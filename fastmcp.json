@@ -1,0 +1,15 @@
+{
+  "mcpServers": {
+    "my-server": {
+      "command": "uv",
+      "args": [
+        "run",
+        "server.py"
+      ]
+    }
+  },
+  "dependencies": [
+    "fastmcp",
+    "requests"
+  ]
+}
