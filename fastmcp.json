@@ -1,15 +1,11 @@
 {
-  "mcpServers": {
-    "my-server": {
-      "command": "uv",
-      "args": [
-        "run",
-        "server.py"
-      ]
-    }
+  "$schema": "https://gofastmcp.com/public/schemas/fastmcp.json/v1.json",
+  "source": {
+    "path": "src/app/server.py",
+    "entrypoint": "mcp"
   },
-  "dependencies": [
-    "fastmcp",
-    "requests"
-  ]
+  "environment": {
+    "type": "uv",
+    "project": "."
+  }
 }
