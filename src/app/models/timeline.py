@@ -1,7 +1,10 @@
 from decimal import Decimal
 from enum import Enum
 from typing import List, Literal, Union
+
 from pydantic import BaseModel, Field, model_validator
+from typing_extensions import Any
+
 
 # create the TimeRange model
 class TimeRange(BaseModel):
@@ -40,6 +43,10 @@ class Track(BaseModel):
     clips: List[Clip] = Field(default_factory=list)
 
 class Project(BaseModel):
+    def __init__(self, /, **data: Any):
+        super().__init__()
+        self.fps_npms = None
+
     id: str
     version: int = Field(default=1, description="Project version")
     fps_npm: int = Field(default=30, description="Frames per minutes")
