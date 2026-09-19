@@ -1,5 +1,6 @@
-# This workflow will install Python dependencies, run tests and lint with a single version of Python
-# For more information see: https://docs.github.com/en/actions/automating-builds-and-tests/building-and-testing-python
+# Installs the project with uv, then lints and runs the test suite.
+# For more information see:
+# https://docs.github.com/en/actions/automating-builds-and-tests/building-and-testing-python
 
 name: Python application
 
@@ -19,21 +20,32 @@ jobs:
 
     steps:
     - uses: actions/checkout@v4
-    - name: Set up Python 3.10
-      uses: actions/setup-python@v3
+
+    # The tests synthesize their own footage and measure real renders, so
+    # ffmpeg and ffprobe both have to be on PATH. The runner image has neither.
+    # The burned-in caption test draws CJK text and counts the lit pixels, so
+    # libass also needs a font that actually covers those glyphs.
+    - name: Install FFmpeg and a CJK font
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y ffmpeg fonts-noto-cjk
+
+    - name: Install uv
+      uses: astral-sh/setup-uv@v10
       with:
-        python-version: "3.10"
+        enable-cache: true
+
+    # pyproject.toml pins requires-python to >=3.14; uv fetches it if the
+    # runner does not have it.
     - name: Install dependencies
+      run: uv sync --locked
+
+    - name: Lint with ruff
       run: |
-        python -m pip install --upgrade pip
-        pip install flake8 pytest
-        if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
-    - name: Lint with flake8
-      run: |
-        # stop the build if there are Python syntax errors or undefined names
-        flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
-        # exit-zero treats all errors as warnings. The GitHub editor is 127 chars wide
-        flake8 . --count --exit-zero --max-complexity=10 --max-line-length=127 --statistics
+        # Stop the build on syntax errors and undefined names. Style is not
+        # gated: the codebase has no ruff config to gate it against.
+        uv run --with ruff ruff check --select=E9,F63,F7,F82 --output-format=github .
+        uv run --with ruff ruff check --exit-zero --statistics .
+
     - name: Test with pytest
-      run: |
-        pytest
+      run: uv run pytest
