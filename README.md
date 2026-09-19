@@ -29,6 +29,8 @@
 目前還不支援：靜態圖片、變速、疊化與轉場特效（只有淡入淡出黑）、
 J/L cut、字幕以外的文字與圖形，以及上述以外的濾鏡。
 
+接下來要往哪走見 [docs/roadmap.md](docs/roadmap.md)。
+
 ## 需求
 
 - Python 3.14+
@@ -127,6 +129,7 @@ uv run pytest
 
 各模組職責見 [docs/architecture.md](docs/architecture.md)。
 引擎層（`src/app/engine/`）不依賴 MCP，可以單獨使用。
+2.0 的方向與里程碑見 [docs/roadmap.md](docs/roadmap.md)。
 
 ## 授權
 

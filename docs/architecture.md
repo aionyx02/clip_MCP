@@ -48,7 +48,8 @@ clip_MCP/
 │   ├── test_skill_resources.py    # skill 與 server 不得漂移（工具、操作、分層指標）
 │   └── test_end_to_end.py         # 從資料夾到成片的完整流程
 ├── docs/
-│   └── architecture.md
+│   ├── architecture.md
+│   └── roadmap.md                 # 2.0 方向：語意時間軸、剪輯規劃器、評測與里程碑
 ├── workspace/                     # 本機資料與產出（CLIP_MCP_WORKSPACE 可覆寫，已 gitignore）
 │   ├── clip_mcp.db                # 專案、素材、分析結果、工作狀態
 │   ├── outputs/<job_id>/          # 每次 render 各自一個目錄，成品與字幕 ASS 都在裡面
