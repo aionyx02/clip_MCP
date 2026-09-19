@@ -546,6 +546,108 @@ def _shift_clips(track: Track, starting_at: Decimal, delta: Decimal) -> None:
         if clip.timeline_in >= starting_at:
             clip.timeline_in += delta
 
+def _fit_track(project: Project, track: Track, op: "FitTrackOp", assets: Mapping[str, Asset]) -> None:
+    """Make an audio track cover the video exactly, with its fades in the right place.
+
+    Four passes over the track: trim whatever runs past the end and drop
+    whatever starts past it, play more of the source when there is some left,
+    loop the song when there is not, and put the fades on whichever clips are
+    first and last once all that is settled.
+
+    Args:
+        project: Project the track belongs to; its video decides the length.
+        track: Audio track to fit.
+        op: The `fit_track` operation being applied.
+        assets: Registered assets keyed by ID, for the length of each source.
+
+    Raises:
+        ValueError: If the track is a video track, or the project has no video
+            to fit it to.
+    """
+    if track.track_type == TrackType.VIDEO:
+        raise ValueError(
+            f"track {track.id} is a video track and sets the length itself; fit_track is for audio tracks"
+        )
+    video_end = project.duration
+    if video_end <= 0:
+        raise ValueError("the project has no video yet, so there is nothing to fit the track to")
+
+    kept: List[Clip] = []
+    for clip in sorted(track.clips, key=lambda item: item.timeline_in):
+        if clip.timeline_in >= video_end:
+            continue
+        if clip.timeline_out > video_end:
+            clip.source_range = TimeRange(
+                start=clip.source_range.start,
+                end=clip.source_range.start + (video_end - clip.timeline_in) * Decimal(str(clip.speed)),
+            )
+        kept.append(clip)
+
+    if kept and kept[-1].timeline_out < video_end:
+        # Play more of the source before looping: a song trimmed by an earlier fit should
+        # carry on from where it stopped rather than jump back to the beginning. This is not
+        # looping, so `loop: false` does not turn it off: there is nothing to repeat yet.
+        last = kept[-1]
+        asset = assets.get(last.asset_id)
+        if asset is not None and asset.duration is not None:
+            room = Decimal(str(asset.duration)) - last.source_range.end
+            needed = (video_end - last.timeline_out) * Decimal(str(last.speed))
+            if room > 0:
+                last.source_range = TimeRange(
+                    start=last.source_range.start,
+                    end=last.source_range.end + min(room, needed),
+                )
+
+    if op.loop and kept:
+        # The longest clip is the untrimmed one, so looping it repeats the whole song rather than an offcut.
+        unit = max(kept, key=lambda item: item.source_range.duration)
+        copies = 1
+        while kept[-1].timeline_out < video_end:
+            position = kept[-1].timeline_out
+            remaining = (video_end - position) * Decimal(str(unit.speed))
+            if remaining <= Decimal("0.001"):
+                break
+            copies += 1
+            identifier = f"{unit.id}-{copies}"
+            while any(item.id == identifier for item in kept):
+                copies += 1
+                identifier = f"{unit.id}-{copies}"
+            kept.append(Clip(
+                id=identifier,
+                asset_id=unit.asset_id,
+                source_range=TimeRange(
+                    start=unit.source_range.start,
+                    end=unit.source_range.start + min(unit.source_range.duration, remaining),
+                ),
+                timeline_in=position,
+                speed=unit.speed,
+                volume=unit.volume,
+            ))
+
+    track.clips = kept
+    if not kept:
+        return
+
+    # Whatever the track looked like before, the fades now belong to its real first and last clips.
+    longest_fade_out = max((clip.audio_fade_out for clip in kept), default=Decimal(0))
+    for clip in kept[:-1]:
+        clip.audio_fade_out = Decimal(0)
+    for clip in kept[1:]:
+        clip.audio_fade_in = Decimal(0)
+    if op.fade_in is not None:
+        kept[0].audio_fade_in = op.fade_in
+    kept[-1].audio_fade_out = op.fade_out if op.fade_out is not None else longest_fade_out
+    kept[0].audio_fade_in = min(kept[0].audio_fade_in, kept[0].timeline_duration)
+    kept[-1].audio_fade_out = min(kept[-1].audio_fade_out, kept[-1].timeline_duration)
+    if kept[0] is kept[-1]:
+        # One clip carrying both fades: shrink them together rather than letting them overlap.
+        only = kept[0]
+        total = only.audio_fade_in + only.audio_fade_out
+        if total > only.timeline_duration:
+            scale = only.timeline_duration / total
+            only.audio_fade_in *= scale
+            only.audio_fade_out *= scale
+
 def apply_operation(project: Project, op: EditOperation, assets: Mapping[str, Asset]) -> None:
     """Apply a single edit operation to a project in place.
 
@@ -680,86 +782,7 @@ def apply_operation(project: Project, op: EditOperation, assets: Mapping[str, As
         clip.timeline_in = position
         track.clips.append(clip)
     elif isinstance(op, FitTrackOp):
-        if track.track_type == TrackType.VIDEO:
-            raise ValueError(
-                f"track {track.id} is a video track and sets the length itself; fit_track is for audio tracks"
-            )
-        target = project.duration
-        if target <= 0:
-            raise ValueError("the project has no video yet, so there is nothing to fit the track to")
-
-        kept: List[Clip] = []
-        for clip in sorted(track.clips, key=lambda item: item.timeline_in):
-            if clip.timeline_in >= target:
-                continue
-            if clip.timeline_out > target:
-                clip.source_range = TimeRange(
-                    start=clip.source_range.start,
-                    end=clip.source_range.start + (target - clip.timeline_in) * Decimal(str(clip.speed)),
-                )
-            kept.append(clip)
-
-        if kept and kept[-1].timeline_out < target:
-            # Play more of the source before looping: a song trimmed by an earlier fit should
-            # carry on from where it stopped rather than jump back to the beginning. This is not
-            # looping, so `loop: false` does not turn it off: there is nothing to repeat yet.
-            last = kept[-1]
-            asset = assets.get(last.asset_id)
-            if asset is not None and asset.duration is not None:
-                room = Decimal(str(asset.duration)) - last.source_range.end
-                needed = (target - last.timeline_out) * Decimal(str(last.speed))
-                if room > 0:
-                    last.source_range = TimeRange(
-                        start=last.source_range.start,
-                        end=last.source_range.end + min(room, needed),
-                    )
-
-        if op.loop and kept:
-            # The longest clip is the untrimmed one, so looping it repeats the whole song rather than an offcut.
-            unit = max(kept, key=lambda item: item.source_range.duration)
-            copies = 1
-            while kept[-1].timeline_out < target:
-                position = kept[-1].timeline_out
-                remaining = (target - position) * Decimal(str(unit.speed))
-                if remaining <= Decimal("0.001"):
-                    break
-                copies += 1
-                identifier = f"{unit.id}-{copies}"
-                while any(item.id == identifier for item in kept):
-                    copies += 1
-                    identifier = f"{unit.id}-{copies}"
-                kept.append(Clip(
-                    id=identifier,
-                    asset_id=unit.asset_id,
-                    source_range=TimeRange(
-                        start=unit.source_range.start,
-                        end=unit.source_range.start + min(unit.source_range.duration, remaining),
-                    ),
-                    timeline_in=position,
-                    speed=unit.speed,
-                    volume=unit.volume,
-                ))
-
-        track.clips = kept
-        if kept:
-            # Whatever the track looked like before, the fades now belong to its real first and last clips.
-            longest_fade_out = max((clip.audio_fade_out for clip in kept), default=Decimal(0))
-            for clip in kept[:-1]:
-                clip.audio_fade_out = Decimal(0)
-            for clip in kept[1:]:
-                clip.audio_fade_in = Decimal(0)
-            if op.fade_in is not None:
-                kept[0].audio_fade_in = op.fade_in
-            kept[-1].audio_fade_out = op.fade_out if op.fade_out is not None else longest_fade_out
-            kept[0].audio_fade_in = min(kept[0].audio_fade_in, kept[0].timeline_duration)
-            kept[-1].audio_fade_out = min(kept[-1].audio_fade_out, kept[-1].timeline_duration)
-            if kept[0] is kept[-1]:
-                only = kept[0]
-                total = only.audio_fade_in + only.audio_fade_out
-                if total > only.timeline_duration:
-                    scale = only.timeline_duration / total
-                    only.audio_fade_in *= scale
-                    only.audio_fade_out *= scale
+        _fit_track(project, track, op, assets)
     elif isinstance(op, SetClipLookOp):
         clip = _find_clip(track, op.clip_id)
         for field in ("video_fade_in", "video_fade_out"):
