@@ -365,6 +365,20 @@ class EditSubtitleOp(BaseModel):
     end: Optional[Decimal] = Field(default=None, ge=0, description="New end on the timeline (seconds)")
     delete: bool = Field(default=False, description="Remove this caption entirely")
 
+    @model_validator(mode="after")
+    def validate_text(self):
+        """Ensure a caption is not blanked out instead of removed.
+
+        Returns:
+            The validated `EditSubtitleOp` instance.
+
+        Raises:
+            ValueError: If `text` is given but holds nothing to show.
+        """
+        if self.text is not None and not self.text.strip():
+            raise ValueError("a caption needs text; set delete to remove it instead")
+        return self
+
 class SetSubtitlesOp(BaseModel):
     """Edit operation that replaces the project's captions."""
 
@@ -575,12 +589,11 @@ def apply_operation(project: Project, op: EditOperation, assets: Mapping[str, As
         if op.delete:
             project.subtitles = [item for item in project.subtitles if item.id != op.cue_id]
             return
-        updated = cue.model_copy(update={
+        # Re-run the model's own rules on the edited cue: model_copy skips them.
+        updated = SubtitleCue.model_validate(cue.model_copy(update={
             field: value for field, value in
             (("text", op.text), ("start", op.start), ("end", op.end)) if value is not None
-        })
-        # Re-run the model's own rules on the edited cue: model_copy skips them.
-        SubtitleCue.model_validate(updated.model_dump())
+        }).model_dump())
         project.subtitles = sorted(
             [updated if item.id == op.cue_id else item for item in project.subtitles],
             key=lambda item: item.start,

@@ -3,6 +3,7 @@
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from app.engine.frames import extract_frame
 from app.engine.subtitles import build_ass, escape_ass_text, format_ass_time, wrap_caption
@@ -269,3 +270,9 @@ def test_get_subtitles_refuses_a_window_that_ends_before_it_starts(spoken: str) 
     project = build_project([video_track(), insert("a", spoken, 0, 10)])
     with pytest.raises(ValueError, match="not after its start"):
         get_subtitles(project, start=5, end=2)
+
+def test_a_caption_cannot_be_blanked_instead_of_deleted(spoken: str) -> None:
+    project = build_project([video_track(), insert("a", spoken, 0, 10)])
+    edit(project, [{"action": "set_subtitles", "cues": generate_subtitles(project)["cues"]}])
+    with pytest.raises(ValidationError, match="set delete to remove it"):
+        edit(project, [{"action": "edit_subtitle", "cue_id": "c1", "text": "   "}])
