@@ -7,17 +7,17 @@ show up.
 
 import shutil
 import subprocess
+import time
 from pathlib import Path
 
 import pytest
 
 from app.models.media import MediaAnalysis, Transcript, TranscriptSegment, TranscriptWord
 from app.server import (
-    apply_edits, create_project, generate_subtitles, get_project, get_subtitles,
-    import_folder, preview_project, repo,
+    generate_subtitles, get_job, get_project, get_subtitles,
+    import_folder, preview_project, render_project, repo,
 )
-from helpers import _OPERATIONS
-from test_render_audio import loudness, render
+from helpers import build_project, edit, loudness, render
 
 @pytest.fixture
 def footage(tmp_path_factory: pytest.TempPathFactory, media: Path, audio_media: Path) -> Path:
@@ -49,8 +49,7 @@ def test_a_whole_job_from_a_folder_to_a_finished_file(footage: Path, tmp_path: P
         ]),
     ))
 
-    project = create_project(width=1080, height=1920)["id"]
-    apply_edits(project, 1, _OPERATIONS.validate_python([
+    project = build_project([
         {"action": "add_track", "track_id": "main", "track_type": "video"},
         {"action": "insert_clip", "track_id": "main", "clip_id": "a", "asset_id": assets["take1"],
          "source_range": {"start": 0, "end": 8}, "video_fade_in": 0.5},
@@ -64,15 +63,14 @@ def test_a_whole_job_from_a_folder_to_a_finished_file(footage: Path, tmp_path: P
         {"action": "insert_clip", "track_id": "music", "clip_id": "song", "asset_id": assets["bgm"],
          "source_range": {"start": 0, "end": 4}, "volume": 0.5},
         {"action": "fit_track", "track_id": "music", "fade_in": 1, "fade_out": 2},
-    ]))
+    ], width=1080, height=1920)
 
     # Rearranged into a flashback, then the opening line cut in two.
-    version = get_project(project)["version"]
-    apply_edits(project, version, _OPERATIONS.validate_python([
+    edit(project, [
         {"action": "split_clip", "track_id": "main", "clip_id": "a", "new_clip_id": "a2", "at_source": 4},
         {"action": "reorder_clip", "track_id": "main", "clip_id": "b", "before_clip_id": "a"},
         {"action": "fit_track", "track_id": "music", "fade_out": 2},
-    ]))
+    ])
 
     state = get_project(project)
     assert [clip["id"] for clip in state["tracks"][0]["clips"]] == ["b", "a", "a2"]
@@ -85,10 +83,8 @@ def test_a_whole_job_from_a_folder_to_a_finished_file(footage: Path, tmp_path: P
 
     cues = generate_subtitles(project)["cues"]
     assert [cue["text"] for cue in cues] == ["開場白", "結尾話"]
-    apply_edits(project, get_project(project)["version"],
-                _OPERATIONS.validate_python([{"action": "set_subtitles", "cues": cues}]))
-    apply_edits(project, get_project(project)["version"], _OPERATIONS.validate_python(
-        [{"action": "edit_subtitle", "cue_id": "c1", "text": "修正過的開場白"}]))
+    edit(project, [{"action": "set_subtitles", "cues": cues}])
+    edit(project, [{"action": "edit_subtitle", "cue_id": "c1", "text": "修正過的開場白"}])
     assert get_subtitles(project)["cues"][0]["text"] == "修正過的開場白"
 
     lines = preview_project(project).content[0].text.splitlines()
@@ -96,11 +92,23 @@ def test_a_whole_job_from_a_folder_to_a_finished_file(footage: Path, tmp_path: P
     assert any("inset on track cam" in line for line in lines)
     assert any("audio track music" in line for line in lines)
 
+    # The workflow's own last steps: render in the background and poll until it lands.
+    job = render_project(project, is_preview=True, burn_subtitles=True)
+    deadline = time.monotonic() + 180
+    while time.monotonic() < deadline:
+        state = get_job(job["job_id"])
+        if state["status"] in {"completed", "failed", "cancelled"}:
+            break
+        time.sleep(0.5)
+    assert state["status"] == "completed", state
+    assert Path(job["output_path"]).stat().st_size > 0
+
     render(project, tmp_path / "final.mp4")
     probe = subprocess.run(
         ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0",
          str(tmp_path / "final.mp4")],
         capture_output=True,
     )
+    assert probe.returncode == 0, probe.stderr.decode("utf-8", errors="replace")
     assert float(probe.stdout.decode()) == pytest.approx(12.0, abs=0.1)
     assert loudness(tmp_path / "final.mp4") == pytest.approx(-14.0, abs=1.5)
