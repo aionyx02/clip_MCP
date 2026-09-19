@@ -93,8 +93,9 @@ done. For example:
 - **Version**: `apply_edits` needs the project's current `version` as
   `expected_version`. `get_project` leaves out clip fields that are still at
   their default, so a clip with no `volume` is at 1.0 and one with no `color`
-  is as shot. It leaves captions out entirely; read those with
-  `get_subtitles`, a window at a time. A failed call changes nothing, so fix the operations and
+  is as shot. It leaves captions out and reports only how many there are as
+  `subtitle_count`; read them with `get_subtitles`, a window at a time, or
+  pass `include_subtitles: true` to get the whole set back with the project. A failed call changes nothing, so fix the operations and
   retry with the same version.
 - **Magnetic editing**: `insert_clip` pushes later clips on the same track
   back to make room. `trim_clip` and `delete_clip` pull later clips on the
@@ -129,8 +130,10 @@ Write to them as an editor would, not as a program reporting its state.
 - Give two or three concrete options to choose from instead of an open
   question such as 「你想怎麼剪？」.
 
-**Read the plan back before anything expensive.** A render or an
-`analyze_asset` costs minutes, while `preview_project` takes seconds, so
+**Read the plan back before anything expensive.** If the plan involves a
+length or a structure you chose, read
+`skill://clip-editing/pacing-and-structure.md` first, so the sentence you read
+back is one worth agreeing to. A render or an `analyze_asset` costs minutes, while `preview_project` takes seconds, so
 before the first `render_project` of a request, and before analyzing a file
 longer than about ten minutes, restate the plan in one sentence in plain
 language and wait for a yes. When the edit is already built, send the
@@ -215,8 +218,8 @@ screen, where the pauses or mistakes are, or which parts are best.
 1. Call `analyze_asset` for each source. Set `language` when you know it. For
    Chinese speech, set `chinese_variant` to match how the user writes:
    `zh-TW` for Traditional Chinese as used in Taiwan (the default for users
-   who write Traditional Chinese), `zh-HK` for Hong Kong, or `zh-Hans` for
-   Simplified. Put names or terms the speaker uses into `prompt`. The first
+   who write Traditional Chinese), `zh-HK` for Hong Kong, `zh-Hant` for
+   Traditional without regional wording, or `zh-Hans` for Simplified. Put names or terms the speaker uses into `prompt`. The first
    run downloads the speech model. Poll `get_job`; for long files, tell the
    user the current `stage` and `progress`.
 2. Read `get_analysis` in windows of about 10 minutes (`start` / `end`). All
@@ -267,7 +270,8 @@ Never transcribe a whole folder up front. Twenty ten-minute files take hours,
 and most of it gets thrown away.
 
 A proposal says what is in the footage, how long each option runs, and what it
-leaves out. Label the options so the user can answer with one letter:
+leaves out. Read `skill://clip-editing/pacing-and-structure.md` before naming
+those lengths. Label the options so the user can answer with one letter:
 
 「這 8 支我都看過了，共 42 分鐘。裡面有三條線：海邊 4 分鐘、晚餐聊天有講到之後的行程 6 分鐘，
 另外 2 支畫面晃得很厲害，建議不要用。
@@ -277,17 +281,6 @@ B：只留晚餐那段對話，約 2 分鐘，比較完整。
 
 When the user answers 「你決定」, take the first option, say in one line which
 one you took, and show them a storyboard before you render.
-
-## Further reading
-
-Two parts of this guide live in their own files, because they are only needed
-sometimes. Read them with `read_resource` when they apply:
-
-- `skill://clip-editing/pacing-and-structure.md` — how long to make the edit,
-  what to open on, how fast to cut, and what the frame cuts off. Read it
-  before proposing a length or a structure.
-- `skill://clip-editing/examples.md` — two requests worked through from the
-  user's words to the tool calls and the reply.
 
 ## Background music
 
@@ -332,9 +325,9 @@ times refer to the source file.
 | 「把這段從中間切開」 / split this clip | `split_clip` with `at` (timeline) or `at_source` (source), plus a `new_clip_id` for the second half |
 | 「改成倒敍，結尾放最前面」 / open with the ending | `split_clip` at the boundary, then `reorder_clip` the tail with `before_clip_id` = the first clip |
 | 「把 A 換成 d.mp4」 / replace A with d.mp4 | `insert_clip` new clip with `before_clip_id: A`, then `delete_clip` A |
-| 「A 和 B 中間停 2 秒黑畫面」 / 2 s of black before B | `move_clip` B and every later video clip to `timeline_in + 2` |
+| 「A 和 B 中間停 2 秒黑畫面」 / 2 s of black before B | `move_clip` B and every later video clip, each with `new_timeline_in` set to its current `timeline_in` plus 2 |
 | 「加背景音樂 song.mp3」 / add background music | See [Background music](#background-music) |
-| 「音樂從第 10 秒才進來」 / start the music at 0:10 | `move_clip` the first music clip to `timeline_in: 10` (or `add_clip` there), then `fit_track` again so the music still ends with the video |
+| 「音樂從第 10 秒才進來」 / start the music at 0:10 | `move_clip` the first music clip with `new_timeline_in: 10` (or `add_clip` with `timeline_in: 10`), then `fit_track` again so the music still ends with the video |
 | 「用歌的 1:05 開始」 / start from the chorus at 1:05 | Music clip `source_range.start: 65` |
 | 「音樂小聲一點／大聲一點」 / music quieter or louder | `set_clip_audio` on every music clip, `volume` × 0.6 or × 1.5 |
 | 「把影片原音關掉」 / mute the original sound | `set_clip_audio` `volume: 0` on every video clip |
@@ -347,6 +340,8 @@ times refer to the source file.
 | 「兩段之間過一下黑」 / dip through black between two clips | `set_clip_look` `video_fade_out` on the earlier clip and `video_fade_in` on the later one |
 | 「這段亮一點／色彩濃一點」 / brighter or more colourful | `set_clip_look` with `color` `brightness` or `saturation`; adjustments you leave out keep their current value |
 | 「改成黑白」 / make it black and white | `set_clip_look` with `color` `{"saturation": 0}` |
+| 「調色拿掉，回原本的樣子」 / undo the grade on this clip | `set_clip_look` with `clear_color: true` |
+| 「小視窗拿掉」 / drop the inset | `delete_clip` it, or `set_clip_look` with `clear_layout: true` to make it cover the frame instead |
 | 「色溫暖一點／冷一點」 / warmer or cooler | `set_clip_look` with `color` `temperature`, below 6500 for warmer and above for cooler |
 | 「右上角放一個小視窗」 / put an inset in the top right | `add_track` a second video track, then `add_clip` with `timeline_in` and a `layout` box |
 | 「中間插一段別的畫面蓋掉原本的」 / cut away to other footage over the same sound | `add_clip` on the upper video track with no `layout`, so it covers the frame, and `volume: 0` so the sound underneath keeps running |
@@ -387,6 +382,7 @@ Use these without asking, and mention the ones you chose in one short line.
 | Captions | Off unless asked. When asked, propose them with `generate_subtitles` and have the user check the wording before rendering |
 | Music fades | 1 s fade-in on the first music clip, 2 s fade-out ending at the video end |
 | Render | Preview first |
+| Length | No default: ask, or propose one. See `skill://clip-editing/pacing-and-structure.md` |
 
 ## When the request is incomplete
 
@@ -440,3 +436,15 @@ message with options the user can pick from.
 | `video fades ... are longer than the clip` | Shorten the fades to fit the clip. |
 | `... is not supported yet` | Explain the limit and offer the closest supported result. |
 | Job `failed` | Summarize `error_message` for the user. Do not retry the same render unchanged. |
+
+## Further reading
+
+Two parts of this guide live in their own files, because they are only needed
+sometimes. Read them with `read_resource` when they apply; `list_resources`
+shows everything this server publishes:
+
+- `skill://clip-editing/pacing-and-structure.md` — how long to make the edit,
+  what to open on, how fast to cut, and what the frame cuts off. Read it
+  before proposing a length or a structure.
+- `skill://clip-editing/examples.md` — two requests worked through from the
+  user's words to the tool calls and the reply.
