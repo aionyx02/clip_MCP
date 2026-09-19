@@ -68,7 +68,7 @@ def media(tmp_path_factory: pytest.TempPathFactory) -> Path:
 
     Returns:
         A folder holding `wide.mp4` (landscape, 10s), `tall.mp4` (portrait,
-        6s), `silent.mp4` (no audio, 4s), `song.mp3` (20s), `jingle.mp3` (only 4s), and `black.mp4`
+        6s), `silent.mp4` (no audio, 4s), `song.mp3` (20s), `jingle.wav` (only 4s), and `black.mp4`
         (an all-black 8s clip).
     """
     folder = tmp_path_factory.mktemp("media")
@@ -77,7 +77,10 @@ def media(tmp_path_factory: pytest.TempPathFactory) -> Path:
     _make_video(folder / "silent.mp4", "testsrc2", "320x240", 4, with_audio=False)
     _run_ffmpeg(["-f", "lavfi", "-i", "sine=frequency=220:duration=20", "-c:a", "libmp3lame", str(folder / "song.mp3")])
     # A song too short to cover a normal edit, so looping can be tested rather than plain extension.
-    _run_ffmpeg(["-f", "lavfi", "-i", "sine=frequency=330:duration=4", "-c:a", "libmp3lame", str(folder / "jingle.mp3")])
+    # Lossless, because fit_track measures how much of the source is left: an mp3 carries encoder
+    # padding that some ffmpeg builds report as duration and others subtract, which moves every
+    # loop boundary by ~0.05s. A wav is exactly as long as it says.
+    _run_ffmpeg(["-f", "lavfi", "-i", "sine=frequency=330:duration=4", "-c:a", "pcm_s16le", str(folder / "jingle.wav")])
     # A black clip, so anything bright in a rendered frame can only have been drawn on top.
     _run_ffmpeg([
         "-f", "lavfi", "-i", "color=c=black:size=640x360:rate=30:duration=8",

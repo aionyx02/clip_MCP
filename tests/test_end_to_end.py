@@ -30,7 +30,7 @@ def footage(tmp_path_factory: pytest.TempPathFactory, media: Path, audio_media: 
     shutil.copy(media / "wide.mp4", folder / "take1.mp4")
     shutil.copy(audio_media / "loud.mp4", folder / "take2.mp4")
     shutil.copy(media / "tall.mp4", folder / "take10.mp4")
-    shutil.copy(media / "jingle.mp3", folder / "bgm.mp3")
+    shutil.copy(media / "jingle.wav", folder / "bgm.wav")
     return folder
 
 def test_a_whole_job_from_a_folder_to_a_finished_file(footage: Path, tmp_path: Path) -> None:

@@ -17,7 +17,7 @@ def sources(media: Path) -> dict:
     return {
         "video": import_asset(str(media / "wide.mp4"))["id"],
         "song": import_asset(str(media / "song.mp3"))["id"],
-        "jingle": import_asset(str(media / "jingle.mp3"))["id"],
+        "jingle": import_asset(str(media / "jingle.wav"))["id"],
     }
 
 def music_project(sources: dict, video_seconds: float, song_seconds: float, song: str = "song", **clip_fields) -> str:
