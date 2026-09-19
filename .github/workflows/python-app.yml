@@ -31,7 +31,7 @@ jobs:
         sudo apt-get install -y ffmpeg fonts-noto-cjk
 
     - name: Install uv
-      uses: astral-sh/setup-uv@v10
+      uses: astral-sh/setup-uv@v10.1.0
       with:
         enable-cache: true
 
