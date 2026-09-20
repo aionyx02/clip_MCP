@@ -18,11 +18,11 @@ from app.benchmark.metrics import (
     MAX_LENGTH_ERROR,
     MIN_MUST_KEEP_COVERAGE,
     Scorecard,
-    missing_analyses,
     score,
 )
-from app.engine.plan import Piece, plan_pieces
+from app.engine.plan import BREATH_SECONDS, Piece, plan_pieces
 from app.engine.semantic import build_timeline
+from app.models.media import MediaAnalysis, Transcript
 from app.models.plan import Beat, EditPlan, Selection
 from test_edit_plan import FOOTAGE, sourced, speech_of
 from test_semantic_timeline import ASSET_ID, analysis
@@ -68,6 +68,24 @@ def piece(start: float, end: float) -> Piece:
     """
     return Piece(ASSET_ID, start, end, ("tl_test:u0001",))
 
+def transcribed(made: MediaAnalysis) -> MediaAnalysis:
+    """Mark an analysis as having been through speech recognition.
+
+    `analysis()` leaves the transcript out when a test names no sentences, and
+    the scorer reads a missing transcript as footage nobody transcribed —
+    right in general, but these tests mean "transcribed, and nobody was
+    talking", which is an answer rather than a gap.
+
+    Args:
+        made: The analysis to mark.
+
+    Returns:
+        The analysis, with an empty transcript if it had none.
+    """
+    if made.transcript is not None:
+        return made
+    return made.model_copy(update={"transcript": Transcript(language="zh", model="test", segments=[])})
+
 def scored(pieces: List[Piece], made=None, **fields) -> Scorecard:
     """Score windows against a case built from the given fields.
 
@@ -79,7 +97,7 @@ def scored(pieces: List[Piece], made=None, **fields) -> Scorecard:
     Returns:
         The scorecard.
     """
-    return score(case_for(**fields), pieces, {ASSET_ID: made or analysis(20.0)}, ASSETS)
+    return score(case_for(**fields), pieces, {ASSET_ID: transcribed(made or analysis(20.0))}, ASSETS)
 
 def test_a_case_will_not_annotate_footage_it_does_not_have() -> None:
     with pytest.raises(ValueError, match="not in the case's footage"):
@@ -205,7 +223,25 @@ def test_unanalyzed_footage_is_named_rather_than_scored_as_clean() -> None:
     card = score(case_for(), [piece(0.0, 5.0)], {}, ASSETS)
     # Nothing was measured, so nothing was found — which must not read as a pass.
     assert card.words_cut == 0 and card.bad_frame_cuts == 0 and card.cut_margins == ()
-    assert missing_analyses([piece(0.0, 5.0)], {}) == [ASSET_ID]
+    assert card.unmeasured == (f"{ASSET_ID} has no analysis, so nothing in it was measured",)
+    assert not card.clean
+
+def test_footage_transcribed_without_word_timings_cannot_clear_the_word_floor() -> None:
+    # faster-whisper times every word, but an asset analyzed with transcribe off has
+    # no transcript at all — and then every cut through it reads as not clipping a
+    # word, because there are no words to compare against.
+    made = analysis(20.0, segments=[(1.0, 5.0, "整段都在講")], silences=[(5.0, 20.0)])
+    stripped = made.model_copy(update={"transcript": None})
+    card = score(case_for(), [piece(2.0, 4.0)], {ASSET_ID: stripped}, ASSETS)
+    assert card.words_cut == 0
+    assert not card.clean
+    assert "word timings" in card.unmeasured[0] or "no analysis" in card.unmeasured[0]
+
+def test_footage_that_was_transcribed_and_had_nobody_talking_is_measured() -> None:
+    # An empty transcript is an answer; a missing one is a gap. They must not be
+    # treated alike, or silent B-roll would never clear a floor.
+    card = scored([piece(0.0, 5.0)])
+    assert card.unmeasured == () and card.clean
 
 def test_a_plan_compiled_from_real_footage_scores_end_to_end() -> None:
     # The whole chain, so a metric cannot be right about hand-built windows and
@@ -241,4 +277,43 @@ def test_a_plan_compiled_from_real_footage_scores_end_to_end() -> None:
     assert card.words_cut == 0 and card.bad_frame_cuts == 0
     assert card.tightest_margin > 0
     assert card.must_keep_coverage > MIN_MUST_KEEP_COVERAGE
+    assert card.unmeasured == ()
     assert card.clean
+
+def test_cuts_are_judged_against_the_windows_the_case_allows() -> None:
+    made = analysis(20.0, segments=[(4.0, 8.0, "講話")], silences=[(0.0, 4.0), (8.0, 20.0)])
+    allowed = [marked(0.0, 4.0, "開頭的靜音"), marked(8.0, 20.0, "結尾的靜音")]
+    assert scored([piece(2.0, 10.0)], made=made, cut_windows=allowed).cuts_outside_windows == 0
+    # Both ends land in the middle of the sentence the annotator ruled out.
+    card = scored([piece(5.0, 6.0)], made=made, cut_windows=allowed)
+    assert card.cuts_outside_windows == 2
+    assert any("outside the windows" in failure for failure in card.failures)
+
+def test_a_file_nobody_drew_windows_for_is_not_judged_on_them() -> None:
+    # A gap in the corpus must not read as a bad plan.
+    assert scored([piece(5.0, 6.0)]).cuts_outside_windows is None
+
+def test_leakage_below_the_reported_precision_still_fails() -> None:
+    # The target is zero, so a leak too small to print is still a leak; comparing on
+    # the rounded number would let anything under 0.005% read as clean.
+    card = scored([piece(0.0, 10.0)], must_drop=[marked(9.9999, 1009.9999, "不要")])
+    assert card.must_drop_leakage == 0.0
+    assert not card.clean and any("had to go" in failure for failure in card.failures)
+
+def test_the_room_a_cut_had_is_the_headroom_the_semantic_layer_measures() -> None:
+    # The two must not drift: safe_in/safe_out is what the compiler cuts by, and this
+    # is what the score judges it on. A cut on a silence's own edge has no room in the
+    # tight direction, and both say so.
+    made = analysis(20.0, segments=[(4.0, 8.0, "講話")], silences=[(0.0, 4.0), (8.0, 20.0)])
+    _, clips = build_timeline({ASSET_ID: sourced()}, {ASSET_ID: made})
+    spoken = next(clip for clip in clips if clip.text)
+    # The clip's headroom is the whole silence on each side; the compiler only ever
+    # spends BREATH_SECONDS of it.
+    assert spoken.safe_in == pytest.approx(4.0) and spoken.safe_out == pytest.approx(12.0)
+
+    # So the cut opens a breath early and closes a breath late, and the room each cut
+    # point reports is exactly the breath that was spent.
+    card = scored([piece(4.0 - BREATH_SECONDS, 8.0 + BREATH_SECONDS)], made=made)
+    assert card.cut_margins == (BREATH_SECONDS, BREATH_SECONDS)
+    # And a cut on the edge itself has none, which is the number, not a missing one.
+    assert scored([piece(4.0, 8.0)], made=made).cut_margins == (0.0, 0.0)

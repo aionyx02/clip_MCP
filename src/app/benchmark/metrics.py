@@ -10,37 +10,66 @@ about taste — a cut through the middle of a word is wrong whoever made it — 
 they are counted here rather than written into a guide and hoped for. What
 cannot be settled this way, such as whether the cut is any good, is left to L3
 and is not pretended to be measured.
+
+The trap this module is built around is that **nothing measured looks exactly
+like nothing found**. Footage nobody analyzed has no words to cut through and
+no bad frames to land on, so a cut straight through it scores a flawless zero
+on both. Every such gap is named in `Scorecard.unmeasured`, and a card with
+anything in it is not `clean` — an untested floor has not been cleared.
 """
 
 from dataclasses import dataclass
 from statistics import median
-from typing import Iterable, List, Mapping, Optional, Sequence, Tuple
+from typing import List, Mapping, Optional, Sequence
 
 from app.engine.plan import Piece, compiled_duration
-from app.engine.semantic import EDGE_TOLERANCE_SECONDS
+from app.engine.semantic import EDGE_TOLERANCE_SECONDS, share_covered
 from app.models.media import MediaAnalysis, Span
 from app.benchmark.case import BenchmarkCase, MarkedSpan
 
-# The floors a cut has to clear, from the roadmap's quality table. A cut that
-# misses one of these is wrong in a way nobody has to be asked about.
+# The floors a cut has to clear, from the roadmap's quality table. A cut that misses
+# one of these is wrong in a way nobody has to be asked about.
+#
+# The length floor is deliberately its own number rather than `plan.LENGTH_TOLERANCE`,
+# which happens to be the same today: that one decides when the planner mentions the
+# drift to whoever is editing, this one decides whether a run passed. The corpus will
+# move them apart, and tuning advice must not quietly move a pass mark.
 MAX_LENGTH_ERROR = 0.10
 MIN_MUST_KEEP_COVERAGE = 0.90
+# The roadmap's target for footage that had to go is zero, so any of it is a failure.
+MAX_MUST_DROP_LEAKAGE = 0.0
 
-def _overlap(start: float, end: float, spans: Iterable[Span]) -> float:
-    """Measure how much of a stretch a set of spans covers.
+@dataclass(frozen=True)
+class CutPoint:
+    """One point in a source file where the cut opens or closes a window.
+
+    Which end it is matters. The opening point is the first frame the viewer
+    sees; the closing point is the first frame they do not.
+
+    Attributes:
+        asset_id: File the cut lands in.
+        seconds: Where it lands, in that file.
+        opens: Whether it opens the window rather than closing it.
+    """
+
+    asset_id: str
+    seconds: float
+    opens: bool
+
+def _cuts(pieces: Sequence[Piece]) -> List[CutPoint]:
+    """List every point in the source footage where the cut opens or closes a window.
 
     Args:
-        start: Start of the stretch in seconds.
-        end: End of the stretch in seconds.
-        spans: Spans to measure against; they need not be sorted or disjoint,
-            but overlapping ones would be counted twice, so callers pass
-            windows that the compiler has already merged.
+        pieces: The compiled windows.
 
     Returns:
-        The covered seconds, never more than the stretch is long.
+        Two cut points per window, in compile order.
     """
-    covered = sum(max(0.0, min(end, span.end) - max(start, span.start)) for span in spans)
-    return min(covered, max(0.0, end - start))
+    return [
+        CutPoint(piece.asset_id, edge, opens)
+        for piece in pieces
+        for edge, opens in ((piece.start, True), (piece.end, False))
+    ]
 
 def _windows(pieces: Sequence[Piece], asset_id: str) -> List[Span]:
     """Collect the windows one asset contributes to the cut.
@@ -54,12 +83,12 @@ def _windows(pieces: Sequence[Piece], asset_id: str) -> List[Span]:
     """
     return [Span(start=piece.start, end=piece.end) for piece in pieces if piece.asset_id == asset_id]
 
-def _share_covered(
+def _share_in_cut(
     marked: Sequence[MarkedSpan],
     pieces: Sequence[Piece],
     asset_ids: Mapping[str, str],
 ) -> Optional[float]:
-    """Measure how much of the annotated time the cut contains.
+    """Measure how much of the annotated time ended up in the cut.
 
     Weighted by seconds rather than by span, so a two-second aside cannot
     outvote a minute that matters.
@@ -70,36 +99,38 @@ def _share_covered(
         asset_ids: Asset ID for each of the case's file paths.
 
     Returns:
-        The covered share from 0.0 to 1.0, or None when nothing was annotated,
-        which is not the same as nothing being covered.
+        The share from 0.0 to 1.0, or None when nothing was annotated — which
+        is not the same answer as nothing being covered.
     """
     total = sum(span.duration for span in marked)
     if total <= 0:
         return None
     covered = sum(
-        _overlap(span.start, span.end, _windows(pieces, asset_ids[span.file]))
+        share_covered(span.start, span.end, _windows(pieces, asset_ids[span.file])) * span.duration
         for span in marked
-        if span.file in asset_ids
     )
-    return round(covered / total, 4)
+    return covered / total
 
-def _cuts(pieces: Sequence[Piece]) -> List[Tuple[str, float, bool]]:
-    """List every point in the source footage where the cut opens or closes a window.
+def _has_word_timings(analysis: MediaAnalysis) -> bool:
+    """Decide whether this analysis can answer whether a cut clips a word.
 
-    Which end it is matters: the opening point is the first frame the viewer
-    sees, while the closing point is the first frame they do not.
+    A file that was analyzed without transcription has no transcript at all,
+    and one transcribed by something that did not time its words has segments
+    with no words in them. Either way there is nothing to compare a cut point
+    against, and the answer that comes back is zero faults.
 
     Args:
-        pieces: The compiled windows.
+        analysis: The stored analysis.
 
     Returns:
-        `(asset_id, seconds, opens)` per cut point, two per window.
+        True when the transcript can be asked where the words are. Footage that
+        was transcribed and turned out to have nobody talking counts: an empty
+        transcript is an answer, a missing one is not.
     """
-    return [
-        (piece.asset_id, edge, opens)
-        for piece in pieces
-        for edge, opens in ((piece.start, True), (piece.end, False))
-    ]
+    transcript = analysis.transcript
+    if transcript is None:
+        return False
+    return not transcript.segments or any(segment.words for segment in transcript.segments)
 
 def _inside_speech(seconds: float, analysis: MediaAnalysis) -> bool:
     """Decide whether a cut point falls in the middle of a spoken word.
@@ -123,7 +154,7 @@ def _inside_speech(seconds: float, analysis: MediaAnalysis) -> bool:
         for word in words
     )
 
-def _on_bad_frame(seconds: float, opens: bool, analysis: MediaAnalysis) -> bool:
+def _on_bad_frame(cut: CutPoint, analysis: MediaAnalysis) -> bool:
     """Decide whether a cut point lands on a frame nobody wants to see.
 
     Half-open, unlike the word test, and which half is open depends on the end:
@@ -133,25 +164,32 @@ def _on_bad_frame(seconds: float, opens: bool, analysis: MediaAnalysis) -> bool:
     there was on screen until the last moment.
 
     Args:
-        seconds: The cut point in the source file.
-        opens: Whether this point opens the window rather than closing it.
+        cut: The cut point.
         analysis: That file's analysis.
 
     Returns:
         True if the picture the viewer actually sees there is black or frozen.
     """
     spans = [*analysis.black_frames, *analysis.frozen_frames]
-    if opens:
-        return any(span.start <= seconds < span.end for span in spans)
-    return any(span.start < seconds <= span.end for span in spans)
+    if cut.opens:
+        return any(span.start <= cut.seconds < span.end for span in spans)
+    return any(span.start < cut.seconds <= span.end for span in spans)
 
 def _margin(seconds: float, analysis: MediaAnalysis) -> float:
-    """Measure how much room a cut point had.
+    """Measure how much silence a cut point had around it before reaching sound.
 
     A cut sitting inside a measured silence can move either way before it
-    reaches sound; the nearer of those two distances is the room it actually
-    had. A cut that is not inside a silence had none, whatever else is true of
-    it.
+    reaches sound, and the nearer of those two distances is the room it really
+    had. A cut that is not inside a silence had none. Zero therefore means the
+    cut is in sound; whether that sound was a word is `words_cut`'s question,
+    not this one.
+
+    Unlike `_inside_speech`, this needs no rounding tolerance, and `_headroom`
+    in the semantic layer agrees with it without one. The tolerance there
+    decides whether a boundary counts as snapped to a silence; the quantity
+    here is the distance to the very edge such a tolerance would relax, so a
+    cut a millisecond past the edge has a millisecond less than no room, which
+    is no room either way.
 
     Args:
         seconds: The cut point in the source file.
@@ -166,6 +204,63 @@ def _margin(seconds: float, analysis: MediaAnalysis) -> float:
         if span.start <= seconds <= span.end
     ]
     return round(max(room), 3) if room else 0.0
+
+def _outside_allowed(cuts: Sequence[CutPoint], case: BenchmarkCase, asset_ids: Mapping[str, str]) -> Optional[int]:
+    """Count cut points that land where the case says a cut may not.
+
+    Only files the case drew windows for are judged. A file with no windows
+    annotated is one nobody has ruled on, and treating that as "every cut is
+    wrong" would punish a plan for a gap in the corpus.
+
+    Args:
+        cuts: The cut points.
+        case: The case, with its acceptable cut windows.
+        asset_ids: Asset ID for each of the case's file paths.
+
+    Returns:
+        How many cut points fall outside every allowed window of a file that
+        has them, or None when the case allows no windows anywhere.
+    """
+    if not case.cut_windows:
+        return None
+    allowed: dict[str, List[MarkedSpan]] = {}
+    for window in case.cut_windows:
+        allowed.setdefault(asset_ids[window.file], []).append(window)
+    return sum(
+        1 for cut in cuts
+        if cut.asset_id in allowed
+        and not any(
+            window.start - EDGE_TOLERANCE_SECONDS <= cut.seconds <= window.end + EDGE_TOLERANCE_SECONDS
+            for window in allowed[cut.asset_id]
+        )
+    )
+
+def _unmeasured(pieces: Sequence[Piece], analyses: Mapping[str, MediaAnalysis]) -> List[str]:
+    """Say which floors could not be tested, and on what footage.
+
+    Called by `score` rather than offered to callers, because a gap nobody
+    remembered to check for reads exactly like a clean pass.
+
+    Args:
+        pieces: The compiled windows.
+        analyses: Each asset's stored analysis, keyed by asset ID.
+
+    Returns:
+        One sentence per piece of footage that could not be fully measured, in
+        the order the cut uses it.
+    """
+    said: List[str] = []
+    seen: set[str] = set()
+    for piece in pieces:
+        if piece.asset_id in seen:
+            continue
+        seen.add(piece.asset_id)
+        analysis = analyses.get(piece.asset_id)
+        if analysis is None:
+            said.append(f"{piece.asset_id} has no analysis, so nothing in it was measured")
+        elif not _has_word_timings(analysis):
+            said.append(f"{piece.asset_id} was not transcribed with word timings, so cuts through words were not counted")
+    return said
 
 @dataclass(frozen=True)
 class Scorecard:
@@ -182,8 +277,11 @@ class Scorecard:
             the case marks none.
         words_cut: Cut points landing in the middle of a spoken word.
         bad_frame_cuts: Cut points landing on black or frozen picture.
-        cut_margins: Room each cut point had, in seconds, in cut order.
+        cuts_outside_windows: Cut points landing where the case says a cut may
+            not. None when the case draws no windows.
+        cut_margins: Silence around each cut point, in seconds, in cut order.
         failures: The floors this cut missed, each said in a sentence.
+        unmeasured: The floors that could not be tested, and on what footage.
     """
 
     case_id: str
@@ -193,21 +291,26 @@ class Scorecard:
     must_drop_leakage: Optional[float]
     words_cut: int
     bad_frame_cuts: int
-    cut_margins: Tuple[float, ...]
-    failures: Tuple[str, ...]
+    cuts_outside_windows: Optional[int]
+    cut_margins: tuple[float, ...]
+    failures: tuple[str, ...]
+    unmeasured: tuple[str, ...]
 
     @property
     def clean(self) -> bool:
         """Whether the cut cleared every floor.
 
+        A floor nobody could test has not been cleared, so footage listed in
+        `unmeasured` keeps a card from reading as clean.
+
         Returns:
-            True when nothing failed.
+            True when nothing failed and nothing went unmeasured.
         """
-        return not self.failures
+        return not self.failures and not self.unmeasured
 
     @property
     def tightest_margin(self) -> Optional[float]:
-        """The least room any cut point had.
+        """The least silence any cut point had around it.
 
         Returns:
             The smallest margin in seconds, or None when the cut has no points.
@@ -216,7 +319,7 @@ class Scorecard:
 
     @property
     def median_margin(self) -> Optional[float]:
-        """The room a typical cut point had.
+        """The silence a typical cut point had around it.
 
         Reported alongside the tightest one because a single tight cut in an
         otherwise roomy edit is a different problem from every cut being tight.
@@ -237,10 +340,9 @@ def score(
     Args:
         case: The case, with its target length and annotations.
         pieces: The windows the plan compiled to, already merged.
-        analyses: Each asset's stored analysis, keyed by asset ID. An asset
-            with no analysis contributes no word or frame findings, so a cut
-            through unanalyzed footage scores zero faults rather than a
-            confident pass; `missing_analyses` says which.
+        analyses: Each asset's stored analysis, keyed by asset ID. Footage with
+            no analysis, or transcribed without word timings, is reported in
+            the card's `unmeasured` rather than scored as faultless.
         asset_ids: Asset ID for each of the case's file paths.
 
     Returns:
@@ -251,9 +353,8 @@ def score(
             resolve. Scoring against footage that is not there would report a
             coverage of zero and look like a bad plan rather than a bad setup.
     """
-    unresolved = sorted(
-        {span.file for span in [*case.must_keep, *case.must_drop]} - set(asset_ids)
-    )
+    annotated = {span.file for span in [*case.must_keep, *case.must_drop, *case.cut_windows]}
+    unresolved = sorted(annotated - set(asset_ids))
     if unresolved:
         raise ValueError(
             f"case {case.id}: {', '.join(unresolved)} is annotated but was not imported; "
@@ -262,16 +363,17 @@ def score(
 
     duration = compiled_duration(pieces)
     length_error = (
-        round(abs(duration - case.target_seconds) / case.target_seconds, 4)
+        abs(duration - case.target_seconds) / case.target_seconds
         if case.target_seconds else None
     )
-    coverage = _share_covered(case.must_keep, pieces, asset_ids)
-    leakage = _share_covered(case.must_drop, pieces, asset_ids)
+    coverage = _share_in_cut(case.must_keep, pieces, asset_ids)
+    leakage = _share_in_cut(case.must_drop, pieces, asset_ids)
 
-    cuts = [(asset_id, at, opens) for asset_id, at, opens in _cuts(pieces) if asset_id in analyses]
-    words_cut = sum(1 for asset_id, at, _ in cuts if _inside_speech(at, analyses[asset_id]))
-    bad_frames = sum(1 for asset_id, at, opens in cuts if _on_bad_frame(at, opens, analyses[asset_id]))
-    margins = tuple(_margin(at, analyses[asset_id]) for asset_id, at, _ in cuts)
+    cuts = [cut for cut in _cuts(pieces) if cut.asset_id in analyses]
+    words_cut = sum(1 for cut in cuts if _inside_speech(cut.seconds, analyses[cut.asset_id]))
+    bad_frames = sum(1 for cut in cuts if _on_bad_frame(cut, analyses[cut.asset_id]))
+    outside = _outside_allowed(_cuts(pieces), case, asset_ids)
+    margins = tuple(_margin(cut.seconds, analyses[cut.asset_id]) for cut in cuts)
 
     # Said in sentences rather than returned as flags: a score that cannot say what
     # went wrong sends the reader back to the footage to find out.
@@ -280,43 +382,27 @@ def score(
         failures.append(f"{words_cut} cut(s) land in the middle of a word")
     if bad_frames:
         failures.append(f"{bad_frames} cut(s) land on black or frozen picture")
+    if outside:
+        failures.append(f"{outside} cut(s) land outside the windows the case allows a cut in")
     if length_error is not None and length_error > MAX_LENGTH_ERROR:
         failures.append(
             f"the cut runs {duration}s against a target of {case.target_seconds}s, out by {length_error:.0%}"
         )
     if coverage is not None and coverage < MIN_MUST_KEEP_COVERAGE:
         failures.append(f"only {coverage:.0%} of the footage that had to be kept is in the cut")
-    if leakage:
-        failures.append(f"{leakage:.0%} of the footage that had to go is in the cut")
+    if leakage is not None and leakage > MAX_MUST_DROP_LEAKAGE:
+        failures.append(f"{leakage:.2%} of the footage that had to go is in the cut")
 
     return Scorecard(
         case_id=case.id,
         duration=duration,
-        length_error=length_error,
-        must_keep_coverage=coverage,
-        must_drop_leakage=leakage,
+        length_error=None if length_error is None else round(length_error, 4),
+        must_keep_coverage=None if coverage is None else round(coverage, 4),
+        must_drop_leakage=None if leakage is None else round(leakage, 4),
         words_cut=words_cut,
         bad_frame_cuts=bad_frames,
+        cuts_outside_windows=outside,
         cut_margins=margins,
         failures=tuple(failures),
+        unmeasured=tuple(_unmeasured(pieces, analyses)),
     )
-
-def missing_analyses(pieces: Sequence[Piece], analyses: Mapping[str, MediaAnalysis]) -> List[str]:
-    """Name the footage in a cut that has not been analyzed.
-
-    A score says nothing about words or frames in footage nobody measured, and
-    the absence looks exactly like a clean result. Call this beside `score` and
-    report what it returns rather than letting a setup mistake read as a pass.
-
-    Args:
-        pieces: The compiled windows.
-        analyses: Each asset's stored analysis, keyed by asset ID.
-
-    Returns:
-        The asset IDs used by the cut that have no analysis, in cut order.
-    """
-    seen: List[str] = []
-    for piece in pieces:
-        if piece.asset_id not in analyses and piece.asset_id not in seen:
-            seen.append(piece.asset_id)
-    return seen

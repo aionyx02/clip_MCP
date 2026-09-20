@@ -68,6 +68,10 @@ class BenchmarkCase(BaseModel):
     must_drop: List[MarkedSpan] = Field(
         default_factory=list, description="Stretches that must not reach the cut at all",
     )
+    cut_windows: List[MarkedSpan] = Field(
+        default_factory=list,
+        description="Stretches a cut point may land in. Files with none are files nobody has ruled on, not files where every cut is wrong",
+    )
     rubric: List[str] = Field(
         default_factory=list,
         description="What a good cut of this footage looks like, one judgeable statement per line. Carried for L3, not scored here",
@@ -85,10 +89,10 @@ class BenchmarkCase(BaseModel):
 
         Raises:
             ValueError: If an annotation names a file the case does not list,
-                or the same stretch is marked both ways.
+                or the same stretch is marked both must-keep and must-drop.
         """
         listed = set(self.footage)
-        for span in [*self.must_keep, *self.must_drop]:
+        for span in [*self.must_keep, *self.must_drop, *self.cut_windows]:
             if span.file not in listed:
                 raise ValueError(
                     f"case {self.id}: an annotation is about {span.file}, which is not in the case's footage"
