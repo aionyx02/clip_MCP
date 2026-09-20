@@ -189,6 +189,7 @@ class Project(BaseModel):
     """An editing project: output format settings plus its tracks."""
 
     id: str
+    name: Optional[str] = Field(default=None, description="What the editor calls this project, such as 'EP1 台北'")
     version: int = Field(default=1, description="Project version")
     fps_num: int = Field(default=30, gt=0, description="Frame rate numerator (e.g. 30000 for 29.97 fps)")
     fps_den: int = Field(default=1, gt=0, description="Frame rate denominator (e.g. 1001 for 29.97 fps)")
@@ -435,6 +436,14 @@ class SetClipLookOp(BaseModel):
                 raise ValueError(f"give either {name} or clear_{name}, not both")
         return self
 
+class RenameProjectOp(BaseModel):
+    """Edit operation that gives the project a name, or takes it away again."""
+
+    action: Literal["rename_project"] = "rename_project"
+    name: Optional[str] = Field(
+        default=None, max_length=120, description="What to call the project; null goes back to no name",
+    )
+
 class SetTrackAudioOp(BaseModel):
     """Edit operation that changes a whole track's audio behaviour; omitted fields stay unchanged."""
 
@@ -471,8 +480,8 @@ class SetClipPinnedOp(BaseModel):
 EditOperation = Annotated[
     Union[
         AddTrackOp, AddClipOp, InsertClipOp, TrimClipOp, DeleteOp, MoveClipOp,
-        SplitClipOp, ReorderClipOp, SetTrackAudioOp, SetClipAudioOp, SetClipLookOp,
-        SetClipPinnedOp, SetSubtitlesOp, EditSubtitleOp, FitTrackOp,
+        SplitClipOp, ReorderClipOp, RenameProjectOp, SetTrackAudioOp, SetClipAudioOp,
+        SetClipLookOp, SetClipPinnedOp, SetSubtitlesOp, EditSubtitleOp, FitTrackOp,
     ],
     Field(discriminator="action"),
 ]
@@ -725,6 +734,10 @@ def apply_operation(project: Project, op: EditOperation, assets: Mapping[str, As
         project.tracks.append(
             Track(id=op.track_id, track_type=op.track_type, duck_under_speech=op.duck_under_speech)
         )
+        return
+
+    if isinstance(op, RenameProjectOp):
+        project.name = op.name.strip() if op.name and op.name.strip() else None
         return
 
     if isinstance(op, SetSubtitlesOp):

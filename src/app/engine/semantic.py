@@ -20,7 +20,7 @@ from app.models.semantic import ClipKind, ClipLevel, SemanticClip, SemanticTimel
 
 # Bumped whenever the rules below change, so timelines built by an older
 # version are recognised as out of date rather than silently reused.
-DERIVATION_VERSION = 1
+DERIVATION_VERSION = 2
 # A stretch without speech shorter than this is not a thing on its own; it is the
 # breath between two sentences, and it is already described by their headroom.
 MIN_UTTERANCE_SECONDS = 0.4
@@ -30,7 +30,7 @@ EDGE_TOLERANCE_SECONDS = 0.02
 MOSTLY = 0.5
 NEARLY_ALL = 0.9
 
-def _fraction(start: float, end: float, spans: Sequence[Span]) -> float:
+def share_covered(start: float, end: float, spans: Sequence[Span]) -> float:
     """Measure how much of a stretch is covered by a set of spans.
 
     Args:
@@ -46,6 +46,29 @@ def _fraction(start: float, end: float, spans: Sequence[Span]) -> float:
         return 0.0
     covered = sum(max(0.0, min(end, span.end) - max(start, span.start)) for span in spans)
     return min(1.0, covered / length)
+
+def was_audible(silence_share: float, has_audio: bool) -> bool:
+    """Decide whether words transcribed over a stretch were ever actually said.
+
+    Speech recognition writes whole sentences over footage with nobody in it —
+    a channel sign-off, a subtitle credit, whatever the model heard most in
+    training — and hands them back with as much confidence as a real line. The
+    silence detector measured the sound itself, so where it says there was
+    nothing to hear, there was nothing said, whatever came back as text.
+
+    An asset with no sound at all is not judged here: it has no silences
+    measured against it, and no transcript either.
+
+    Args:
+        silence_share: How much of the stretch the silence detector marked,
+            as `share_covered` measures it.
+        has_audio: Whether the asset has an audio stream at all.
+
+    Returns:
+        False only when the stretch was measured as silent nearly all the way
+        through.
+    """
+    return not has_audio or silence_share < NEARLY_ALL
 
 def _headroom(start: float, end: float, silences: Sequence[Span], duration: float) -> Tuple[float, float]:
     """Measure how far a clip's in and out points may move before reaching sound.
@@ -164,10 +187,10 @@ def _scores(
     """
     words = segment.words if segment is not None else []
     scores = {
-        "speech": _fraction(start, end, [Span(start=word.start, end=word.end) for word in words]),
-        "silence": _fraction(start, end, analysis.silences),
-        "black": _fraction(start, end, analysis.black_frames),
-        "frozen": _fraction(start, end, analysis.frozen_frames),
+        "speech": share_covered(start, end, [Span(start=word.start, end=word.end) for word in words]),
+        "silence": share_covered(start, end, analysis.silences),
+        "black": share_covered(start, end, analysis.black_frames),
+        "frozen": share_covered(start, end, analysis.frozen_frames),
     }
     if words and end > start:
         scores["words_per_second"] = len(words) / (end - start)
@@ -186,9 +209,11 @@ def _kind(has_speech: bool, has_audio: bool, scores: Mapping[str, float]) -> Cli
         or frozen is `UNUSABLE`; one that is silent throughout is `SILENCE`;
         anything else without speech is `AMBIENT`, including shots from a file
         with no sound, because telling those apart from `ACTION` needs a
-        motion measurement the analysis does not take.
+        motion measurement the analysis does not take. Words transcribed over
+        a stretch measured as silent do not make it `SPEECH`: see
+        `was_audible`.
     """
-    if has_speech:
+    if has_speech and was_audible(scores["silence"], has_audio):
         return ClipKind.SPEECH
     if scores["black"] >= MOSTLY or scores["frozen"] >= MOSTLY:
         return ClipKind.UNUSABLE

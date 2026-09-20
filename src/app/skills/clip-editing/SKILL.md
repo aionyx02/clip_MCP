@@ -76,7 +76,10 @@ done. For example:
   kind of track it can go on.
 - **Project**: output `width`, `height`, and frame rate, plus its tracks.
   These settings cannot be changed later; create a new project instead.
-  `get_project` also returns `duration`, the length of the edited video.
+  `get_project` also returns `duration`, the length of the edited video. A
+  project also has a `name`: give it one, because `list_projects` shows it and
+  three projects at once cannot be told apart by their IDs. `rename_project`
+  changes it later.
 - **Tracks**: the first `video` track is the base: it holds the sequence and
   each clip's own sound, and it decides the output length. Further `video`
   tracks are drawn on top of it, for picture in picture; their clips carry
@@ -92,7 +95,12 @@ done. For example:
 - **Captions**: `generate_subtitles` proposes captions from the transcripts of
   the base-track clips that survived the edit, already moved onto the
   timeline; insets on higher tracks are pictures over that sound, so they are
-  not captioned. Nothing is saved until you apply them with `set_subtitles`,
+  not captioned. A narration laid on an audio track is captioned too — it is
+  speech the viewer hears — so analyze a voice-over file like any other
+  source. Music is left alone, because a song has no transcript to caption
+  from, and so is a clip set to `volume: 0`. The result counts how many
+  captions `overlapping` each other, which is what a narration talking over
+  footage that also speaks looks like. Nothing is saved until you apply them with `set_subtitles`,
   so check the wording first, and they only appear in the file when
   `render_project` is called with `burn_subtitles`. Stored captions belong to
   the cut they were made from: they do not move when clips do, so caption
@@ -171,7 +179,8 @@ is wrong before a render is wasted.
    when the footage sits in sub-folders. Use the returned `duration` instead
    of guessing lengths. Use `inspect_media` if you need resolution or frame
    rate.
-3. Call `create_project` with the output settings; see
+3. Call `create_project` with the output settings and a `name` the user
+   would recognise, such as `EP1 台北`; see
    [Defaults](#defaults). Then call `apply_edits` with an `add_track`
    operation, `{"action": "add_track", "track_id": "main", "track_type": "video"}`,
    together with the first clips.
@@ -265,8 +274,11 @@ screen, where the pauses or mistakes are, or which parts are best.
    answers 「這批素材有什麼」.
 5. Look before you cut. Call `view_frames` with about 12 frames over the whole
    asset for an overview, then use a narrow range to check a specific moment.
-   Do not describe what is on screen without looking. `view_frames` reads a
-   source file; `preview_project` shows the edited sequence.
+   It takes a list of assets, so a range is only accepted for one of them; for
+   several, it takes that many frames from each and puts them on one sheet, up
+   to 36 frames in total. Do not describe what is on screen without looking.
+   `view_frames` reads source files; `preview_project` shows the edited
+   sequence.
 6. To make what is on screen searchable, call `frames_for_clips` on the clips
    you care about, then write what you saw back with `set_clip_tags`. Show the
    user your descriptions first and let them correct anything you misread:
@@ -286,6 +298,13 @@ screen, where the pauses or mistakes are, or which parts are best.
      for a stretch that is mostly those.
 8. For subjective selections such as highlights, list the chosen parts with
    times and quoted text, and confirm with the user before rendering.
+9. Speech recognition invents sentences over shots with nobody in them — a
+   channel sign-off, a subtitle credit — and returns them at high confidence.
+   A stretch measured as silent is never `speech`, whatever text came back,
+   and such a line is not offered as a caption either, so both `query_clips`
+   and `generate_subtitles` already keep them out. What the rule cannot catch
+   is a mishearing of something that was said: check a quote that matters
+   against the surrounding clips, and ask the user about a name.
 
 ## Planning a cut
 
@@ -325,6 +344,14 @@ When the user asks for a change — 「第三段太長」, 「開頭無聊」 �
 and compile it again, rather than nudging clips on the timeline. The plan is
 where the reasons live; the timeline is only what fell out of them.
 
+Change it with `amend_plan`, one amendment per thing that actually changed:
+`set_trim` to retrim a piece, `set_rationale` to rewrite why it is there or
+move it to another beat, `add_selection` to put something in, and
+`drop_selection` to take something out, which files it under `rejected` with
+the reason. Do not send the whole plan through `save_plan` again to move one
+edge: every other selection's reason is retyped to do it, and those reasons
+are the part that cannot be rebuilt.
+
 Compiling again is safe. A compiled clip remembers which plan and which
 footage it came from, and any clip you adjust by hand — trimmed, moved,
 recoloured, split — is pinned by that edit alone. A pinned clip comes through
@@ -353,8 +380,8 @@ footage yourself, then give them a choice between concrete directions.
 Work through it in three passes, so the slow one runs only on what survives:
 
 1. **Survey, seconds per file.** `import_folder` on the folder, or
-   `import_asset` per file, then `view_frames` with about 6 frames on each
-   video. This alone tells you how much footage there is, which files have
+   `import_asset` per file, then `view_frames` over the whole list, about 6
+   frames each, six files to a call — not one call per file. This alone tells you how much footage there is, which files have
    sound, what each one shows, and which are unusable because they are dark,
    shaky, or a stray recording.
 2. **Triage, one decoding pass per file.** On the files that look usable,
@@ -436,6 +463,7 @@ times refer to the source file.
 | 「拿掉背景音樂」 / remove the music | `delete_clip` every clip on the audio track |
 | 「人聲出現時音樂小聲一點」 / duck the music under the talking | `set_track_audio` on the music track with `duck_under_speech: true` |
 | 「每段音量差很多」 / the volume jumps between clips | Nothing: `render_project` normalizes the finished mix to -14 LUFS |
+| 「這支叫 EP1 台北」 / name this project | `rename_project` with the new `name` |
 | 「做成直式／方形」 / make it vertical or square | New project with the new size, then rebuild the clips |
 | 「開頭淡入、結尾淡出」 / fade in at the start and out at the end | `set_clip_look` `video_fade_in` on the first clip, `video_fade_out` on the last |
 | 「兩段之間過一下黑」 / dip through black between two clips | `set_clip_look` `video_fade_out` on the earlier clip and `video_fade_in` on the later one |
@@ -460,7 +488,7 @@ times refer to the source file.
 | 「只留有講到 X 的段落」 / keep only parts about X | Keep the transcript segments about X, plus enough context to make sense |
 | 「剪掉黑畫面／畫面卡住的地方」 / remove black or frozen parts | Keep the time outside `black_frames` / `frozen_frames` |
 | 「找出精華剪成 60 秒」 / a 60 s highlight reel | Choose segments by transcript and frames until about 60 s; confirm the list before rendering |
-| 「第 3 分鐘那個畫面是什麼」 / what is on screen at 3:00 | `view_frames` with `start: 175`, `end: 185`, `count: 4` |
+| 「第 3 分鐘那個畫面是什麼」 / what is on screen at 3:00 | `view_frames` with one `asset_ids` entry, `start: 175`, `end: 185`, `count: 4` |
 | 「現在剪成什麼樣子」 / show me the cut so far | `preview_project`, then describe the order and the cut points |
 | 「這個資料夾的影片幫我剪一下」 / edit this folder for me | `import_folder`, then survey and propose; see [When the user brings raw footage and no plan](#when-the-user-brings-raw-footage-and-no-plan) |
 

@@ -7,6 +7,7 @@ import pytest
 from PIL import Image
 
 from app.engine.frames import TILE_SIZE, _crop_to_aspect, format_timestamp, storyboard_sheet
+from app.server import MAX_STORYBOARD_TILES, import_asset, view_frames
 
 @pytest.mark.parametrize(("seconds", "expected"), [
     (0, "00:00.0"),
@@ -62,3 +63,53 @@ def test_storyboard_sheet_crops_every_tile_to_the_output_aspect(media: Path) -> 
     # so the sheet shows the render's framing rather than the sources'.
     assert portrait.height > landscape.height
     assert portrait.width < landscape.width
+
+def assets_for(media: Path) -> tuple:
+    """Import the three videos the sheet tests sample.
+
+    Returns:
+        `(wide, tall, silent)` asset IDs.
+    """
+    return tuple(import_asset(str(media / f"{name}.mp4"))["id"] for name in ("wide", "tall", "silent"))
+
+def sheet_text(result) -> list:
+    """Split a `view_frames` result into its listing lines.
+
+    Args:
+        result: What `view_frames` returned.
+
+    Returns:
+        The lines of the text block.
+    """
+    return result.content[0].text.splitlines()
+
+def test_view_frames_samples_one_asset_across_a_range(media: Path) -> None:
+    wide, _, _ = assets_for(media)
+    lines = sheet_text(view_frames([wide], start=2, end=6, count=4))
+    times = [float(line.split("|")[1].split("s")[0]) for line in lines if line.startswith("#")]
+    assert len(times) == 4
+    assert times == sorted(times) and 2 <= times[0] and times[-1] <= 6
+
+def test_view_frames_covers_several_assets_in_one_call(media: Path) -> None:
+    # 148 files used to mean 148 calls; this is the whole point of the change.
+    wide, tall, silent = assets_for(media)
+    lines = [line for line in sheet_text(view_frames([wide, tall, silent], count=3)) if line.startswith("#")]
+    assert len(lines) == 9
+    # Each tile says which file it came from, in the order they were asked for.
+    assert [line.split("|")[0].split(": ")[1].strip() for line in lines[::3]] == [
+        "wide.mp4", "tall.mp4", "silent.mp4",
+    ]
+
+def test_view_frames_refuses_more_frames_than_one_sheet_holds(media: Path) -> None:
+    wide, tall, silent = assets_for(media)
+    with pytest.raises(ValueError, match="more than one sheet holds"):
+        view_frames([wide, tall, silent], count=MAX_STORYBOARD_TILES)
+
+def test_view_frames_refuses_a_range_across_several_assets(media: Path) -> None:
+    wide, tall, _ = assets_for(media)
+    with pytest.raises(ValueError, match="only means something for one asset"):
+        view_frames([wide, tall], start=1, end=3)
+
+def test_view_frames_needs_at_least_one_asset() -> None:
+    with pytest.raises(ValueError, match="at least one asset"):
+        view_frames([])

@@ -412,7 +412,7 @@ class Repository:
         timeline_id: str,
         level: Optional[ClipLevel] = None,
         kinds: Optional[Iterable[ClipKind]] = None,
-        asset_id: Optional[str] = None,
+        asset_ids: Optional[Iterable[str]] = None,
         topic: Optional[str] = None,
         tag: Optional[str] = None,
         text: Optional[str] = None,
@@ -433,7 +433,7 @@ class Repository:
             timeline_id: Timeline to search.
             level: Keep only clips at this level.
             kinds: Keep only clips of these kinds.
-            asset_id: Keep only clips from this asset.
+            asset_ids: Keep only clips from these assets.
             topic: Keep only sections labelled with this subject.
             tag: Keep only clips carrying this tag, whoever wrote it.
             text: Keep only clips whose text or description contains this.
@@ -464,9 +464,10 @@ class Repository:
         if kinds:
             where.append(f"kind IN ({','.join('?' * len(kinds))})")
             params.extend(ClipKind(kind).value for kind in kinds)
-        if asset_id is not None:
-            where.append("asset_id = ?")
-            params.append(asset_id)
+        sources = list(asset_ids or [])
+        if sources:
+            where.append(f"asset_id IN ({','.join('?' * len(sources))})")
+            params.extend(sources)
         if topic is not None:
             where.append("json_extract(data, '$.topic') = ?")
             params.append(topic)

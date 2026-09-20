@@ -12,7 +12,7 @@ from fastmcp.tools import ToolResult
 from fastmcp.utilities.types import Image
 from pydantic import Field, TypeAdapter
 from app.models.media import Asset, Span
-from app.models.plan import EditPlan
+from app.models.plan import EditPlan, PlanAmendment, apply_amendment
 from app.models.semantic import (
     ClipDescription, ClipKind, ClipLevel, SectionChoice, SemanticClip, SemanticTimeline, Tag, TagSource,
 )
@@ -28,7 +28,7 @@ from app.engine.sections import build_sections, candidate_hash, check_sections, 
 from app.engine.semantic import build_timeline, timeline_input_hash
 from app.engine.probe import probe_file
 from app.engine.builder import DEFAULT_LOUDNESS_TARGET, FFmpegRenderer
-from app.engine.frames import contact_sheet, format_timestamp, storyboard_sheet
+from app.engine.frames import format_timestamp, storyboard_sheet
 from app.engine.subtitles import DEFAULT_MAX_CHARACTERS, DEFAULT_MAX_SECONDS, build_ass, timeline_cues
 from app.engine.renderer import JobManager
 from app.storage.repo import Repository
@@ -501,7 +501,7 @@ def query_clips(
     timeline_id: Optional[str] = None,
     level: ClipLevel = ClipLevel.UTTERANCE,
     kinds: Optional[List[ClipKind]] = None,
-    asset_id: Optional[str] = None,
+    asset_ids: Optional[List[str]] = None,
     topic: Optional[str] = None,
     tag: Optional[str] = None,
     text: Optional[str] = None,
@@ -542,7 +542,8 @@ def query_clips(
             (nothing is audible), `ambient` (sound but no speech, and shots
             from files without sound), `unusable` (nobody talking over a black
             or frozen picture). Omit for all of them.
-        asset_id: Keep only clips from one asset.
+        asset_ids: Keep only clips from these assets. Omit for every file
+            in the timeline.
         topic: Keep only sections about this subject, as `set_sections`
             labelled them. Topics are shared between files, so this is how to
             gather everything shot about one thing.
@@ -573,7 +574,7 @@ def query_clips(
         timeline.id,
         level=level,
         kinds=kinds,
-        asset_id=asset_id,
+        asset_ids=asset_ids,
         topic=topic,
         tag=tag,
         text=text,
@@ -912,52 +913,79 @@ def set_clip_tags(
 
 @mcp.tool()
 def view_frames(
-    asset_id: str,
+    asset_ids: list[str],
     start: Annotated[float, Field(ge=0)] = 0,
     end: Optional[float] = None,
     count: Annotated[int, Field(ge=1, le=MAX_STORYBOARD_TILES)] = 12,
 ) -> ToolResult:
-    """Look at frames from an asset as one labeled contact sheet image.
+    """Look at frames from one or more assets as one labeled contact sheet image.
 
-    Frames are sampled at evenly spaced times between `start` and `end`. Each
-    tile is labeled with its number and source time. Use a wide range for an
-    overview and a narrow range to inspect a moment before choosing a cut
-    point. Works without `analyze_asset`.
+    With a single asset, frames are sampled at evenly spaced times between
+    `start` and `end`: use a wide range for an overview and a narrow range to
+    inspect a moment before choosing a cut point. With several, `count` frames
+    are taken across the whole of each one and they follow each other on the
+    sheet, which is how a folder of footage is surveyed without a call per
+    file. A range means nothing across files of different lengths, so `start`
+    and `end` are only accepted for a single asset.
+
+    Every tile is labeled with its number, its source time, and which file it
+    came from. Works without `analyze_asset`.
 
     Args:
-        asset_id: ID of an asset with video.
-        start: Range start in seconds.
-        end: Range end in seconds; omit for the end of the asset.
-        count: Number of frames to sample.
+        asset_ids: IDs of the assets to sample, in the order to show them.
+        start: Range start in seconds; one asset only.
+        end: Range end in seconds; one asset only, and the end of the asset
+            when omitted.
+        count: Number of frames per asset.
 
     Returns:
-        A text block listing each tile's source time, followed by the contact
-        sheet as a JPEG image.
+        A text block listing each tile's asset and source time, followed by
+        the contact sheet as a JPEG image.
 
     Raises:
-        ValueError: If the asset does not exist, has no video, or the range is
-            empty.
+        ValueError: If an asset does not exist or has no video, the range is
+            empty, a range is given for more than one asset, or the frames
+            asked for do not fit on one sheet.
         RuntimeError: If frames cannot be decoded.
     """
-    asset = _get_asset(asset_id)
-    if not asset.has_video or asset.duration is None:
-        raise ValueError(f"asset {asset_id} has no video frames to show")
-    duration = float(asset.duration)
-    end = duration if end is None else min(end, duration)
-    if end <= start:
-        raise ValueError(f"empty range: start {start}s must be before end {end}s (asset is {duration}s long)")
+    if not asset_ids:
+        raise ValueError("name at least one asset to show frames from")
+    if len(asset_ids) * count > MAX_STORYBOARD_TILES:
+        raise ValueError(
+            f"{len(asset_ids)} assets at {count} frames each is more than one sheet holds; "
+            f"ask for at most {MAX_STORYBOARD_TILES} frames in total"
+        )
+    if len(asset_ids) > 1 and (start or end is not None):
+        raise ValueError("a time range only means something for one asset; drop start and end, or ask about one file")
 
-    step = (end - start) / count
-    # Sample the middle of each interval, and stay clear of the very last frame, which may not decode.
-    times = [round(min(start + step * (index + 0.5), duration - 0.05), 3) for index in range(count)]
-    listing = "\n".join(f"#{index + 1}: {seconds:.3f}s ({format_timestamp(seconds)})" for index, seconds in enumerate(times))
+    shots: List[tuple[str, float, str]] = []
+    listing: List[str] = []
+    for asset_id in asset_ids:
+        asset = _get_asset(asset_id)
+        if not asset.has_video or asset.duration is None:
+            raise ValueError(f"asset {asset_id} has no video frames to show")
+        duration = float(asset.duration)
+        last = duration if end is None else min(end, duration)
+        if last <= start:
+            raise ValueError(f"empty range: start {start}s must be before end {last}s (asset is {duration}s long)")
+        step = (last - start) / count
+        for index in range(count):
+            # Sample the middle of each interval, and stay clear of the very last frame, which may not decode.
+            seconds = round(min(start + step * (index + 0.5), duration - 0.05), 3)
+            number = len(shots) + 1
+            name = Path(asset.path).name
+            shots.append((asset.path, seconds, f"#{number}  {format_timestamp(seconds)}  {name[:14]}"))
+            listing.append(f"#{number}: {name} | {seconds:.3f}s ({format_timestamp(seconds)})")
+
+    where = f"asset {asset_ids[0]}" if len(asset_ids) == 1 else f"{len(asset_ids)} assets, {count} frames each"
     return ToolResult(content=[
-        f"Contact sheet of asset {asset_id}, {count} frames from {start:.3f}s to {end:.3f}s, in reading order:\n{listing}",
-        Image(data=contact_sheet(asset.path, times), format="jpeg"),
+        f"Contact sheet of {where}, in reading order:\n" + "\n".join(listing),
+        Image(data=storyboard_sheet(shots), format="jpeg"),
     ])
 
 @mcp.tool()
 def create_project(
+    name: Annotated[Optional[str], Field(max_length=120)] = None,
     width: Annotated[int, Field(gt=0, multiple_of=2)] = 1920,
     height: Annotated[int, Field(gt=0, multiple_of=2)] = 1080,
     fps_num: Annotated[int, Field(gt=0)] = 30,
@@ -970,6 +998,10 @@ def create_project(
     converted to the output frame rate.
 
     Args:
+        name: What to call the project, such as 'EP1 台北'. Worth giving: it is
+            what `list_projects` shows, and several projects at once are hard
+            to tell apart by ID. Change it later with a `rename_project`
+            operation.
         width: Output width in pixels; must be even.
         height: Output height in pixels; must be even.
         fps_num: Frame rate numerator, e.g. 30000 for 29.97 fps.
@@ -979,7 +1011,10 @@ def create_project(
         The new project serialized as a dictionary, including its generated
         `id` and initial `version`.
     """
-    project = Project(id=str(uuid.uuid4()), width=width, height=height, fps_num=fps_num, fps_den=fps_den)
+    project = Project(
+        id=str(uuid.uuid4()), name=(name.strip() or None) if name else None,
+        width=width, height=height, fps_num=fps_num, fps_den=fps_den,
+    )
     repo.add_project(project)
     return project.model_dump()
 
@@ -989,9 +1024,12 @@ def list_projects() -> dict:
 
     Returns:
         A dictionary with a `projects` list, each item holding a project's
-        `id` and current `version`.
+        `id`, its `name` if it was given one, and its current `version`.
     """
-    return {"projects": [{"id": project.id, "version": project.version} for project in repo.list_projects()]}
+    return {"projects": [
+        {"id": project.id, "name": project.name, "version": project.version}
+        for project in repo.list_projects()
+    ]}
 
 @mcp.tool()
 def get_project(project_id: str, include_subtitles: bool = False) -> dict:
@@ -1242,6 +1280,55 @@ def save_plan(plan: EditPlan) -> dict:
     }
 
 @mcp.tool()
+def amend_plan(plan_id: str, expected_version: int, amendments: list[PlanAmendment]) -> dict:
+    """Change part of a stored plan without sending the whole thing again.
+
+    A cut is argued with one piece at a time — this beat runs long, that shot
+    does not work, one more thing belongs in the middle — and every selection
+    carries a written reason that sending the plan again puts at risk. Retrim
+    with `set_trim`, rewrite a reason or move a piece to another beat with
+    `set_rationale`, put something in with `add_selection`, and take something
+    out with `drop_selection`, which files it under the plan's rejections with
+    the reason so the question can be answered later.
+
+    Nothing is compiled here. Call `compile_plan` when the plan reads right.
+
+    Args:
+        plan_id: Plan to amend.
+        expected_version: The plan's current `version`, as `get_plan` reported
+            it. The amendment is refused if the stored plan has moved on.
+        amendments: What to change, applied in order.
+
+    Returns:
+        A dictionary with the `plan_id`, its new `version`, the `timeline_id`,
+        and `problems` and `notes` from checking the amended plan. As with
+        `save_plan`, it is stored whether or not it checks out.
+
+    Raises:
+        ValueError: If the plan or its timeline is gone, the version does not
+            match, or an amendment names a selection the plan does not have.
+    """
+    plan = _require_plan(plan_id)
+    if plan.version != expected_version:
+        raise ValueError(f"version conflict: plan {plan.id} is at version {plan.version}, not {expected_version}")
+    amended = plan.model_copy(deep=True)
+    for amendment in amendments:
+        apply_amendment(amended, amendment)
+
+    timeline = repo.get_semantic_timeline(amended.timeline_id)
+    if timeline is None:
+        raise ValueError(f"the plan is written against timeline {amended.timeline_id}, which no longer exists")
+    stored = repo.save_plan(amended.model_copy(update={"timeline_input_hash": timeline.input_hash}))
+    problems, notes = check_plan(stored, *_plan_context(stored))
+    return {
+        "plan_id": stored.id,
+        "version": stored.version,
+        "timeline_id": stored.timeline_id,
+        "problems": problems,
+        "notes": notes,
+    }
+
+@mcp.tool()
 def get_plan(plan_id: Optional[str] = None) -> dict:
     """Read a stored plan back, with the other plans there are to compare it with.
 
@@ -1457,12 +1544,40 @@ def preview_project(
                 "put audio-only assets on an audio track"
             )
 
-    # One tile per clip is the floor, so a one-second clip in a long edit is still shown.
+    # Where the picture really goes black, found over the whole sequence rather than over
+    # the tiles chosen below. A clip left out of the storyboard is not a hole in the edit,
+    # and reading the gaps off the sampled list turned every skipped clip into one.
     total_clips = len(clips)
+    gaps: List[List[tuple[Decimal, Decimal]]] = [[] for _ in clips]
+    running_out = Decimal(0)
+    for index, clip in enumerate(clips):
+        if clip.timeline_in > running_out:
+            gaps[index].append((running_out, clip.timeline_in))
+        running_out = clip.timeline_out
+
+    def gap_line(opened: Decimal, closed: Decimal) -> str:
+        """Describe one stretch of black picture for the listing."""
+        return (
+            f"-- black gap {format_timestamp(float(opened))} to "
+            f"{format_timestamp(float(closed))} ({float(closed - opened):.3f}s)"
+        )
+
+    # One tile per clip is the floor, so a one-second clip in a long edit is still shown.
     omitted = max(0, total_clips - MAX_STORYBOARD_TILES)
     if omitted:
         stride = total_clips / MAX_STORYBOARD_TILES
-        clips = [clips[min(int(stride * index), total_clips - 1)] for index in range(MAX_STORYBOARD_TILES)]
+        chosen = sorted({min(int(stride * index), total_clips - 1) for index in range(MAX_STORYBOARD_TILES)})
+    else:
+        chosen = list(range(total_clips))
+    # Every tile carries what fell between the tile before it and itself, so a clip that is
+    # not drawn is still counted and a real gap behind it is still reported.
+    spans = list(zip([-1, *chosen], chosen))
+    skipped = [later - earlier - 1 for earlier, later in spans]
+    carried = [
+        [gap for index in range(earlier + 1, later + 1) for gap in gaps[index]]
+        for earlier, later in spans
+    ]
+    clips = [clips[index] for index in chosen]
     per_clip = [1] * len(clips)
     for _ in range(max(count, len(clips)) - len(clips)):
         # Give the next frame to whichever clip currently covers the most seconds per frame.
@@ -1471,14 +1586,10 @@ def preview_project(
 
     shots: List[tuple[str, float, str]] = []
     listing: List[str] = []
-    previous_out = Decimal(0)
-    for clip, frames in zip(clips, per_clip):
-        if clip.timeline_in > previous_out:
-            listing.append(
-                f"-- black gap {format_timestamp(float(previous_out))} to "
-                f"{format_timestamp(float(clip.timeline_in))} "
-                f"({float(clip.timeline_in - previous_out):.3f}s)"
-            )
+    for position, (clip, frames) in enumerate(zip(clips, per_clip)):
+        if skipped[position]:
+            listing.append(f"-- {skipped[position]} clip(s) not shown")
+        listing.extend(gap_line(opened, closed) for opened, closed in carried[position])
         asset = assets[clip.asset_id]
         start, end = float(clip.source_range.start), float(clip.source_range.end)
         step = (end - start) / frames
@@ -1496,7 +1607,13 @@ def preview_project(
                 f"#{number}: clip {clip.id} | edit {format_timestamp(at)} | "
                 f"source {seconds:.3f}s ({format_timestamp(seconds)})"
             )
-        previous_out = clip.timeline_out
+
+    # Sampling can stop short of the last clip, so say what runs on past the final tile.
+    trailing = total_clips - 1 - chosen[-1]
+    if trailing:
+        listing.append(f"-- {trailing} clip(s) not shown")
+        for index in range(chosen[-1] + 1, total_clips):
+            listing.extend(gap_line(opened, closed) for opened, closed in gaps[index])
 
     for track in project.video_tracks[1:]:
         for clip in sorted(track.clips, key=lambda item: item.timeline_in):
@@ -1542,13 +1659,17 @@ def generate_subtitles(
 ) -> dict:
     """Propose captions for the edited sequence, from transcripts already made.
 
-    Reads the transcript of every clip on the base video track, keeps only
-    the speech that survived the edit, and moves each line to where it now
-    falls in the result. Insets on video tracks above the base are pictures
-    over that sound, so they are not captioned. Long sentences are broken between words. Nothing is saved:
-    check the wording, fix any name the transcript misheard, and then store
-    the captions with a `set_subtitles` operation in `apply_edits`. Render
-    them into the picture with `render_project` and `burn_subtitles`.
+    Reads the transcript of every clip on the base video track and on the
+    audio tracks, keeps only the speech that survived the edit, and moves each
+    line to where it now falls in the result. A narration recorded separately
+    and laid on an audio track is captioned like any other speech; music is
+    not, because nobody transcribes a song. Insets on video tracks above the
+    base are pictures over that sound, so they are not captioned, and neither
+    is a clip turned all the way down. Long sentences are broken between
+    words. Nothing is saved: check the wording, fix any name the transcript
+    misheard, and then store the captions with a `set_subtitles` operation in
+    `apply_edits`. Render them into the picture with `render_project` and
+    `burn_subtitles`.
 
     Args:
         project_id: ID of the project to caption.
@@ -1557,39 +1678,50 @@ def generate_subtitles(
 
     Returns:
         A dictionary with `cues`, each holding its `id`, `start` and `end` in
-        seconds on the timeline, and its `text`, and
-        `assets_without_transcript`, the assets that still need
-        `analyze_asset` before they can be captioned.
+        seconds on the timeline, and its `text`;
+        `assets_without_transcript`, the video sources that still need
+        `analyze_asset` before they can be captioned; and `overlapping`, how
+        many captions run into the one before them, which is worth a look when
+        a narration track talks over footage that speaks for itself.
 
     Raises:
-        ValueError: If the project does not exist, or no clip on its video
-            track has been transcribed.
+        ValueError: If the project does not exist, or nothing it plays has
+            been transcribed.
     """
     project = repo.get_project(project_id)
     if not project:
         raise ValueError(f"project {project_id} not found")
 
     transcripts = {}
+    silences: dict[str, List[Span]] = {}
     untranscribed: List[str] = []
     base = project.base_video_track
-    for clip in base.clips if base else []:
-        if clip.asset_id in transcripts or clip.asset_id in untranscribed:
-            continue
-        analysis = repo.get_analysis(clip.asset_id)
-        if analysis is not None and analysis.transcript is not None:
-            transcripts[clip.asset_id] = analysis.transcript
-        else:
-            untranscribed.append(clip.asset_id)
+    sound = [track for track in project.tracks if track.track_type == TrackType.AUDIO]
+    for track in ([base] if base else []) + sound:
+        for clip in track.clips:
+            if clip.asset_id in transcripts or clip.asset_id in untranscribed:
+                continue
+            analysis = repo.get_analysis(clip.asset_id)
+            if analysis is not None and analysis.transcript is not None:
+                transcripts[clip.asset_id] = analysis.transcript
+                silences[clip.asset_id] = analysis.silences
+            elif track is base:
+                # A music bed has no transcript and never needs one, so it is not a gap to report.
+                untranscribed.append(clip.asset_id)
 
     if not transcripts:
         raise ValueError(
             f"project {project_id} has no transcribed clips to caption; "
             "call analyze_asset on its sources first"
         )
-    cues = timeline_cues(project, transcripts, max_characters=max_characters, max_seconds=max_seconds)
+    cues = timeline_cues(
+        project, transcripts, max_characters=max_characters, max_seconds=max_seconds, silences=silences,
+    )
+    overlapping = sum(1 for earlier, later in zip(cues, cues[1:]) if later.start < earlier.end)
     return {
         "cues": [cue.model_dump() for cue in cues],
         "assets_without_transcript": untranscribed,
+        "overlapping": overlapping,
     }
 
 @mcp.tool()

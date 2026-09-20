@@ -107,6 +107,38 @@ def test_caps_the_number_of_tiles_and_says_what_it_skipped(assets: dict) -> None
     assert len(tiles(lines)) == 36
     assert "4 clip(s) were skipped" in lines[0]
 
+def long_sequence(asset_id: str, clips: int = 40) -> list:
+    """Build a run of short clips, end to end, long enough to overflow the sheet.
+
+    Args:
+        asset_id: Asset every clip comes from.
+        clips: How many clips to lay down.
+
+    Returns:
+        The operations, starting with the track.
+    """
+    return [video_track()] + [
+        insert(f"c{index}", asset_id, index * 0.2, index * 0.2 + 0.2) for index in range(clips)
+    ]
+
+def test_a_skipped_clip_is_not_mistaken_for_a_black_gap(assets: dict) -> None:
+    # Forty clips end to end, so four have to be left out of the sheet. The gaps used to be
+    # read off the sampled list, which printed every skipped clip as a hole in the edit.
+    lines, _ = storyboard(build_project(long_sequence(assets["wide"])))
+    assert [line for line in lines if "black gap" in line] == []
+    # They are still accounted for, in the places where they were dropped.
+    notes = [line for line in lines if "not shown" in line]
+    assert sum(int(line.split()[1]) for line in notes) == 4
+
+def test_a_real_gap_survives_the_clips_that_are_skipped(assets: dict) -> None:
+    operations = long_sequence(assets["wide"])
+    operations.append({
+        "action": "add_clip", "track_id": "main", "clip_id": "late", "asset_id": assets["tall"],
+        "source_range": {"start": 0, "end": 2}, "timeline_in": 10,
+    })
+    lines, _ = storyboard(build_project(operations))
+    assert [line for line in lines if "black gap" in line] == ["-- black gap 00:08.0 to 00:10.0 (2.000s)"]
+
 def test_crops_tiles_to_the_project_shape(assets: dict) -> None:
     operations = [video_track(), insert("a", assets["wide"], 0, 4)]
     _, portrait = storyboard(build_project(operations, width=1080, height=1920), count=1)

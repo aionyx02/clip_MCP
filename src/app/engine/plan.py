@@ -95,9 +95,12 @@ def _piece(
     lead, trail = _breath(clip)
     opening = (clip.source_range.start if start is None else start) - (lead if pad_head else 0.0)
     closing = (clip.source_range.end if end is None else end) + (trail if pad_tail else 0.0)
+    # Round to milliseconds before clamping, never after: rounding 36.266667 up to 36.267
+    # would put the window past the end of a file that is only 36.266667s long.
+    closing = round(closing, 3)
     if asset.duration is not None:
         closing = min(closing, float(asset.duration))
-    return Piece(asset.id, round(max(0.0, opening), 3), round(closing, 3), (clip.id,))
+    return Piece(asset.id, round(max(0.0, opening), 3), closing, (clip.id,))
 
 def _selection_pieces(
     selection: Selection,

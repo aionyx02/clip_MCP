@@ -15,7 +15,7 @@ it, and then the plan would no longer determine the cut.
 import uuid
 from datetime import datetime, timezone
 from enum import Enum
-from typing import List, Optional
+from typing import Annotated, List, Literal, Optional, Union
 
 from pydantic import BaseModel, Field
 
@@ -103,8 +103,11 @@ class EditPlan(BaseModel):
     version: int = Field(default=1, ge=1, description="Raised on every save; `save_plan` takes it to detect a clash")
     timeline_id: str = Field(..., description="Semantic timeline the clip IDs belong to")
     timeline_input_hash: str = Field(
-        ...,
-        description="What that timeline was built from, so a plan cannot be compiled against different footage",
+        default="",
+        description=(
+            "What that timeline was built from, so a plan cannot be compiled against different footage. "
+            "Leave this out when writing a plan: `save_plan` stamps it from the timeline it names"
+        ),
     )
     goal: str = Field(default="", description="What this video is for, in a sentence")
     target: PlanTarget = Field(default_factory=PlanTarget)
@@ -114,3 +117,103 @@ class EditPlan(BaseModel):
     music: Optional[MusicPlan] = None
     created_at: datetime = Field(default_factory=_utc_now)
     updated_at: datetime = Field(default_factory=_utc_now)
+
+class SetTrimOp(BaseModel):
+    """Amendment that changes how much of one chosen clip is used."""
+
+    action: Literal["set_trim"] = "set_trim"
+    clip_id: str = Field(..., description="Semantic clip whose selection is being retrimmed")
+    trim: Trim
+
+class SetRationaleOp(BaseModel):
+    """Amendment that rewrites why one piece is where it is; omitted fields stay unchanged."""
+
+    action: Literal["set_rationale"] = "set_rationale"
+    clip_id: str
+    rationale: Optional[str] = Field(default=None, description="Why this piece, here")
+    role: Optional[str] = Field(default=None, description="What it does in the beat, such as 例子 or 結論")
+    beat_id: Optional[str] = Field(default=None, description="Move it into a different beat")
+
+class AddSelectionOp(BaseModel):
+    """Amendment that puts one more piece of footage into the cut."""
+
+    action: Literal["add_selection"] = "add_selection"
+    selection: Selection
+    before_clip_id: Optional[str] = Field(
+        default=None,
+        description="Put it in front of this selection; appended to the end when left out",
+    )
+
+class DropSelectionOp(BaseModel):
+    """Amendment that takes a piece out of the cut, and says why for the next person who asks."""
+
+    action: Literal["drop_selection"] = "drop_selection"
+    clip_id: str
+    reason: str = Field(default="", description="Why it came out; kept with the plan's other rejections")
+
+PlanAmendment = Annotated[
+    Union[SetTrimOp, SetRationaleOp, AddSelectionOp, DropSelectionOp],
+    Field(discriminator="action"),
+]
+
+def _selection_index(plan: EditPlan, clip_id: str) -> int:
+    """Find a selection in a plan by the clip it uses.
+
+    Args:
+        plan: Plan to search.
+        clip_id: Semantic clip the selection names.
+
+    Returns:
+        Its position in `plan.selections`.
+
+    Raises:
+        ValueError: If the plan does not select that clip.
+    """
+    for index, selection in enumerate(plan.selections):
+        if selection.clip_id == clip_id:
+            return index
+    known = ", ".join(item.clip_id for item in plan.selections[:5]) or "nothing"
+    raise ValueError(f"the plan does not use clip {clip_id}; it selects {known}")
+
+def apply_amendment(plan: EditPlan, op: PlanAmendment) -> None:
+    """Apply one amendment to a plan in place.
+
+    This is how a plan changes: a trim that was too long, a piece that turned
+    out not to work, one more shot that belongs in a beat. The alternative —
+    sending the whole plan again to move one edge — loses the reasons written
+    into every other selection to a typo.
+
+    Args:
+        plan: Plan to amend.
+        op: The amendment.
+
+    Raises:
+        ValueError: If it names a selection the plan does not have, or adds
+            one for a clip that is already in the cut.
+    """
+    if isinstance(op, SetTrimOp):
+        plan.selections[_selection_index(plan, op.clip_id)].trim = op.trim
+        return
+
+    if isinstance(op, SetRationaleOp):
+        selection = plan.selections[_selection_index(plan, op.clip_id)]
+        if op.rationale is not None:
+            selection.rationale = op.rationale
+        if op.role is not None:
+            selection.role = op.role
+        if op.beat_id is not None:
+            selection.beat_id = op.beat_id
+        return
+
+    if isinstance(op, AddSelectionOp):
+        if any(item.clip_id == op.selection.clip_id for item in plan.selections):
+            raise ValueError(f"clip {op.selection.clip_id} is already in the cut; retrim it rather than adding it twice")
+        at = len(plan.selections) if op.before_clip_id is None else _selection_index(plan, op.before_clip_id)
+        plan.selections.insert(at, op.selection)
+        # Putting something back settles the question of why it was out.
+        plan.rejected = [item for item in plan.rejected if item.clip_id != op.selection.clip_id]
+        return
+
+    dropped = plan.selections.pop(_selection_index(plan, op.clip_id))
+    plan.rejected = [item for item in plan.rejected if item.clip_id != dropped.clip_id]
+    plan.rejected.append(Rejection(clip_id=dropped.clip_id, reason=op.reason))

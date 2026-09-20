@@ -2,7 +2,7 @@ import io
 import math
 import subprocess
 from concurrent.futures import ThreadPoolExecutor
-from typing import List, Optional, Sequence, Tuple
+from typing import Optional, Sequence, Tuple
 
 from PIL import Image, ImageDraw, ImageFont
 
@@ -128,28 +128,6 @@ def _compose_sheet(frames: Sequence[Image.Image], labels: Sequence[str], columns
     sheet.save(output, "JPEG", quality=82)
     return output.getvalue()
 
-def contact_sheet(path: str, times: List[float], columns: int = 4, ffmpeg_bin: str = "ffmpeg") -> bytes:
-    """Render frames from one video as a labeled grid image.
-
-    Each tile is labeled with its number and source time.
-
-    Args:
-        path: Video file to sample.
-        times: Times of the frames to show, in seconds.
-        columns: Maximum number of tiles per row.
-        ffmpeg_bin: Path to, or name of, the FFmpeg executable.
-
-    Returns:
-        The contact sheet encoded as JPEG.
-
-    Raises:
-        RuntimeError: If a frame cannot be decoded.
-    """
-    with ThreadPoolExecutor(max_workers=resources.max_decoders()) as pool:
-        frames = list(pool.map(lambda t: extract_frame(path, t, ffmpeg_bin=ffmpeg_bin), times))
-    labels = [f"#{index + 1}  {format_timestamp(seconds)}" for index, seconds in enumerate(times)]
-    return _compose_sheet(frames, labels, columns)
-
 def storyboard_sheet(
     shots: Sequence[Tuple[str, float, str]],
     aspect: Optional[float] = None,
@@ -158,8 +136,9 @@ def storyboard_sheet(
 ) -> bytes:
     """Render frames drawn from several videos as one labeled grid image.
 
-    Unlike `contact_sheet`, each tile comes from its own file and carries its
-    own caption, so an edited sequence can be shown in timeline order.
+    Each tile comes from its own file and carries its own caption, so an
+    edited sequence can be shown in timeline order, and so can a run of
+    separate files being looked over.
 
     Args:
         shots: One `(path, seconds, label)` per tile, in the order to show them.

@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Dict, List
 
 import pytest
+from pydantic import TypeAdapter
 
 from app.engine.plan import (
     BREATH_SECONDS,
@@ -24,9 +25,12 @@ from app.engine.plan import (
 from app.engine.sections import build_sections, propose_candidates
 from app.engine.semantic import build_timeline
 from app.models.media import Asset
-from app.models.plan import Beat, EditPlan, MusicPlan, PlanTarget, Rejection, Selection, Trim, TrimKind
+from app.models.plan import (
+    Beat, EditPlan, MusicPlan, PlanAmendment, PlanTarget, Rejection, Selection, Trim, TrimKind,
+)
 from app.models.semantic import SectionChoice, SemanticClip
 from app.server import (
+    amend_plan,
     apply_edits,
     compile_plan,
     create_project,
@@ -147,6 +151,25 @@ def test_the_air_never_reaches_further_than_the_headroom_allows() -> None:
     pieces = plan_pieces(plan_for([Selection(clip_id=second.id, beat_id="b1")]), by_id, {}, assets)
     assert pieces[0].start == pytest.approx(second.source_range.start - second.safe_in)
     assert pieces[0].start > speech_of(clips)[0].source_range.end - BREATH_SECONDS
+
+def test_a_window_that_reaches_the_end_of_the_file_stays_inside_it() -> None:
+    # A file 36.266667s long, with the last sentence running right to the end. Rounding
+    # that to milliseconds gives 36.267, which is past the end of the file: the whole
+    # plan used to be refused for a window that was only ever asking for all of it.
+    length = 36.266667
+    to_the_end = analysis(
+        length,
+        segments=[(1.0, 3.0, "第一句"), (30.0, length, "最後一句")],
+        silences=[(0.0, 1.0), (3.0, 30.0)],
+    )
+    assets = {ASSET_ID: sourced(seconds=length)}
+    _, clips = build_timeline(assets, {ASSET_ID: to_the_end})
+    by_id = {clip.id: clip for clip in clips}
+    last = speech_of(clips)[-1]
+
+    pieces = plan_pieces(plan_for([Selection(clip_id=last.id, beat_id="b1")]), by_id, {}, assets)
+    # Compared the way the timeline compares it, which is where this used to blow up.
+    assert Decimal(str(pieces[-1].end)) <= assets[ASSET_ID].duration
 
 def test_pieces_that_nearly_touch_become_one_clip() -> None:
     by_id, children, assets, clips = footage()
@@ -396,6 +419,62 @@ def test_saving_a_plan_at_the_wrong_version_is_refused(planned: dict) -> None:
     save_plan(stored)
     with pytest.raises(ValueError, match="version conflict"):
         save_plan(stored)
+
+def amendments(*operations: dict) -> list:
+    """Validate plan amendments the way a client's would be.
+
+    Args:
+        *operations: Amendments as plain dictionaries.
+
+    Returns:
+        The parsed amendments.
+    """
+    return TypeAdapter(List[PlanAmendment]).validate_python(list(operations))
+
+def test_one_trim_can_be_changed_without_sending_the_plan_again(planned: dict) -> None:
+    first = planned["clips"][0]["clip_id"]
+    result = amend_plan(planned["plan_id"], 1, amendments(
+        {"action": "set_trim", "clip_id": first, "trim": {"kind": "head", "seconds": 1.0}},
+    ))
+    assert result["version"] == 2 and result["problems"] == []
+    stored = get_plan(planned["plan_id"])["plan"]
+    assert stored["selections"][0]["trim"] == {"kind": "head", "keep_clip_ids": [], "seconds": 1.0}
+    # Everything the plan was written to remember is still there.
+    assert stored["selections"][0]["rationale"] == "開場最清楚"
+    assert stored["rejected"][0]["reason"] == "重複了"
+
+def test_dropping_a_piece_records_why_it_went(planned: dict) -> None:
+    second = planned["clips"][2]["clip_id"]
+    amend_plan(planned["plan_id"], 1, amendments(
+        {"action": "drop_selection", "clip_id": second, "reason": "尾巴太拖"},
+    ))
+    stored = get_plan(planned["plan_id"])["plan"]
+    assert [item["clip_id"] for item in stored["selections"]] == [planned["clips"][0]["clip_id"]]
+    assert {item["clip_id"]: item["reason"] for item in stored["rejected"]}[second] == "尾巴太拖"
+
+def test_a_piece_can_be_put_back_where_it_belongs(planned: dict) -> None:
+    rejected, last = planned["clips"][1]["clip_id"], planned["clips"][2]["clip_id"]
+    amend_plan(planned["plan_id"], 1, amendments(
+        {"action": "add_selection", "before_clip_id": last,
+         "selection": {"clip_id": rejected, "beat_id": "b1", "rationale": "還是需要這句"}},
+    ))
+    stored = get_plan(planned["plan_id"])["plan"]
+    assert [item["clip_id"] for item in stored["selections"]][1] == rejected
+    # It is in the cut now, so it is no longer an answer to "why is it not in there".
+    assert [item["clip_id"] for item in stored["rejected"]] == []
+
+def test_amending_a_plan_someone_else_has_moved_on_is_refused(planned: dict) -> None:
+    first = planned["clips"][0]["clip_id"]
+    change = amendments({"action": "set_trim", "clip_id": first, "trim": {"kind": "tighten"}})
+    amend_plan(planned["plan_id"], 1, change)
+    with pytest.raises(ValueError, match="version conflict"):
+        amend_plan(planned["plan_id"], 1, change)
+
+def test_amending_a_piece_the_plan_does_not_use_is_refused(planned: dict) -> None:
+    with pytest.raises(ValueError, match="does not use clip"):
+        amend_plan(planned["plan_id"], 1, amendments(
+            {"action": "set_trim", "clip_id": "tl_nope:u9999", "trim": {"kind": "full"}},
+        ))
 
 def test_a_plan_checks_out_before_anything_is_rendered(planned: dict) -> None:
     result = validate_plan(planned["plan_id"])

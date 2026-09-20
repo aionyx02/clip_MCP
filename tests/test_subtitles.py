@@ -1,5 +1,6 @@
 """Tests for proposing captions from transcripts and burning them in."""
 
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -7,7 +8,7 @@ from pydantic import ValidationError
 
 from app.engine.frames import extract_frame
 from app.engine.subtitles import build_ass, escape_ass_text, format_ass_time, wrap_caption
-from app.models.media import MediaAnalysis, Transcript, TranscriptSegment, TranscriptWord
+from app.models.media import MediaAnalysis, Span, Transcript, TranscriptSegment, TranscriptWord
 from app.models.timeline import SubtitleCue
 from app.server import generate_subtitles, get_project, get_subtitles, import_asset, render_project, repo
 from helpers import build_project, edit, insert, render, video_track
@@ -123,6 +124,71 @@ def test_assets_without_a_transcript_are_reported(spoken: str, media: Path) -> N
     other = import_asset(str(media / "tall.mp4"))["id"]
     project = build_project([video_track(), insert("a", spoken, 0, 3), insert("b", other, 0, 2)])
     assert generate_subtitles(project)["assets_without_transcript"] == [other]
+
+def test_a_narration_on_an_audio_track_is_captioned(media: Path) -> None:
+    # A voice-over recorded separately: the picture under it says nothing, and the
+    # words the viewer actually hears used to come back with no captions at all.
+    quiet = import_asset(str(media / "silent.mp4"))["id"]
+    voice = import_asset(str(media / "song.mp3"))["id"]
+    transcribe(voice, [
+        TranscriptSegment(start=0.5, end=2.0, text="這一天從早上開始",
+                          words=words(("這一天從早上開始", 0.5, 2.0))),
+    ])
+    project = build_project([
+        video_track(), insert("shot", quiet, 0, 4),
+        {"action": "add_track", "track_id": "voice", "track_type": "audio"},
+        insert("v", voice, 0, 4, track_id="voice"),
+    ])
+    spoken_lines = [cue for cue in generate_subtitles(project)["cues"] if cue["text"] == "這一天從早上開始"]
+    assert [(cue["start"], cue["end"]) for cue in spoken_lines] == [(Decimal("0.5"), Decimal("2.0"))]
+
+def test_a_music_bed_is_not_reported_as_missing_a_transcript(spoken: str, media: Path) -> None:
+    song = import_asset(str(media / "jingle.wav"))["id"]
+    project = build_project([
+        video_track(), insert("a", spoken, 0, 3),
+        {"action": "add_track", "track_id": "music", "track_type": "audio"},
+        insert("m", song, 0, 3, track_id="music"),
+    ])
+    # Nobody transcribes a song, so it is not a gap to go and fill.
+    assert generate_subtitles(project)["assets_without_transcript"] == []
+
+def test_a_clip_turned_all_the_way_down_is_not_captioned(spoken: str) -> None:
+    # Silenced footage is a picture laid over someone else's sound, so it has no lines.
+    project = build_project([video_track(), insert("a", spoken, 0, 4, volume=0)])
+    assert generate_subtitles(project)["cues"] == []
+
+def test_captions_that_talk_over_each_other_are_counted(spoken: str, media: Path) -> None:
+    voice = import_asset(str(media / "song.mp3"))["id"]
+    transcribe(voice, [
+        TranscriptSegment(start=1.5, end=3.0, text="旁白蓋過去",
+                          words=words(("旁白蓋過去", 1.5, 3.0))),
+    ])
+    project = build_project([
+        video_track(), insert("a", spoken, 0, 4),
+        {"action": "add_track", "track_id": "voice", "track_type": "audio"},
+        insert("v", voice, 0, 4, track_id="voice"),
+    ])
+    result = generate_subtitles(project)
+    # 第一句 runs 1.0 to 3.0 under a narration line starting at 1.5.
+    assert result["overlapping"] == 1
+
+def test_a_sentence_transcribed_over_silence_is_not_captioned(media: Path) -> None:
+    # The same invention the semantic timeline refuses to call speech: it must not
+    # reach the picture either, or it is burned in before anyone reads it.
+    asset = import_asset(str(media / "muted.mp4"))["id"]
+    repo.save_analysis(MediaAnalysis(
+        asset_id=asset,
+        duration=4.0,
+        silences=[Span(start=1.8, end=4.0)],
+        transcript=Transcript(language="zh", model="test", segments=[
+            TranscriptSegment(start=0.0, end=1.5, text="真的講了這句",
+                              words=words(("真的講了這句", 0.0, 1.5))),
+            TranscriptSegment(start=2.0, end=3.8, text="中文字幕——YK",
+                              words=words(("中文字幕——YK", 2.0, 3.8))),
+        ]),
+    ))
+    project = build_project([video_track(), insert("a", asset, 0, 4)])
+    assert [cue["text"] for cue in generate_subtitles(project)["cues"]] == ["真的講了這句"]
 
 def test_a_project_with_no_transcripts_is_reported_clearly(media: Path) -> None:
     asset = import_asset(str(media / "tall.mp4"))["id"]

@@ -227,6 +227,24 @@ def test_a_black_stretch_someone_is_talking_over_stays_speech() -> None:
     assert clips[0].kind == ClipKind.SPEECH
     assert clips[0].scores["black"] == 1.0
 
+def test_a_sentence_transcribed_over_silence_is_not_speech() -> None:
+    # Speech recognition invents a sign-off over a shot of food with nobody in it and
+    # hands it back at high confidence. The silence detector heard the same stretch and
+    # measured nothing, so picking footage by score used to cut the invention in.
+    clips = build(analysis(
+        8.0,
+        segments=[(0.0, 8.0, "請不吝點贊 訂閱 打賞支援")],
+        silences=[(0.0, 8.0)],
+    ))
+    assert [clip.kind for clip in clips] == [ClipKind.SILENCE]
+    # The measurements still say what each detector found; only the judgement changed.
+    assert clips[0].scores["speech"] == 1.0 and clips[0].scores["silence"] == 1.0
+
+def test_a_quiet_line_is_still_speech() -> None:
+    # Half the stretch measured silent is a pause, not an invention.
+    clips = build(analysis(8.0, segments=[(0.0, 8.0, "小聲講了一句")], silences=[(4.0, 8.0)]))
+    assert clips[0].kind == ClipKind.SPEECH
+
 def test_scores_measure_what_each_detector_covered() -> None:
     clips = build(analysis(
         10.0,

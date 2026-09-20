@@ -3,10 +3,11 @@
 import os
 import unicodedata
 from decimal import Decimal
-from typing import Iterable, Iterator, List, Mapping, Tuple
+from typing import Iterable, Iterator, List, Mapping, Optional, Sequence, Tuple
 
-from app.models.media import Transcript, TranscriptSegment, TranscriptWord
-from app.models.timeline import Project, SubtitleCue, number_cues
+from app.engine.semantic import share_covered, was_audible
+from app.models.media import Span, Transcript, TranscriptSegment, TranscriptWord
+from app.models.timeline import Project, SubtitleCue, TrackType, number_cues
 
 # Burned captions sit larger than broadcast subtitles, at about six percent of the shorter side.
 FONT_DIVISOR = 16
@@ -202,40 +203,59 @@ def timeline_cues(
     transcripts: Mapping[str, Transcript],
     max_characters: int = DEFAULT_MAX_CHARACTERS,
     max_seconds: float = DEFAULT_MAX_SECONDS,
+    silences: Optional[Mapping[str, Sequence[Span]]] = None,
 ) -> List[SubtitleCue]:
     """Map the transcripts of a project's source files onto its edited timeline.
 
     Only the speech that survived the edit is kept, and each caption is moved
     to where that speech now falls in the result. Captions come from the base
-    video track, the sequence itself; video tracks drawn on top of it are
-    pictures over that sound, not extra speech.
+    video track, the sequence itself, and from the audio tracks, because a
+    voice-over recorded separately is speech the viewer hears and has nowhere
+    else to live. Video tracks drawn on top of the base are pictures over that
+    sound, not extra speech, so they are left out. So is anything turned all
+    the way down, and anything never transcribed — which is what keeps a music
+    bed out of the captions.
 
     Args:
-        project: Project whose base video track is captioned.
+        project: Project whose sound is captioned.
         transcripts: Transcript of each asset, keyed by asset ID; assets that
             were never transcribed are simply skipped.
         max_characters: Longest caption text before it is broken up.
         max_seconds: Longest caption before it is broken up.
+        silences: Measured silences per asset. Given them, a sentence the
+            transcriber wrote over a stretch that was silent is left out
+            rather than captioned: see `was_audible`.
 
     Returns:
         The captions in timeline order.
     """
+    measured = silences or {}
     cues: List[SubtitleCue] = []
-    track = project.base_video_track
-    # Only the base track: an inset drawn over it is a second picture, not a second voice to caption.
-    for clip in sorted(track.clips, key=lambda item: item.timeline_in) if track else []:
+    # The base track and the audio tracks: an inset drawn over the base is a second
+    # picture, not a second voice, but a narration track is exactly a second voice.
+    base = project.base_video_track
+    tracks = ([base] if base else []) + [
+        track for track in project.tracks if track.track_type == TrackType.AUDIO
+    ]
+    for clip in sorted(
+        (clip for track in tracks for clip in track.clips), key=lambda item: item.timeline_in
+    ):
         transcript = transcripts.get(clip.asset_id)
-        if transcript is None:
+        if transcript is None or clip.volume == 0:
             continue
         start, end = float(clip.source_range.start), float(clip.source_range.end)
-        base, speed = float(clip.timeline_in), float(clip.speed)
+        base_in, speed = float(clip.timeline_in), float(clip.speed)
+        quiet = measured.get(clip.asset_id, ())
         for segment in transcript.segments:
             if segment.end <= start or segment.start >= end:
                 continue
+            # A sentence the recogniser invented over an empty shot is not a caption.
+            if quiet and not was_audible(share_covered(segment.start, segment.end, quiet), True):
+                continue
             for piece_start, piece_end, text in _pieces(segment, start, end, max_characters, max_seconds):
                 cues.append(SubtitleCue(
-                    start=Decimal(str(round(base + (piece_start - start) / speed, 3))),
-                    end=Decimal(str(round(base + (piece_end - start) / speed, 3))),
+                    start=Decimal(str(round(base_in + (piece_start - start) / speed, 3))),
+                    end=Decimal(str(round(base_in + (piece_end - start) / speed, 3))),
                     text=text,
                 ))
     # Numbered here, so a single line can be corrected later without resending the rest,
