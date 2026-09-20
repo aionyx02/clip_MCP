@@ -17,6 +17,16 @@ DUCK_THRESHOLD = 0.03
 DUCK_RATIO = 10
 DUCK_ATTACK_MS = 20
 DUCK_RELEASE_MS = 500
+# loudnorm derives its gain from the measured loudness of what it is given. A mix that
+# is silent all the way through measures as -inf LUFS, so that gain comes out infinite
+# and fills the stream with NaN; the AAC encoder then refuses the frame and the whole
+# render fails. That happens whenever nothing on the timeline has sound — footage shot
+# on a muted microphone, or a cut with no audio track at all. Replacing NaN with zero
+# hands the encoder the silence it was actually given, and leaves every real mix
+# untouched. Clamping the samples or converting them to integers instead is not an
+# alternative: both turn the NaN into full-scale noise. Two expressions, because
+# everything reaching the mix has already been formatted to stereo.
+SILENCE_GUARD = r"aeval=exprs=if(isnan(val(0))\,0\,val(0))|if(isnan(val(1))\,0\,val(1)):c=same"
 
 @dataclass(frozen=True)
 class Segment:
@@ -519,10 +529,13 @@ class FFmpegRenderer:
         if loudness_target is None:
             filters.append("[mixa]anull[outa]")
         else:
-            # loudnorm resamples to 192 kHz internally, so come back to the project rate and to the exact length.
+            # loudnorm resamples to 192 kHz internally, so come back to the project rate and to
+            # the exact length. The guard sits after that, where there are a quarter as many
+            # samples to look at, and before the format is settled for the encoder.
             filters.append(
                 f"[mixa]loudnorm=I={loudness_target:g}:TP={LOUDNESS_TRUE_PEAK:g}:LRA={LOUDNESS_RANGE:g},"
-                f"aresample={AUDIO_SAMPLE_RATE},aformat=sample_fmts=fltp:channel_layouts=stereo,"
+                f"aresample={AUDIO_SAMPLE_RATE},{SILENCE_GUARD},"
+                f"aformat=sample_fmts=fltp:channel_layouts=stereo,"
                 f"apad=whole_len={total_samples},atrim=end_sample={total_samples}[outa]"
             )
 

@@ -107,3 +107,25 @@ def test_the_output_stays_as_long_as_the_video(quiet_project: str, tmp_path: Pat
         capture_output=True,
     )
     assert float(probe.stdout.decode()) == pytest.approx(4.0, abs=0.1)
+
+# Normalizing a mix that has no sound in it at all would ask for infinite gain. What
+# comes out has to be silence, and the render has to finish: the failure this guards
+# against used to take the whole job down at the first audio frame.
+@pytest.mark.parametrize("source", ["silent.mp4", "muted.mp4"])
+def test_a_project_with_no_sound_renders_silence(media: Path, source: str, tmp_path: Path) -> None:
+    asset = import_asset(str(media / source))["id"]
+    project = build_project([video_track(), insert("s", asset, 0, 3)], width=320, height=240)
+    render(project, tmp_path / "out.mp4")
+    # -91 dB is what the AAC encoder writes for digital silence; anything audible is a failure.
+    assert level(tmp_path / "out.mp4", 0, 3) < -80
+
+def test_the_silence_guard_reaches_nothing_but_nan(media: Path, audio_media: Path, tmp_path: Path) -> None:
+    muted = import_asset(str(media / "muted.mp4"))["id"]
+    loud = import_asset(str(audio_media / "loud.mp4"))["id"]
+    project = build_project([video_track(), insert("m", muted, 0, 3), insert("l", loud, 0, 4)],
+                            width=320, height=240)
+    render(project, tmp_path / "out.mp4")
+    # Silence where the muted clip is, and the clip that has sound comes through loudly:
+    # the guard replaces NaN and leaves every sample that is a number alone.
+    assert level(tmp_path / "out.mp4", 0, 2.5) < -80
+    assert level(tmp_path / "out.mp4", 3.5, 3) > -30

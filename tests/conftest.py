@@ -68,13 +68,22 @@ def media(tmp_path_factory: pytest.TempPathFactory) -> Path:
 
     Returns:
         A folder holding `wide.mp4` (landscape, 10s), `tall.mp4` (portrait,
-        6s), `silent.mp4` (no audio, 4s), `song.mp3` (20s), `jingle.wav` (only 4s), and `black.mp4`
+        6s), `silent.mp4` (no audio, 4s), `muted.mp4` (an audio track of pure
+        silence, 4s), `song.mp3` (20s), `jingle.wav` (only 4s), and `black.mp4`
         (an all-black 8s clip).
     """
     folder = tmp_path_factory.mktemp("media")
     _make_video(folder / "wide.mp4", "testsrc", "640x360", 10)
     _make_video(folder / "tall.mp4", "smptebars", "360x640", 6)
     _make_video(folder / "silent.mp4", "testsrc2", "320x240", 4, with_audio=False)
+    # A clip recorded with the microphone muted: it has an audio stream, and every
+    # sample in it is zero. Nothing about the file says so short of decoding it.
+    _run_ffmpeg([
+        "-f", "lavfi", "-i", "testsrc=size=320x240:rate=30:duration=4",
+        "-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo:d=4",
+        "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+        "-c:a", "aac", "-shortest", str(folder / "muted.mp4"),
+    ])
     _run_ffmpeg(["-f", "lavfi", "-i", "sine=frequency=220:duration=20", "-c:a", "libmp3lame", str(folder / "song.mp3")])
     # A song too short to cover a normal edit, so looping can be tested rather than plain extension.
     # Lossless, because fit_track measures how much of the source is left: an mp3 carries encoder
