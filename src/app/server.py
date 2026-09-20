@@ -16,7 +16,14 @@ from app.models.plan import EditPlan, PlanAmendment, apply_amendment
 from app.models.semantic import (
     ClipDescription, ClipKind, ClipLevel, SectionChoice, SemanticClip, SemanticTimeline, Tag, TagSource,
 )
-from app.models.timeline import Project, TrackType, EditOperation, apply_operation, validate_project
+from app.models.timeline import (
+    EditOperation,
+    Project,
+    SetSubtitlesOp,
+    TrackType,
+    apply_operation,
+    validate_project,
+)
 from app.models.job import Job, JobKind, JobStatus
 from app.engine import resources
 from app.engine.analysis import whisper_model_name
@@ -33,6 +40,7 @@ from app.engine.subtitles import (
     DEFAULT_MAX_CHARACTERS,
     DEFAULT_MAX_SECONDS,
     build_ass,
+    captioned_clips,
     place_cues,
     timeline_cues,
 )
@@ -1177,6 +1185,17 @@ def _apply(
     if project.version != expected_version:
         raise ValueError(f"version conflict: current version is {project.version}, expected version is {expected_version}")
 
+    # A caption names the file its words were spoken in. One naming a file nobody
+    # imported would store cleanly and then never appear, which reads as a captioning
+    # bug rather than a typo, so it is refused here where the typo still has a name.
+    named = {cue.asset_id for op in operations if isinstance(op, SetSubtitlesOp) for cue in op.cues}
+    unknown = sorted(named - set(repo.get_assets(named)))
+    if unknown:
+        raise ValueError(
+            f"caption(s) name assets that are not imported: {', '.join(unknown)}; "
+            "import the footage the words were spoken in first"
+        )
+
     # Assets are looked up first so operations that need source lengths, such as fit_track, can use them.
     known = repo.get_assets({clip.asset_id for track in project.tracks for clip in track.clips})
     for op in operations:
@@ -1683,12 +1702,13 @@ def generate_subtitles(
         max_seconds: Longest caption before it is broken in two.
 
     Returns:
-        A dictionary with `cues`, each holding its `id`, `start` and `end` in
-        seconds on the timeline, and its `text`;
-        `assets_without_transcript`, the video sources that still need
-        `analyze_asset` before they can be captioned; and `overlapping`, how
-        many captions run into the one before them, which is worth a look when
-        a narration track talks over footage that speaks for itself.
+        A dictionary with `cues`, each holding its `id`, the `asset_id` the
+        words were spoken in, `source_start` and `source_end` in seconds
+        within that file, and its `text`; `assets_without_transcript`, the
+        video sources that still need `analyze_asset` before they can be
+        captioned; and `overlapping`, how many captions land on top of the one
+        before them once the cut puts them on screen, which is worth a look
+        when a narration track talks over footage that speaks for itself.
 
     Raises:
         ValueError: If the project does not exist, or nothing it plays has
@@ -1702,20 +1722,30 @@ def generate_subtitles(
     silences: dict[str, List[Span]] = {}
     untranscribed: List[str] = []
     base = project.base_video_track
-    sound = [track for track in project.tracks if track.track_type == TrackType.AUDIO]
-    for track in ([base] if base else []) + sound:
-        for clip in track.clips:
-            if clip.asset_id in transcripts or clip.asset_id in untranscribed:
-                continue
-            analysis = repo.get_analysis(clip.asset_id)
-            if analysis is not None and analysis.transcript is not None:
-                transcripts[clip.asset_id] = analysis.transcript
-                silences[clip.asset_id] = analysis.silences
-            elif track is base:
-                # A music bed has no transcript and never needs one, so it is not a gap to report.
-                untranscribed.append(clip.asset_id)
+    # Reported as a gap only for the sequence itself: a music bed has no transcript and
+    # never needs one. Read off the same walk the captions come from, so a clip that is
+    # turned all the way down cannot be called a gap in one place and skipped in the other.
+    sequence = {clip.asset_id for clip in base.clips if clip.volume != 0} if base else set()
+    for clip in captioned_clips(project):
+        if clip.asset_id in transcripts or clip.asset_id in untranscribed:
+            continue
+        analysis = repo.get_analysis(clip.asset_id)
+        if analysis is not None and analysis.transcript is not None:
+            transcripts[clip.asset_id] = analysis.transcript
+            silences[clip.asset_id] = analysis.silences
+        elif clip.asset_id in sequence:
+            untranscribed.append(clip.asset_id)
 
     if not transcripts:
+        # Two different setups end up here and they need different advice: footage that
+        # was never put through speech recognition, and footage that was but is silent in
+        # the cut. Telling someone to analyze a file they already analyzed sends them off
+        # to redo work that was never the problem.
+        if not captioned_clips(project):
+            raise ValueError(
+                f"project {project_id} has nothing audible to caption; every clip that could "
+                "carry words is turned all the way down, or there are none"
+            )
         raise ValueError(
             f"project {project_id} has no transcribed clips to caption; "
             "call analyze_asset on its sources first"
@@ -1758,9 +1788,9 @@ def get_subtitles(
 
     Returns:
         A dictionary with `cues` in the window — each with its `cue_id`,
-        `start` and `end` on the timeline, and `text` — the `total` number
-        placed anywhere in the cut, `stored`, how many captions the project
-        holds, and the `window` that was read. `stored` above `total` means
+        `start` and `end` on the timeline, and `text` — `placed`, how many
+        land anywhere in the cut, `stored`, how many captions the project
+        holds, and the `window` that was read. `stored` above `placed` means
         some captions belong to footage the edit dropped.
 
     Raises:
@@ -1783,7 +1813,7 @@ def get_subtitles(
     ]
     return {
         "cues": window,
-        "total": len(placed),
+        "placed": len(placed),
         "stored": len(project.subtitles),
         "window": {"start": start, "end": limit},
     }

@@ -93,8 +93,8 @@ done. For example:
   `layout` only means something above the base track, so putting one on a base
   clip is refused rather than quietly ignored.
 - **Captions**: `generate_subtitles` proposes captions from the transcripts of
-  the base-track clips that survived the edit, already moved onto the
-  timeline; insets on higher tracks are pictures over that sound, so they are
+  the base-track clips that survived the edit, each anchored to the file and
+  the second its words were spoken in; insets on higher tracks are pictures over that sound, so they are
   not captioned. A narration laid on an audio track is captioned too — it is
   speech the viewer hears — so analyze a voice-over file like any other
   source. Music is left alone, because a song has no transcript to caption
@@ -197,8 +197,7 @@ is wrong before a render is wasted.
    [Background music](#background-music).
 7. Put all operations for one request into a single `apply_edits` call.
 8. If the user asked for captions, call `generate_subtitles`, show them the
-   lines with their times, and store them with `set_subtitles` once they are
-   happy. Transcripts mishear names, so this is worth reading rather than
+   lines and store them with `set_subtitles` once they are happy. Transcripts mishear names, so this is worth reading rather than
    applying blind. Afterwards, correct single lines with `edit_subtitle` and
    its `cue_id`; never resend the whole set to change one word. Lower
    `max_characters` or `max_seconds` if the user wants shorter lines on
@@ -481,7 +480,7 @@ times refer to the source file.
 | 「右上角放一個小視窗」 / put an inset in the top right | `add_track` a second video track, then `add_clip` with `timeline_in` and a `layout` box |
 | 「中間插一段別的畫面蓋掉原本的」 / cut away to other footage over the same sound | `add_clip` on the upper video track with no `layout`, so it covers the frame, and `volume: 0` so the sound underneath keeps running |
 | 「加字幕」 / add captions | `generate_subtitles`, show the user the lines, `set_subtitles`, then render with `burn_subtitles: true` |
-| 「字幕有個字打錯了」 / a caption has the wrong word | `get_subtitles` around that moment to find the cue's `id`, then one `edit_subtitle` with its new `text` |
+| 「字幕有個字打錯了」 / a caption has the wrong word | `get_subtitles` around that moment to find the cue's `cue_id`, then one `edit_subtitle` with its new `text` |
 | 「後來又加了一段，那段沒有字幕」 / the footage added since has no captions | `generate_subtitles` again and store the new set; the captions already there follow the cut on their own |
 | 「這句字幕多停一下」 / hold this caption longer | `edit_subtitle` with a new `source_end` |
 | 「這句不要了」 / drop this caption | `edit_subtitle` with `delete: true` |
@@ -560,7 +559,9 @@ message with options the user can pick from.
 | `runs outside the frame` | The inset's `x + width` or `y + height` is over 1.0; shrink it or move it back inside. |
 | `has no transcribed clips to caption` | Run `analyze_asset` with transcription on the sources first. |
 | `has no captions to burn` | Call `generate_subtitles`, then store them with a `set_subtitles` operation. |
-| `caption ... not found` | Read the current `id`s with `get_subtitles`; a caption that was deleted, or a set replaced by freshly generated cues, will not have the old one. |
+| `caption ... not found` | Read the current `cue_id`s with `get_subtitles`; a caption that was deleted, or a set replaced by freshly generated cues, will not have the old one. |
+| `name assets that are not imported` | A caption names footage that is not registered; import it, or drop the caption. |
+| `none of the footage they transcribe is in the cut` | Every stored caption belongs to footage the edit removed. Run `generate_subtitles` again against the sequence as it stands. |
 | `sets the length itself` | `fit_track` is for audio tracks; the video track already decides the length. |
 | `the project has no video yet` | Build the video sequence before fitting music to it. |
 | `must fall inside` | The split point is outside that clip; check the clip's source range, or split the clip that really covers that moment. |

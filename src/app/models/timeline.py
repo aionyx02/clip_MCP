@@ -1,8 +1,8 @@
 from decimal import Decimal
 from enum import Enum
-from typing import Annotated, List, Literal, Mapping, Optional, Union
+from typing import Annotated, List, Literal, Mapping, Optional, Tuple, Union
 
-from pydantic import BaseModel, Field, computed_field, model_validator
+from pydantic import BaseModel, Field, computed_field, field_validator, model_validator
 
 from app.models.media import Asset
 
@@ -227,6 +227,28 @@ class Project(BaseModel):
         description="Captions burned into the picture when render_project is called with burn_subtitles",
     )
 
+    @field_validator("subtitles", mode="before")
+    @classmethod
+    def drop_captions_from_before_they_followed_the_footage(cls, value):
+        """Leave behind captions stored against the timeline instead of the footage.
+
+        Captions used to record where they landed in the cut. Those carry no
+        `asset_id`, so they cannot be placed, and refusing them would be worse
+        than dropping them: the project would not open at all, and a project
+        that will not open cannot have its captions made again — which is what
+        the roadmap asks for instead of a migration.
+
+        Args:
+            value: Whatever was stored under `subtitles`.
+
+        Returns:
+            The captions that can still be placed. A project stored before the
+            change opens with none, and `generate_subtitles` makes them again.
+        """
+        if not isinstance(value, list):
+            return value
+        return [cue for cue in value if not isinstance(cue, dict) or "asset_id" in cue]
+
     @property
     def video_tracks(self) -> List[Track]:
         """The video tracks in the order they are drawn.
@@ -402,7 +424,10 @@ class EditSubtitleOp(BaseModel):
     """Edit operation that changes or removes one caption, leaving the rest untouched."""
 
     action: Literal["edit_subtitle"] = "edit_subtitle"
-    cue_id: str = Field(..., description="ID of the caption, as generate_subtitles and get_subtitles report it")
+    cue_id: str = Field(
+        ...,
+        description="ID of the caption: `id` as generate_subtitles reports it, `cue_id` as get_subtitles does",
+    )
     text: Optional[str] = Field(default=None, description="New text for this caption")
     source_start: Optional[Decimal] = Field(
         default=None, ge=0, description="New start in the source file (seconds), to catch a line that comes up early",
@@ -521,7 +546,9 @@ EditOperation = Annotated[
 # alternative is a feedback loop that wipes their work every time it comes round.
 _EDITS_BY_HAND = (TrimClipOp, MoveClipOp, SplitClipOp, ReorderClipOp, SetClipLookOp, SetClipAudioOp)
 
-def cue_order(cue: SubtitleCue) -> tuple:
+CueOrder = Tuple[str, Decimal, Decimal]
+
+def cue_order(cue: SubtitleCue) -> CueOrder:
     """Order captions by where the words are, not by where they land.
 
     The cut decides where a caption appears and the cut can change; the file

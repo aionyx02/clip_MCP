@@ -3,11 +3,20 @@
 import os
 import unicodedata
 from decimal import Decimal
-from typing import Iterable, Iterator, List, Mapping, Optional, Sequence, Tuple
+from typing import Dict, Iterable, Iterator, List, Mapping, Optional, Sequence, Tuple
 
 from app.engine.semantic import share_covered, was_audible
 from app.models.media import Span, Transcript, TranscriptSegment, TranscriptWord
-from app.models.timeline import Clip, PlacedCue, Project, SubtitleCue, TrackType, cue_order, number_cues
+from app.models.timeline import (
+    Clip,
+    CueOrder,
+    PlacedCue,
+    Project,
+    SubtitleCue,
+    TrackType,
+    cue_order,
+    number_cues,
+)
 
 # Burned captions sit larger than broadcast subtitles, at about six percent of the shorter side.
 FONT_DIVISOR = 16
@@ -21,6 +30,10 @@ DEFAULT_FONT = os.environ.get("CLIP_MCP_SUBTITLE_FONT", "Arial")
 DEFAULT_MAX_CHARACTERS = 24
 DEFAULT_MAX_SECONDS = 6.0
 MINIMUM_CUE_SECONDS = 0.05
+# The same floor in Decimal, for placing stored captions on a timeline that counts in Decimal.
+MINIMUM_CUE = Decimal(str(MINIMUM_CUE_SECONDS))
+# Times on the timeline are kept to milliseconds; Decimal division does not stop there by itself.
+MILLISECOND = Decimal('0.001')
 
 def format_ass_time(seconds: float) -> str:
     """Format a time the way an ASS event line expects it.
@@ -118,7 +131,22 @@ def captioned_clips(project: Project) -> List[Clip]:
     audible = [clip for track in tracks for clip in track.clips if clip.volume != 0]
     return sorted(audible, key=lambda clip: clip.timeline_in)
 
-def place_cues(project: Project, cues: Iterable[SubtitleCue]) -> List[PlacedCue]:
+def _at(timeline_in: Decimal, into_clip: Decimal, speed: Decimal) -> Decimal:
+    """Work out when a moment inside a clip falls on the timeline.
+
+    Args:
+        timeline_in: Where the clip starts on the timeline.
+        into_clip: How far into the clip's source the moment is.
+        speed: The clip's playback speed.
+
+    Returns:
+        The time on the timeline, to the millisecond the rest of the timeline
+        is kept to. Dividing by a speed other than 1.0 otherwise leaves a
+        Decimal carrying every digit it can hold.
+    """
+    return (timeline_in + into_clip / speed).quantize(MILLISECOND)
+
+def place_cues(project: Project, cues: Sequence[SubtitleCue]) -> List[PlacedCue]:
     """Work out where each stored caption falls in the cut as it stands.
 
     Captions are anchored to the source file and second the words were spoken,
@@ -130,27 +158,30 @@ def place_cues(project: Project, cues: Iterable[SubtitleCue]) -> List[PlacedCue]
 
     Args:
         project: Project whose timeline the captions are placed on.
-        cues: The stored captions.
+        cues: The stored captions. A sequence rather than an iterable on
+            purpose: they are read once per clip, and a generator would be
+            spent on the first one and leave every later clip captionless.
 
     Returns:
         The placements in timeline order.
-
     """
+    by_asset: Dict[str, List[SubtitleCue]] = {}
+    for cue in cues:
+        by_asset.setdefault(cue.asset_id, []).append(cue)
+
     placed: List[PlacedCue] = []
     for clip in captioned_clips(project):
         speed = Decimal(str(clip.speed))
         window_start, window_end = clip.source_range.start, clip.source_range.end
-        for cue in cues:
-            if cue.asset_id != clip.asset_id:
-                continue
+        for cue in by_asset.get(clip.asset_id, ()):
             first = max(cue.source_start, window_start)
             last = min(cue.source_end, window_end)
-            if last - first <= Decimal(str(MINIMUM_CUE_SECONDS)):
+            if last - first <= MINIMUM_CUE:
                 continue
             placed.append(PlacedCue(
                 cue_id=cue.id,
-                start=clip.timeline_in + (first - window_start) / speed,
-                end=clip.timeline_in + (last - window_start) / speed,
+                start=_at(clip.timeline_in, first - window_start, speed),
+                end=_at(clip.timeline_in, last - window_start, speed),
                 text=cue.text,
             ))
     return sorted(placed, key=lambda item: (item.start, item.end))
@@ -292,7 +323,7 @@ def timeline_cues(
     """
     measured = silences or {}
     cues: List[SubtitleCue] = []
-    seen: set[tuple] = set()
+    seen: set[CueOrder] = set()
     for clip in captioned_clips(project):
         transcript = transcripts.get(clip.asset_id)
         if transcript is None:
@@ -306,18 +337,19 @@ def timeline_cues(
             if quiet and not was_audible(share_covered(segment.start, segment.end, quiet), True):
                 continue
             for piece_start, piece_end, text in _pieces(segment, start, end, max_characters, max_seconds):
-                anchor = (clip.asset_id, round(piece_start, 3), round(piece_end, 3))
-                # The same words can survive in two places — a clip split in two, or used
-                # twice — and that is one caption, placed twice, not two to proofread.
-                if anchor in seen:
-                    continue
-                seen.add(anchor)
-                cues.append(SubtitleCue(
+                cue = SubtitleCue(
                     asset_id=clip.asset_id,
-                    source_start=Decimal(str(anchor[1])),
-                    source_end=Decimal(str(anchor[2])),
+                    source_start=Decimal(str(round(piece_start, 3))),
+                    source_end=Decimal(str(round(piece_end, 3))),
                     text=text,
-                ))
+                )
+                # The same words can survive in two places — a clip split in two, or used
+                # twice — and that is one caption placed twice, not two to proofread. The
+                # key is the one the store orders by, so the two cannot disagree.
+                if cue_order(cue) in seen:
+                    continue
+                seen.add(cue_order(cue))
+                cues.append(cue)
     # Numbered here, so a single line can be corrected later without resending the rest,
     # and by the same helper `set_subtitles` uses, so the IDs survive being stored.
     return number_cues(sorted(cues, key=cue_order))

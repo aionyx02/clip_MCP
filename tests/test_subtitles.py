@@ -15,7 +15,7 @@ from app.engine.subtitles import (
     wrap_caption,
 )
 from app.models.media import MediaAnalysis, Span, Transcript, TranscriptSegment, TranscriptWord
-from app.models.timeline import PlacedCue
+from app.models.timeline import PlacedCue, Project
 from app.server import generate_subtitles, get_project, get_subtitles, import_asset, render_project, repo
 from helpers import build_project, edit, insert, render, video_track
 
@@ -179,10 +179,28 @@ def test_a_music_bed_is_not_reported_as_missing_a_transcript(spoken: str, media:
     # Nobody transcribes a song, so it is not a gap to go and fill.
     assert generate_subtitles(project)["assets_without_transcript"] == []
 
-def test_a_clip_turned_all_the_way_down_is_not_captioned(spoken: str) -> None:
-    # Silenced footage is a picture laid over someone else's sound, so it has no lines.
+def test_a_clip_turned_all_the_way_down_is_not_captioned(spoken: str, media: Path) -> None:
+    # Silenced footage is a picture laid over someone else's sound, so it has no lines
+    # of its own — while the clip beside it, at full volume, still gets its own.
+    other = import_asset(str(media / "black.mp4"))["id"]
+    transcribe(other, [TranscriptSegment(start=0.0, end=2.0, text="蓋掉的那段",
+                                         words=words(("蓋掉的那段", 0.0, 2.0)))])
+    project = build_project([
+        video_track(),
+        insert("cover", other, 0, 2, volume=0),
+        insert("heard", spoken, 0, 4),
+    ])
+    texts = [cue["text"] for cue in generate_subtitles(project)["cues"]]
+    assert "蓋掉的那段" not in texts and "第一句" in texts
+    # And a silenced clip is not a gap in the transcripts either: it could never speak.
+    assert generate_subtitles(project)["assets_without_transcript"] == []
+
+def test_a_cut_where_everything_is_silenced_says_so_rather_than_blaming_the_transcripts(spoken: str) -> None:
+    # The asset here has been transcribed. Telling anyone to run analyze_asset on it
+    # would send them to redo work that was never the problem.
     project = build_project([video_track(), insert("a", spoken, 0, 4, volume=0)])
-    assert generate_subtitles(project)["cues"] == []
+    with pytest.raises(ValueError, match="nothing audible to caption"):
+        generate_subtitles(project)
 
 def test_captions_that_talk_over_each_other_are_counted(spoken: str, media: Path) -> None:
     voice = import_asset(str(media / "song.mp3"))["id"]
@@ -217,8 +235,12 @@ def test_a_sentence_transcribed_over_silence_is_not_captioned(media: Path) -> No
     project = build_project([video_track(), insert("a", asset, 0, 4)])
     assert [cue["text"] for cue in generate_subtitles(project)["cues"]] == ["真的講了這句"]
 
-def test_a_project_with_no_transcripts_is_reported_clearly(media: Path) -> None:
-    asset = import_asset(str(media / "tall.mp4"))["id"]
+def test_a_project_with_no_transcripts_is_reported_clearly(media: Path, tmp_path: Path) -> None:
+    # Imported under a path of its own: the workspace is shared across this file, so a
+    # test that needs footage nobody has transcribed has to bring its own.
+    untouched = tmp_path / "never-transcribed.mp4"
+    untouched.write_bytes((media / "tall.mp4").read_bytes())
+    asset = import_asset(str(untouched))["id"]
     project = build_project([video_track(), insert("a", asset, 0, 2)])
     with pytest.raises(ValueError, match="no transcribed clips"):
         generate_subtitles(project)
@@ -342,7 +364,7 @@ def test_captions_can_be_read_a_window_at_a_time(spoken: str) -> None:
     edit(project, [{"action": "set_subtitles", "cues": generate_subtitles(project)["cues"]}])
     window = get_subtitles(project, start=3.5, end=6.5)
     assert [cue["cue_id"] for cue in window["cues"]] == ["c2"]
-    assert window["total"] == 3
+    assert window["placed"] == 3
 
 def test_get_project_leaves_the_captions_out_by_default(spoken: str) -> None:
     project = build_project([video_track(), insert("a", spoken, 0, 10)])
@@ -363,7 +385,7 @@ def test_captions_for_footage_the_edit_dropped_stop_appearing(spoken: str) -> No
 
     read = get_subtitles(project)
     assert [cue["text"] for cue in read["cues"]] == ["第一句"]
-    assert read["total"] == 1 and read["stored"] == 3
+    assert read["placed"] == 1 and read["stored"] == 3
 
 def test_get_subtitles_refuses_a_window_that_ends_before_it_starts(spoken: str) -> None:
     project = build_project([video_track(), insert("a", spoken, 0, 10)])
@@ -375,3 +397,44 @@ def test_a_caption_cannot_be_blanked_instead_of_deleted(spoken: str) -> None:
     edit(project, [{"action": "set_subtitles", "cues": generate_subtitles(project)["cues"]}])
     with pytest.raises(ValidationError, match="set delete to remove it"):
         edit(project, [{"action": "edit_subtitle", "cue_id": "c1", "text": "   "}])
+
+
+def test_a_project_stored_before_captions_followed_the_footage_still_opens(spoken: str) -> None:
+    # Captions used to record where they landed in the cut. Refusing to load them would
+    # brick the project — and a project that will not open cannot have its captions made
+    # again, which is what the roadmap asks for instead of a migration.
+    project = build_project([video_track(), insert("a", spoken, 0, 10)])
+    stored = repo.get_project(project)
+    raw = stored.model_dump_json()
+    old_shape = raw.replace(
+        '"subtitles":[]',
+        '"subtitles":[{"id":"c1","start":"0.0","end":"2.0","text":"舊的字幕"}]',
+    )
+    assert old_shape != raw
+
+    reopened = Project.model_validate_json(old_shape)
+    assert reopened.subtitles == []
+    assert float(reopened.duration) == 10.0
+
+def test_a_caption_naming_footage_nobody_imported_is_refused(spoken: str) -> None:
+    project = build_project([video_track(), insert("a", spoken, 0, 10)])
+    with pytest.raises(ValueError, match="not imported"):
+        edit(project, [{"action": "set_subtitles", "cues": [
+            {"id": "c1", "asset_id": "no-such-asset", "source_start": 1, "source_end": 2, "text": "x"},
+        ]}])
+
+def test_burning_captions_that_all_belong_to_dropped_footage_is_refused(spoken: str, media: Path) -> None:
+    other = import_asset(str(media / "black.mp4"))["id"]
+    transcribe(other, [TranscriptSegment(start=0.0, end=2.0, text="只有這段",
+                                         words=words(("只有這段", 0.0, 2.0)))])
+    project = build_project([video_track(), insert("a", other, 0, 2)])
+    edit(project, [{"action": "set_subtitles", "cues": generate_subtitles(project)["cues"]}])
+    # Replace the footage the captions came from: they are still stored, and place nowhere.
+    edit(project, [
+        {"action": "insert_clip", "track_id": "main", "clip_id": "b", "asset_id": spoken,
+         "source_range": {"start": 0, "end": 3}, "before_clip_id": "a"},
+        {"action": "delete_clip", "track_id": "main", "clip_id": "a"},
+    ])
+    assert get_subtitles(project)["placed"] == 0
+    with pytest.raises(ValueError, match="none of the footage they transcribe"):
+        render_project(project, is_preview=True, burn_subtitles=True)
