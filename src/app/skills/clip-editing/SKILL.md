@@ -45,8 +45,21 @@ Supported:
   progress.
 - Understanding footage: scene changes, black and frozen picture, silences,
   and a transcript with accurate word timings (`analyze_asset`,
-  `get_analysis`), plus labeled frame contact sheets (`view_frames`).
-  Everything runs locally; nothing is uploaded.
+  `get_analysis`), turned into searchable clips — one per sentence, shot or
+  pause, each knowing how much room its edges have (`build_semantic_timeline`,
+  `query_clips`, `get_semantic_clip`), grouped into named sections and topics
+  (`propose_sections`, `set_sections`), plus labeled frame contact sheets
+  (`view_frames`, `frames_for_clips`) whose descriptions can be written back
+  with their source (`set_clip_tags`).
+  Detection, transcription and rendering all run on the user's machine and no
+  media file is uploaded anywhere. Frames and transcripts do reach you as tool
+  results, though, so if you are not running on that machine they have left
+  it. Say so plainly if the user asks, and before putting private footage
+  through `frames_for_clips`.
+- Planning: a cut written down as intent — goal, beats, which footage and why,
+  what was rejected — compiled to a timeline by the server (`save_plan`,
+  `validate_plan`, `compile_plan`, `diff_plan`), with hand adjustments kept
+  across recompiles (`set_clip_pinned`).
 
 Not supported yet: still images, speed changes, cross dissolves and wipes
 between clips (only fades through black), sound leading or trailing the
@@ -205,6 +218,7 @@ so a conversation can be continued days later.
   which one they mean. Do not start a new project just because this
   conversation has not seen one; that silently abandons their edit.
 - Every `render_project` and `analyze_asset` returns a `job_id`. Hold on to it
+  until the job reaches `completed`, `failed`, or `cancelled`.
 - Jobs queue. Renders and transcriptions each need a lot of the computer's
   memory, so only one or two run at a time and the rest wait their turn. A job
   that sits at `queued` with a `stage` such as `waiting for 1 running job(s) to
@@ -212,7 +226,6 @@ so a conversation can be continued days later.
   or start it again. Asking for several analyses at once is fine — they run one
   after another rather than all at once — so tell the user how many are in line,
   not that something is stuck.
-  until the job reaches `completed`, `failed`, or `cancelled`.
 - If the user changes their mind while a render or an analysis is running, or
   a preview is no longer worth waiting for, call `cancel_job` and tell them
   what you stopped. Do not leave a long job running because they moved on.
@@ -229,24 +242,104 @@ screen, where the pauses or mistakes are, or which parts are best.
    Traditional without regional wording, or `zh-Hans` for Simplified. Put names or terms the speaker uses into `prompt`. The first
    run downloads the speech model. Poll `get_job`; for long files, tell the
    user the current `stage` and `progress`.
-2. Read `get_analysis` in windows of about 10 minutes (`start` / `end`). All
-   times are seconds in the source file, so they can be used directly as
-   `source_range`.
-3. Look before you cut. Call `view_frames` with about 12 frames over the whole
+2. Call `build_semantic_timeline` once over the analyzed sources. It turns
+   the transcripts and detections into clips you can search — one per
+   sentence, per shot, per long pause — each with a stable ID. Keep the
+   `timeline_id`. Building again over unchanged analyses is free and returns
+   the same IDs, so call it rather than trying to remember one.
+3. Find material with `query_clips`, not by reading a transcript end to end.
+   Ask for what you need and let the search narrow it: a kind, a phrase, a
+   minimum length, a stretch of the file, a bound on the scores. Then call
+   `get_semantic_clip` on the few worth a closer look, which gives the full
+   text and, with `include_words`, every word's timing.
+   `get_analysis` is still there for checking what a detector actually found,
+   but it is not how to read footage any more.
+4. On anything longer than a few minutes, break it into sections before you
+   plan. Sentences are too fine to think in; sections are one per thing the
+   speaker gets through. Call `propose_sections`, read the utterances against
+   the candidate boundaries it offers, pick the ones that are real, name each
+   section, and send them back with `set_sections`. You can only choose among
+   the candidates, which is why a section can never begin mid-word. Give
+   sections that are about the same thing the same `topic` — topics are
+   labels, so they gather sections across different files, and they are what
+   answers 「這批素材有什麼」.
+5. Look before you cut. Call `view_frames` with about 12 frames over the whole
    asset for an overview, then use a narrow range to check a specific moment.
    Do not describe what is on screen without looking. `view_frames` reads a
    source file; `preview_project` shows the edited sequence.
-4. Turn the results into clips:
-   - Use transcript segment `start` / `end` as `source_range`. Add about
-     0.1 s before and 0.15 s after so words are not clipped, but stay inside
-     the neighboring `silences` and the asset duration.
+6. To make what is on screen searchable, call `frames_for_clips` on the clips
+   you care about, then write what you saw back with `set_clip_tags`. Show the
+   user your descriptions first and let them correct anything you misread:
+   these are stored as facts about the footage and later choices are made from
+   them. What wrote each one is stored alongside it, so a label you read off a
+   thumbnail is never mistaken later for something a detector measured.
+7. Turn clips into edits:
+   - A clip's `start` and `end` are the `source_range`. To leave a little air
+     around it, extend by up to `safe_in` before and `safe_out` after. Those
+     are measured from the silence around the clip, so anything within them
+     cannot clip a word — and anything past them can. Do not add a margin of
+     your own and do not work the numbers out from the silences yourself.
    - Merge kept parts that are less than 0.3 s apart into one clip, so the
      result is not choppy.
    - Build the sequence with `insert_clip` in source order.
-   - Use `include_words: true` only when you need to cut in the middle of a
-     sentence.
-5. For subjective selections such as highlights, list the chosen parts with
+   - Leave out clips whose `kind` is `unusable`, and say so if the user asks
+     for a stretch that is mostly those.
+8. For subjective selections such as highlights, list the chosen parts with
    times and quoted text, and confirm with the user before rendering.
+
+## Planning a cut
+
+For anything longer than a handful of clips, write a plan before you touch the
+timeline. A plan says what the video is for, what its parts are, which footage
+fills them and why — and the server works out every second from it. That is
+what lets the user change their mind later without the whole thing being
+redone from memory.
+
+1. `save_plan` with a `goal`, a `target` length, the `beats` the video is made
+   of, and a `selection` per piece of footage naming the beat it belongs to
+   and the `rationale` for it being there. Put what you considered and passed
+   over into `rejected` with the reason. That field earns its keep the moment
+   the user asks 「那段講到 X 的怎麼沒放」.
+2. Each selection's `trim` says how much of its clip to use: `full`, `keep`
+   with the sentences inside a section to keep, `head` or `tail` with a number
+   of seconds, or `tighten` to drop the pauses out of a section. There is no
+   free-text trim. If none of these says what you mean, select `utterance`
+   clips instead and name them one by one — the plan drops to the level it
+   needs rather than leaving the decision to something downstream.
+3. `validate_plan` before compiling. It costs nothing and catches a clip that
+   is not there, a beat nothing belongs to, a trim longer than its clip, and
+   footage marked `unusable` slipping in. `problems` stop the plan; `notes`
+   are worth reading — a cut a third longer than the length asked for is a
+   note, not an error.
+4. Read the plan back to the user in plain language — how many parts, how long
+   each runs, why each is there — before compiling. They can say 「不用看，
+   直接剪」 and skip it, but that is theirs to skip, not yours to assume.
+5. `compile_plan` into an empty project builds the whole cut. Compiling the
+   same plan again always gives the same cut, so an edit can be reproduced.
+   A project that already has clips is refused: make a new one and keep both.
+6. When there are two ways to cut the same footage, save two plans and use
+   `diff_plan` to tell the user what actually differs. `get_plan` reads one
+   back, with the other plans listed for comparison.
+
+When the user asks for a change — 「第三段太長」, 「開頭無聊」 — change the plan
+and compile it again, rather than nudging clips on the timeline. The plan is
+where the reasons live; the timeline is only what fell out of them.
+
+Compiling again is safe. A compiled clip remembers which plan and which
+footage it came from, and any clip you adjust by hand — trimmed, moved,
+recoloured, split — is pinned by that edit alone. A pinned clip comes through
+the next compile with its adjustment intact, only in whatever place the new
+plan gives it. Two things follow:
+
+- Do not redo a hand adjustment after recompiling. It is still there. The
+  result says how many clips were `kept` that way.
+- If a recompile is refused because a pinned clip's footage is no longer in
+  the plan, that is a real choice to put to the user: either the clip goes
+  back into the plan, or `set_clip_pinned` with `pinned: false` hands it back
+  and the next compile rebuilds it. Do not unpin their work without asking.
+
+The plan owns the sequence track and the music bed and rebuilds both. Insets
+and any other track you added are untouched by a compile.
 
 Transcripts can misrecognize names and jargon. When a quote matters, check the
 surrounding segments, and ask the user if the meaning is unclear.
@@ -271,7 +364,8 @@ Work through it in three passes, so the slow one runs only on what survives:
    files that are mostly nothing.
 3. **Propose, then transcribe.** Offer two or three directions and let the
    user pick. Only once they have picked, run `analyze_asset` with
-   transcription, on the files that direction needs.
+   transcription, on the files that direction needs. Build the semantic
+   timeline over them afterwards, and select from it.
 
 Never transcribe a whole folder up front. Twenty ten-minute files take hours,
 and most of it gets thrown away.
@@ -349,6 +443,8 @@ times refer to the source file.
 | 「改成黑白」 / make it black and white | `set_clip_look` with `color` `{"saturation": 0}` |
 | 「調色拿掉，回原本的樣子」 / undo the grade on this clip | `set_clip_look` with `clear_color: true` |
 | 「小視窗拿掉」 / drop the inset | `delete_clip` it, or `set_clip_look` with `clear_layout: true` to make it cover the frame instead |
+| 「這段我自己調的不要動」 / keep my version of this one | Already kept: editing it by hand pinned it. `set_clip_pinned` `pinned: true` says so for a clip nobody has touched |
+| 「這段照計畫重做就好」 / rebuild this one from the plan | `set_clip_pinned` with `pinned: false`, then compile again |
 | 「色溫暖一點／冷一點」 / warmer or cooler | `set_clip_look` with `color` `temperature`, below 6500 for warmer and above for cooler |
 | 「右上角放一個小視窗」 / put an inset in the top right | `add_track` a second video track, then `add_clip` with `timeline_in` and a `layout` box |
 | 「中間插一段別的畫面蓋掉原本的」 / cut away to other footage over the same sound | `add_clip` on the upper video track with no `layout`, so it covers the frame, and `volume: 0` so the sound underneath keeps running |
@@ -358,9 +454,9 @@ times refer to the source file.
 | 「這句字幕多停一下」 / hold this caption longer | `edit_subtitle` with a new `end` |
 | 「這句不要了」 / drop this caption | `edit_subtitle` with `delete: true` |
 | 「音樂比影片長／短」 / the music does not match the video length | `fit_track` on the music track |
-| 「這支影片在講什麼」 / what is this video about | `analyze_asset`, then summarize `get_analysis` with times, and `view_frames` for the visuals |
+| 「這支影片在講什麼」 / what is this video about | `analyze_asset`, `build_semantic_timeline`, then summarize what `query_clips` returns with times, and `view_frames` for the visuals |
 | 「剪掉講錯／重講的地方」 / remove flubbed takes | From the transcript, keep only the last complete version of each repeated sentence |
-| 「去掉停頓／氣口」 / remove pauses | Keep the speech between `silences` longer than about 0.6 s, with padding, as consecutive clips |
+| 「去掉停頓／氣口」 / remove pauses | `query_clips` for `kind: speech`, then place them as consecutive clips, each widened by its own `safe_in` / `safe_out` |
 | 「只留有講到 X 的段落」 / keep only parts about X | Keep the transcript segments about X, plus enough context to make sense |
 | 「剪掉黑畫面／畫面卡住的地方」 / remove black or frozen parts | Keep the time outside `black_frames` / `frozen_frames` |
 | 「找出精華剪成 60 秒」 / a 60 s highlight reel | Choose segments by transcript and frames until about 60 s; confirm the list before rendering |
@@ -409,7 +505,7 @@ footage and propose directions instead. See
 
 Do not ask about anything you can look up, such as durations
 (`import_asset`, `inspect_media`), the current timeline (`get_project`), or
-what is said or shown in the footage (`analyze_asset`, `get_analysis`,
+what is said or shown in the footage (`analyze_asset`, `query_clips`,
 `view_frames`).
 Do not ask about [Defaults](#defaults). Put all open questions into one short
 message with options the user can pick from.

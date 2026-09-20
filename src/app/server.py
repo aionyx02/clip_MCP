@@ -3,19 +3,29 @@ import re
 import uuid
 from decimal import Decimal
 from pathlib import Path
-from typing import Annotated, List, Literal, Optional
+from typing import Annotated, Callable, List, Literal, Optional
 
 from fastmcp import FastMCP
 from fastmcp.server.providers.skills import SkillsDirectoryProvider
 from fastmcp.server.transforms import ResourcesAsTools
 from fastmcp.tools import ToolResult
 from fastmcp.utilities.types import Image
-from pydantic import Field
+from pydantic import Field, TypeAdapter
 from app.models.media import Asset, Span
+from app.models.plan import EditPlan
+from app.models.semantic import (
+    ClipDescription, ClipKind, ClipLevel, SectionChoice, SemanticClip, SemanticTimeline, Tag, TagSource,
+)
 from app.models.timeline import Project, TrackType, EditOperation, apply_operation, validate_project
+from app.models.job import Job, JobKind, JobStatus
 from app.engine import resources
 from app.engine.analysis import whisper_model_name
-from app.models.job import Job, JobKind, JobStatus
+from app.engine.plan import (
+    MUSIC_TRACK_ID, VIDEO_TRACK_ID, check_plan, check_recompile, compile_operations, compiled_duration,
+    diff_plans, plan_pieces,
+)
+from app.engine.sections import build_sections, candidate_hash, check_sections, propose_candidates
+from app.engine.semantic import build_timeline, timeline_input_hash
 from app.engine.probe import probe_file
 from app.engine.builder import DEFAULT_LOUDNESS_TARGET, FFmpegRenderer
 from app.engine.frames import contact_sheet, format_timestamp, storyboard_sheet
@@ -26,6 +36,11 @@ from app.storage.repo import Repository
 WORKSPACE_DIR = os.path.abspath(os.environ.get("CLIP_MCP_WORKSPACE", "workspace"))
 SKILLS_DIR = Path(__file__).parent / "skills"
 MAX_STORYBOARD_TILES = 36
+MAX_CLIP_RESULTS = 200
+# Reading a whole timeline at once: an hour of talk is a few hundred utterances.
+MAX_TIMELINE_CLIPS = 5000
+# A summary says enough to judge a clip by; the whole text is one call away.
+CLIP_SUMMARY_CHARACTERS = 80
 MEDIA_EXTENSIONS = frozenset({
     ".mp4", ".mov", ".m4v", ".mkv", ".avi", ".webm", ".mpg", ".mpeg", ".mts", ".m2ts", ".wmv", ".flv", ".3gp",
     ".mp3", ".m4a", ".wav", ".aac", ".flac", ".ogg", ".opus", ".wma", ".aiff",
@@ -57,6 +72,10 @@ mcp = FastMCP(
 # without having to read the manifest first.
 mcp.add_provider(SkillsDirectoryProvider(roots=SKILLS_DIR, supporting_files="resources"))
 mcp.add_transform(ResourcesAsTools(mcp))
+
+# Compiled operations are validated the same way a client's are, so a plan cannot reach
+# the timeline through a door the tool surface does not have.
+_OPERATIONS = TypeAdapter(List[EditOperation])
 
 repo = Repository(os.path.join(WORKSPACE_DIR, "clip_mcp.db"))
 job_manager = JobManager(repo)
@@ -368,6 +387,529 @@ def get_analysis(
         "transcript": transcript,
     }
 
+def _clip_summary(clip: SemanticClip) -> dict:
+    """Describe a semantic clip in one short record.
+
+    Args:
+        clip: Clip to describe.
+
+    Returns:
+        The clip's identity, placement, headroom, measurements, and its text
+        cut to `CLIP_SUMMARY_CHARACTERS`; `get_semantic_clip` has the rest.
+    """
+    text = clip.text if len(clip.text) <= CLIP_SUMMARY_CHARACTERS else clip.text[:CLIP_SUMMARY_CHARACTERS] + "…"
+    return {
+        "clip_id": clip.id,
+        "asset_id": clip.asset_id,
+        **({"name": clip.name} if clip.name else {}),
+        **({"topic": clip.topic} if clip.topic else {}),
+        "kind": clip.kind.value,
+        "start": clip.source_range.start,
+        "end": clip.source_range.end,
+        "duration": round(clip.duration, 3),
+        "safe_in": clip.safe_in,
+        "safe_out": clip.safe_out,
+        "text": text,
+        **({"description": clip.description} if clip.description else {}),
+        **({"tags": [tag.value for tag in clip.tags]} if clip.tags else {}),
+        "scores": clip.scores,
+    }
+
+def _require_timeline(timeline_id: Optional[str]) -> SemanticTimeline:
+    """Fetch a semantic timeline, or the newest one.
+
+    Args:
+        timeline_id: ID of the timeline, or `None` for the newest build.
+
+    Returns:
+        The timeline.
+
+    Raises:
+        ValueError: If it does not exist, or if nothing has been built yet.
+    """
+    timeline = repo.get_semantic_timeline(timeline_id)
+    if timeline is None:
+        raise ValueError(
+            f"semantic timeline {timeline_id} not found" if timeline_id
+            else "no semantic timeline has been built; call build_semantic_timeline first"
+        )
+    return timeline
+
+@mcp.tool()
+def build_semantic_timeline(asset_ids: List[str], rebuild: bool = False) -> dict:
+    """Turn the analyses of a set of assets into semantic clips that can be searched.
+
+    A semantic clip is one thing that stands on its own: a sentence someone
+    said, a shot, a pause. Each one carries how much room its edges have
+    before they would run into sound, so a cut can be placed without having to
+    work out from the transcript whether it would clip a word.
+
+    Build this once the assets have been analyzed, then work through
+    `query_clips` rather than reading transcripts with `get_analysis`. Every
+    asset must have been analyzed first; transcribed assets give sentences,
+    and assets without a transcript give shots.
+
+    Building again over unchanged analyses returns the same timeline with the
+    same clip IDs rather than making a new one, so an ID stays pointing at the
+    same moment.
+
+    Args:
+        asset_ids: IDs of the assets to cover. They can be built together, so
+            that one timeline covers a whole shoot.
+        rebuild: Build again even when nothing has changed. Only useful after
+            re-analyzing an asset.
+
+    Returns:
+        A dictionary with the `timeline_id`, the `asset_ids` it covers,
+        `reused` saying whether an existing build was returned untouched,
+        `total_clips`, and `counts` of clips by level and kind.
+
+    Raises:
+        ValueError: If no assets were given, an asset does not exist, or an
+            asset has not been analyzed yet.
+    """
+    if not asset_ids:
+        raise ValueError("give at least one asset to build a semantic timeline from")
+    assets = {asset_id: _get_asset(asset_id) for asset_id in dict.fromkeys(asset_ids)}
+    analyses = {asset_id: repo.get_analysis(asset_id) for asset_id in assets}
+    missing = sorted(asset_id for asset_id, analysis in analyses.items() if analysis is None)
+    if missing:
+        raise ValueError(f"these assets have not been analyzed yet, call analyze_asset on them first: {', '.join(missing)}")
+
+    existing = repo.find_semantic_timeline(timeline_input_hash(analyses))
+    if existing is not None and not rebuild:
+        return {
+            "timeline_id": existing.id,
+            "asset_ids": existing.asset_ids,
+            "reused": True,
+            "total_clips": sum(repo.count_semantic_clips(existing.id).values()),
+            "counts": repo.count_semantic_clips(existing.id),
+        }
+
+    timeline, clips = build_timeline(assets, analyses)
+    repo.save_semantic_timeline(timeline, clips)
+    return {
+        "timeline_id": timeline.id,
+        "asset_ids": timeline.asset_ids,
+        "reused": False,
+        "total_clips": len(clips),
+        "counts": repo.count_semantic_clips(timeline.id),
+    }
+
+@mcp.tool()
+def query_clips(
+    timeline_id: Optional[str] = None,
+    level: ClipLevel = ClipLevel.UTTERANCE,
+    kinds: Optional[List[ClipKind]] = None,
+    asset_id: Optional[str] = None,
+    topic: Optional[str] = None,
+    tag: Optional[str] = None,
+    text: Optional[str] = None,
+    start: Annotated[Optional[float], Field(ge=0)] = None,
+    end: Optional[float] = None,
+    min_duration: Annotated[Optional[float], Field(ge=0)] = None,
+    max_duration: Annotated[Optional[float], Field(ge=0)] = None,
+    min_scores: Optional[dict[str, float]] = None,
+    max_scores: Optional[dict[str, float]] = None,
+    limit: Annotated[int, Field(ge=1, le=MAX_CLIP_RESULTS)] = 50,
+) -> dict:
+    """Search the semantic timeline for the clips worth looking at.
+
+    This is how to find material: ask for what is needed rather than reading a
+    transcript end to end. Conditions combine, so "the parts of this file
+    where someone speaks for more than four seconds and the picture is not
+    black" is one call.
+
+    Results are summaries. Each carries enough to decide whether a clip is
+    wanted — what is said, how long it runs, how much room its edges have —
+    and `get_semantic_clip` has the full text and word timings for the few
+    that matter.
+
+    The scores each clip carries are measurements, not opinions:
+    `speech` and `silence` are the shares of the clip covered by words and by
+    detected silence, `black` and `frozen` the shares the picture detectors
+    marked, and `words_per_second` its pace. Pace counts whatever the
+    transcript counts as a word, which for Chinese is characters, so compare
+    it within one language rather than across two.
+
+    Args:
+        timeline_id: Timeline to search; omit for the one built most recently.
+        level: `utterance` for single sentences and shots, `section` for the
+            parts a whole subject was covered in. Sections exist once
+            `set_sections` has stored them; plan from those and drop to
+            `utterance` when placing the cuts.
+        kinds: Keep only these kinds: `speech` (someone is talking), `silence`
+            (nothing is audible), `ambient` (sound but no speech, and shots
+            from files without sound), `unusable` (nobody talking over a black
+            or frozen picture). Omit for all of them.
+        asset_id: Keep only clips from one asset.
+        topic: Keep only sections about this subject, as `set_sections`
+            labelled them. Topics are shared between files, so this is how to
+            gather everything shot about one thing.
+        tag: Keep only clips carrying this tag, as `set_clip_tags` wrote it.
+        text: Keep only clips whose words or on-screen description contain
+            this.
+        start: Keep only clips reaching past this second of their source file.
+        end: Keep only clips beginning before this second of their source file.
+        min_duration: Keep only clips at least this many seconds long.
+        max_duration: Keep only clips at most this many seconds long.
+        min_scores: Lower bounds on scores, such as `{"speech": 0.5}`. A clip
+            without that score is left out.
+        max_scores: Upper bounds on scores, such as `{"black": 0.1}`.
+        limit: Largest number of clips to return.
+
+    Returns:
+        A dictionary with the `timeline_id` searched and the matching `clips`,
+        each with its `clip_id`, `asset_id`, `kind`, `start` and `end` in the
+        source file, `duration`, `safe_in` / `safe_out`, its `text`, and its
+        `scores`. `truncated` is true when the limit cut the results short.
+
+    Raises:
+        ValueError: If the timeline does not exist, or a score name is not a
+            plain identifier.
+    """
+    timeline = _require_timeline(timeline_id)
+    clips = repo.query_semantic_clips(
+        timeline.id,
+        level=level,
+        kinds=kinds,
+        asset_id=asset_id,
+        topic=topic,
+        tag=tag,
+        text=text,
+        start=start,
+        end=end,
+        min_duration=min_duration,
+        max_duration=max_duration,
+        min_scores=min_scores,
+        max_scores=max_scores,
+        limit=limit,
+    )
+    return {
+        "timeline_id": timeline.id,
+        "clips": [_clip_summary(clip) for clip in clips],
+        "truncated": len(clips) == limit,
+    }
+
+def _timeline_utterances(timeline: SemanticTimeline) -> List[SemanticClip]:
+    """Read every `utterance` clip of a timeline, in order.
+
+    Args:
+        timeline: Timeline to read.
+
+    Returns:
+        The clips, ordered by asset and then by time.
+    """
+    return repo.query_semantic_clips(timeline.id, level=ClipLevel.UTTERANCE, limit=MAX_TIMELINE_CLIPS)
+
+def _timeline_analyses(timeline: SemanticTimeline) -> dict:
+    """Read the analyses a timeline was built from.
+
+    Args:
+        timeline: Timeline whose assets to read.
+
+    Returns:
+        The analyses, keyed by asset ID.
+
+    Raises:
+        ValueError: If an asset's analysis has gone missing.
+    """
+    analyses = {asset_id: repo.get_analysis(asset_id) for asset_id in timeline.asset_ids}
+    missing = sorted(asset_id for asset_id, found in analyses.items() if found is None)
+    if missing:
+        raise ValueError(f"the analysis of {', '.join(missing)} is gone; analyze those assets and build the timeline again")
+    return analyses
+
+@mcp.tool()
+def propose_sections(timeline_id: Optional[str] = None, asset_id: Optional[str] = None) -> dict:
+    """List the places a section could begin, for you to choose between.
+
+    Sentences are too fine to plan from: an hour of talk is hundreds of them.
+    Sections are the level to think in — one per thing the speaker gets
+    through — and deciding where one ends is a judgement, so it is yours to
+    make. What the server does is narrow the field, by measuring where a
+    boundary is plausible: how long the pause is, how far the vocabulary turns
+    over, whether the shots change, whether the sentence opens with a phrase
+    like 「那我們接下來」.
+
+    Read the utterances, pick the candidates that are real boundaries, name
+    each section, and send them back with `set_sections`. You can only choose
+    among these candidates; that is deliberate, because each one already sits
+    on a boundary measured from the audio, so a section can never begin in the
+    middle of a word.
+
+    Give every section a `topic` as well when several of them are about the
+    same subject. Topics are labels, not spans, so the same one can be used in
+    different files and it is what answers "what is in this footage".
+
+    Args:
+        timeline_id: Timeline to propose for; omit for the newest build.
+        asset_id: Show only one file's candidates and utterances. Candidates
+            are always worked out over the whole timeline, so this changes
+            what you read, not what you may choose.
+
+    Returns:
+        A dictionary with the `timeline_id`, the `candidates` — each with the
+        `after_clip_id` that would open the next section, its time, its
+        `signals` and its `score` — and the `utterances` to read them against,
+        each with its `clip_id`, times, `kind` and text.
+
+    Raises:
+        ValueError: If the timeline does not exist or its analyses are gone.
+    """
+    timeline = _require_timeline(timeline_id)
+    clips = _timeline_utterances(timeline)
+    candidates = propose_candidates(clips, _timeline_analyses(timeline))
+
+    shown = [clip for clip in clips if asset_id is None or clip.asset_id == asset_id]
+    return {
+        "timeline_id": timeline.id,
+        "candidates": [
+            {
+                "after_clip_id": candidate.after_clip_id,
+                "asset_id": candidate.asset_id,
+                "at": round(candidate.at, 3),
+                "signals": candidate.signals,
+                "score": candidate.score,
+            }
+            for candidate in candidates
+            if asset_id is None or candidate.asset_id == asset_id
+        ],
+        "utterances": [
+            {
+                "clip_id": clip.id,
+                "asset_id": clip.asset_id,
+                "start": clip.source_range.start,
+                "end": clip.source_range.end,
+                "kind": clip.kind.value,
+                "text": clip.text,
+            }
+            for clip in shown
+        ],
+    }
+
+@mcp.tool()
+def set_sections(
+    sections: List[SectionChoice],
+    timeline_id: Optional[str] = None,
+    chosen_by: Optional[str] = None,
+) -> dict:
+    """Store the sections you chose from `propose_sections`.
+
+    Every utterance belongs to exactly one section, so the sections of a file
+    follow one another with nothing left between them, and each one after the
+    first begins at a candidate boundary. Anything that does not hold up is
+    handed back with the reason rather than quietly corrected: a section moved
+    without your say-so is a decision nobody made.
+
+    Sections replace whatever was stored for this timeline before, so sending
+    a revised set is how you change your mind.
+
+    Args:
+        sections: The sections, in order, each with the utterance it opens on
+            and the one it ends on, a `name`, an optional `topic` shared with
+            related sections, and a one-line `summary`.
+        timeline_id: Timeline they belong to; omit for the newest build.
+        chosen_by: What decided them, such as the model and version doing the
+            reading. Stored alongside, so it is clear later what judged this.
+
+    Returns:
+        A dictionary with the `timeline_id`, how many `sections` were stored,
+        and `topics`, each with how many sections carry it and how many
+        seconds they cover between them.
+
+    Raises:
+        ValueError: If the timeline does not exist, no sections were given, or
+            the sections do not cover the footage or start where they may. The
+            message lists every problem at once.
+    """
+    if not sections:
+        raise ValueError("give at least one section; to clear them, build the timeline again with rebuild")
+    timeline = _require_timeline(timeline_id)
+    clips = _timeline_utterances(timeline)
+    candidates = propose_candidates(clips, _timeline_analyses(timeline))
+
+    problems = check_sections([(choice.first_clip_id, choice.last_clip_id) for choice in sections], clips, candidates)
+    if problems:
+        raise ValueError("these sections were not stored:\n- " + "\n- ".join(problems))
+
+    built, utterances = build_sections(timeline.id, clips, sections)
+    timeline = timeline.model_copy(update={
+        "levels": [ClipLevel.UTTERANCE, ClipLevel.SECTION],
+        "sections_by": chosen_by,
+        "candidate_hash": candidate_hash(candidates),
+    })
+    repo.save_semantic_timeline(timeline, [*utterances, *built])
+
+    topics: dict[str, dict] = {}
+    for section in built:
+        if section.topic:
+            entry = topics.setdefault(section.topic, {"sections": 0, "seconds": 0.0})
+            entry["sections"] += 1
+            entry["seconds"] = round(entry["seconds"] + section.duration, 3)
+    return {"timeline_id": timeline.id, "sections": len(built), "topics": topics}
+
+@mcp.tool()
+def get_semantic_clip(clip_id: str, include_words: bool = False) -> dict:
+    """Read one semantic clip in full.
+
+    Use this on the few clips a `query_clips` search turned up that are worth
+    a closer look: the whole text rather than the summary's opening, and, when
+    a cut has to land mid-sentence, the timing of every word.
+
+    `safe_in` and `safe_out` are the point of this record. They say how far
+    the clip's start may move earlier and its end may move later while staying
+    inside the silence around it, measured from the audio rather than guessed.
+    A cut placed within them does not clip a word; one placed past them does.
+
+    Args:
+        clip_id: ID of the clip, as `query_clips` returned it.
+        include_words: Whether to include each word's timing. Leave it off
+            unless cutting inside a sentence.
+
+    Returns:
+        The clip: its `clip_id`, `timeline_id`, `asset_id`, `level`, `kind`,
+        `source_range`, `safe_in` / `safe_out`, full `text`, `speaker`,
+        `scores`, and `tags` with where each came from. With `include_words`,
+        also `words`, each with `start`, `end`, and `text`.
+
+    Raises:
+        ValueError: If no clip has that ID.
+    """
+    clip = repo.get_semantic_clip(clip_id)
+    if clip is None:
+        raise ValueError(f"semantic clip {clip_id} not found; query_clips lists the ones that exist")
+
+    record = clip.model_dump(exclude={"id"})
+    record["clip_id"] = clip.id
+    if include_words:
+        analysis = repo.get_analysis(clip.asset_id)
+        transcript = analysis.transcript if analysis is not None else None
+        record["words"] = [
+            word.model_dump()
+            for segment in (transcript.segments if transcript else [])
+            for word in segment.words
+            if word.end > clip.source_range.start and word.start < clip.source_range.end
+        ]
+    return record
+
+@mcp.tool()
+def frames_for_clips(
+    clip_ids: List[str],
+    columns: Annotated[int, Field(ge=1, le=8)] = 4,
+) -> ToolResult:
+    """Look at one frame from each of several semantic clips, as a labeled grid.
+
+    This server has no model that can see, so describing what is on screen is
+    yours to do: read the sheet, then write what you saw back with
+    `set_clip_tags`, and from then on those descriptions can be searched like
+    anything else.
+
+    The frames are returned to you as a tool result, which means they leave
+    this machine if you are not running on it. Say so before using this on
+    footage the user may consider private.
+
+    Args:
+        clip_ids: Clips to sample, in the order to show them. One frame is
+            taken from the middle of each.
+        columns: Most tiles per row.
+
+    Returns:
+        A text block naming each tile's clip and time, followed by the grid as
+        a JPEG image.
+
+    Raises:
+        ValueError: If no clips were given, there are too many, a clip does
+            not exist, or its asset has no picture.
+        RuntimeError: If a frame cannot be decoded.
+    """
+    if not clip_ids:
+        raise ValueError("give at least one clip to look at")
+    if len(clip_ids) > MAX_STORYBOARD_TILES:
+        raise ValueError(f"{len(clip_ids)} clips is more than one sheet holds; ask for at most {MAX_STORYBOARD_TILES}")
+
+    shots: List[tuple[str, float, str]] = []
+    listing: List[str] = []
+    for position, clip_id in enumerate(clip_ids):
+        clip = repo.get_semantic_clip(clip_id)
+        if clip is None:
+            raise ValueError(f"semantic clip {clip_id} not found; query_clips lists the ones that exist")
+        asset = _get_asset(clip.asset_id)
+        if not asset.has_video:
+            raise ValueError(f"clip {clip_id} comes from {asset.id}, which has no picture to show")
+        middle = (clip.source_range.start + clip.source_range.end) / 2
+        if asset.duration is not None:
+            middle = min(middle, float(asset.duration) - 0.05)
+        seconds = round(max(middle, 0.0), 3)
+        shots.append((asset.path, seconds, f"#{position + 1}  {format_timestamp(seconds)}"))
+        listing.append(f"#{position + 1}: {clip_id} | {clip.kind.value} | {seconds:.3f}s ({format_timestamp(seconds)})")
+
+    return ToolResult(content=[
+        "One frame from the middle of each clip, in reading order:\n" + "\n".join(listing),
+        Image(data=storyboard_sheet(shots, columns=columns), format="jpeg"),
+    ])
+
+@mcp.tool()
+def set_clip_tags(
+    descriptions: List[ClipDescription],
+    written_by: str,
+    reviewed: bool = False,
+) -> dict:
+    """Write back what you saw in a clip, so it can be searched later.
+
+    These descriptions become facts that later choices are made from — which
+    B-roll covers which line, what the footage is said to contain. A model
+    looking at a thumbnail gets things wrong, so show the user what you are
+    about to write and let them correct it before calling this. `reviewed`
+    says you did.
+
+    Where each claim came from is stored with it, because a label somebody
+    read off a picture and a number a detector measured are not worth the
+    same later.
+
+    Writing again replaces what the same author wrote before and leaves other
+    authors' tags alone, so a correction from the user does not wipe out what
+    a detector measured.
+
+    Args:
+        descriptions: One entry per clip, each with what is on screen and any
+            short tags to search on.
+        written_by: Who or what is writing, such as the model and version that
+            read the frames, or the user's name when they dictated a fix.
+        reviewed: True once the user has seen these and agreed to them.
+
+    Returns:
+        A dictionary with how many clips were `updated` and the total `tags`
+        now on them.
+
+    Raises:
+        ValueError: If nothing was given, a clip does not exist, or the
+            descriptions have not been reviewed.
+    """
+    if not descriptions:
+        raise ValueError("give at least one clip to describe")
+    if not reviewed:
+        raise ValueError(
+            "show these descriptions to the user and get their agreement first, then call again with reviewed: true; "
+            "they are stored as facts about the footage and later choices are made from them"
+        )
+
+    written: List[SemanticClip] = []
+    for entry in descriptions:
+        clip = repo.get_semantic_clip(entry.clip_id)
+        if clip is None:
+            raise ValueError(f"semantic clip {entry.clip_id} not found; query_clips lists the ones that exist")
+        source = TagSource.USER if written_by == "user" else TagSource.MODEL
+        kept = [tag for tag in clip.tags if not (tag.source == source and tag.model_version == written_by)]
+        written.append(clip.model_copy(update={
+            "description": entry.description or clip.description,
+            "described_by": written_by if entry.description else clip.described_by,
+            "tags": [*kept, *(Tag(value=value, source=source, model_version=written_by) for value in entry.tags)],
+        }))
+
+    repo.update_semantic_clips(written)
+    return {"updated": len(written), "tags": sum(len(clip.tags) for clip in written)}
+
 @mcp.tool()
 def view_frames(
     asset_id: str,
@@ -558,6 +1100,33 @@ def apply_edits(project_id: str, expected_version: int, operations: list[EditOpe
             an operation references a missing or duplicate track or clip, or
             the resulting timeline breaks a rule above.
     """
+    return {"status": "success", "new_version": _apply(project_id, expected_version, operations).version}
+
+def _apply(
+    project_id: str,
+    expected_version: int,
+    operations: list,
+    stamp: Optional[Callable[[Project], None]] = None,
+) -> Project:
+    """Apply a batch of operations to a project, atomically.
+
+    Args:
+        project_id: Project to edit.
+        expected_version: Version the caller last read.
+        operations: Operations to apply, in order.
+        stamp: Called with the edited project before it is checked, for
+            whatever the operations themselves cannot carry. `compile_plan`
+            uses it to record where each clip came from, which keeps
+            provenance off the tool surface and out of a caller's reach.
+
+    Returns:
+        The saved project, at its new version.
+
+    Raises:
+        ValueError: If the project does not exist, the version does not match,
+            or the result breaks a timeline rule. Nothing is saved in that
+            case.
+    """
     project = repo.get_project(project_id)
     if not project:
         raise ValueError(f"project {project_id} not found")
@@ -568,13 +1137,271 @@ def apply_edits(project_id: str, expected_version: int, operations: list[EditOpe
     known = repo.get_assets({clip.asset_id for track in project.tracks for clip in track.clips})
     for op in operations:
         apply_operation(project, op, known)
+    if stamp is not None:
+        stamp(project)
     assets = _referenced_assets(project)
     validate_project(project, assets)
     renderer.check_supported(project, assets)
 
     project.version += 1
     repo.update_project(project, expected_version)
-    return {"status": "success", "new_version": project.version}
+    return project
+
+def _plan_context(plan: EditPlan) -> tuple:
+    """Gather everything a plan has to be judged and compiled against.
+
+    Args:
+        plan: Plan to read.
+
+    Returns:
+        `(timeline, clips_by_id, children_by_parent, assets_by_id)`.
+
+    Raises:
+        ValueError: If the timeline the plan names is gone.
+    """
+    timeline = repo.get_semantic_timeline(plan.timeline_id)
+    if timeline is None:
+        raise ValueError(f"the plan is written against timeline {plan.timeline_id}, which no longer exists")
+    clips = repo.query_semantic_clips(timeline.id, limit=MAX_TIMELINE_CLIPS)
+    children: dict[str, List[SemanticClip]] = {}
+    for clip in clips:
+        if clip.parent_id:
+            children.setdefault(clip.parent_id, []).append(clip)
+    for inside in children.values():
+        inside.sort(key=lambda clip: clip.source_range.start)
+    wanted = {clip.asset_id for clip in clips} | ({plan.music.asset_id} if plan.music else set())
+    return timeline, {clip.id: clip for clip in clips}, children, repo.get_assets(wanted)
+
+def _require_plan(plan_id: Optional[str]) -> EditPlan:
+    """Fetch a plan, or the one saved most recently.
+
+    Args:
+        plan_id: ID of the plan, or `None` for the newest.
+
+    Returns:
+        The plan.
+
+    Raises:
+        ValueError: If it does not exist, or nothing has been planned yet.
+    """
+    plan = repo.get_plan(plan_id)
+    if plan is None:
+        raise ValueError(f"plan {plan_id} not found" if plan_id else "no plan has been saved yet; write one with save_plan")
+    return plan
+
+@mcp.tool()
+def save_plan(plan: EditPlan) -> dict:
+    """Store a plan for a cut: what it is for, its parts, and which footage fills them.
+
+    A plan is written in terms of semantic clips rather than seconds. You
+    decide what goes in and why; `compile_plan` works out where every cut
+    lands. Write down why each piece is there and why the ones you passed over
+    were passed over — that is what makes the next round of changes possible
+    rather than a fresh start.
+
+    Each selection carries a `trim` saying how much of its clip to use:
+    `full`, `keep` with the clips inside a section to keep, `head` or `tail`
+    with a number of seconds, or `tighten` to drop the pauses and unusable
+    picture inside a section. There is no free-text trim on purpose: the
+    compiler has to produce the same cut from the same plan every time, and it
+    cannot do that if it has to interpret a sentence.
+
+    Saving a plan that already exists needs its current `version`, and raises
+    it by one. Saving under a fresh id keeps both, which is how two ways of
+    cutting the same footage are compared with `diff_plan`.
+
+    Args:
+        plan: The plan. `timeline_id` says which footage it is about;
+            `timeline_input_hash` is filled in for you.
+
+    Returns:
+        A dictionary with the `plan_id`, its new `version`, the `timeline_id`,
+        and `problems` and `notes` from checking it. A plan is stored whether
+        or not it checks out, so it can be fixed rather than retyped.
+
+    Raises:
+        ValueError: If the timeline does not exist, or the plan was saved at a
+            version other than the stored one.
+    """
+    timeline = repo.get_semantic_timeline(plan.timeline_id)
+    if timeline is None:
+        raise ValueError(f"semantic timeline {plan.timeline_id} not found; build one before planning against it")
+
+    stamped = plan.model_copy(update={"timeline_input_hash": timeline.input_hash})
+    stored = repo.save_plan(stamped)
+    problems, notes = check_plan(stored, *_plan_context(stored))
+    newest = repo.get_semantic_timeline(None)
+    if newest is not None and newest.id != timeline.id:
+        notes.append(f"a newer timeline ({newest.id}) has been built since; this plan is about {timeline.id}")
+    return {
+        "plan_id": stored.id,
+        "version": stored.version,
+        "timeline_id": stored.timeline_id,
+        "problems": problems,
+        "notes": notes,
+    }
+
+@mcp.tool()
+def get_plan(plan_id: Optional[str] = None) -> dict:
+    """Read a stored plan back, with the other plans there are to compare it with.
+
+    Args:
+        plan_id: Plan to read; omit for the one saved most recently.
+
+    Returns:
+        A dictionary with the `plan` as it was stored — its goal, target,
+        beats, selections with their reasons, what was rejected and why, and
+        any music — plus `other_plans`, each with its `plan_id`, `goal` and
+        `timeline_id`, for `diff_plan` to compare against.
+
+    Raises:
+        ValueError: If the plan does not exist, or none have been saved.
+    """
+    plan = _require_plan(plan_id)
+    return {
+        "plan": plan.model_dump(),
+        "other_plans": [
+            {"plan_id": other.id, "goal": other.goal, "timeline_id": other.timeline_id, "version": other.version}
+            for other in repo.list_plans() if other.id != plan.id
+        ],
+    }
+
+@mcp.tool()
+def validate_plan(plan_id: Optional[str] = None) -> dict:
+    """Check a plan against the footage before anything is rendered from it.
+
+    This is the cheap way to find out whether an edit works: it needs no
+    decoding and no rendering, only arithmetic. It catches a clip that is not
+    in the timeline, a beat nothing belongs to, a trim asking for more seconds
+    than a clip has, and footage marked unusable being selected anyway.
+
+    Nothing is corrected. A problem stops the plan compiling and is yours to
+    resolve; a note is something to weigh, such as the cut coming out a third
+    longer than the length that was asked for.
+
+    Args:
+        plan_id: Plan to check; omit for the one saved most recently.
+
+    Returns:
+        A dictionary with `ok`, the `problems` that stop it compiling, the
+        `notes` worth reading, the `duration` the cut would run, and `clips`,
+        how many pieces it would place.
+
+    Raises:
+        ValueError: If the plan or its timeline does not exist.
+    """
+    plan = _require_plan(plan_id)
+    timeline, clips, children, assets = _plan_context(plan)
+    problems, notes = check_plan(plan, timeline, clips, children, assets)
+    pieces = [] if problems else plan_pieces(plan, clips, children, assets)
+    return {
+        "ok": not problems,
+        "problems": problems,
+        "notes": notes,
+        "duration": compiled_duration(pieces),
+        "clips": len(pieces),
+    }
+
+@mcp.tool()
+def compile_plan(project_id: str, expected_version: int, plan_id: Optional[str] = None) -> dict:
+    """Build a plan's cut on a project's timeline.
+
+    Every second is worked out here, the same way every time: each selection
+    becomes the piece its trim asks for, widened into the measured silence
+    around it so no line starts abruptly, and pieces that nearly touch become
+    one clip. Music, if the plan has any, goes underneath and is fitted to the
+    picture.
+
+    Compiling the same plan again after it has been changed rebuilds the cut,
+    which is how a round of feedback lands: change the plan, compile again.
+    Anything adjusted by hand in the meantime is kept exactly as it was — a
+    clip that was trimmed, moved, recoloured or split is pinned by that edit
+    alone, and comes back with those changes, only in the place the new plan
+    gives it. If the new plan no longer uses the footage a pinned clip was
+    made from, nothing is compiled and you are told which clips are in the
+    way, because losing somebody's work to a recompile is worse than stopping.
+
+    Only the sequence and the music bed belong to the plan. Other tracks — an
+    inset, a second music bed — are left exactly as they are.
+
+    Args:
+        project_id: Project to build the cut on.
+        expected_version: Version you last read from `get_project`.
+        plan_id: Plan to compile; omit for the one saved most recently.
+
+    Returns:
+        A dictionary with the `plan_id`, the `project_id`, its `new_version`,
+        how many `clips` were placed, how many of those were `kept` from a
+        hand adjustment, the `duration` they run, and any `notes` from
+        checking the plan.
+
+    Raises:
+        ValueError: If the plan does not check out, compiling would destroy
+            work done by hand, the project does not exist, or the version does
+            not match. Nothing is compiled in part.
+    """
+    plan = _require_plan(plan_id)
+    timeline, clips, children, assets = _plan_context(plan)
+    problems, notes = check_plan(plan, timeline, clips, children, assets)
+    if problems:
+        raise ValueError("this plan cannot be compiled yet:\n- " + "\n- ".join(problems))
+
+    project = repo.get_project(project_id)
+    if not project:
+        raise ValueError(f"project {project_id} not found")
+    blocked = check_recompile(plan, project, plan_pieces(plan, clips, children, assets))
+    if blocked:
+        raise ValueError("compiling would undo work already on this project:\n- " + "\n- ".join(blocked))
+
+    built, provenance = compile_operations(plan, clips, children, assets, project)
+    operations = _OPERATIONS.validate_python(built)
+
+    def record(edited: Project) -> None:
+        """Write onto each compiled clip where it came from."""
+        for track in edited.tracks:
+            for clip in track.clips:
+                origin = provenance.get(clip.id)
+                if origin is not None and track.id in (VIDEO_TRACK_ID, MUSIC_TRACK_ID):
+                    clip.from_plan_id = origin["from_plan_id"]
+                    clip.from_clip_ids = origin["from_clip_ids"]
+                    clip.pinned = origin["pinned"]
+
+    saved = _apply(project_id, expected_version, operations, stamp=record)
+    return {
+        "plan_id": plan.id,
+        "project_id": project_id,
+        "new_version": saved.version,
+        "clips": sum(1 for operation in operations if operation.action == "insert_clip"),
+        "kept": sum(1 for origin in provenance.values() if origin["pinned"]),
+        "duration": float(saved.duration),
+        "notes": notes,
+    }
+
+@mcp.tool()
+def diff_plan(before_plan_id: str, after_plan_id: str) -> dict:
+    """Say what changed between two plans.
+
+    Use this when there are two ways of cutting the same footage, or when a
+    plan has been reworked after feedback and the user asks what is actually
+    different.
+
+    Args:
+        before_plan_id: The earlier plan.
+        after_plan_id: The later one.
+
+    Returns:
+        A dictionary with the two plan ids and `changes`, grouped as `goal`,
+        `beats`, `selections` and `music`. A group with nothing in it is left
+        out, so an empty `changes` means the two plans are the same.
+
+    Raises:
+        ValueError: If either plan does not exist.
+    """
+    return {
+        "before": before_plan_id,
+        "after": after_plan_id,
+        "changes": diff_plans(_require_plan(before_plan_id), _require_plan(after_plan_id)),
+    }
 
 @mcp.tool()
 def preview_project(

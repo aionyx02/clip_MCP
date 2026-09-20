@@ -1,4 +1,5 @@
 import os
+import re
 import sqlite3
 import threading
 from contextlib import contextmanager
@@ -7,6 +8,8 @@ from typing import Callable, Dict, Iterable, Iterator, List, Optional
 
 from app.models.job import Job
 from app.models.media import Asset, MediaAnalysis
+from app.models.plan import EditPlan
+from app.models.semantic import ClipKind, ClipLevel, SemanticClip, SemanticTimeline
 from app.models.timeline import Project
 
 # Each entry upgrades the schema by one version; PRAGMA user_version records how many have been applied.
@@ -24,6 +27,26 @@ _MIGRATIONS: List[List[str]] = [
         "DROP TABLE jobs",
         "ALTER TABLE jobs_v2 RENAME TO jobs",
         "CREATE TABLE analyses (asset_id TEXT PRIMARY KEY, data TEXT NOT NULL)",
+    ],
+    [
+        # The semantic timeline. Clips keep the few fields queries filter on as columns and
+        # the rest as JSON; a workspace holds thousands of them at most, so plain columns and
+        # a LIKE over the text are quicker than they need to be and carry no index to keep in
+        # step. Full-text search was measured and rejected: SQLite's trigram tokenizer cannot
+        # match a two-character Chinese word, which is most of them.
+        "CREATE TABLE semantic_timelines (id TEXT PRIMARY KEY, input_hash TEXT NOT NULL UNIQUE, data TEXT NOT NULL)",
+        "CREATE TABLE semantic_clips ("
+        "id TEXT PRIMARY KEY, timeline_id TEXT NOT NULL, asset_id TEXT NOT NULL, level TEXT NOT NULL, "
+        "kind TEXT NOT NULL, start_seconds REAL NOT NULL, end_seconds REAL NOT NULL, text TEXT NOT NULL, "
+        "data TEXT NOT NULL)",
+        "CREATE INDEX semantic_clips_timeline ON semantic_clips (timeline_id, level, start_seconds)",
+        "CREATE INDEX semantic_clips_asset ON semantic_clips (asset_id, start_seconds)",
+    ],
+    [
+        # Edit plans. Versioned the way projects are, so two sessions editing the same plan
+        # cannot overwrite one another without noticing.
+        "CREATE TABLE plans (id TEXT PRIMARY KEY, timeline_id TEXT NOT NULL, version INTEGER NOT NULL, data TEXT NOT NULL)",
+        "CREATE INDEX plans_timeline ON plans (timeline_id)",
     ],
 ]
 SCHEMA_VERSION = len(_MIGRATIONS)
@@ -298,3 +321,267 @@ class Repository:
             job.updated_at = datetime.now(timezone.utc)
             conn.execute("UPDATE jobs SET data = ? WHERE id = ?", (job.model_dump_json(), job_id))
             return job
+
+    def save_semantic_timeline(self, timeline: SemanticTimeline, clips: Iterable[SemanticClip]) -> None:
+        """Store a semantic timeline and its clips, replacing any earlier build of it.
+
+        Args:
+            timeline: Timeline to store.
+            clips: Its clips. Everything previously stored under the same
+                timeline is removed first, so a rebuild leaves nothing behind.
+        """
+        with self._transaction() as conn:
+            conn.execute(
+                "INSERT INTO semantic_timelines (id, input_hash, data) VALUES (?, ?, ?) "
+                "ON CONFLICT(id) DO UPDATE SET input_hash = excluded.input_hash, data = excluded.data",
+                (timeline.id, timeline.input_hash, timeline.model_dump_json()),
+            )
+            conn.execute("DELETE FROM semantic_clips WHERE timeline_id = ?", (timeline.id,))
+            conn.executemany(
+                "INSERT INTO semantic_clips "
+                "(id, timeline_id, asset_id, level, kind, start_seconds, end_seconds, text, data) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                [
+                    (
+                        clip.id, clip.timeline_id, clip.asset_id, clip.level.value, clip.kind.value,
+                        clip.source_range.start, clip.source_range.end, clip.text, clip.model_dump_json(),
+                    )
+                    for clip in clips
+                ],
+            )
+
+    def update_semantic_clips(self, clips: Iterable[SemanticClip]) -> None:
+        """Write changes to clips that already exist, in one transaction.
+
+        Unlike storing a timeline, this leaves every other clip alone, so
+        writing a description onto a handful of them does not rebuild the set.
+
+        Args:
+            clips: The changed clips. A clip that is no longer stored is
+                skipped rather than inserted, because the timeline it belonged
+                to has been rebuilt and it no longer means anything.
+        """
+        with self._transaction() as conn:
+            conn.executemany(
+                "UPDATE semantic_clips SET kind = ?, text = ?, data = ? WHERE id = ?",
+                [(clip.kind.value, clip.text, clip.model_dump_json(), clip.id) for clip in clips],
+            )
+
+    def find_semantic_timeline(self, input_hash: str) -> Optional[SemanticTimeline]:
+        """Look up the timeline built from a given input.
+
+        Args:
+            input_hash: Fingerprint of the analyses and the derivation.
+
+        Returns:
+            The matching timeline, or `None` if that input has not been built.
+        """
+        rows = self._query("SELECT data FROM semantic_timelines WHERE input_hash = ?", (input_hash,))
+        return SemanticTimeline.model_validate_json(rows[0][0]) if rows else None
+
+    def get_semantic_timeline(self, timeline_id: Optional[str]) -> Optional[SemanticTimeline]:
+        """Fetch a semantic timeline, or the one built most recently.
+
+        Args:
+            timeline_id: ID of the timeline, or `None` for the newest build.
+
+        Returns:
+            The timeline, or `None` if it does not exist, or if none have been
+            built.
+        """
+        if timeline_id is None:
+            rows = self._query("SELECT data FROM semantic_timelines ORDER BY rowid DESC LIMIT 1")
+        else:
+            rows = self._query("SELECT data FROM semantic_timelines WHERE id = ?", (timeline_id,))
+        return SemanticTimeline.model_validate_json(rows[0][0]) if rows else None
+
+    def get_semantic_clip(self, clip_id: str) -> Optional[SemanticClip]:
+        """Fetch one semantic clip.
+
+        Args:
+            clip_id: ID of the clip.
+
+        Returns:
+            The clip, or `None` if no clip has that ID.
+        """
+        rows = self._query("SELECT data FROM semantic_clips WHERE id = ?", (clip_id,))
+        return SemanticClip.model_validate_json(rows[0][0]) if rows else None
+
+    def query_semantic_clips(
+        self,
+        timeline_id: str,
+        level: Optional[ClipLevel] = None,
+        kinds: Optional[Iterable[ClipKind]] = None,
+        asset_id: Optional[str] = None,
+        topic: Optional[str] = None,
+        tag: Optional[str] = None,
+        text: Optional[str] = None,
+        start: Optional[float] = None,
+        end: Optional[float] = None,
+        min_duration: Optional[float] = None,
+        max_duration: Optional[float] = None,
+        min_scores: Optional[Dict[str, float]] = None,
+        max_scores: Optional[Dict[str, float]] = None,
+        limit: int = 50,
+    ) -> List[SemanticClip]:
+        """Select the clips of a timeline that match a set of conditions.
+
+        A condition left as `None` is not applied; the ones given are combined
+        with and.
+
+        Args:
+            timeline_id: Timeline to search.
+            level: Keep only clips at this level.
+            kinds: Keep only clips of these kinds.
+            asset_id: Keep only clips from this asset.
+            topic: Keep only sections labelled with this subject.
+            tag: Keep only clips carrying this tag, whoever wrote it.
+            text: Keep only clips whose text or description contains this.
+            start: Keep only clips reaching past this second of their source.
+            end: Keep only clips beginning before this second of their source.
+            min_duration: Keep only clips at least this many seconds long.
+            max_duration: Keep only clips at most this many seconds long.
+            min_scores: Keep only clips whose named scores are at least these
+                values. A clip that does not carry one of the named scores is
+                dropped.
+            max_scores: Keep only clips whose named scores are at most these
+                values, on the same terms.
+            limit: Largest number of clips to return.
+
+        Returns:
+            The matching clips, ordered by asset and then by time.
+
+        Raises:
+            ValueError: If a score name is not a plain identifier.
+        """
+        # Both are taken as the enum or as its plain string, so a caller that has one
+        # from a tool schema and one from a literal gets the same answer either way.
+        where, params = ["timeline_id = ?"], [timeline_id]
+        if level is not None:
+            where.append("level = ?")
+            params.append(ClipLevel(level).value)
+        kinds = list(kinds or [])
+        if kinds:
+            where.append(f"kind IN ({','.join('?' * len(kinds))})")
+            params.extend(ClipKind(kind).value for kind in kinds)
+        if asset_id is not None:
+            where.append("asset_id = ?")
+            params.append(asset_id)
+        if topic is not None:
+            where.append("json_extract(data, '$.topic') = ?")
+            params.append(topic)
+        if tag:
+            where.append("EXISTS (SELECT 1 FROM json_each(data, '$.tags') WHERE json_extract(value, '$.value') = ?)")
+            params.append(tag)
+        if text:
+            # The wildcards belong to LIKE, so a search for a literal % or _ escapes it. The
+            # description is searched too: what is on screen is as much a reason to pick a clip
+            # as what is said, and a clip with no words has nothing else to be found by.
+            escaped = re.sub(r"([%_\\])", r"\\\1", text)
+            where.append(
+                "(text LIKE '%' || ? || '%' ESCAPE '\\' "
+                "OR coalesce(json_extract(data, '$.description'), '') LIKE '%' || ? || '%' ESCAPE '\\')"
+            )
+            params.extend([escaped, escaped])
+        if start is not None:
+            where.append("end_seconds > ?")
+            params.append(start)
+        if end is not None:
+            where.append("start_seconds < ?")
+            params.append(end)
+        if min_duration is not None:
+            where.append("end_seconds - start_seconds >= ?")
+            params.append(min_duration)
+        if max_duration is not None:
+            where.append("end_seconds - start_seconds <= ?")
+            params.append(max_duration)
+        # A score name reaches the JSON path itself rather than a placeholder,
+        # so only a plain identifier is let through.
+        for bounds, comparison in ((min_scores, ">="), (max_scores, "<=")):
+            for name, value in (bounds or {}).items():
+                if not re.fullmatch(r"[a-z][a-z_]*", name):
+                    raise ValueError(f"{name!r} is not a score name")
+                where.append(f"json_extract(data, '$.scores.{name}') {comparison} ?")
+                params.append(value)
+
+        rows = self._query(
+            f"SELECT data FROM semantic_clips WHERE {' AND '.join(where)} "
+            "ORDER BY asset_id, start_seconds LIMIT ?",
+            [*params, limit],
+        )
+        return [SemanticClip.model_validate_json(row[0]) for row in rows]
+
+    def save_plan(self, plan: EditPlan) -> EditPlan:
+        """Store an edit plan, raising its version if it already exists.
+
+        A plan that is not stored yet is inserted as it stands. One that is
+        must carry the version it was last read at, so two sessions working
+        from the same plan cannot overwrite one another in silence.
+
+        Args:
+            plan: Plan to store.
+
+        Returns:
+            The stored plan, at its new version.
+
+        Raises:
+            VersionConflictError: If the stored plan is at a different
+                version.
+        """
+        with self._transaction() as conn:
+            row = conn.execute("SELECT version FROM plans WHERE id = ?", (plan.id,)).fetchone()
+            if row is None:
+                stored = plan.model_copy(update={"version": 1, "updated_at": datetime.now(timezone.utc)})
+                conn.execute(
+                    "INSERT INTO plans (id, timeline_id, version, data) VALUES (?, ?, ?, ?)",
+                    (stored.id, stored.timeline_id, stored.version, stored.model_dump_json()),
+                )
+                return stored
+            if row[0] != plan.version:
+                raise VersionConflictError(
+                    f"version conflict: plan {plan.id} is at version {row[0]}, not {plan.version}"
+                )
+            stored = plan.model_copy(update={"version": plan.version + 1, "updated_at": datetime.now(timezone.utc)})
+            conn.execute(
+                "UPDATE plans SET timeline_id = ?, version = ?, data = ? WHERE id = ?",
+                (stored.timeline_id, stored.version, stored.model_dump_json(), stored.id),
+            )
+            return stored
+
+    def get_plan(self, plan_id: Optional[str]) -> Optional[EditPlan]:
+        """Fetch an edit plan, or the one saved most recently.
+
+        Args:
+            plan_id: ID of the plan, or `None` for the newest.
+
+        Returns:
+            The plan, or `None` if it does not exist or none are stored.
+        """
+        if plan_id is None:
+            rows = self._query("SELECT data FROM plans ORDER BY rowid DESC LIMIT 1")
+        else:
+            rows = self._query("SELECT data FROM plans WHERE id = ?", (plan_id,))
+        return EditPlan.model_validate_json(rows[0][0]) if rows else None
+
+    def list_plans(self) -> List[EditPlan]:
+        """Return every stored edit plan, newest first.
+
+        Returns:
+            The plans.
+        """
+        return [EditPlan.model_validate_json(row[0]) for row in self._query("SELECT data FROM plans ORDER BY rowid DESC")]
+
+    def count_semantic_clips(self, timeline_id: str) -> Dict[str, int]:
+        """Count a timeline's clips by level and kind.
+
+        Args:
+            timeline_id: Timeline to count.
+
+        Returns:
+            Counts keyed by `"<level>/<kind>"`.
+        """
+        rows = self._query(
+            "SELECT level, kind, count(*) FROM semantic_clips WHERE timeline_id = ? GROUP BY level, kind",
+            (timeline_id,),
+        )
+        return {f"{level}/{kind}": count for level, kind, count in rows}

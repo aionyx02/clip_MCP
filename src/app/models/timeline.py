@@ -116,12 +116,28 @@ class ColorAdjust(BaseModel):
         )
 
 class Clip(BaseModel):
-    """A segment of a source asset placed on a track."""
+    """A segment of a source asset placed on a track.
+
+    A clip that a plan compiled carries where it came from, and whether
+    anybody has touched it since. Those two together are what lets a plan be
+    compiled a second time without throwing away the changes made by hand in
+    between: the compiler rebuilds what it made, and leaves alone what it did
+    not.
+    """
 
     id: str
     asset_id: str
     source_range: TimeRange = Field(..., description="Source time range of the clip")
     timeline_in: Decimal = Field(..., ge=0, description="Start time on the timeline")
+    from_plan_id: Optional[str] = Field(default=None, description="Plan that compiled this clip, if one did")
+    from_clip_ids: List[str] = Field(
+        default_factory=list,
+        description="Semantic clips this was compiled from; what the compiler matches on when it runs again",
+    )
+    pinned: bool = Field(
+        default=False,
+        description="Adjusted by hand, so compiling the plan again keeps it as it is rather than rebuilding it",
+    )
     speed: float = Field(default=1.0, gt=0)
     volume: float = Field(default=1.0, ge=0, description="Audio gain; 1.0 keeps the original level, 0.5 halves it")
     audio_fade_in: Decimal = Field(default=Decimal(0), ge=0, description="Audio fade-in length at the clip start (seconds)")
@@ -439,14 +455,32 @@ class SetClipAudioOp(BaseModel):
     audio_fade_in: Optional[Decimal] = Field(default=None, ge=0, description="Audio fade-in length at the clip start (seconds)")
     audio_fade_out: Optional[Decimal] = Field(default=None, ge=0, description="Audio fade-out length at the clip end (seconds)")
 
+class SetClipPinnedOp(BaseModel):
+    """Edit operation that protects a clip from being rebuilt, or gives it back to the plan.
+
+    Adjusting a compiled clip by hand pins it on its own, so this is mostly
+    how a clip is handed back: unpin it and the next compile rebuilds it from
+    the plan like any other.
+    """
+
+    action: Literal["set_clip_pinned"] = "set_clip_pinned"
+    track_id: str
+    clip_id: str
+    pinned: bool = Field(..., description="True to keep this clip as it is; false to let the plan rebuild it")
+
 EditOperation = Annotated[
     Union[
         AddTrackOp, AddClipOp, InsertClipOp, TrimClipOp, DeleteOp, MoveClipOp,
         SplitClipOp, ReorderClipOp, SetTrackAudioOp, SetClipAudioOp, SetClipLookOp,
-        SetSubtitlesOp, EditSubtitleOp, FitTrackOp,
+        SetClipPinnedOp, SetSubtitlesOp, EditSubtitleOp, FitTrackOp,
     ],
     Field(discriminator="action"),
 ]
+
+# Touching a compiled clip through one of these is the user changing it by hand, which
+# is what pinning records. Nobody has to remember to say so, which is the point: the
+# alternative is a feedback loop that wipes their work every time it comes round.
+_EDITS_BY_HAND = (TrimClipOp, MoveClipOp, SplitClipOp, ReorderClipOp, SetClipLookOp, SetClipAudioOp)
 
 def number_cues(cues: List[SubtitleCue]) -> List[SubtitleCue]:
     """Give every caption an ID, keeping the ones that already have a unique one.
@@ -648,6 +682,20 @@ def _fit_track(project: Project, track: Track, op: "FitTrackOp", assets: Mapping
             only.audio_fade_in *= scale
             only.audio_fade_out *= scale
 
+def _touched_clips(track: Track, op: EditOperation) -> List[Clip]:
+    """Find the clips a hand edit changed.
+
+    Args:
+        track: Track the operation ran on.
+        op: The operation, already applied.
+
+    Returns:
+        The clips it named that are still on the track. A `split_clip` names
+        both halves, because the cut between them is the change.
+    """
+    wanted = {getattr(op, "clip_id", None), getattr(op, "new_clip_id", None)} - {None}
+    return [clip for clip in track.clips if clip.id in wanted]
+
 def apply_operation(project: Project, op: EditOperation, assets: Mapping[str, Asset]) -> None:
     """Apply a single edit operation to a project in place.
 
@@ -754,9 +802,11 @@ def apply_operation(project: Project, op: EditOperation, assets: Mapping[str, As
             # A fade-out belongs to the end of the original clip, which is now the end of the tail.
             audio_fade_out=clip.audio_fade_out,
             video_fade_out=clip.video_fade_out,
-            # The halves are the same shot, so they keep the same look.
+            # The halves are the same shot, so they keep the same look and the same origin.
             color=clip.color,
             layout=clip.layout,
+            from_plan_id=clip.from_plan_id,
+            from_clip_ids=list(clip.from_clip_ids),
         )
         clip.source_range = TimeRange(start=clip.source_range.start, end=at_source)
         clip.audio_fade_out = Decimal(0)
@@ -806,6 +856,16 @@ def apply_operation(project: Project, op: EditOperation, assets: Mapping[str, As
             value = getattr(op, field)
             if value is not None:
                 setattr(clip, field, value)
+    elif isinstance(op, SetClipPinnedOp):
+        _find_clip(track, op.clip_id).pinned = op.pinned
+
+    if isinstance(op, _EDITS_BY_HAND):
+        # Whatever this operation touched was compiled by a plan, it has now been
+        # changed by hand, so the next compile leaves it alone. `split_clip` pins
+        # both halves: the cut between them is the change.
+        for touched in _touched_clips(track, op):
+            if touched.from_plan_id is not None:
+                touched.pinned = True
     track.clips.sort(key=lambda clip: clip.timeline_in)
 
 def validate_project(project: Project, assets: Mapping[str, Asset]) -> None:
