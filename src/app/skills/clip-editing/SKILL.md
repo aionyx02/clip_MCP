@@ -102,10 +102,14 @@ done. For example:
   captions `overlapping` each other, which is what a narration talking over
   footage that also speaks looks like. Nothing is saved until you apply them with `set_subtitles`,
   so check the wording first, and they only appear in the file when
-  `render_project` is called with `burn_subtitles`. Stored captions belong to
-  the cut they were made from: they do not move when clips do, so caption
-  last, and generate them again after any later change to the cut.
-  `get_project` reports how many are stored as `subtitle_count`.
+  `render_project` is called with `burn_subtitles`. A stored caption is
+  anchored to the file and the second the words were spoken, not to a moment
+  in the cut, so it follows the footage: move a clip and its lines go with it,
+  drop a clip and its lines stop appearing, split one and the line shows on
+  both sides. `get_project` reports how many are stored as `subtitle_count`,
+  and `get_subtitles` reports both `total`, how many land in the cut as it
+  stands, and `stored`, how many the project holds — `stored` above `total`
+  means some belong to footage the edit dropped.
 - **Clip**: the part of an asset between `source_range.start` and
   `source_range.end` (seconds in the source file), placed on a track at
   `timeline_in`. Its length on the timeline is `end - start`. It also has
@@ -198,9 +202,9 @@ is wrong before a render is wasted.
    applying blind. Afterwards, correct single lines with `edit_subtitle` and
    its `cue_id`; never resend the whole set to change one word. Lower
    `max_characters` or `max_seconds` if the user wants shorter lines on
-   screen. Caption last, after the cut is settled: stored captions do not
-   move when clips do, so any later edit that changes the cut means calling
-   `generate_subtitles` again and storing the new set.
+   screen. Captions can be made at any point, because they follow the cut;
+   only footage that entered the sequence after they were stored needs
+   `generate_subtitles` run again.
 9. Call `preview_project` and look at the storyboard before rendering. Its
    tiles are in timeline order and cropped the way the render crops, so it
    shows the clip order, the framing, and whether a cut lands on a bad frame,
@@ -478,8 +482,8 @@ times refer to the source file.
 | 「中間插一段別的畫面蓋掉原本的」 / cut away to other footage over the same sound | `add_clip` on the upper video track with no `layout`, so it covers the frame, and `volume: 0` so the sound underneath keeps running |
 | 「加字幕」 / add captions | `generate_subtitles`, show the user the lines, `set_subtitles`, then render with `burn_subtitles: true` |
 | 「字幕有個字打錯了」 / a caption has the wrong word | `get_subtitles` around that moment to find the cue's `id`, then one `edit_subtitle` with its new `text` |
-| 「字幕跟畫面對不上了」 / the captions no longer match the picture | The cut changed after they were stored; run `generate_subtitles` again and store the new set with `set_subtitles` |
-| 「這句字幕多停一下」 / hold this caption longer | `edit_subtitle` with a new `end` |
+| 「後來又加了一段，那段沒有字幕」 / the footage added since has no captions | `generate_subtitles` again and store the new set; the captions already there follow the cut on their own |
+| 「這句字幕多停一下」 / hold this caption longer | `edit_subtitle` with a new `source_end` |
 | 「這句不要了」 / drop this caption | `edit_subtitle` with `delete: true` |
 | 「音樂比影片長／短」 / the music does not match the video length | `fit_track` on the music track |
 | 「這支影片在講什麼」 / what is this video about | `analyze_asset`, `build_semantic_timeline`, then summarize what `query_clips` returns with times, and `view_frames` for the visuals |

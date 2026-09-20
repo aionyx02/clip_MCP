@@ -7,9 +7,15 @@ import pytest
 from pydantic import ValidationError
 
 from app.engine.frames import extract_frame
-from app.engine.subtitles import build_ass, escape_ass_text, format_ass_time, wrap_caption
+from app.engine.subtitles import (
+    build_ass,
+    escape_ass_text,
+    format_ass_time,
+    place_cues,
+    wrap_caption,
+)
 from app.models.media import MediaAnalysis, Span, Transcript, TranscriptSegment, TranscriptWord
-from app.models.timeline import SubtitleCue
+from app.models.timeline import PlacedCue
 from app.server import generate_subtitles, get_project, get_subtitles, import_asset, render_project, repo
 from helpers import build_project, edit, insert, render, video_track
 
@@ -82,24 +88,42 @@ def test_captions_move_to_where_the_speech_lands_in_the_result(spoken: str) -> N
         insert("intro", spoken, 0, 2),
         insert("a", spoken, 3.5, 6.5),
     ])
-    cue = next(item for item in generate_subtitles(project)["cues"] if item["text"] == "第二句")
+    edit(project, [{"action": "set_subtitles", "cues": generate_subtitles(project)["cues"]}])
+    cue = next(item for item in get_subtitles(project)["cues"] if item["text"] == "第二句")
     # The line was at 4.0 in a clip starting at 3.5, placed after a 2 s intro.
     assert float(cue["start"]) == pytest.approx(2.5)
     assert float(cue["end"]) == pytest.approx(4.5)
 
 def test_captions_are_clamped_so_they_do_not_run_past_a_cut(spoken: str) -> None:
     project = build_project([video_track(), insert("a", spoken, 0, 2.0)])
-    cue = generate_subtitles(project)["cues"][0]
+    edit(project, [{"action": "set_subtitles", "cues": generate_subtitles(project)["cues"]}])
+    cue = get_subtitles(project)["cues"][0]
     assert float(cue["end"]) == pytest.approx(2.0)
 
-def test_reordering_the_clips_reorders_the_captions(spoken: str) -> None:
+def test_captions_follow_the_clips_when_the_cut_is_rearranged(spoken: str) -> None:
+    # The point of anchoring captions to the footage: nobody regenerates them and nothing
+    # is stranded. They are stored against one order and read back in another.
     project = build_project([
         video_track(),
         insert("first", spoken, 0.5, 3.5),
         insert("second", spoken, 6.5, 9.5),
     ])
+    edit(project, [{"action": "set_subtitles", "cues": generate_subtitles(project)["cues"]}])
+    assert [cue["text"] for cue in get_subtitles(project)["cues"]] == ["第一句", "第三句"]
+
     edit(project, [{"action": "reorder_clip", "track_id": "main", "clip_id": "second", "before_clip_id": "first"}])
-    assert [cue["text"] for cue in generate_subtitles(project)["cues"]] == ["第三句", "第一句"]
+    assert [cue["text"] for cue in get_subtitles(project)["cues"]] == ["第三句", "第一句"]
+
+def test_a_caption_whose_clip_is_split_is_shown_on_both_sides(spoken: str) -> None:
+    project = build_project([video_track(), insert("a", spoken, 0, 10)])
+    edit(project, [{"action": "set_subtitles", "cues": generate_subtitles(project)["cues"]}])
+    # Split through the middle of the second sentence: those words are on screen on both
+    # sides of the cut, so the one stored caption is placed twice under the one id.
+    edit(project, [{"action": "split_clip", "track_id": "main", "clip_id": "a",
+                    "at_source": 5.0, "new_clip_id": "b"}])
+    placed = [cue for cue in get_subtitles(project)["cues"] if cue["text"] == "第二句"]
+    assert len(placed) == 2
+    assert len({cue["cue_id"] for cue in placed}) == 1
 
 def test_long_sentences_are_broken_between_words(media: Path) -> None:
     asset = import_asset(str(media / "silent.mp4"))["id"]
@@ -140,7 +164,10 @@ def test_a_narration_on_an_audio_track_is_captioned(media: Path) -> None:
         insert("v", voice, 0, 4, track_id="voice"),
     ])
     spoken_lines = [cue for cue in generate_subtitles(project)["cues"] if cue["text"] == "這一天從早上開始"]
-    assert [(cue["start"], cue["end"]) for cue in spoken_lines] == [(Decimal("0.5"), Decimal("2.0"))]
+    # Anchored to the narration file, at the second the words were actually said.
+    assert [(cue["asset_id"], cue["source_start"], cue["source_end"]) for cue in spoken_lines] == [
+        (voice, Decimal("0.5"), Decimal("2.0"))
+    ]
 
 def test_a_music_bed_is_not_reported_as_missing_a_transcript(spoken: str, media: Path) -> None:
     song = import_asset(str(media / "jingle.wav"))["id"]
@@ -211,7 +238,7 @@ def test_captions_are_drawn_low_in_the_picture_when_they_are_due(media: Path, tm
     stored = repo.get_project(project)
 
     subtitle_file = tmp_path / "subs.ass"
-    subtitle_file.write_text(build_ass(stored.subtitles, 640, 360), encoding="utf-8")
+    subtitle_file.write_text(build_ass(place_cues(stored, stored.subtitles), 640, 360), encoding="utf-8")
     render(project, tmp_path / "burned.mp4", loudness_target=None, subtitle_path=str(subtitle_file))
 
     def bright_pixels(seconds: float, top: float, bottom: float) -> int:
@@ -242,7 +269,7 @@ def test_wrap_caption_breaks_chinese_without_spaces(media: Path) -> None:
     assert len(lines) == 4 and all(len(line) <= 12 for line in lines)
 
 def test_build_ass_wraps_long_captions_into_several_lines() -> None:
-    cue = SubtitleCue(start=0, end=2, text="字" * 30)
+    cue = PlacedCue(cue_id="c1", start=0, end=2, text="字" * 30)
     dialogue = [line for line in build_ass([cue], 1080, 1920).splitlines() if line.startswith("Dialogue")][0]
     assert dialogue.count(chr(92) + "N") >= 1
 
@@ -269,7 +296,9 @@ def test_captions_burn_from_a_path_with_awkward_characters(media: Path, tmp_path
     folder = tmp_path / "o'brien [take 1], final"
     folder.mkdir()
     subtitle_file = folder / "subs.ass"
-    subtitle_file.write_text(build_ass([SubtitleCue(start=0, end=2, text="OK")], 320, 240), encoding="utf-8")
+    subtitle_file.write_text(
+        build_ass([PlacedCue(cue_id="c1", start=0, end=2, text="OK")], 320, 240), encoding="utf-8",
+    )
     render(project, tmp_path / "burned.mp4", loudness_target=None, subtitle_path=str(subtitle_file))
     assert (tmp_path / "burned.mp4").exists()
 
@@ -291,10 +320,10 @@ def test_one_caption_can_be_corrected_without_resending_the_rest(spoken: str) ->
 def test_a_caption_can_be_retimed_and_deleted(spoken: str) -> None:
     project = build_project([video_track(), insert("a", spoken, 0, 10)])
     edit(project, [{"action": "set_subtitles", "cues": generate_subtitles(project)["cues"]}])
-    edit(project, [{"action": "edit_subtitle", "cue_id": "c1", "end": 3.8}])
+    edit(project, [{"action": "edit_subtitle", "cue_id": "c1", "source_end": 3.8}])
     assert float(get_subtitles(project)["cues"][0]["end"]) == 3.8
     edit(project, [{"action": "edit_subtitle", "cue_id": "c2", "delete": True}])
-    assert [cue["id"] for cue in get_subtitles(project)["cues"]] == ["c1", "c3"]
+    assert [cue["cue_id"] for cue in get_subtitles(project)["cues"]] == ["c1", "c3"]
 
 def test_editing_an_unknown_caption_is_reported_clearly(spoken: str) -> None:
     project = build_project([video_track(), insert("a", spoken, 0, 10)])
@@ -306,13 +335,13 @@ def test_a_caption_cannot_be_retimed_to_end_before_it_starts(spoken: str) -> Non
     project = build_project([video_track(), insert("a", spoken, 0, 10)])
     edit(project, [{"action": "set_subtitles", "cues": generate_subtitles(project)["cues"]}])
     with pytest.raises(ValueError, match="must end after it starts"):
-        edit(project, [{"action": "edit_subtitle", "cue_id": "c1", "end": 0.5}])
+        edit(project, [{"action": "edit_subtitle", "cue_id": "c1", "source_end": 0.5}])
 
 def test_captions_can_be_read_a_window_at_a_time(spoken: str) -> None:
     project = build_project([video_track(), insert("a", spoken, 0, 10)])
     edit(project, [{"action": "set_subtitles", "cues": generate_subtitles(project)["cues"]}])
     window = get_subtitles(project, start=3.5, end=6.5)
-    assert [cue["id"] for cue in window["cues"]] == ["c2"]
+    assert [cue["cue_id"] for cue in window["cues"]] == ["c2"]
     assert window["total"] == 3
 
 def test_get_project_leaves_the_captions_out_by_default(spoken: str) -> None:
@@ -322,15 +351,19 @@ def test_get_project_leaves_the_captions_out_by_default(spoken: str) -> None:
     assert get_project(project)["subtitle_count"] == 3
     assert len(get_project(project, include_subtitles=True)["subtitles"]) == 3
 
-def test_get_subtitles_shows_captions_stranded_past_the_end(spoken: str) -> None:
-    # A later edit can leave a caption past the end of the video; it has to stay findable.
+def test_captions_for_footage_the_edit_dropped_stop_appearing(spoken: str) -> None:
+    # Captions used to be left stranded past the end of the video and had to be hunted
+    # down. Anchored to the footage they simply stop being placed — and stay stored, so
+    # putting the footage back brings them back.
     project = build_project([video_track(), insert("a", spoken, 0, 10)])
     edit(project, [{"action": "set_subtitles", "cues": generate_subtitles(project)["cues"]}])
     edit(project, [{"action": "trim_clip", "track_id": "main", "clip_id": "a",
                     "new_source_range": {"start": 0, "end": 4}}])
     assert float(get_project(project)["duration"]) == 4.0
-    visible = get_subtitles(project)
-    assert len(visible["cues"]) == visible["total"] == 3
+
+    read = get_subtitles(project)
+    assert [cue["text"] for cue in read["cues"]] == ["第一句"]
+    assert read["total"] == 1 and read["stored"] == 3
 
 def test_get_subtitles_refuses_a_window_that_ends_before_it_starts(spoken: str) -> None:
     project = build_project([video_track(), insert("a", spoken, 0, 10)])

@@ -29,7 +29,13 @@ from app.engine.semantic import build_timeline, timeline_input_hash
 from app.engine.probe import probe_file
 from app.engine.builder import DEFAULT_LOUDNESS_TARGET, FFmpegRenderer
 from app.engine.frames import format_timestamp, storyboard_sheet
-from app.engine.subtitles import DEFAULT_MAX_CHARACTERS, DEFAULT_MAX_SECONDS, build_ass, timeline_cues
+from app.engine.subtitles import (
+    DEFAULT_MAX_CHARACTERS,
+    DEFAULT_MAX_SECONDS,
+    build_ass,
+    place_cues,
+    timeline_cues,
+)
 from app.engine.renderer import JobManager
 from app.storage.repo import Repository
 
@@ -1717,7 +1723,10 @@ def generate_subtitles(
     cues = timeline_cues(
         project, transcripts, max_characters=max_characters, max_seconds=max_seconds, silences=silences,
     )
-    overlapping = sum(1 for earlier, later in zip(cues, cues[1:]) if later.start < earlier.end)
+    # Counted where the captions land, not where the words were said: two lines from
+    # different files overlap only once the cut puts them on screen together.
+    placed = place_cues(project, cues)
+    overlapping = sum(1 for earlier, later in zip(placed, placed[1:]) if later.start < earlier.end)
     return {
         "cues": [cue.model_dump() for cue in cues],
         "assets_without_transcript": untranscribed,
@@ -1732,22 +1741,27 @@ def get_subtitles(
 ) -> dict:
     """Read the captions stored on a project, a window at a time.
 
-    A long video has hundreds of captions, so read the stretch you need
-    rather than all of them. Each caption's `id` is what `edit_subtitle`
-    takes, so one wrong word can be corrected on its own.
+    A long video has hundreds of captions, so read the stretch you need rather
+    than all of them. Each caption's `cue_id` is what `edit_subtitle` takes, so
+    one wrong word can be corrected on its own.
 
-    Omitting `end` reads every stored caption, including any left stranded
-    past the end of the video by a later edit: those never appear in the
-    render, and this is where you find them to fix or delete.
+    Captions are stored against the footage they transcribe, so this works out
+    where each one falls in the cut as it stands. One whose words the edit cut
+    out is not here, because it does not appear; one whose words survived in
+    two places is here twice, under the same `cue_id`, and correcting it
+    corrects both.
 
     Args:
         project_id: ID of the project to read.
         start: Start of the window in seconds on the timeline.
-        end: End of the window in seconds; omit for every caption there is.
+        end: End of the window in seconds; omit for the rest of the video.
 
     Returns:
-        A dictionary with `cues` in the window, the `total` number of captions
-        on the project, and the `window` that was read.
+        A dictionary with `cues` in the window — each with its `cue_id`,
+        `start` and `end` on the timeline, and `text` — the `total` number
+        placed anywhere in the cut, `stored`, how many captions the project
+        holds, and the `window` that was read. `stored` above `total` means
+        some captions belong to footage the edit dropped.
 
     Raises:
         ValueError: If the project does not exist, or `end` is not after
@@ -1756,18 +1770,23 @@ def get_subtitles(
     project = repo.get_project(project_id)
     if not project:
         raise ValueError(f"project {project_id} not found")
+    placed = place_cues(project, project.subtitles)
     if end is None:
-        # Past the end of the video too: a caption you cannot see is one you cannot correct.
-        limit = max([float(project.duration), *(float(cue.end) for cue in project.subtitles)])
+        limit = float(project.duration)
     else:
         limit = end
         if limit <= start:
             raise ValueError(f"the window ends at {limit}s, which is not after its start at {start}s")
     window = [
-        cue.model_dump() for cue in project.subtitles
+        cue.model_dump() for cue in placed
         if float(cue.end) > start and float(cue.start) < limit
     ]
-    return {"cues": window, "total": len(project.subtitles), "window": {"start": start, "end": limit}}
+    return {
+        "cues": window,
+        "total": len(placed),
+        "stored": len(project.subtitles),
+        "window": {"start": start, "end": limit},
+    }
 
 @mcp.tool()
 def render_project(
@@ -1825,10 +1844,16 @@ def render_project(
                 f"project {project_id} has no captions to burn; "
                 "propose them with generate_subtitles and store them with a set_subtitles operation"
             )
+        placed = place_cues(project, project.subtitles)
+        if not placed:
+            raise ValueError(
+                f"project {project_id} has captions, but none of the footage they transcribe is in the cut; "
+                "run generate_subtitles again against the sequence as it stands"
+            )
         os.makedirs(job.work_dir, exist_ok=True)
         subtitle_path = os.path.join(job.work_dir, "subtitles.ass")
         with open(subtitle_path, "w", encoding="utf-8") as handle:
-            handle.write(build_ass(project.subtitles, project.width, project.height))
+            handle.write(build_ass(placed, project.width, project.height))
 
     command = renderer.build_command(
         project, _referenced_assets(project), job.output_path,

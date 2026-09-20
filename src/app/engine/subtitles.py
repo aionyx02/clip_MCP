@@ -7,7 +7,7 @@ from typing import Iterable, Iterator, List, Mapping, Optional, Sequence, Tuple
 
 from app.engine.semantic import share_covered, was_audible
 from app.models.media import Span, Transcript, TranscriptSegment, TranscriptWord
-from app.models.timeline import Project, SubtitleCue, TrackType, number_cues
+from app.models.timeline import Clip, PlacedCue, Project, SubtitleCue, TrackType, cue_order, number_cues
 
 # Burned captions sit larger than broadcast subtitles, at about six percent of the shorter side.
 FONT_DIVISOR = 16
@@ -97,14 +97,72 @@ def wrap_caption(text: str, max_units: float) -> List[str]:
         lines.append(current)
     return lines or [""]
 
-def build_ass(cues: Iterable[SubtitleCue], width: int, height: int, font: str = DEFAULT_FONT) -> str:
+def captioned_clips(project: Project) -> List[Clip]:
+    """Collect the clips whose sound the viewer hears, in timeline order.
+
+    The base video track carries the sequence and the audio tracks carry any
+    narration; video tracks above the base are pictures drawn over that sound,
+    so they bring no words of their own. A clip turned all the way down brings
+    none either.
+
+    Args:
+        project: Project to read.
+
+    Returns:
+        The clips that can put words on screen.
+    """
+    base = project.base_video_track
+    tracks = ([base] if base else []) + [
+        track for track in project.tracks if track.track_type == TrackType.AUDIO
+    ]
+    audible = [clip for track in tracks for clip in track.clips if clip.volume != 0]
+    return sorted(audible, key=lambda clip: clip.timeline_in)
+
+def place_cues(project: Project, cues: Iterable[SubtitleCue]) -> List[PlacedCue]:
+    """Work out where each stored caption falls in the cut as it stands.
+
+    Captions are anchored to the source file and second the words were spoken,
+    so this is where that becomes a time on screen. A caption whose words were
+    cut out is placed nowhere and simply does not appear; one whose words were
+    split across two clips is placed twice, because they are said twice. Each
+    placement is clipped to the window it lands in, so a line never runs past
+    the cut that ends it.
+
+    Args:
+        project: Project whose timeline the captions are placed on.
+        cues: The stored captions.
+
+    Returns:
+        The placements in timeline order.
+
+    """
+    placed: List[PlacedCue] = []
+    for clip in captioned_clips(project):
+        speed = Decimal(str(clip.speed))
+        window_start, window_end = clip.source_range.start, clip.source_range.end
+        for cue in cues:
+            if cue.asset_id != clip.asset_id:
+                continue
+            first = max(cue.source_start, window_start)
+            last = min(cue.source_end, window_end)
+            if last - first <= Decimal(str(MINIMUM_CUE_SECONDS)):
+                continue
+            placed.append(PlacedCue(
+                cue_id=cue.id,
+                start=clip.timeline_in + (first - window_start) / speed,
+                end=clip.timeline_in + (last - window_start) / speed,
+                text=cue.text,
+            ))
+    return sorted(placed, key=lambda item: (item.start, item.end))
+
+def build_ass(cues: Iterable[PlacedCue], width: int, height: int, font: str = DEFAULT_FONT) -> str:
     """Render subtitle cues as a complete ASS subtitle file.
 
     The style is sized and positioned from the output format, so captions
     keep clear of the controls a phone draws over a vertical video.
 
     Args:
-        cues: Cues to write, in timeline order.
+        cues: Placed cues to write, in timeline order.
         width: Output width in pixels.
         height: Output height in pixels.
         font: Font family name to ask for.
@@ -205,16 +263,19 @@ def timeline_cues(
     max_seconds: float = DEFAULT_MAX_SECONDS,
     silences: Optional[Mapping[str, Sequence[Span]]] = None,
 ) -> List[SubtitleCue]:
-    """Map the transcripts of a project's source files onto its edited timeline.
+    """Propose captions for the speech that survived the edit.
 
-    Only the speech that survived the edit is kept, and each caption is moved
-    to where that speech now falls in the result. Captions come from the base
-    video track, the sequence itself, and from the audio tracks, because a
-    voice-over recorded separately is speech the viewer hears and has nowhere
-    else to live. Video tracks drawn on top of the base are pictures over that
-    sound, not extra speech, so they are left out. So is anything turned all
-    the way down, and anything never transcribed — which is what keeps a music
-    bed out of the captions.
+    Only speech the viewer can hear is captioned: the base video track carries
+    the sequence, the audio tracks carry any narration recorded separately, and
+    video tracks drawn on top of the base are pictures over that sound rather
+    than extra voices. Anything turned all the way down is left out, and so is
+    anything never transcribed — which is what keeps a music bed out of the
+    captions.
+
+    The cut decides which words are captioned; it does not decide where the
+    captions sit. Each one is anchored to the file and the second the words
+    were spoken, so rearranging the cut afterwards moves them with the footage
+    instead of stranding them.
 
     Args:
         project: Project whose sound is captioned.
@@ -227,24 +288,16 @@ def timeline_cues(
             rather than captioned: see `was_audible`.
 
     Returns:
-        The captions in timeline order.
+        The captions, ordered by the footage they come from.
     """
     measured = silences or {}
     cues: List[SubtitleCue] = []
-    # The base track and the audio tracks: an inset drawn over the base is a second
-    # picture, not a second voice, but a narration track is exactly a second voice.
-    base = project.base_video_track
-    tracks = ([base] if base else []) + [
-        track for track in project.tracks if track.track_type == TrackType.AUDIO
-    ]
-    for clip in sorted(
-        (clip for track in tracks for clip in track.clips), key=lambda item: item.timeline_in
-    ):
+    seen: set[tuple] = set()
+    for clip in captioned_clips(project):
         transcript = transcripts.get(clip.asset_id)
-        if transcript is None or clip.volume == 0:
+        if transcript is None:
             continue
         start, end = float(clip.source_range.start), float(clip.source_range.end)
-        base_in, speed = float(clip.timeline_in), float(clip.speed)
         quiet = measured.get(clip.asset_id, ())
         for segment in transcript.segments:
             if segment.end <= start or segment.start >= end:
@@ -253,11 +306,18 @@ def timeline_cues(
             if quiet and not was_audible(share_covered(segment.start, segment.end, quiet), True):
                 continue
             for piece_start, piece_end, text in _pieces(segment, start, end, max_characters, max_seconds):
+                anchor = (clip.asset_id, round(piece_start, 3), round(piece_end, 3))
+                # The same words can survive in two places — a clip split in two, or used
+                # twice — and that is one caption, placed twice, not two to proofread.
+                if anchor in seen:
+                    continue
+                seen.add(anchor)
                 cues.append(SubtitleCue(
-                    start=Decimal(str(round(base_in + (piece_start - start) / speed, 3))),
-                    end=Decimal(str(round(base_in + (piece_end - start) / speed, 3))),
+                    asset_id=clip.asset_id,
+                    source_start=Decimal(str(anchor[1])),
+                    source_end=Decimal(str(anchor[2])),
                     text=text,
                 ))
     # Numbered here, so a single line can be corrected later without resending the rest,
     # and by the same helper `set_subtitles` uses, so the IDs survive being stored.
-    return number_cues(sorted(cues, key=lambda cue: cue.start))
+    return number_cues(sorted(cues, key=cue_order))

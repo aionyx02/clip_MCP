@@ -37,26 +37,52 @@ class TimeRange(BaseModel):
         return self.end - self.start
 
 class SubtitleCue(BaseModel):
-    """One caption with its place on the edited timeline."""
+    """One caption, anchored to the words it transcribes rather than to a moment in the cut.
+
+    A caption is a record of something said at a particular second of a
+    particular file, and that stays true however the cut is rearranged. Storing
+    where it lands on the timeline instead meant every caption was wrong the
+    moment a clip moved, so captions had to be made last and made again after
+    any change. Anchored here, they follow the footage: a clip that moves
+    carries its lines with it, a clip that is deleted takes its lines with it,
+    and a clip split in two hands the line across the cut to both halves.
+
+    `place_cues` works out where each one falls in the cut as it stands.
+    """
 
     id: str = Field(default="", description="Stable ID for this caption, so a single line can be corrected on its own")
-    start: Decimal = Field(..., ge=0, description="When the caption appears (seconds on the timeline)")
-    end: Decimal = Field(..., ge=0, description="When the caption disappears (seconds on the timeline)")
+    asset_id: str = Field(..., min_length=1, description="Source file the words were spoken in")
+    source_start: Decimal = Field(..., ge=0, description="When they begin in that file (seconds)")
+    source_end: Decimal = Field(..., ge=0, description="When they end in that file (seconds)")
     text: str = Field(..., description="The caption text; it is wrapped to fit the frame when rendered")
 
     @model_validator(mode="after")
     def validate_span(self):
-        """Ensure the caption is on screen for a positive length of time.
+        """Ensure the caption covers a positive stretch of its source file.
 
         Returns:
             The validated `SubtitleCue` instance.
 
         Raises:
-            ValueError: If `end` is not after `start`.
+            ValueError: If `source_end` is not after `source_start`.
         """
-        if self.end <= self.start:
+        if self.source_end <= self.source_start:
             raise ValueError("a subtitle must end after it starts")
         return self
+
+class PlacedCue(BaseModel):
+    """One caption worked out onto the cut as it stands now.
+
+    The same stored caption can be placed more than once — a clip split in two
+    shows its line on both sides of the cut — so this carries the `cue_id` it
+    came from rather than being one itself. That is also what `edit_subtitle`
+    takes: correcting a word corrects every place it appears.
+    """
+
+    cue_id: str = Field(..., description="The stored caption this came from")
+    start: Decimal = Field(..., ge=0, description="When it appears (seconds on the timeline)")
+    end: Decimal = Field(..., ge=0, description="When it disappears (seconds on the timeline)")
+    text: str = Field(..., description="The caption text")
 
 class ClipLayout(BaseModel):
     """Where a clip is drawn in the frame, as fractions of the output size.
@@ -378,8 +404,12 @@ class EditSubtitleOp(BaseModel):
     action: Literal["edit_subtitle"] = "edit_subtitle"
     cue_id: str = Field(..., description="ID of the caption, as generate_subtitles and get_subtitles report it")
     text: Optional[str] = Field(default=None, description="New text for this caption")
-    start: Optional[Decimal] = Field(default=None, ge=0, description="New start on the timeline (seconds)")
-    end: Optional[Decimal] = Field(default=None, ge=0, description="New end on the timeline (seconds)")
+    source_start: Optional[Decimal] = Field(
+        default=None, ge=0, description="New start in the source file (seconds), to catch a line that comes up early",
+    )
+    source_end: Optional[Decimal] = Field(
+        default=None, ge=0, description="New end in the source file (seconds), to hold a line on screen longer",
+    )
     delete: bool = Field(default=False, description="Remove this caption entirely")
 
     @model_validator(mode="after")
@@ -490,6 +520,21 @@ EditOperation = Annotated[
 # is what pinning records. Nobody has to remember to say so, which is the point: the
 # alternative is a feedback loop that wipes their work every time it comes round.
 _EDITS_BY_HAND = (TrimClipOp, MoveClipOp, SplitClipOp, ReorderClipOp, SetClipLookOp, SetClipAudioOp)
+
+def cue_order(cue: SubtitleCue) -> tuple:
+    """Order captions by where the words are, not by where they land.
+
+    The cut decides where a caption appears and the cut can change; the file
+    and the second the words were said cannot, so that is what keeps the stored
+    order — and with it the IDs — stable across an edit.
+
+    Args:
+        cue: The caption.
+
+    Returns:
+        A sort key over its source file and time.
+    """
+    return (cue.asset_id, cue.source_start, cue.source_end)
 
 def number_cues(cues: List[SubtitleCue]) -> List[SubtitleCue]:
     """Give every caption an ID, keeping the ones that already have a unique one.
@@ -741,7 +786,7 @@ def apply_operation(project: Project, op: EditOperation, assets: Mapping[str, As
         return
 
     if isinstance(op, SetSubtitlesOp):
-        project.subtitles = number_cues(sorted(op.cues, key=lambda cue: cue.start))
+        project.subtitles = number_cues(sorted(op.cues, key=cue_order))
         return
 
     if isinstance(op, EditSubtitleOp):
@@ -755,11 +800,12 @@ def apply_operation(project: Project, op: EditOperation, assets: Mapping[str, As
         # Re-run the model's own rules on the edited cue: model_copy skips them.
         updated = SubtitleCue.model_validate(cue.model_copy(update={
             field: value for field, value in
-            (("text", op.text), ("start", op.start), ("end", op.end)) if value is not None
+            (("text", op.text), ("source_start", op.source_start), ("source_end", op.source_end))
+            if value is not None
         }).model_dump())
         project.subtitles = sorted(
             [updated if item.id == op.cue_id else item for item in project.subtitles],
-            key=lambda item: item.start,
+            key=cue_order,
         )
         return
 
