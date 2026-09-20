@@ -12,6 +12,7 @@ that cannot be picked honestly without a corpus to pick them against.
 """
 
 import hashlib
+from dataclasses import dataclass
 import json
 from typing import List, Mapping, Optional, Sequence, Tuple
 
@@ -298,3 +299,111 @@ def build_timeline(
                 scores=scores,
             ))
     return timeline, clips
+
+@dataclass(frozen=True)
+class CleanCuts:
+    """Where a cut may land in one file without breaking something.
+
+    Two questions, kept apart because they have different answers and very
+    different costs. Moving a cut off the middle of a word costs a fraction of
+    a second and is never worth refusing. Moving it to the end of the sentence
+    can cost many seconds, which changes how long somebody's video runs — so
+    that one is reported rather than done to them.
+
+    Attributes:
+        words: Every transcribed word as `(start, end)` in source seconds, in
+            order.
+        sentences: Every transcribed sentence the same way.
+    """
+
+    words: Tuple[Tuple[float, float], ...] = ()
+    sentences: Tuple[Tuple[float, float], ...] = ()
+
+    @property
+    def word_edges(self) -> Tuple[float, ...]:
+        """Every second at which no word is in progress.
+
+        Returns:
+            The words' starts and ends together, in order.
+        """
+        return tuple(sorted({edge for word in self.words for edge in word}))
+
+    def splits_a_word(self, seconds: float) -> bool:
+        """Say whether a cut here would land inside a word.
+
+        Args:
+            seconds: The time to check.
+
+        Returns:
+            True when a word is in progress. A file with no word timings
+            answers False: nothing is *known* to break, which is not the same
+            as nothing breaking.
+        """
+        return any(start < seconds < end for start, end in self.words)
+
+    def splits_a_sentence(self, seconds: float) -> bool:
+        """Say whether a cut here would leave a sentence unfinished.
+
+        Args:
+            seconds: The time to check.
+
+        Returns:
+            True when the time falls inside a transcribed sentence.
+        """
+        return any(start < seconds < end for start, end in self.sentences)
+
+    def rest_of_sentence(self, seconds: float) -> float:
+        """Measure how much longer the sentence being cut through runs.
+
+        Args:
+            seconds: The time the cut lands at.
+
+        Returns:
+            The seconds still to be spoken, or 0.0 when no sentence is in
+            progress. This is what a note hands back to whoever chose the
+            length, because spending it is their decision and not a
+            compiler's.
+        """
+        inside = [end for start, end in self.sentences if start < seconds < end]
+        return round(max(inside) - seconds, 3) if inside else 0.0
+
+    def nearest_word_edge(self, seconds: float, within: float) -> Optional[float]:
+        """Find the closest second near a time at which no word is in progress.
+
+        Args:
+            seconds: The time a cut was asked for.
+            within: How far the cut may move, in seconds.
+
+        Returns:
+            The nearest such second, or None when the file offers none that
+            close. A tie goes to the later one, which keeps the word whole
+            rather than dropping it.
+        """
+        near = [edge for edge in self.word_edges if abs(edge - seconds) <= within]
+        return max(near, key=lambda edge: (-abs(edge - seconds), edge)) if near else None
+
+def clean_cuts(analysis: MediaAnalysis) -> CleanCuts:
+    """Work out where a cut may land in one file without breaking a word.
+
+    A pure function of the transcript already on disk, so the compiler can be
+    handed numbers rather than transcripts to interpret.
+
+    Args:
+        analysis: The file's analysis.
+
+    Returns:
+        The clean cut points. Empty for a file that was never transcribed,
+        which the compiler reads as knowing nothing about it rather than as
+        everything in it being safe to cut.
+    """
+    transcript = analysis.transcript
+    if transcript is None:
+        return CleanCuts()
+    return CleanCuts(
+        words=tuple(
+            (word.start, word.end)
+            for segment in transcript.segments
+            for word in segment.words
+        ),
+        sentences=tuple((segment.start, segment.end) for segment in transcript.segments),
+    )

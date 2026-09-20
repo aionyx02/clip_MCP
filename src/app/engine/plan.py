@@ -20,6 +20,7 @@ from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 
 from app.models.media import Asset
 from app.models.plan import EditPlan, Selection, TrimKind
+from app.engine.semantic import CleanCuts
 from app.models.semantic import ClipKind, SemanticClip, SemanticTimeline
 from app.models.timeline import Clip, Project
 
@@ -28,6 +29,11 @@ from app.models.timeline import Clip, Project
 BREATH_SECONDS = 0.1
 # Two pieces this close together become one clip; a gap this short reads as a stumble.
 MERGE_GAP_SECONDS = 0.3
+# How far a `head` or `tail` cut may move to stop landing in the middle of a word.
+# Measured on real footage, finishing the word in progress costs about a fifth of a
+# second and never more than about two, so this buys a clean cut for almost nothing.
+# Provisional until there is a corpus to tune it against.
+SNAP_SECONDS = 1.0
 VIDEO_TRACK_ID = "main"
 MUSIC_TRACK_ID = "music"
 # How far the compiled length may sit from what the plan asked for before it is worth saying.
@@ -78,6 +84,7 @@ def _piece(
     end: Optional[float] = None,
     pad_head: bool = True,
     pad_tail: bool = True,
+    cuts: Optional[CleanCuts] = None,
 ) -> Piece:
     """Cut one window out of a clip, with air around it where there is room.
 
@@ -88,6 +95,11 @@ def _piece(
         end: Window end in the source; the clip's own end by default.
         pad_head: Whether to reach back into the headroom before the window.
         pad_tail: Whether to reach on into the headroom after it.
+        cuts: Where this file may be cut without splitting a word. Given them,
+            an edge that is not padded — which is to say one a `head` or
+            `tail` put at an arbitrary second — moves to the nearest such
+            place within `SNAP_SECONDS`. Padded edges are already sitting in
+            measured silence and are left alone.
 
     Returns:
         The window, in source seconds and inside the asset.
@@ -95,6 +107,13 @@ def _piece(
     lead, trail = _breath(clip)
     opening = (clip.source_range.start if start is None else start) - (lead if pad_head else 0.0)
     closing = (clip.source_range.end if end is None else end) + (trail if pad_tail else 0.0)
+    if cuts is not None:
+        # Only the unpadded edges: a padded one already ends in silence, and moving it
+        # would spend the breath the rest of the compiler works to give every cut.
+        if not pad_head:
+            opening = _landed(opening, clip.source_range.start, clip.source_range.end, cuts)
+        if not pad_tail:
+            closing = _landed(closing, clip.source_range.start, clip.source_range.end, cuts)
     # Round to milliseconds before clamping, never after: rounding 36.266667 up to 36.267
     # would put the window past the end of a file that is only 36.266667s long.
     closing = round(closing, 3)
@@ -102,11 +121,32 @@ def _piece(
         closing = min(closing, float(asset.duration))
     return Piece(asset.id, round(max(0.0, opening), 3), closing, (clip.id,))
 
+def _landed(seconds: float, floor: float, ceiling: float, cuts: CleanCuts) -> float:
+    """Move a cut off the middle of a word, if there is somewhere near to put it.
+
+    Args:
+        seconds: Where the cut was asked for.
+        floor: Earliest it may go, the clip's own start.
+        ceiling: Latest it may go, the clip's own end.
+        cuts: Where this file may be cut without splitting a word.
+
+    Returns:
+        The nearest clean second within `SNAP_SECONDS` and inside the clip, or
+        the time as asked when the file offers nothing that close — which
+        happens on footage nobody transcribed, and is reported by
+        `check_plan` rather than guessed at.
+    """
+    if not cuts.splits_a_word(seconds):
+        return seconds
+    landed = cuts.nearest_word_edge(seconds, SNAP_SECONDS)
+    return seconds if landed is None else min(max(landed, floor), ceiling)
+
 def _selection_pieces(
     selection: Selection,
     clip: SemanticClip,
     children: Sequence[SemanticClip],
     asset: Asset,
+    cuts: Optional[CleanCuts] = None,
 ) -> List[Piece]:
     """Work out what one selection contributes to the cut.
 
@@ -115,6 +155,7 @@ def _selection_pieces(
         clip: The semantic clip it names.
         children: That clip's own clips, in time order, empty for an utterance.
         asset: The asset they play from.
+        cuts: Where this file may be cut without splitting a word.
 
     Returns:
         The windows this selection puts on the timeline, in order.
@@ -128,9 +169,15 @@ def _selection_pieces(
         kept = [child for child in children if child.kind not in (ClipKind.SILENCE, ClipKind.UNUSABLE)]
         return [_piece(child, asset) for child in kept] if kept else [_piece(clip, asset)]
     if trim.kind == TrimKind.HEAD and trim.seconds is not None:
-        return [_piece(clip, asset, end=min(clip.source_range.start + trim.seconds, clip.source_range.end), pad_tail=False)]
+        return [_piece(
+            clip, asset, end=min(clip.source_range.start + trim.seconds, clip.source_range.end),
+            pad_tail=False, cuts=cuts,
+        )]
     if trim.kind == TrimKind.TAIL and trim.seconds is not None:
-        return [_piece(clip, asset, start=max(clip.source_range.end - trim.seconds, clip.source_range.start), pad_head=False)]
+        return [_piece(
+            clip, asset, start=max(clip.source_range.end - trim.seconds, clip.source_range.start),
+            pad_head=False, cuts=cuts,
+        )]
     return [_piece(clip, asset)]
 
 def _merge(pieces: Sequence[Piece]) -> List[Piece]:
@@ -177,6 +224,7 @@ def plan_pieces(
     clips: Mapping[str, SemanticClip],
     children: Mapping[str, List[SemanticClip]],
     assets: Mapping[str, Asset],
+    cuts: Optional[Mapping[str, CleanCuts]] = None,
 ) -> List[Piece]:
     """Work out every window the plan puts on the timeline, in order.
 
@@ -185,6 +233,9 @@ def plan_pieces(
         clips: The timeline's clips, keyed by ID.
         children: Each section's own clips in time order, keyed by section ID.
         assets: The assets they play from, keyed by asset ID.
+        cuts: Where each file may be cut without splitting a word, keyed by
+            asset ID. Without them a `head` or `tail` lands at exactly the
+            second it was given, which is how a cut ends mid-syllable.
 
     Returns:
         The windows, merged where they nearly touch.
@@ -195,7 +246,10 @@ def plan_pieces(
         asset = assets.get(clip.asset_id) if clip is not None else None
         if clip is None or asset is None:
             continue
-        pieces.extend(_selection_pieces(selection, clip, children.get(clip.id, []), asset))
+        pieces.extend(_selection_pieces(
+            selection, clip, children.get(clip.id, []), asset,
+            None if cuts is None else cuts.get(clip.asset_id),
+        ))
     return _merge(pieces)
 
 def compiled_duration(pieces: Sequence[Piece]) -> float:
@@ -209,12 +263,49 @@ def compiled_duration(pieces: Sequence[Piece]) -> float:
     """
     return round(sum(piece.duration for piece in pieces), 3)
 
+def _unfinished_sentences(
+    pieces: Sequence[Piece],
+    cuts: Optional[Mapping[str, CleanCuts]],
+) -> List[str]:
+    """Say which windows stop while somebody is still talking.
+
+    The compiler moves a cut off the middle of a word on its own, because that
+    costs a fraction of a second. Letting the sentence finish is a different
+    matter: measured on real footage it costs seconds per cut, which changes
+    how long the video runs. Spending that is the decision of whoever set the
+    length, so it is handed back rather than taken.
+
+    Args:
+        pieces: The compiled windows.
+        cuts: Where each file may be cut without splitting a word, keyed by
+            asset ID.
+
+    Returns:
+        One note per window that ends mid-sentence, saying what it would cost
+        to finish. Empty when nothing was transcribed, since then nothing is
+        known to be cut through.
+    """
+    if not cuts:
+        return []
+    said: List[str] = []
+    for piece in pieces:
+        known = cuts.get(piece.asset_id)
+        if known is None or not known.splits_a_sentence(piece.end):
+            continue
+        owed = known.rest_of_sentence(piece.end)
+        said.append(
+            f"{', '.join(piece.from_clip_ids)} stops {owed:.1f}s before the sentence ends; "
+            "trim it to `full`, or give it those seconds, if the cut sounds abrupt there"
+        )
+    return said
+
 def check_plan(
     plan: EditPlan,
     timeline: SemanticTimeline,
     clips: Mapping[str, SemanticClip],
     children: Mapping[str, List[SemanticClip]],
     assets: Mapping[str, Asset],
+    cuts: Optional[Mapping[str, CleanCuts]] = None,
 ) -> Tuple[List[str], List[str]]:
     """Check a plan against the footage it claims to be made of.
 
@@ -224,6 +315,8 @@ def check_plan(
         clips: That timeline's clips, keyed by ID.
         children: Each section's own clips, keyed by section ID.
         assets: The assets they play from, keyed by asset ID.
+        cuts: Where each file may be cut without splitting a word, keyed by
+            asset ID.
 
     Returns:
         `(problems, notes)`. A problem stops the plan compiling; a note is
@@ -293,8 +386,9 @@ def check_plan(
             problems.append(f"the music asset {plan.music.asset_id} has no sound")
 
     if not problems:
-        pieces = plan_pieces(plan, clips, children, assets)
+        pieces = plan_pieces(plan, clips, children, assets, cuts)
         duration = compiled_duration(pieces)
+        notes.extend(_unfinished_sentences(pieces, cuts))
         if plan.target.seconds:
             drift = abs(duration - plan.target.seconds) / plan.target.seconds
             if drift > LENGTH_TOLERANCE:
@@ -307,7 +401,7 @@ def check_plan(
                 continue
             chosen = [selection for selection in plan.selections if selection.beat_id == beat.id]
             in_beat = compiled_duration(plan_pieces(
-                plan.model_copy(update={"selections": chosen}), clips, children, assets,
+                plan.model_copy(update={"selections": chosen}), clips, children, assets, cuts,
             ))
             if abs(in_beat - beat.target_seconds) / beat.target_seconds > LENGTH_TOLERANCE:
                 notes.append(f"beat {beat.id} ({beat.name}) runs {in_beat:.1f}s against {beat.target_seconds:g}s")
@@ -376,6 +470,7 @@ def compile_operations(
     children: Mapping[str, List[SemanticClip]],
     assets: Mapping[str, Asset],
     project: Optional[Project] = None,
+    cuts: Optional[Mapping[str, CleanCuts]] = None,
 ) -> Tuple[List[dict], Dict[str, dict]]:
     """Turn a plan into the edit operations that build its cut.
 
@@ -390,6 +485,8 @@ def compile_operations(
         children: Each section's own clips, keyed by section ID.
         assets: The assets they play from, keyed by asset ID.
         project: What is already on the timeline, if anything.
+        cuts: Where each file may be cut without splitting a word, keyed by
+            asset ID.
 
     Returns:
         `(operations, provenance)` — operations for `apply_edits`, and, keyed
@@ -398,7 +495,7 @@ def compile_operations(
         operations are applied, so it never has to travel through the tool
         surface.
     """
-    pieces = plan_pieces(plan, clips, children, assets)
+    pieces = plan_pieces(plan, clips, children, assets, cuts)
     kept = {
         tuple(clip.from_clip_ids): clip
         for _, clip in _compiled_clips(project) if clip.pinned

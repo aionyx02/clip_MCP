@@ -32,7 +32,7 @@ from app.engine.plan import (
     diff_plans, plan_pieces,
 )
 from app.engine.sections import build_sections, candidate_hash, check_sections, propose_candidates
-from app.engine.semantic import build_timeline, timeline_input_hash
+from app.engine.semantic import build_timeline, clean_cuts, timeline_input_hash
 from app.engine.probe import probe_file
 from app.engine.builder import DEFAULT_LOUDNESS_TARGET, FFmpegRenderer
 from app.engine.frames import format_timestamp, storyboard_sheet
@@ -1217,7 +1217,7 @@ def _plan_context(plan: EditPlan) -> tuple:
         plan: Plan to read.
 
     Returns:
-        `(timeline, clips_by_id, children_by_parent, assets_by_id)`.
+        `(timeline, clips_by_id, children_by_parent, assets_by_id, cuts_by_asset_id)`.
 
     Raises:
         ValueError: If the timeline the plan names is gone.
@@ -1233,7 +1233,15 @@ def _plan_context(plan: EditPlan) -> tuple:
     for inside in children.values():
         inside.sort(key=lambda clip: clip.source_range.start)
     wanted = {clip.asset_id for clip in clips} | ({plan.music.asset_id} if plan.music else set())
-    return timeline, {clip.id: clip for clip in clips}, children, repo.get_assets(wanted)
+    # Where each file may be cut without splitting a word. The compiler is handed these
+    # numbers rather than the transcripts they come from: reading a transcript is
+    # interpretation, and the compiler has to stay a pure function of what it is given.
+    cuts = {}
+    for asset_id in {clip.asset_id for clip in clips}:
+        analysis = repo.get_analysis(asset_id)
+        if analysis is not None:
+            cuts[asset_id] = clean_cuts(analysis)
+    return timeline, {clip.id: clip for clip in clips}, children, repo.get_assets(wanted), cuts
 
 def _require_plan(plan_id: Optional[str]) -> EditPlan:
     """Fetch a plan, or the one saved most recently.
@@ -1403,9 +1411,9 @@ def validate_plan(plan_id: Optional[str] = None) -> dict:
         ValueError: If the plan or its timeline does not exist.
     """
     plan = _require_plan(plan_id)
-    timeline, clips, children, assets = _plan_context(plan)
-    problems, notes = check_plan(plan, timeline, clips, children, assets)
-    pieces = [] if problems else plan_pieces(plan, clips, children, assets)
+    timeline, clips, children, assets, cuts = _plan_context(plan)
+    problems, notes = check_plan(plan, timeline, clips, children, assets, cuts)
+    pieces = [] if problems else plan_pieces(plan, clips, children, assets, cuts)
     return {
         "ok": not problems,
         "problems": problems,
@@ -1453,19 +1461,19 @@ def compile_plan(project_id: str, expected_version: int, plan_id: Optional[str] 
             not match. Nothing is compiled in part.
     """
     plan = _require_plan(plan_id)
-    timeline, clips, children, assets = _plan_context(plan)
-    problems, notes = check_plan(plan, timeline, clips, children, assets)
+    timeline, clips, children, assets, cuts = _plan_context(plan)
+    problems, notes = check_plan(plan, timeline, clips, children, assets, cuts)
     if problems:
         raise ValueError("this plan cannot be compiled yet:\n- " + "\n- ".join(problems))
 
     project = repo.get_project(project_id)
     if not project:
         raise ValueError(f"project {project_id} not found")
-    blocked = check_recompile(plan, project, plan_pieces(plan, clips, children, assets))
+    blocked = check_recompile(plan, project, plan_pieces(plan, clips, children, assets, cuts))
     if blocked:
         raise ValueError("compiling would undo work already on this project:\n- " + "\n- ".join(blocked))
 
-    built, provenance = compile_operations(plan, clips, children, assets, project)
+    built, provenance = compile_operations(plan, clips, children, assets, project, cuts)
     operations = _OPERATIONS.validate_python(built)
 
     def record(edited: Project) -> None:

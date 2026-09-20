@@ -16,15 +16,16 @@ from pydantic import TypeAdapter
 
 from app.engine.plan import (
     BREATH_SECONDS,
+    SNAP_SECONDS,
     check_plan,
     compile_operations,
     compiled_duration,
     diff_plans,
     plan_pieces,
 )
-from app.engine.sections import build_sections, propose_candidates
-from app.engine.semantic import build_timeline
-from app.models.media import Asset
+from app.engine.sections import build_sections
+from app.engine.semantic import build_timeline, clean_cuts
+from app.models.media import Asset, MediaAnalysis, TranscriptWord
 from app.models.plan import (
     Beat, EditPlan, MusicPlan, PlanAmendment, PlanTarget, Rejection, Selection, Trim, TrimKind,
 )
@@ -86,7 +87,6 @@ def sectioned() -> tuple:
     """
     made = analysis(**FOOTAGE)
     timeline, clips = build_timeline({ASSET_ID: sourced()}, {ASSET_ID: made})
-    candidates = propose_candidates(clips, {ASSET_ID: made})
     sections, utterances = build_sections(timeline.id, clips, [
         SectionChoice(first_clip_id=clips[0].id, last_clip_id=clips[-1].id, name="全部", summary="整段"),
     ])
@@ -170,6 +170,109 @@ def test_a_window_that_reaches_the_end_of_the_file_stays_inside_it() -> None:
     pieces = plan_pieces(plan_for([Selection(clip_id=last.id, beat_id="b1")]), by_id, {}, assets)
     # Compared the way the timeline compares it, which is where this used to blow up.
     assert Decimal(str(pieces[-1].end)) <= assets[ASSET_ID].duration
+
+def spoken_words(*triples) -> MediaAnalysis:
+    """Build an analysis of one sentence whose words are timed individually.
+
+    `analysis()` gives each sentence a single word spanning it, which is
+    enough for everything else but hides where the words actually are — and
+    where the words are is the whole question here.
+
+    Args:
+        *triples: `(text, start, end)` per word.
+
+    Returns:
+        The analysis, with silence before the first word and after the last.
+    """
+    first, last = triples[0][1], triples[-1][2]
+    made = analysis(
+        20.0,
+        segments=[(first, last, "".join(word for word, _, _ in triples))],
+        silences=[(0.0, first), (last, 20.0)],
+    )
+    return made.model_copy(update={"transcript": made.transcript.model_copy(update={
+        "segments": [made.transcript.segments[0].model_copy(update={
+            "words": [TranscriptWord(text=word, start=start, end=end) for word, start, end in triples],
+        })],
+    })})
+
+SENTENCE = (("今天", 2.0, 3.0), ("四點", 3.0, 4.0), ("就起床", 4.0, 5.5), ("了", 5.5, 6.0))
+
+def head_piece(seconds: float, made: MediaAnalysis, snap: bool = True):
+    """Compile a `head` trim over one spoken sentence.
+
+    Args:
+        seconds: How many seconds the trim asks for.
+        made: The analysis to compile against.
+        snap: Whether to hand the compiler the clean cut points.
+
+    Returns:
+        The single compiled window.
+    """
+    assets = {ASSET_ID: sourced()}
+    _, clips = build_timeline(assets, {ASSET_ID: made})
+    spoken = next(clip for clip in clips if clip.text)
+    plan = plan_for([Selection(
+        clip_id=spoken.id, beat_id="b1", trim=Trim(kind=TrimKind.HEAD, seconds=seconds),
+    )])
+    cuts = {ASSET_ID: clean_cuts(made)} if snap else None
+    return plan_pieces(plan, {clip.id: clip for clip in clips}, {}, assets, cuts)[0]
+
+def test_a_head_trim_does_not_stop_in_the_middle_of_a_word() -> None:
+    made = spoken_words(*SENTENCE)
+    # The sentence starts at 2.0, so 2.5s of it ends at 4.5 — inside 就起床.
+    assert head_piece(2.5, made, snap=False).end == pytest.approx(4.5)
+    # Given the word edges, it lands on one rather than through a syllable.
+    landed = head_piece(2.5, made).end
+    assert landed in (4.0, 5.5)
+    assert not clean_cuts(made).splits_a_word(landed)
+
+def test_snapping_a_cut_costs_a_fraction_of_a_second() -> None:
+    # Whichever edge it takes, it may not wander: the point is a clean cut, not a
+    # different edit. Measured on real footage this costs about a fifth of a second.
+    made = spoken_words(*SENTENCE)
+    assert abs(head_piece(2.5, made).end - 4.5) <= SNAP_SECONDS
+
+def test_a_cut_already_between_words_is_left_where_it_is() -> None:
+    made = spoken_words(*SENTENCE)
+    # 2.0s of a sentence starting at 2.0 ends at 4.0, which is between two words.
+    assert head_piece(2.0, made).end == pytest.approx(4.0)
+
+def test_an_edge_that_breathes_is_not_snapped() -> None:
+    # The opening of a `head` sits in measured silence with a breath on it. Moving it to
+    # a word edge would spend the breath the rest of the compiler works to give it.
+    made = spoken_words(*SENTENCE)
+    assert head_piece(2.5, made).start == pytest.approx(2.0 - BREATH_SECONDS)
+
+def test_footage_nobody_transcribed_is_cut_where_it_was_asked_for() -> None:
+    # No word timings means nothing is known to break, which is not a licence to guess.
+    made = analysis(20.0, silences=[(0.0, 20.0)])
+    assets = {ASSET_ID: sourced()}
+    _, clips = build_timeline(assets, {ASSET_ID: made})
+    plan = plan_for([Selection(
+        clip_id=clips[0].id, beat_id="b1", trim=Trim(kind=TrimKind.HEAD, seconds=3.0),
+    )])
+    piece = plan_pieces(plan, {clip.id: clip for clip in clips}, {}, assets, {ASSET_ID: clean_cuts(made)})[0]
+    assert piece.end == pytest.approx(3.0)
+
+def test_a_cut_that_still_stops_mid_sentence_is_reported_not_repaired() -> None:
+    # Finishing the sentence costs seconds, not fractions of one, so it changes how long
+    # the video runs — which is the decision of whoever set the length, not the compiler's.
+    made = spoken_words(*SENTENCE)
+    assets = {ASSET_ID: sourced()}
+    timeline, clips = build_timeline(assets, {ASSET_ID: made})
+    spoken = next(clip for clip in clips if clip.text)
+    plan = plan_for([Selection(
+        clip_id=spoken.id, beat_id="b1", trim=Trim(kind=TrimKind.HEAD, seconds=2.5),
+    )]).model_copy(update={"timeline_id": timeline.id, "timeline_input_hash": timeline.input_hash})
+
+    by_id = {clip.id: clip for clip in clips}
+    cuts = {ASSET_ID: clean_cuts(made)}
+    problems, notes = check_plan(plan, timeline, by_id, {}, assets, cuts)
+    assert problems == []
+    assert any("before the sentence ends" in note for note in notes)
+    # And it says what finishing it would cost, so the choice can be made on a number.
+    assert any("2.0s" in note for note in notes)
 
 def test_pieces_that_nearly_touch_become_one_clip() -> None:
     by_id, children, assets, clips = footage()
