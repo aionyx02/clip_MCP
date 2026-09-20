@@ -19,6 +19,7 @@ clip_MCP/
 │   │   │   ├── __init__.py
 │   │   │   ├── probe.py           # ffprobe 封裝
 │   │   │   ├── builder.py         # 時間軸轉譯為 FFmpeg filtergraph（堆疊畫中畫、調色、淡入淡出、響度與 ducking）
+│   │   │   ├── resources.py       # 實體記憶體量測、各項上限與記憶體估算
 │   │   │   ├── ffmpeg.py          # FFmpeg 子程序執行（進度回報、取消）
 │   │   │   ├── analysis.py        # 素材分析：換場、黑畫面、靜止畫面、靜音、逐字稿（faster-whisper）
 │   │   │   ├── frames.py          # 抽幀、附時間標籤的縮圖總覽、按輸出比例裁切的 storyboard
@@ -43,6 +44,7 @@ clip_MCP/
 │   ├── test_render_audio.py       # 實際 render 後量測響度與 ducking
 │   ├── test_render_look.py        # 實際 render 後量測調色與淡入淡出
 │   ├── test_subtitles.py          # 字幕對應、斷行、燒錄位置
+│   ├── test_job_limits.py         # 記憶體閘門：排隊順序、記憶體判準、逾時釋放、解碼器上限
 │   ├── test_picture_in_picture.py # 疊加時機、邊界、聲音混入
 │   ├── test_fit_track.py          # 音樂對齊影片長度（裁切、接續、循環、淡出搬家）
 │   ├── test_skill_resources.py    # skill 與 server 不得漂移（工具、操作、分層指標）
@@ -65,6 +67,14 @@ clip_MCP/
 - **時間單位**：模型與工具之間一律用秒（float）。`source_range` 是來源檔的秒數，
   `timeline_in` 是剪輯後時間軸的秒數。
 - **樂觀鎖**：`apply_edits` 必須帶 `expected_version`。版本不符就整批不套用，
+- **記憶體閘門**：工作先排隊，不是呼叫就跑。`JobManager._plan` 在
+  `Repository.update_active_jobs` 的單一 immediate transaction 內，一次看完所有未完成
+  的工作再決定放行誰——所以多個伺服器或 worker 不會各自算出「還能再開一個」。
+  判準有兩個：同時執行數（`CLIP_MCP_MAX_JOBS`）與剩餘實體記憶體減去保留量
+  （`CLIP_MCP_MEMORY_RESERVE_MB`）。剛放行的工作還沒真的配置記憶體，所以 `WARMUP`
+  之內它的估算值會額外從可用量扣除。排隊依先到先服務，不讓小工作一直插隊；
+  但沒有任何工作在跑時，隊首一定放行——全部拒絕比慢慢跑更糟。
+  worker 結束與 `get_job` 都會再推一次隊伍，所以不需要另外的排程器。
   呼叫端重讀 `get_project` 再重試。失敗的呼叫不會留下半套狀態。
 - **背景工作**：render 與分析都跑在獨立 worker 子程序，狀態寫進 SQLite，
   所以伺服器重啟不會中斷工作，也能多行程共用同一個工作區。

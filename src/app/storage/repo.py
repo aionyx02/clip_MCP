@@ -242,6 +242,38 @@ class Repository:
         rows = self._query("SELECT data FROM jobs WHERE id = ?", (job_id,))
         return Job.model_validate_json(rows[0][0]) if rows else None
 
+    def update_active_jobs(self, change: Callable[[List[Job]], Iterable[str]]) -> List[Job]:
+        """Atomically read every unfinished job, decide across them, and write back the ones chosen.
+
+        This is how a limit that spans jobs is enforced — how many may run at
+        once, and how much memory they may take together. Reading the whole
+        set, deciding, and writing the decision happen in one immediate
+        transaction, so two servers or two workers looking at the same
+        workspace cannot both conclude that there is room for one more.
+
+        Args:
+            change: Function called with the queued and running jobs, ordered
+                oldest first. It may modify them in place and returns the IDs
+                of the ones whose changes should be saved. It runs inside the
+                transaction and should not block.
+
+        Returns:
+            The jobs that were written, in the order `change` named them.
+        """
+        with self._transaction() as conn:
+            rows = conn.execute(
+                "SELECT data FROM jobs WHERE json_extract(data, '$.status') IN ('queued', 'running')"
+            ).fetchall()
+            jobs = sorted((Job.model_validate_json(row[0]) for row in rows), key=lambda job: job.created_at)
+            by_id = {job.job_id: job for job in jobs}
+            written = []
+            for job_id in change(jobs):
+                job = by_id[job_id]
+                job.updated_at = datetime.now(timezone.utc)
+                conn.execute("UPDATE jobs SET data = ? WHERE id = ?", (job.model_dump_json(), job.job_id))
+                written.append(job)
+            return written
+
     def update_job(self, job_id: str, change: Callable[[Job], None]) -> Optional[Job]:
         """Atomically read a job, apply a change to it, and write it back.
 

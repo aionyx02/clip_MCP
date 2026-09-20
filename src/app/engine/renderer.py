@@ -7,6 +7,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, Optional
 
+from app.engine import resources
 from app.engine.analysis import analyze_media
 from app.engine.ffmpeg import OperationCancelled, run_ffmpeg
 from app.models.job import Job, JobKind, JobStatus
@@ -14,6 +15,9 @@ from app.storage.repo import Repository
 
 HEARTBEAT_INTERVAL_SECONDS = 1.0
 STALE_AFTER = timedelta(seconds=30)
+# A worker that has just been launched has not claimed its memory yet, so until it has
+# had this long its whole estimate is counted against what the machine reports as free.
+WARMUP = timedelta(seconds=60)
 SPEC_FILE_NAME = "job.json"
 FFMPEG_LOG_FILE_NAME = "ffmpeg.log"
 WORKER_LOG_FILE_NAME = "worker.log"
@@ -49,11 +53,19 @@ def _fail_if_active(message: str) -> Callable[[Job], None]:
     return change
 
 class JobManager:
-    """Starts background jobs in detached worker processes and reports their state.
+    """Admits background jobs into detached worker processes and reports their state.
 
     Job state lives in the repository rather than in this process: workers
     record progress and outcomes there, so jobs survive server restarts and
     can be observed from any process that shares the database.
+
+    A job is not started when it is asked for, only queued. Renders and
+    analyses are each heavy enough to fill a machine on their own — a render
+    holds a decoder open per clip, and a transcription loads a speech model
+    of a few gigabytes — so starting one for every call would exhaust the
+    computer's memory rather than its patience. Queued jobs cost a database
+    row and nothing else, and one is admitted only when both the job count
+    and the free memory allow it.
     """
 
     def __init__(self, repo: Repository):
@@ -65,28 +77,109 @@ class JobManager:
         self.repo = repo
 
     def start_job(self, job: Job, spec: Dict[str, Any]) -> Job:
-        """Store a new job and launch a worker process that runs it.
+        """Store a new job and start it as soon as the machine has room for it.
 
         Args:
-            job: New job with `work_dir` set to a directory dedicated to it.
+            job: New job with `work_dir` set to a directory dedicated to it,
+                and `memory_estimate` set to what it is expected to need.
             spec: JSON-serializable instructions for the worker, saved in the
                 job directory. Render jobs need `command` and
                 `duration_seconds`; analyze jobs need `transcribe`, `language`,
                 `prompt`, and `chinese_variant`.
 
         Returns:
-            The stored job, in the `QUEUED` state.
+            The stored job. It is `QUEUED` either way; its `stage` says what
+            it is waiting for when it could not start immediately.
 
         Raises:
-            OSError: If the job directory cannot be written or the worker
-                cannot be started. The job is recorded as failed in the latter
-                case.
+            OSError: If the job directory or its specification cannot be
+                written.
         """
         os.makedirs(job.work_dir, exist_ok=True)
         with open(os.path.join(job.work_dir, SPEC_FILE_NAME), "w", encoding="utf-8") as spec_file:
             json.dump(spec, spec_file, indent=2, ensure_ascii=False)
         self.repo.add_job(job)
+        self.launch_ready()
+        return self.repo.get_job(job.job_id) or job
 
+    def launch_ready(self) -> List[Job]:
+        """Start workers for as many queued jobs as the machine can afford.
+
+        Jobs are admitted oldest first and never out of order, so a small job
+        cannot keep jumping ahead of a large one that is waiting for memory.
+        The jobs that stay queued have their `stage` set to what they are
+        waiting for, which is what `get_job` reports back.
+
+        Returns:
+            The jobs that were admitted and had a worker launched for them.
+        """
+        admitted = [job for job in self.repo.update_active_jobs(self._plan) if job.admitted_at is not None]
+        for job in admitted:
+            self._launch_worker(job)
+        return admitted
+
+    def _plan(self, jobs: List[Job]) -> List[str]:
+        """Decide which queued jobs may start, and why the rest may not.
+
+        Runs inside the repository's transaction, so the view of what is
+        already running cannot change while the decision is being made.
+
+        Args:
+            jobs: Every queued and running job, oldest first. Jobs that are
+                admitted or left waiting are modified in place.
+
+        Returns:
+            The IDs of the jobs that were changed.
+        """
+        now = datetime.now(timezone.utc)
+        # A job whose worker stopped reporting has lost its memory back to the machine,
+        # so it no longer holds a slot; `get_job` fails it the next time it is asked for.
+        running = [
+            job for job in jobs
+            if (job.status == JobStatus.RUNNING or job.admitted_at is not None)
+            and now - job.updated_at <= STALE_AFTER
+        ]
+        slots = resources.max_concurrent_jobs() - len(running)
+        spare = resources.spare_bytes()
+        if spare is not None:
+            spare -= sum(
+                job.memory_estimate for job in running
+                if job.admitted_at is not None and now - job.admitted_at < WARMUP
+            )
+
+        changed, busy, behind = [], len(running), 0
+        for job in jobs:
+            if job.admitted_at is not None or job.status != JobStatus.QUEUED or job.cancel_requested:
+                continue
+            if behind:
+                reason = f"queued behind {behind} job(s)"
+            elif slots <= 0:
+                reason = f"waiting for {len(running)} running job(s) to finish"
+            # Nothing at all is running and this job still does not fit: start it anyway.
+            # Refusing every job on a small machine is worse than running one job slowly,
+            # and there is nothing whose finishing could free the memory it is waiting for.
+            elif spare is not None and busy and job.memory_estimate > spare:
+                reason = f"waiting for {job.memory_estimate // resources.MEGABYTE} MB of free memory"
+            else:
+                job.admitted_at, job.stage = now, None
+                slots, busy = slots - 1, busy + 1
+                if spare is not None:
+                    spare = max(0, spare - job.memory_estimate)
+                changed.append(job.job_id)
+                continue
+            behind += 1
+            if job.stage != reason:
+                job.stage = reason
+                changed.append(job.job_id)
+        return changed
+
+    def _launch_worker(self, job: Job) -> None:
+        """Start the detached worker process for an admitted job.
+
+        Args:
+            job: Job that was just admitted. It is recorded as failed if its
+                worker cannot be started, which frees the slot again.
+        """
         try:
             with open(os.path.join(job.work_dir, WORKER_LOG_FILE_NAME), "wb") as worker_log:
                 subprocess.Popen(
@@ -99,15 +192,18 @@ class JobManager:
                 )
         except OSError as exc:
             self.repo.update_job(job.job_id, _fail_if_active(f"could not start worker: {exc}"))
-            raise
-        return job
 
     def get_job(self, job_id: str) -> Optional[Job]:
         """Fetch a job, first failing it if its worker has stopped reporting.
 
-        Workers refresh an active job every `HEARTBEAT_INTERVAL_SECONDS`. An
-        active job not updated within `STALE_AFTER` is assumed to have lost
-        its worker, for example because the process was killed.
+        Workers refresh an active job every `HEARTBEAT_INTERVAL_SECONDS`. A
+        job whose worker has started but has not been updated within
+        `STALE_AFTER` is assumed to have lost it, for example because the
+        process was killed. A job still waiting for a free slot has no worker
+        yet and is never failed for being quiet.
+
+        Polling also moves the queue along, so a slot freed by a job that
+        finished is filled without waiting for the next request.
 
         Args:
             job_id: ID of the job to fetch.
@@ -116,9 +212,12 @@ class JobManager:
             The job's latest state, or `None` if it does not exist.
         """
         job = self.repo.get_job(job_id)
-        if job is not None and job.status.is_active and datetime.now(timezone.utc) - job.updated_at > STALE_AFTER:
-            job = self.repo.update_job(job_id, _fail_if_active("worker stopped reporting; it may have been terminated"))
-        return job
+        if job is None:
+            return None
+        if job.status.is_active and job.admitted_at is not None and datetime.now(timezone.utc) - job.updated_at > STALE_AFTER:
+            self.repo.update_job(job_id, _fail_if_active("worker stopped reporting; it may have been terminated"))
+        self.launch_ready()
+        return self.repo.get_job(job_id)
 
     def cancel_job(self, job_id: str, wait_seconds: float = 5.0) -> Optional[Job]:
         """Cancel a queued or running job.
@@ -147,6 +246,8 @@ class JobManager:
         while job is not None and job.status == JobStatus.RUNNING and time.monotonic() < deadline:
             time.sleep(0.2)
             job = self.repo.get_job(job_id)
+        # Whatever the cancelled job was holding is free again; let the queue use it.
+        self.launch_ready()
         return job
 
 class JobContext:
@@ -280,6 +381,7 @@ def run_worker(repo: Repository, job_id: str) -> None:
 
     Returns without doing anything if the job is missing or no longer queued.
     A render that fails or is cancelled has its partial output file deleted.
+    Whatever queued job the freed memory allows is started before returning.
 
     Args:
         repo: Repository that stores the job.
@@ -332,6 +434,9 @@ def run_worker(repo: Repository, job_id: str) -> None:
             current.progress = 1.0
 
     repo.update_job(job_id, finish)
+    # This worker's slot and its memory are free now, so hand them to whatever is waiting
+    # rather than leaving the queue still until someone next asks about a job.
+    JobManager(repo).launch_ready()
 
 def main(argv: Optional[List[str]] = None) -> None:
     """Run the worker process for one job.

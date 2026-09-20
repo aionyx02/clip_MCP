@@ -48,5 +48,10 @@ class Job(BaseModel):
     work_dir: Optional[str] = Field(default=None, description="Directory holding the job's specification and logs")
     error_message: Optional[str] = None
     cancel_requested: bool = False
+    memory_estimate: int = Field(default=0, ge=0, description="Peak memory the job is expected to need, in bytes")
     created_at: datetime = Field(default_factory=_utc_now)
+    admitted_at: Optional[datetime] = Field(
+        default=None,
+        description="When a worker was launched for this job; null while it waits for a free slot",
+    )
     updated_at: datetime = Field(default_factory=_utc_now, description="Last time the job record was written")

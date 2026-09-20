@@ -3,6 +3,7 @@ import os
 import re
 from typing import Callable, Dict, List, Optional
 
+from app.engine import resources
 from app.engine.ffmpeg import OperationCancelled, run_ffmpeg
 from app.models.media import Asset, MediaAnalysis, Span, Transcript, TranscriptSegment, TranscriptWord
 
@@ -268,6 +269,17 @@ def convert_chinese_variant(segments: List[TranscriptSegment], variant: str) -> 
         segment.text = "".join(word.text for word in segment.words).strip()
     return segments
 
+def whisper_model_name() -> str:
+    """Name of the speech recognition model that transcription will load.
+
+    Set by `CLIP_MCP_WHISPER_MODEL`. Callers use it to size the memory a
+    transcription needs before starting one.
+
+    Returns:
+        The model name, such as `large-v3-turbo`, or a path to a local model.
+    """
+    return os.environ.get("CLIP_MCP_WHISPER_MODEL", DEFAULT_WHISPER_MODEL)
+
 def _whisper_device() -> str:
     """Choose the device for speech recognition.
 
@@ -309,10 +321,22 @@ def _run_whisper(
 
     Raises:
         OperationCancelled: If cancellation was requested.
+        RuntimeError: If the machine has less free memory than the model
+            needs, or if the device cannot run it.
     """
     from faster_whisper import BatchedInferencePipeline, WhisperModel
 
-    model_name = os.environ.get("CLIP_MCP_WHISPER_MODEL", DEFAULT_WHISPER_MODEL)
+    model_name = whisper_model_name()
+    # Only on the CPU do the weights sit in system memory; on the GPU they are in VRAM,
+    # and a card that is too small raises its own error and falls back here.
+    needed = resources.whisper_memory_bytes(model_name)
+    available = resources.memory_status() if device == "cpu" else None
+    if available is not None and available[0] < needed:
+        raise RuntimeError(
+            f"{model_name} needs about {needed // resources.MEGABYTE} MB to transcribe and only "
+            f"{available[0] // resources.MEGABYTE} MB is free; close something, or set "
+            "CLIP_MCP_WHISPER_MODEL to a smaller model such as small"
+        )
     model = WhisperModel(model_name, device=device, compute_type="float16" if device == "cuda" else "int8")
     # Batched decoding on CPU overflows CTranslate2's native stack on Windows, so the CPU decodes one chunk at a time.
     segments, info = BatchedInferencePipeline(model).transcribe(

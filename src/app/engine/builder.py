@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from decimal import Decimal
 from fractions import Fraction
 from typing import List, Mapping, Optional, Tuple
+from app.engine import resources
 from app.models.media import Asset
 from app.models.timeline import Clip, Project, TrackType
 
@@ -527,7 +528,14 @@ class FFmpegRenderer:
 
         # Log errors only and suppress console stats; render workers read progress through -progress instead.
         cmd = [self.ffmpeg_bin, "-y", "-loglevel", "error", "-nostats"]
+        # Every input is opened at once and stays open for the whole render, so on a long
+        # timeline the decoders, not the encoder, are what fills memory. Past a handful of
+        # them each one is held to a single thread, which keeps one decoded picture in
+        # flight per input instead of one per core.
+        threads = resources.decoder_threads(len(inputs))
         for input_args in inputs:
+            if threads:
+                cmd.extend(["-threads", str(threads)])
             cmd.extend(input_args)
         cmd.extend(["-filter_complex", ";".join(filters), "-map", "[outv]", "-map", "[outa]"])
 

@@ -115,6 +115,20 @@ workspace/
 | `CLIP_MCP_WHISPER_MODEL` | `large-v3-turbo` | 語音辨識模型 |
 | `CLIP_MCP_WHISPER_DEVICE` | `auto` | `cuda` 或 `cpu`；auto 會偵測 CUDA，失敗時退回 CPU |
 | `CLIP_MCP_SUBTITLE_FONT` | `Arial` | 燒錄字幕的字型 |
+| `CLIP_MCP_MAX_JOBS` | `2` | 同時執行的 render／分析工作數上限 |
+| `CLIP_MCP_MEMORY_RESERVE_MB` | `2048` | 保留給系統、工作不得動用的實體記憶體 |
+| `CLIP_MCP_MAX_DECODERS` | `4` | 縮圖抽幀同時開啟的解碼行程上限（整個伺服器共用）|
+
+### 記憶體與排隊
+
+render 與分析都是重工作：一次 render 會為每個片段各開一個解碼器，一次轉錄要載入數 GB
+的語音模型。所以工作不是「呼叫就跑」，而是先排隊——只有在工作數與剩餘實體記憶體
+都夠時才真正啟動 worker。排隊中的工作只佔一筆資料庫紀錄，`get_job` 的 `stage`
+會說明它在等什麼；等待是正常的，照常輪詢即可。
+
+機器記憶體不足時，**唯一**一個工作仍然會啟動：全部拒絕比慢慢跑更糟。真正跑不動的情況
+（例如 CPU 轉錄但可用記憶體低於模型需求）會直接失敗並告訴你改用哪個較小的模型，
+而不是把整台電腦拖垮。
 
 ## 測試
 

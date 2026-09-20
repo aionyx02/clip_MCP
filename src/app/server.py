@@ -13,6 +13,8 @@ from fastmcp.utilities.types import Image
 from pydantic import Field
 from app.models.media import Asset, Span
 from app.models.timeline import Project, TrackType, EditOperation, apply_operation, validate_project
+from app.engine import resources
+from app.engine.analysis import whisper_model_name
 from app.models.job import Job, JobKind, JobStatus
 from app.engine.probe import probe_file
 from app.engine.builder import DEFAULT_LOUDNESS_TARGET, FFmpegRenderer
@@ -284,7 +286,12 @@ def analyze_asset(
             scripts.
 
     Returns:
-        A dictionary with the `job_id` and initial `status`.
+        A dictionary with the `job_id`, the initial `status`, and `stage`.
+        Analyses run one or two at a time, so that several of them cannot
+        exhaust the machine's memory between them; `stage` says what a job
+        that has not started yet is waiting for, and is null when it started
+        immediately. Waiting costs nothing and needs no action: keep polling
+        `get_job` as usual.
 
     Raises:
         ValueError: If the asset does not exist or has no known duration.
@@ -295,8 +302,9 @@ def analyze_asset(
 
     job = Job(kind=JobKind.ANALYZE, asset_id=asset_id)
     job.work_dir = os.path.join(WORKSPACE_DIR, "jobs", job.job_id)
-    job_manager.start_job(job, {"transcribe": transcribe, "language": language, "prompt": prompt, "chinese_variant": chinese_variant})
-    return {"job_id": job.job_id, "status": job.status.value}
+    job.memory_estimate = resources.analysis_memory_bytes(transcribe and asset.has_audio, whisper_model_name())
+    job = job_manager.start_job(job, {"transcribe": transcribe, "language": language, "prompt": prompt, "chinese_variant": chinese_variant})
+    return {"job_id": job.job_id, "status": job.status.value, "stage": job.stage}
 
 @mcp.tool()
 def get_analysis(
@@ -830,9 +838,13 @@ def render_project(
             `generate_subtitles` proposes them from the transcripts.
 
     Returns:
-        A dictionary with the `job_id`, the initial `status`, and the absolute
-        `output_path` the file will be written to. Each job writes to its own
-        directory, so repeated renders never overwrite each other.
+        A dictionary with the `job_id`, the initial `status`, `stage`, and the
+        absolute `output_path` the file will be written to. Each job writes to
+        its own directory, so repeated renders never overwrite each other.
+        Renders and analyses run one or two at a time, so that several of them
+        cannot exhaust the machine's memory between them; `stage` says what a
+        job that has not started yet is waiting for, and is null when it
+        started immediately.
 
     Raises:
         ValueError: If the project does not exist, contains no clips, or uses
@@ -863,9 +875,11 @@ def render_project(
         project, _referenced_assets(project), job.output_path,
         is_preview=is_preview, loudness_target=loudness_target, subtitle_path=subtitle_path,
     )
-    job_manager.start_job(job, {"command": command, "duration_seconds": float(renderer.output_duration(project))})
+    # One input per clip, all opened at once, is what a render's memory use is made of.
+    job.memory_estimate = resources.render_memory_bytes(command.count("-i"))
+    job = job_manager.start_job(job, {"command": command, "duration_seconds": float(renderer.output_duration(project))})
 
-    return {"job_id": job.job_id, "status": job.status.value, "output_path": job.output_path}
+    return {"job_id": job.job_id, "status": job.status.value, "stage": job.stage, "output_path": job.output_path}
 
 @mcp.tool()
 def get_job(job_id: str) -> dict:

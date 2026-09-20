@@ -205,6 +205,13 @@ so a conversation can be continued days later.
   which one they mean. Do not start a new project just because this
   conversation has not seen one; that silently abandons their edit.
 - Every `render_project` and `analyze_asset` returns a `job_id`. Hold on to it
+- Jobs queue. Renders and transcriptions each need a lot of the computer's
+  memory, so only one or two run at a time and the rest wait their turn. A job
+  that sits at `queued` with a `stage` such as `waiting for 1 running job(s) to
+  finish` is working as intended: keep polling `get_job`, and do not cancel it
+  or start it again. Asking for several analyses at once is fine — they run one
+  after another rather than all at once — so tell the user how many are in line,
+  not that something is stuck.
   until the job reaches `completed`, `failed`, or `cancelled`.
 - If the user changes their mind while a render or an analysis is running, or
   a preview is no longer worth waiting for, call `cancel_job` and tell them

@@ -6,6 +6,7 @@ from typing import List, Optional, Sequence, Tuple
 
 from PIL import Image, ImageDraw, ImageFont
 
+from app.engine import resources
 from app.engine.ffmpeg import hidden_window_flags
 
 TILE_SIZE = 320
@@ -30,6 +31,10 @@ def format_timestamp(seconds: float) -> str:
 def extract_frame(path: str, seconds: float, max_size: int = TILE_SIZE, ffmpeg_bin: str = "ffmpeg") -> Image.Image:
     """Decode a single video frame, scaled to fit a square box.
 
+    Waits for one of the server's decoding slots first, so several sheets
+    being built at the same time cannot put an unbounded number of decoders
+    on the machine at once.
+
     Args:
         path: Media file to read.
         seconds: Time of the frame in the file.
@@ -42,18 +47,21 @@ def extract_frame(path: str, seconds: float, max_size: int = TILE_SIZE, ffmpeg_b
     Raises:
         RuntimeError: If FFmpeg cannot decode a frame at that time.
     """
-    result = subprocess.run(
-        [
-            ffmpeg_bin, "-hide_banner", "-loglevel", "error", "-nostdin",
-            "-ss", f"{max(seconds, 0):.3f}", "-i", path,
-            "-map", "0:V:0", "-frames:v", "1",
-            "-vf", f"scale={max_size}:{max_size}:force_original_aspect_ratio=decrease",
-            "-f", "image2pipe", "-c:v", "png", "-",
-        ],
-        stdin=subprocess.DEVNULL,
-        capture_output=True,
-        creationflags=hidden_window_flags(),
-    )
+    # Wait for a slot, then decode on one thread: a single frame is wanted, and frame
+    # threading would hold several decoded pictures of a 4K source in memory to produce it.
+    with resources.decoder_slot():
+        result = subprocess.run(
+            [
+                ffmpeg_bin, "-hide_banner", "-loglevel", "error", "-nostdin",
+                "-threads", "1", "-ss", f"{max(seconds, 0):.3f}", "-i", path,
+                "-map", "0:V:0", "-frames:v", "1",
+                "-vf", f"scale={max_size}:{max_size}:force_original_aspect_ratio=decrease",
+                "-f", "image2pipe", "-c:v", "png", "-",
+            ],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            creationflags=hidden_window_flags(),
+        )
     if result.returncode != 0 or not result.stdout:
         raise RuntimeError(f"could not read a frame at {seconds:.3f}s: {result.stderr.decode('utf-8', errors='replace').strip()[-300:]}")
     return Image.open(io.BytesIO(result.stdout)).convert("RGB")
@@ -137,7 +145,7 @@ def contact_sheet(path: str, times: List[float], columns: int = 4, ffmpeg_bin: s
     Raises:
         RuntimeError: If a frame cannot be decoded.
     """
-    with ThreadPoolExecutor(max_workers=6) as pool:
+    with ThreadPoolExecutor(max_workers=resources.max_decoders()) as pool:
         frames = list(pool.map(lambda t: extract_frame(path, t, ffmpeg_bin=ffmpeg_bin), times))
     labels = [f"#{index + 1}  {format_timestamp(seconds)}" for index, seconds in enumerate(times)]
     return _compose_sheet(frames, labels, columns)
@@ -167,7 +175,7 @@ def storyboard_sheet(
     Raises:
         RuntimeError: If a frame cannot be decoded.
     """
-    with ThreadPoolExecutor(max_workers=6) as pool:
+    with ThreadPoolExecutor(max_workers=resources.max_decoders()) as pool:
         frames = list(pool.map(lambda shot: extract_frame(shot[0], shot[1], ffmpeg_bin=ffmpeg_bin), shots))
     if aspect is not None:
         # One size for every tile, so sources of different shapes line up in the grid.
