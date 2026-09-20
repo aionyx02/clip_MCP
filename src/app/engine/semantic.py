@@ -1,4 +1,10 @@
-"""Deriving the semantic timeline's `utterance` level from an asset's analysis.
+"""Deriving, from an asset's analysis, the facts an edit is decided from.
+
+Two of them. The semantic timeline's `utterance` level — a clip per sentence,
+per shot, per long pause — and the seconds at which that file may be cut
+without splitting a word. They share a module because they are the same kind
+of thing: a pure function of what `analyze_asset` already stored, handed on as
+numbers so that nothing downstream has to read a transcript and interpret it.
 
 Everything here is a pure function of what `analyze_asset` already stored:
 sentence boundaries from the transcript, shot changes from scene detection,
@@ -319,17 +325,14 @@ class CleanCuts:
     words: Tuple[Tuple[float, float], ...] = ()
     sentences: Tuple[Tuple[float, float], ...] = ()
 
-    @property
-    def word_edges(self) -> Tuple[float, ...]:
-        """Every second at which no word is in progress.
-
-        Returns:
-            The words' starts and ends together, in order.
-        """
-        return tuple(sorted({edge for word in self.words for edge in word}))
-
     def splits_a_word(self, seconds: float) -> bool:
         """Say whether a cut here would land inside a word.
+
+        The same rounding tolerance the rest of this module allows on a snapped
+        boundary applies, so that this and the benchmark's `words_cut` — which
+        asks the identical question of a finished cut — cannot answer it
+        differently and leave the compiler chasing a fault the scorer does not
+        see.
 
         Args:
             seconds: The time to check.
@@ -339,7 +342,10 @@ class CleanCuts:
             answers False: nothing is *known* to break, which is not the same
             as nothing breaking.
         """
-        return any(start < seconds < end for start, end in self.words)
+        return any(
+            start + EDGE_TOLERANCE_SECONDS < seconds < end - EDGE_TOLERANCE_SECONDS
+            for start, end in self.words
+        )
 
     def splits_a_sentence(self, seconds: float) -> bool:
         """Say whether a cut here would leave a sentence unfinished.
@@ -376,11 +382,17 @@ class CleanCuts:
 
         Returns:
             The nearest such second, or None when the file offers none that
-            close. A tie goes to the later one, which keeps the word whole
-            rather than dropping it.
+            close.
         """
-        near = [edge for edge in self.word_edges if abs(edge - seconds) <= within]
-        return max(near, key=lambda edge: (-abs(edge - seconds), edge)) if near else None
+        best: Optional[float] = None
+        for edge in (edge for word in self.words for edge in word):
+            if abs(edge - seconds) > within:
+                continue
+            # Nearest wins. A tie goes to the later edge, which keeps the word whole
+            # rather than dropping it — hence the sort key falling on -edge.
+            if best is None or (abs(edge - seconds), -edge) < (abs(best - seconds), -best):
+                best = edge
+        return best
 
 def clean_cuts(analysis: MediaAnalysis) -> CleanCuts:
     """Work out where a cut may land in one file without breaking a word.

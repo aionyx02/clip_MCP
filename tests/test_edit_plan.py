@@ -223,8 +223,10 @@ def test_a_head_trim_does_not_stop_in_the_middle_of_a_word() -> None:
     # The sentence starts at 2.0, so 2.5s of it ends at 4.5 — inside 就起床.
     assert head_piece(2.5, made, snap=False).end == pytest.approx(4.5)
     # Given the word edges, it lands on one rather than through a syllable.
+    # 4.5 is half a second from the edge at 4.0 and a full second from the one at 5.5,
+    # so the nearest is 4.0 and the tie-break never comes into it.
     landed = head_piece(2.5, made).end
-    assert landed in (4.0, 5.5)
+    assert landed == pytest.approx(4.0)
     assert not clean_cuts(made).splits_a_word(landed)
 
 def test_snapping_a_cut_costs_a_fraction_of_a_second() -> None:
@@ -255,6 +257,53 @@ def test_footage_nobody_transcribed_is_cut_where_it_was_asked_for() -> None:
     piece = plan_pieces(plan, {clip.id: clip for clip in clips}, {}, assets, {ASSET_ID: clean_cuts(made)})[0]
     assert piece.end == pytest.approx(3.0)
 
+def test_a_tail_trim_does_not_start_in_the_middle_of_a_word() -> None:
+    # The other end, and the other unpadded edge: `tail` opens wherever the arithmetic
+    # lands, so it needs the same treatment as `head`.
+    made = spoken_words(*SENTENCE)
+    assets = {ASSET_ID: sourced()}
+    _, clips = build_timeline(assets, {ASSET_ID: made})
+    spoken = next(clip for clip in clips if clip.text)
+    plan = plan_for([Selection(
+        clip_id=spoken.id, beat_id="b1", trim=Trim(kind=TrimKind.TAIL, seconds=2.5),
+    )])
+    by_id = {clip.id: clip for clip in clips}
+    # 2.5s back from the sentence end at 6.0 is 3.5, inside 四點 (3.0-4.0).
+    assert plan_pieces(plan, by_id, {}, assets, None)[0].start == pytest.approx(3.5)
+    landed = plan_pieces(plan, by_id, {}, assets, {ASSET_ID: clean_cuts(made)})[0].start
+    assert not clean_cuts(made).splits_a_word(landed)
+
+def test_a_word_longer_than_the_snap_allows_is_left_alone_and_said_so() -> None:
+    # One long word and no edge within SNAP_SECONDS of the middle of it. Moving the cut
+    # further than that is a bigger change to the edit than the fault it fixes, so the
+    # compiler leaves it — and says it left it, rather than quietly failing to fix it.
+    made = spoken_words(("嗯" * 8, 2.0, 6.0))
+    assets = {ASSET_ID: sourced()}
+    timeline, clips = build_timeline(assets, {ASSET_ID: made})
+    spoken = next(clip for clip in clips if clip.text)
+    plan = plan_for([Selection(
+        clip_id=spoken.id, beat_id="b1", trim=Trim(kind=TrimKind.HEAD, seconds=2.0),
+    )]).model_copy(update={"timeline_id": timeline.id, "timeline_input_hash": timeline.input_hash})
+    by_id, cuts = {clip.id: clip for clip in clips}, {ASSET_ID: clean_cuts(made)}
+
+    assert plan_pieces(plan, by_id, {}, assets, cuts)[0].end == pytest.approx(4.0)
+    _, notes = check_plan(plan, timeline, by_id, {}, assets, cuts)
+    assert any("still land inside a word" in note for note in notes)
+
+def test_moving_a_cut_is_reported_even_though_it_is_arithmetic() -> None:
+    # It is still a change to somebody's edit. 「不要默默修正」 is about not doing things
+    # silently, not only about validation.
+    made = spoken_words(*SENTENCE)
+    assets = {ASSET_ID: sourced()}
+    timeline, clips = build_timeline(assets, {ASSET_ID: made})
+    spoken = next(clip for clip in clips if clip.text)
+    plan = plan_for([Selection(
+        clip_id=spoken.id, beat_id="b1", trim=Trim(kind=TrimKind.HEAD, seconds=2.5),
+    )]).model_copy(update={"timeline_id": timeline.id, "timeline_input_hash": timeline.input_hash})
+    _, notes = check_plan(plan, timeline, {clip.id: clip for clip in clips}, {}, assets,
+                          {ASSET_ID: clean_cuts(made)})
+    assert any("moved off the middle of a word" in note for note in notes)
+
 def test_a_cut_that_still_stops_mid_sentence_is_reported_not_repaired() -> None:
     # Finishing the sentence costs seconds, not fractions of one, so it changes how long
     # the video runs — which is the decision of whoever set the length, not the compiler's.
@@ -270,9 +319,11 @@ def test_a_cut_that_still_stops_mid_sentence_is_reported_not_repaired() -> None:
     cuts = {ASSET_ID: clean_cuts(made)}
     problems, notes = check_plan(plan, timeline, by_id, {}, assets, cuts)
     assert problems == []
-    assert any("before the sentence ends" in note for note in notes)
+    assert any("stop before the sentence ends" in note for note in notes)
     # And it says what finishing it would cost, so the choice can be made on a number.
     assert any("2.0s" in note for note in notes)
+    # One line however many windows it covers: fifteen near-identical notes is not a report.
+    assert sum(1 for note in notes if "sentence ends" in note) == 1
 
 def test_pieces_that_nearly_touch_become_one_clip() -> None:
     by_id, children, assets, clips = footage()

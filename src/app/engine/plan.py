@@ -105,15 +105,18 @@ def _piece(
         The window, in source seconds and inside the asset.
     """
     lead, trail = _breath(clip)
-    opening = (clip.source_range.start if start is None else start) - (lead if pad_head else 0.0)
-    closing = (clip.source_range.end if end is None else end) + (trail if pad_tail else 0.0)
+    opened = clip.source_range.start if start is None else start
+    closed = clip.source_range.end if end is None else end
+    opening = opened - (lead if pad_head else 0.0)
+    closing = closed + (trail if pad_tail else 0.0)
     if cuts is not None:
-        # Only the unpadded edges: a padded one already ends in silence, and moving it
-        # would spend the breath the rest of the compiler works to give every cut.
-        if not pad_head:
-            opening = _landed(opening, clip.source_range.start, clip.source_range.end, cuts)
-        if not pad_tail:
-            closing = _landed(closing, clip.source_range.start, clip.source_range.end, cuts)
+        # A padded edge is meant to be sitting in silence, but the breath is measured
+        # from the silence detector while words come from the transcriber, and the two
+        # disagree: a breath can reach back into a word the detector called quiet. So
+        # every edge is checked, and a padded one that lands in a word gives the breath
+        # back rather than clipping a syllable.
+        opening = _landed(opening, opened if pad_head else None, clip, cuts)
+        closing = _landed(closing, closed if pad_tail else None, clip, cuts)
     # Round to milliseconds before clamping, never after: rounding 36.266667 up to 36.267
     # would put the window past the end of a file that is only 36.266667s long.
     closing = round(closing, 3)
@@ -121,32 +124,47 @@ def _piece(
         closing = min(closing, float(asset.duration))
     return Piece(asset.id, round(max(0.0, opening), 3), closing, (clip.id,))
 
-def _landed(seconds: float, floor: float, ceiling: float, cuts: CleanCuts) -> float:
+def _landed(
+    seconds: float,
+    unpadded: Optional[float],
+    clip: SemanticClip,
+    cuts: CleanCuts,
+) -> float:
     """Move a cut off the middle of a word, if there is somewhere near to put it.
 
     Args:
-        seconds: Where the cut was asked for.
-        floor: Earliest it may go, the clip's own start.
-        ceiling: Latest it may go, the clip's own end.
+        seconds: Where the cut would fall.
+        unpadded: The same edge without its breath, for an edge that has one;
+            None for an edge that never had one. Giving the breath back is
+            tried first, because it is the smallest move available and it
+            returns the edge to the sentence boundary it came from.
+        clip: The clip being cut, whose own range bounds the answer.
         cuts: Where this file may be cut without splitting a word.
 
     Returns:
-        The nearest clean second within `SNAP_SECONDS` and inside the clip, or
-        the time as asked when the file offers nothing that close — which
-        happens on footage nobody transcribed, and is reported by
-        `check_plan` rather than guessed at.
+        A second that does not fall inside a word, as near as possible to the
+        one asked for. The time as asked when nothing near enough qualifies —
+        which happens where a word runs longer than `SNAP_SECONDS` allows the
+        cut to travel, and which `check_plan` reports rather than papers over.
     """
     if not cuts.splits_a_word(seconds):
         return seconds
+    if unpadded is not None and not cuts.splits_a_word(unpadded):
+        return unpadded
     landed = cuts.nearest_word_edge(seconds, SNAP_SECONDS)
-    return seconds if landed is None else min(max(landed, floor), ceiling)
+    if landed is None:
+        return seconds
+    # Clamped back into the clip, the edge can land in a word all over again, which
+    # would undo the move without anybody noticing.
+    inside = min(max(landed, clip.source_range.start), clip.source_range.end)
+    return seconds if cuts.splits_a_word(inside) else inside
 
 def _selection_pieces(
     selection: Selection,
     clip: SemanticClip,
     children: Sequence[SemanticClip],
     asset: Asset,
-    cuts: Optional[CleanCuts] = None,
+    cuts: Optional[CleanCuts],
 ) -> List[Piece]:
     """Work out what one selection contributes to the cut.
 
@@ -263,39 +281,74 @@ def compiled_duration(pieces: Sequence[Piece]) -> float:
     """
     return round(sum(piece.duration for piece in pieces), 3)
 
-def _unfinished_sentences(
+def _cut_notes(
     pieces: Sequence[Piece],
+    unsnapped: Sequence[Piece],
     cuts: Optional[Mapping[str, CleanCuts]],
+    duration: float,
 ) -> List[str]:
-    """Say which windows stop while somebody is still talking.
+    """Say what the compiler did to the cuts, and what it left for somebody to decide.
 
-    The compiler moves a cut off the middle of a word on its own, because that
-    costs a fraction of a second. Letting the sentence finish is a different
-    matter: measured on real footage it costs seconds per cut, which changes
-    how long the video runs. Spending that is the decision of whoever set the
-    length, so it is handed back rather than taken.
+    Three things, each said once however many cuts it covers. Fifteen near
+    identical lines is not a report, it is something to scroll past.
+
+    Moving an edge off the middle of a word is arithmetic and is done without
+    asking, but it is still a change to somebody's edit, so it is said.
+    Letting a sentence finish is not arithmetic: measured on real footage it
+    runs to a third of the length of the video, and how long the video runs is
+    not the compiler's to decide. Leaving a cut inside a word because no clean
+    second is near enough is a failure to say plainly rather than to hide.
 
     Args:
         pieces: The compiled windows.
+        unsnapped: The same windows as they would be without the cut points,
+            for saying how many moved.
         cuts: Where each file may be cut without splitting a word, keyed by
             asset ID.
+        duration: How long the compiled cut runs, for costing what is owed.
 
     Returns:
-        One note per window that ends mid-sentence, saying what it would cost
-        to finish. Empty when nothing was transcribed, since then nothing is
-        known to be cut through.
+        The notes, empty when nothing was transcribed and so nothing is known.
     """
     if not cuts:
         return []
     said: List[str] = []
-    for piece in pieces:
-        known = cuts.get(piece.asset_id)
-        if known is None or not known.splits_a_sentence(piece.end):
-            continue
-        owed = known.rest_of_sentence(piece.end)
+
+    moved = [
+        abs(new_edge - old_edge)
+        for new, old in zip(pieces, unsnapped)
+        for new_edge, old_edge in ((new.start, old.start), (new.end, old.end))
+        if new_edge != old_edge
+    ]
+    if moved:
         said.append(
-            f"{', '.join(piece.from_clip_ids)} stops {owed:.1f}s before the sentence ends; "
-            "trim it to `full`, or give it those seconds, if the cut sounds abrupt there"
+            f"{len(moved)} cut(s) moved off the middle of a word, by up to {max(moved):.2f}s"
+        )
+
+    stuck = [
+        piece for piece in pieces
+        if (known := cuts.get(piece.asset_id))
+        and any(known.splits_a_word(edge) for edge in (piece.start, piece.end))
+    ]
+    if stuck:
+        said.append(
+            f"{len(stuck)} cut(s) still land inside a word: {', '.join(p.from_clip_ids[0] for p in stuck)}. "
+            f"No clean point is within {SNAP_SECONDS:g}s of them, so they were left as asked"
+        )
+
+    owed = [
+        (known.rest_of_sentence(piece.end), piece)
+        for piece in pieces
+        if (known := cuts.get(piece.asset_id)) and known.splits_a_sentence(piece.end)
+    ]
+    if owed:
+        total = sum(seconds for seconds, _ in owed)
+        worst, piece = max(owed, key=lambda item: item[0])
+        share = f", {total / duration:.0%} of the cut" if duration else ""
+        said.append(
+            f"{len(owed)} window(s) stop before the sentence ends. Finishing them all would add "
+            f"{total:.1f}s{share}; the longest is {piece.from_clip_ids[0]}, {worst:.1f}s short. "
+            "Give those seconds to the ones that sound abrupt, or leave them"
         )
     return said
 
@@ -388,7 +441,7 @@ def check_plan(
     if not problems:
         pieces = plan_pieces(plan, clips, children, assets, cuts)
         duration = compiled_duration(pieces)
-        notes.extend(_unfinished_sentences(pieces, cuts))
+        notes.extend(_cut_notes(pieces, plan_pieces(plan, clips, children, assets, None), cuts, duration))
         if plan.target.seconds:
             drift = abs(duration - plan.target.seconds) / plan.target.seconds
             if drift > LENGTH_TOLERANCE:

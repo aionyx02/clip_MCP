@@ -21,7 +21,7 @@ from app.benchmark.metrics import (
     score,
 )
 from app.engine.plan import BREATH_SECONDS, Piece, plan_pieces
-from app.engine.semantic import build_timeline
+from app.engine.semantic import build_timeline, clean_cuts
 from app.models.media import MediaAnalysis, Transcript
 from app.models.plan import Beat, EditPlan, Selection
 from test_edit_plan import FOOTAGE, sourced, speech_of
@@ -258,7 +258,7 @@ def test_a_plan_compiled_from_real_footage_scores_end_to_end() -> None:
             Selection(clip_id=spoken[2].id, beat_id="b1", rationale="收尾"),
         ],
     )
-    pieces = plan_pieces(plan, {clip.id: clip for clip in clips}, {}, assets)
+    pieces = plan_pieces(plan, {clip.id: clip for clip in clips}, {}, assets, {ASSET_ID: clean_cuts(made)})
 
     card = score(
         BenchmarkCase(
