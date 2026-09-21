@@ -38,6 +38,7 @@ clip_MCP/
 │   │   ├── benchmark/             # L2 評測：不必 render 就能替一份 plan 打分
 │   │   │   ├── __init__.py
 │   │   │   ├── case.py            # 語料案例：素材 + 指令 + 必留/必剔標註（以相對路徑錨定）
+│   │   │   │                      #   案例會說明指令與標註各是誰寫的；草稿一律不計分
 │   │   │   └── metrics.py         # 品質底線的量測（純函式）與計分卡
 │   │   ├── storage/               # 專案與任務持久化
 │   │   │   ├── __init__.py
@@ -72,6 +73,8 @@ clip_MCP/
 │   ├── test_skill_resources.py    # skill 與 server 不得漂移（工具、操作、分層指標）
 │   ├── test_benchmark.py          # L2 計分：案例驗證、五項底線、剪點餘裕、端到端
 │   └── test_end_to_end.py         # 從資料夾到成片的完整流程
+├── corpus/                        # L2 語料：一題一個 .json（案例本身已 gitignore，只留 README）
+│   └── README.md                  # 素材根目錄、成片與素材同資料夾的陷阱、三支的待辦
 ├── docs/
 │   ├── architecture.md
 │   └── roadmap.md                 # 只留待辦：還缺的量測與剪輯功能、評測、里程碑

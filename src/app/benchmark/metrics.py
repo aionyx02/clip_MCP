@@ -329,6 +329,32 @@ class Scorecard:
         """
         return round(median(self.cut_margins), 3) if self.cut_margins else None
 
+def _untested(
+    case: BenchmarkCase,
+    pieces: Sequence[Piece],
+    analyses: Mapping[str, MediaAnalysis],
+) -> List[str]:
+    """Say what could not be tested, footage and annotations alike.
+
+    A draft case belongs here rather than among the failures. Its floors were
+    not missed; nobody has set them yet, and a card that reported one as
+    cleared would be claiming a measurement that was never taken.
+
+    Args:
+        case: The case being scored.
+        pieces: The windows the plan compiled to.
+        analyses: Each asset's stored analysis, keyed by asset ID.
+
+    Returns:
+        One sentence per floor that went untested.
+    """
+    untested = []
+    if case.is_draft:
+        untested.append(
+            f"case {case.id}: its annotations are an unreviewed draft, so nothing it reports is evidence"
+        )
+    return untested + _unmeasured(pieces, analyses)
+
 def score(
     case: BenchmarkCase,
     pieces: Sequence[Piece],
@@ -404,5 +430,5 @@ def score(
         cuts_outside_windows=outside,
         cut_margins=margins,
         failures=tuple(failures),
-        unmeasured=tuple(_unmeasured(pieces, analyses)),
+        unmeasured=tuple(_untested(case, pieces, analyses)),
     )

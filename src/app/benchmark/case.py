@@ -11,6 +11,15 @@ deliberately not a model answer. There is more than one good cut of anything,
 so a case scores whether the mines were stepped on and whether the point was
 found, not how closely the result resembles one person's version.
 
+Which is why a case says where its instruction and its annotations came from.
+A brief the person wrote before anything was cut is worth more than one
+reconstructed afterwards, and shortening theirs sits between the two: the
+requirements are still theirs, but whoever shortened them knew the answer.
+A case seeded from footage somebody has already cut starts with every chosen
+stretch marked must-keep, and that is a model answer wearing an annotation's
+clothes. It stays marked `draft` until a person has taken out everything that
+was merely chosen rather than necessary, and a draft scores nothing.
+
 Every annotation anchors to a file path and a time inside that file. Asset IDs
 are generated per workspace, so a corpus keyed on them would score nothing on a
 second machine; paths survive being copied about, which is what a corpus is
@@ -18,7 +27,7 @@ for.
 """
 
 from pathlib import Path
-from typing import List, Optional
+from typing import List, Literal, Optional
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -76,6 +85,32 @@ class BenchmarkCase(BaseModel):
         default_factory=list,
         description="What a good cut of this footage looks like, one judgeable statement per line. Carried for L3, not scored here",
     )
+    instruction_by: Literal["user", "summarised", "derived"] = Field(
+        default="user",
+        description="Whose words the instruction is, and how far from the ask it has travelled. 'user' is what "
+                    "they wrote; 'summarised' is what they wrote, shortened by somebody who has since seen the "
+                    "cut; 'derived' was reconstructed from the cut itself and never asked by anyone",
+    )
+    annotated_by: Literal["user", "draft"] = Field(
+        default="user",
+        description="Who settled the annotations. 'draft' means nobody has been through them yet",
+    )
+
+    @property
+    def is_draft(self) -> bool:
+        """Whether this case is still somebody's homework.
+
+        A case whose annotations were extracted from an existing cut marks
+        everything that cut used as must-keep, which scores a new plan on how
+        closely it reproduces an old one. That is the one thing the corpus is
+        not for, so until a person has been through the list and taken out
+        what was merely chosen rather than necessary, this case measures
+        nothing.
+
+        Returns:
+            True while the annotations are an unreviewed draft.
+        """
+        return self.annotated_by == "draft"
 
     @model_validator(mode="after")
     def validate_annotations(self):

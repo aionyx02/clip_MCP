@@ -317,3 +317,59 @@ def test_the_room_a_cut_had_is_the_headroom_the_semantic_layer_measures() -> Non
     assert card.cut_margins == (BREATH_SECONDS, BREATH_SECONDS)
     # And a cut on the edge itself has none, which is the number, not a missing one.
     assert scored([piece(4.0, 8.0)], made=made).cut_margins == (0.0, 0.0)
+
+# --- provenance: a case says whose words it carries and who checked its annotations -------
+
+def test_a_draft_case_scores_nothing_until_somebody_has_been_through_it() -> None:
+    """Seeded from an existing cut, every chosen stretch is must-keep — a model answer.
+
+    Scoring against that measures how closely a plan reproduces the old cut,
+    which is the one thing the corpus is not for, so a draft belongs with the
+    floors nobody could test rather than among the ones that passed.
+    """
+    assert case_for(must_keep=[marked(0, 4)], annotated_by="draft").is_draft
+    card = scored([piece(0, 4)], must_keep=[marked(0, 4)], annotated_by="draft")
+    assert any("unreviewed draft" in note for note in card.unmeasured)
+    # Full coverage and no failures, and still not clean: nothing here is evidence.
+    assert card.must_keep_coverage == 1.0
+    assert not card.failures
+    assert not card.clean
+
+def test_a_reviewed_case_is_evidence() -> None:
+    """The same annotations, once a person has stood behind them, do score."""
+    assert not case_for(must_keep=[marked(0, 4)]).is_draft
+    card = scored([piece(0, 4)], must_keep=[marked(0, 4)])
+    assert not any("draft" in note for note in card.unmeasured)
+
+def test_a_case_defaults_to_being_somebody_own_reviewed_work() -> None:
+    """Hand-written cases are the normal kind, so they need neither field."""
+    case = case_for()
+    assert (case.instruction_by, case.annotated_by) == ("user", "user")
+    assert not case.is_draft
+
+def test_an_instruction_reconstructed_after_the_fact_says_so() -> None:
+    """An instruction written by somebody who had already seen the answer is not the ask."""
+    case = case_for(instruction_by="derived")
+    assert case.instruction_by == "derived"
+
+# --- the corpus that ships with the repo --------------------------------------------------
+
+def test_the_corpus_holds_up_if_there_is_one() -> None:
+    """The cases are edited by hand, so a malformed one should fail here and not mid-run.
+
+    Skipped where the corpus is absent: the annotations quote somebody's own
+    brief and point at footage on one machine, so they are not in the repo.
+    """
+    corpus = Path(__file__).resolve().parent.parent / "corpus"
+    cases = sorted(corpus.glob("*.json")) if corpus.is_dir() else []
+    if not cases:
+        pytest.skip("no corpus checked out")
+    loaded = load_cases(corpus)
+    assert len(loaded) == len(cases)
+    for case in loaded:
+        assert case.footage, f"{case.id} lists no footage"
+        # The finished exports live beside the footage. One reaching a case would be
+        # handing the answer to whatever is being measured.
+        for name in case.footage:
+            stem = Path(name).stem
+            assert not (stem[:4].isdigit() and len(stem) <= 8), f"{case.id}: {name} looks like a finished cut"
