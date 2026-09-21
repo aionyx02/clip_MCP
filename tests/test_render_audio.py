@@ -10,6 +10,7 @@ from pathlib import Path
 import pytest
 
 from app.server import import_asset
+from app.server import repo
 from helpers import build_project, edit, insert, level, loudness, render, video_track
 
 @pytest.fixture
@@ -129,3 +130,80 @@ def test_the_silence_guard_reaches_nothing_but_nan(media: Path, audio_media: Pat
     # the guard replaces NaN and leaves every sample that is a number alone.
     assert level(tmp_path / "out.mp4", 0, 2.5) < -80
     assert level(tmp_path / "out.mp4", 3.5, 3) > -30
+
+
+@pytest.fixture
+def two_tones(tmp_path_factory: pytest.TempPathFactory) -> tuple:
+    """Two clips carrying tones far enough apart to be told apart in the mix.
+
+    Returns:
+        The asset IDs of a 440 Hz clip and a 1500 Hz clip, six seconds each.
+    """
+    folder = tmp_path_factory.mktemp("tones")
+    assets = []
+    for name, frequency in (("low.mp4", 440), ("high.mp4", 1500)):
+        path = folder / name
+        result = subprocess.run([
+            "ffmpeg", "-y", "-loglevel", "error",
+            "-f", "lavfi", "-i", "testsrc=size=320x240:rate=30:duration=6",
+            "-f", "lavfi", "-i", f"sine=frequency={frequency}:duration=6",
+            "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+            "-c:a", "aac", "-shortest", str(path),
+        ], capture_output=True)
+        assert result.returncode == 0, result.stderr.decode("utf-8", errors="replace")
+        assets.append(import_asset(str(path))["id"])
+    return tuple(assets)
+
+
+def cut_at_three(low: str, high: str, **audio) -> str:
+    """Put the low clip on screen for three seconds, then the high one.
+
+    Args:
+        low: Asset for the first clip.
+        high: Asset for the second.
+        **audio: Fields for a `set_clip_audio` on whichever clip is named.
+
+    Returns:
+        The project ID.
+    """
+    project = build_project([video_track(), insert("a", low, 0, 3), insert("b", high, 2, 5)],
+                            width=320, height=240)
+    if audio:
+        edit(project, [{"action": "set_clip_audio", "track_id": "main", **audio}])
+    return project
+
+
+def test_a_j_cut_is_heard_before_it_is_seen(two_tones: tuple, tmp_path: Path) -> None:
+    """The second clip's sound comes in under the tail of the first clip's picture."""
+    low, high = two_tones
+    straight = cut_at_three(low, high)
+    render(straight, tmp_path / "straight.mp4", loudness_target=None)
+    # Nothing of the second clip is audible while the first is still on screen.
+    assert level(tmp_path / "straight.mp4", 1.5, 1.4, freq=1500) < -50
+
+    jcut = cut_at_three(low, high, clip_id="b", audio_lead=1.5)
+    render(jcut, tmp_path / "jcut.mp4", loudness_target=None)
+    assert level(tmp_path / "jcut.mp4", 1.5, 1.4, freq=1500) > -30
+    # And the picture has not moved: the cut is still at three seconds.
+    assert repo.get_project(jcut).tracks[0].clips[1].timeline_in == 3
+
+
+def test_an_l_cut_is_still_heard_after_it_has_gone(two_tones: tuple, tmp_path: Path) -> None:
+    """The first clip's sound finishes over the shot that replaced it."""
+    low, high = two_tones
+    straight = cut_at_three(low, high)
+    render(straight, tmp_path / "straight.mp4", loudness_target=None)
+    assert level(tmp_path / "straight.mp4", 3.6, 1.4, freq=440) < -50
+
+    lcut = cut_at_three(low, high, clip_id="a", audio_lag=1.5)
+    render(lcut, tmp_path / "lcut.mp4", loudness_target=None)
+    assert level(tmp_path / "lcut.mp4", 3.6, 1.4, freq=440) > -30
+
+
+def test_the_two_are_heard_together_where_they_overlap(two_tones: tuple, tmp_path: Path) -> None:
+    """An overlap is both of them at once, not one replacing the other."""
+    low, high = two_tones
+    jcut = cut_at_three(low, high, clip_id="b", audio_lead=1.5)
+    render(jcut, tmp_path / "out.mp4", loudness_target=None)
+    assert level(tmp_path / "out.mp4", 1.6, 1.2, freq=440) > -30
+    assert level(tmp_path / "out.mp4", 1.6, 1.2, freq=1500) > -30

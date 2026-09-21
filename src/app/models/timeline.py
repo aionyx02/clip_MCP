@@ -141,6 +141,11 @@ class ColorAdjust(BaseModel):
             and self.temperature is None
         )
 
+# What the renderer can stretch sound to without stacking filters on top of each other
+# past the point where anybody would want to listen to the result.
+MIN_SPEED = 0.25
+MAX_SPEED = 8.0
+
 class Clip(BaseModel):
     """A segment of a source asset placed on a track.
 
@@ -164,10 +169,35 @@ class Clip(BaseModel):
         default=False,
         description="Adjusted by hand, so compiling the plan again keeps it as it is rather than rebuilding it",
     )
-    speed: float = Field(default=1.0, gt=0)
+    speed: float = Field(
+        default=1.0,
+        ge=MIN_SPEED,
+        le=MAX_SPEED,
+        description="How fast the clip plays. 2.0 runs it at double speed and half the length, 0.5 at half speed "
+                    "and twice the length. The sound is stretched to match, so voices keep their pitch",
+    )
     volume: float = Field(default=1.0, ge=0, description="Audio gain; 1.0 keeps the original level, 0.5 halves it")
+    audio_lead: Decimal = Field(
+        default=Decimal(0),
+        ge=0,
+        description="Seconds this clip's sound starts before its picture does, taken from before its source range. "
+                    "This is the J cut: the next scene is heard under the end of the one still on screen",
+    )
+    audio_lag: Decimal = Field(
+        default=Decimal(0),
+        ge=0,
+        description="Seconds this clip's sound runs on after its picture has cut away, taken from after its source "
+                    "range. This is the L cut: a line finishes over the shot that follows it",
+    )
     audio_fade_in: Decimal = Field(default=Decimal(0), ge=0, description="Audio fade-in length at the clip start (seconds)")
     audio_fade_out: Decimal = Field(default=Decimal(0), ge=0, description="Audio fade-out length at the clip end (seconds)")
+    dissolve_in: Decimal = Field(
+        default=Decimal(0),
+        ge=0,
+        description="Seconds this clip's picture mixes in over the end of the clip before it — a cross dissolve. "
+                    "The mix ends where this clip starts, and the extra picture comes from before its source "
+                    "range, so the cut stays where it is and the sequence keeps its length. 0 is a straight cut",
+    )
     video_fade_in: Decimal = Field(default=Decimal(0), ge=0, description="Fade in from black at the clip start (seconds)")
     video_fade_out: Decimal = Field(default=Decimal(0), ge=0, description="Fade out to black at the clip end (seconds)")
     color: Optional[ColorAdjust] = Field(default=None, description="Picture adjustments; null leaves the picture as shot")
@@ -175,6 +205,90 @@ class Clip(BaseModel):
         default=None,
         description="Where the clip is drawn, for clips on a video track above the first; null fills the frame",
     )
+
+    @property
+    def video_source_start(self) -> Decimal:
+        """Where in the source this clip's picture begins.
+
+        A dissolve is fed from before the clip's in point, so that the mix can
+        run under the outgoing clip while this one is still to come. Plain
+        arithmetic, for the same reason `audio_source_start` is: a dissolve
+        reaching past the start of the file has to be reportable.
+
+        Returns:
+            The second in the source, which is negative when the dissolve asks
+            for more picture than the file has before the clip.
+        """
+        return self.source_range.start - self.dissolve_in * Decimal(str(self.speed))
+
+    @property
+    def audio_source_start(self) -> Decimal:
+        """Where in the source this clip's sound begins.
+
+        Plain arithmetic rather than a range, because a lead that reaches back
+        past the start of the file has to be reportable. Building a `TimeRange`
+        here would raise on the way to the sentence explaining what is wrong.
+
+        Returns:
+            The second in the source, which is negative when the lead asks for
+            more sound than the file has before the picture.
+        """
+        return self.source_range.start - self.audio_lead * Decimal(str(self.speed))
+
+    @property
+    def audio_source_end(self) -> Decimal:
+        """Where in the source this clip's sound ends.
+
+        Returns:
+            The second in the source, which may be past the end of the file
+            when the lag asks for more than it has.
+        """
+        return self.source_range.end + self.audio_lag * Decimal(str(self.speed))
+
+    @property
+    def audio_source_range(self) -> TimeRange:
+        """Source range this clip's sound is taken from.
+
+        The picture's range, opened out by whatever the lead and the lag ask
+        for. Those are timeline seconds, so playback speed turns them into
+        source seconds the same way it does for the clip's own length.
+
+        Returns:
+            The range. Equal to `source_range` when neither is set.
+
+        Raises:
+            ValueError: If it falls outside the file. `validate_project` says
+                so in a sentence first; this is the backstop.
+        """
+        return TimeRange(start=self.audio_source_start, end=self.audio_source_end)
+
+    @property
+    def audio_timeline_in(self) -> Decimal:
+        """Time on the timeline at which this clip's sound comes in.
+
+        Returns:
+            `timeline_in`, less the lead.
+        """
+        return self.timeline_in - self.audio_lead
+
+    @property
+    def audio_timeline_out(self) -> Decimal:
+        """Time on the timeline at which this clip's sound stops.
+
+        Returns:
+            `timeline_out`, plus the lag.
+        """
+        return self.timeline_out + self.audio_lag
+
+    @property
+    def audio_timeline_duration(self) -> Decimal:
+        """How long this clip's sound runs on the timeline.
+
+        Returns:
+            The picture's length plus the lead and the lag. This, rather than
+            `timeline_duration`, is what the clip's fades have to fit inside.
+        """
+        return self.timeline_duration + self.audio_lead + self.audio_lag
 
     @property
     def timeline_duration(self) -> Decimal:
@@ -193,6 +307,28 @@ class Clip(BaseModel):
             `timeline_in` plus `timeline_duration`, in seconds.
         """
         return self.timeline_in + self.timeline_duration
+
+class Marker(BaseModel):
+    """A named point on the timeline: where one part of the video begins.
+
+    A cut has a shape — an opening, a middle, an ending — and until now that
+    shape lived only in the plan and was lost the moment the plan was
+    compiled. A marker is that shape written onto the timeline, where the
+    things that follow it can read it: where the music changes, how dense the
+    B-roll should be, which caption style applies.
+
+    Markers name a moment, not a stretch. Where one part ends is where the
+    next begins, and the last one runs to the end of the cut.
+    """
+
+    id: str
+    name: str = Field(..., min_length=1, description="What this part is, such as 開場 or 結尾")
+    timeline_in: Decimal = Field(..., ge=0, description="Where it begins on the timeline (seconds)")
+    from_beat_id: Optional[str] = Field(
+        default=None,
+        description="Beat of the plan this came from. Markers with one are the compiler's and are rebuilt "
+                    "every time the plan is compiled; markers without one were put there by hand and are kept",
+    )
 
 class TrackType(str, Enum):
     """Kind of media a track carries."""
@@ -222,6 +358,10 @@ class Project(BaseModel):
     width: int = Field(default=1920, gt=0, multiple_of=2, description="Output width (pixels); must be even")
     height: int = Field(default=1080, gt=0, multiple_of=2, description="Output height (pixels); must be even")
     tracks: List[Track] = Field(default_factory=list)
+    markers: List[Marker] = Field(
+        default_factory=list,
+        description="Where each part of the video begins, in timeline order",
+    )
     subtitles: List[SubtitleCue] = Field(
         default_factory=list,
         description="Captions burned into the picture when render_project is called with burn_subtitles",
@@ -458,11 +598,20 @@ class SetSubtitlesOp(BaseModel):
     cues: List[SubtitleCue] = Field(default_factory=list, description="The complete new set of captions; an empty list removes them")
 
 class SetClipLookOp(BaseModel):
-    """Edit operation that changes a clip's picture: its fades from and to black, and its colour; omitted fields stay unchanged."""
+    """Edit operation that changes a clip's picture: how it comes in, its colour, and where it sits.
+
+    Omitted fields stay unchanged.
+    """
 
     action: Literal["set_clip_look"] = "set_clip_look"
     track_id: str
     clip_id: str
+    dissolve_in: Optional[Decimal] = Field(
+        default=None,
+        ge=0,
+        description="Seconds this clip's picture mixes in over the end of the clip before it — a cross dissolve. "
+                    "0 makes it a straight cut again",
+    )
     video_fade_in: Optional[Decimal] = Field(default=None, ge=0, description="Fade in from black at the clip start (seconds)")
     video_fade_out: Optional[Decimal] = Field(default=None, ge=0, description="Fade out to black at the clip end (seconds)")
     color: Optional[ColorAdjust] = Field(
@@ -510,7 +659,10 @@ class SetTrackAudioOp(BaseModel):
     )
 
 class SetClipAudioOp(BaseModel):
-    """Edit operation that changes a clip's audio level or fades; omitted fields stay unchanged."""
+    """Edit operation that changes a clip's audio level, fades, or how far its sound runs outside its picture.
+
+    Omitted fields stay unchanged.
+    """
 
     action: Literal["set_clip_audio"] = "set_clip_audio"
     track_id: str
@@ -518,6 +670,48 @@ class SetClipAudioOp(BaseModel):
     volume: Optional[float] = Field(default=None, ge=0, description="Audio gain; 1.0 keeps the original level, 0.5 halves it")
     audio_fade_in: Optional[Decimal] = Field(default=None, ge=0, description="Audio fade-in length at the clip start (seconds)")
     audio_fade_out: Optional[Decimal] = Field(default=None, ge=0, description="Audio fade-out length at the clip end (seconds)")
+    audio_lead: Optional[Decimal] = Field(
+        default=None,
+        ge=0,
+        description="Seconds this clip's sound starts before its picture — a J cut. 0 puts them back together",
+    )
+    audio_lag: Optional[Decimal] = Field(
+        default=None,
+        ge=0,
+        description="Seconds this clip's sound runs on after its picture — an L cut. 0 puts them back together",
+    )
+
+class SetMarkersOp(BaseModel):
+    """Edit operation that replaces the timeline's structure markers.
+
+    The whole set at once, like captions: a marker means something only
+    against the ones either side of it, so they are written together.
+    """
+
+    action: Literal["set_markers"] = "set_markers"
+    markers: List[Marker] = Field(default_factory=list, description="The markers; an empty list clears them")
+
+class SetClipSpeedOp(BaseModel):
+    """Edit operation that changes how fast a clip plays.
+
+    The clip's length on the timeline changes with it — twice the speed is
+    half the length — so by default what follows moves up or back to keep the
+    sequence tight, the same way retrimming does.
+    """
+
+    action: Literal["set_clip_speed"] = "set_clip_speed"
+    track_id: str
+    clip_id: str
+    speed: float = Field(
+        ...,
+        ge=MIN_SPEED,
+        le=MAX_SPEED,
+        description="1.0 is as shot, 2.0 twice as fast and half as long, 0.5 half as fast and twice as long",
+    )
+    ripple: bool = Field(
+        default=True,
+        description="Shift later clips by the change in duration, so no gap or overlap is created",
+    )
 
 class SetClipPinnedOp(BaseModel):
     """Edit operation that protects a clip from being rebuilt, or gives it back to the plan.
@@ -536,7 +730,8 @@ EditOperation = Annotated[
     Union[
         AddTrackOp, AddClipOp, InsertClipOp, TrimClipOp, DeleteOp, MoveClipOp,
         SplitClipOp, ReorderClipOp, RenameProjectOp, SetTrackAudioOp, SetClipAudioOp,
-        SetClipLookOp, SetClipPinnedOp, SetSubtitlesOp, EditSubtitleOp, FitTrackOp,
+        SetClipLookOp, SetClipPinnedOp, SetClipSpeedOp, SetMarkersOp, SetSubtitlesOp, EditSubtitleOp,
+        FitTrackOp,
     ],
     Field(discriminator="action"),
 ]
@@ -544,7 +739,9 @@ EditOperation = Annotated[
 # Touching a compiled clip through one of these is the user changing it by hand, which
 # is what pinning records. Nobody has to remember to say so, which is the point: the
 # alternative is a feedback loop that wipes their work every time it comes round.
-_EDITS_BY_HAND = (TrimClipOp, MoveClipOp, SplitClipOp, ReorderClipOp, SetClipLookOp, SetClipAudioOp)
+_EDITS_BY_HAND = (
+    TrimClipOp, MoveClipOp, SplitClipOp, ReorderClipOp, SetClipLookOp, SetClipAudioOp, SetClipSpeedOp,
+)
 
 CueOrder = Tuple[str, Decimal, Decimal]
 
@@ -808,6 +1005,15 @@ def apply_operation(project: Project, op: EditOperation, assets: Mapping[str, As
         )
         return
 
+    if isinstance(op, SetMarkersOp):
+        named: dict = {}
+        for marker in op.markers:
+            if marker.id in named:
+                raise ValueError(f"two markers share the id {marker.id!r}; a marker is named once")
+            named[marker.id] = marker
+        project.markers = sorted(op.markers, key=lambda item: (item.timeline_in, item.id))
+        return
+
     if isinstance(op, RenameProjectOp):
         project.name = op.name.strip() if op.name and op.name.strip() else None
         return
@@ -921,7 +1127,7 @@ def apply_operation(project: Project, op: EditOperation, assets: Mapping[str, As
         _fit_track(project, track, op, assets)
     elif isinstance(op, SetClipLookOp):
         clip = _find_clip(track, op.clip_id)
-        for field in ("video_fade_in", "video_fade_out"):
+        for field in ("dissolve_in", "video_fade_in", "video_fade_out"):
             value = getattr(op, field)
             if value is not None:
                 setattr(clip, field, value)
@@ -938,10 +1144,16 @@ def apply_operation(project: Project, op: EditOperation, assets: Mapping[str, As
             clip.layout = op.layout
     elif isinstance(op, SetClipAudioOp):
         clip = _find_clip(track, op.clip_id)
-        for field in ("volume", "audio_fade_in", "audio_fade_out"):
+        for field in ("volume", "audio_fade_in", "audio_fade_out", "audio_lead", "audio_lag"):
             value = getattr(op, field)
             if value is not None:
                 setattr(clip, field, value)
+    elif isinstance(op, SetClipSpeedOp):
+        clip = _find_clip(track, op.clip_id)
+        was = clip.timeline_out
+        clip.speed = op.speed
+        if op.ripple:
+            _shift_clips(track, was, clip.timeline_out - was)
     elif isinstance(op, SetClipPinnedOp):
         _find_clip(track, op.clip_id).pinned = op.pinned
 
@@ -960,7 +1172,12 @@ def validate_project(project: Project, assets: Mapping[str, Asset]) -> None:
     These rules hold regardless of what the renderer supports: every clip
     references a registered asset, stays within that asset's duration, does
     not overlap another clip on the same track, and has fades that fit within
-    its length. Only audio tracks duck under speech, and only clips on a
+    its length. Overlap has two deliberate exceptions. A clip whose sound
+    leads or lags overlaps its neighbour's sound, which is what a J or an L
+    cut is. A clip that dissolves in mixes its picture over the end of the one
+    before it, which is what a cross dissolve is. Neither moves a clip: the
+    cut stays where it is, and both draw the extra media from outside the
+    clip's own source range. Only audio tracks duck under speech, and only clips on a
     video track above the base one are drawn in a layout box.
 
     Args:
@@ -990,10 +1207,49 @@ def validate_project(project: Project, assets: Mapping[str, Asset]) -> None:
                     f"clip {clip.id}: source range ends at {clip.source_range.end}s, "
                     f"but asset {asset.id} is only {asset.duration}s long"
                 )
-            if clip.audio_fade_in + clip.audio_fade_out > clip.timeline_duration:
+            if clip.dissolve_in:
+                if previous is None or previous.timeline_out != clip.timeline_in:
+                    raise ValueError(
+                        f"clip {clip.id}: a dissolve mixes this clip in over the one before it, and there is no "
+                        f"clip ending where this one starts on track {track.id}. To come up from black, "
+                        "use video_fade_in"
+                    )
+                if clip.dissolve_in > previous.timeline_duration:
+                    raise ValueError(
+                        f"clip {clip.id}: a {clip.dissolve_in}s dissolve is longer than clip {previous.id}, "
+                        f"which runs {previous.timeline_duration}s and is what it would mix in over"
+                    )
+                if clip.video_source_start < 0:
+                    raise ValueError(
+                        f"clip {clip.id}: a {clip.dissolve_in}s dissolve reaches back to "
+                        f"{clip.video_source_start}s of asset {asset.id}, before the file starts"
+                    )
+            if (clip.audio_lead or clip.audio_lag) and not asset.has_audio:
+                raise ValueError(
+                    f"clip {clip.id}: asks for its sound to run outside its picture, but asset {asset.id} "
+                    "has no sound to run"
+                )
+            if clip.audio_timeline_in < 0:
+                raise ValueError(
+                    f"clip {clip.id}: a lead of {clip.audio_lead}s would start its sound at "
+                    f"{clip.audio_timeline_in}s, before the timeline begins"
+                )
+            if clip.audio_source_start < 0:
+                raise ValueError(
+                    f"clip {clip.id}: a lead of {clip.audio_lead}s reaches back to "
+                    f"{clip.audio_source_start}s of asset {asset.id}, before the file starts"
+                )
+            if asset.duration is not None and clip.audio_source_end > asset.duration:
+                raise ValueError(
+                    f"clip {clip.id}: a lag of {clip.audio_lag}s reaches to "
+                    f"{clip.audio_source_end}s of asset {asset.id}, which is only {asset.duration}s long"
+                )
+            # Against the sound's length, not the picture's: a lead and a lag make the sound
+            # longer than the clip, and a fade belongs to the sound.
+            if clip.audio_fade_in + clip.audio_fade_out > clip.audio_timeline_duration:
                 raise ValueError(
                     f"clip {clip.id}: audio fades ({clip.audio_fade_in}s in + {clip.audio_fade_out}s out) "
-                    f"are longer than the clip ({clip.timeline_duration}s)"
+                    f"are longer than the clip's sound ({clip.audio_timeline_duration}s)"
                 )
             if clip.video_fade_in + clip.video_fade_out > clip.timeline_duration:
                 raise ValueError(

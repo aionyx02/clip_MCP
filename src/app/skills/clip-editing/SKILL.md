@@ -472,6 +472,10 @@ times refer to the source file.
 | 「用歌的 1:05 開始」 / start from the chorus at 1:05 | Music clip `source_range.start: 65` |
 | 「音樂小聲一點／大聲一點」 / music quieter or louder | `set_clip_audio` on every music clip, `volume` × 0.6 or × 1.5 |
 | 「把影片原音關掉」 / mute the original sound | `set_clip_audio` `volume: 0` on every video clip |
+| 「聲音先進來」「上一句講完再切」 / J cut, L cut | `set_clip_audio` with `audio_lead` on the incoming clip, or `audio_lag` on the outgoing one |
+| 「這裡用溶接」「不要硬切」 / cross dissolve | `set_clip_look` with `dissolve_in` on the incoming clip |
+| 「這段快轉」「放慢一點」 / speed it up or slow it down | `set_clip_speed` with `speed`; 2.0 is twice as fast, 0.5 half |
+| 「標一下開場到哪裡」 / mark where a part begins | `set_markers`; `compile_plan` already writes one per beat |
 | 「音樂淡出」 / fade the music out | `fit_track` with `fade_out: 2`; it trims the music to the video and puts the fade on whichever clip ends up last |
 | 「拿掉背景音樂」 / remove the music | `delete_clip` every clip on the audio track |
 | 「人聲出現時音樂小聲一點」 / duck the music under the talking | `set_track_audio` on the music track with `duck_under_speech: true` |

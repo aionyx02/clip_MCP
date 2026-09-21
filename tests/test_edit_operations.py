@@ -1,11 +1,12 @@
-"""Tests for splitting a clip and reordering the sequence."""
+"""Tests for splitting a clip, reordering the sequence, and sound that runs outside its picture."""
 
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
 
-from app.server import import_asset
+from app.server import import_asset, repo
 from helpers import build_project, clips_of, edit, insert, layout, video_track
 
 @pytest.fixture
@@ -168,3 +169,88 @@ def test_split_shortens_a_video_fade_that_no_longer_fits_its_half(source: str) -
     halves = {clip["id"]: clip for clip in clips_of(project)}
     assert float(halves["a"]["video_fade_in"]) == 1
     assert float(halves["a2"]["video_fade_out"]) == 3
+
+
+# --- sound that runs outside its picture: the J and L cuts ---------------------------------
+
+@pytest.fixture
+def two_clips(media: Path) -> str:
+    """Three clips of a ten-second file, laid end to end.
+
+    Returns:
+        The project ID. `a` takes the start of the file and sits at the start
+        of the timeline, so it has room for neither a lead nor anything
+        before it. `b` takes the middle, so it has room both ways. `c` takes
+        the start of the file again but sits late on the timeline, which is
+        the one case where a lead runs out of file before it runs out of
+        timeline.
+    """
+    asset = import_asset(str(media / "wide.mp4"))["id"]
+    return build_project([
+        video_track(), insert("a", asset, 0, 4), insert("b", asset, 4, 8), insert("c", asset, 0, 2),
+    ])
+
+
+def set_audio(project: str, clip_id: str, **fields) -> None:
+    """Change how far a clip's sound runs outside its picture.
+
+    Args:
+        project: Project to edit.
+        clip_id: Clip to change.
+        **fields: `audio_lead` or `audio_lag`.
+    """
+    edit(project, [{"action": "set_clip_audio", "track_id": "main", "clip_id": clip_id, **fields}])
+
+
+def test_sound_may_overlap_where_picture_may_not(two_clips: str) -> None:
+    """A J cut is two clips' sound overlapping. That is the whole point of it."""
+    set_audio(two_clips, "b", audio_lead=1.5)
+    clips = {clip.id: clip for clip in repo.get_project(two_clips).tracks[0].clips}
+    # The pictures still butt up against each other at four seconds.
+    assert clips["a"].timeline_out == clips["b"].timeline_in == 4
+    # The sound does not: the second clip is already playing under the first.
+    assert clips["b"].audio_timeline_in == Decimal("2.5")
+    assert clips["b"].audio_timeline_in < clips["a"].timeline_out
+
+
+def test_a_lead_that_reaches_before_the_file_is_refused(two_clips: str) -> None:
+    """`c` sits late enough on the timeline, but its source starts at the start of the file."""
+    with pytest.raises(ValueError, match="before the file starts"):
+        set_audio(two_clips, "c", audio_lead=1.0)
+
+
+def test_a_lag_that_reaches_past_the_end_of_the_file_is_refused(two_clips: str) -> None:
+    """`wide.mp4` runs ten seconds, and the second clip already ends at eight."""
+    with pytest.raises(ValueError, match="only 10"):
+        set_audio(two_clips, "b", audio_lag=3.0)
+
+
+def test_a_lead_that_starts_before_the_timeline_is_refused(two_clips: str) -> None:
+    """Sound cannot begin before the video does."""
+    with pytest.raises(ValueError, match="before the timeline begins"):
+        set_audio(two_clips, "a", audio_lead=1.0)
+
+
+def test_footage_with_no_sound_cannot_have_its_sound_run_on(media: Path) -> None:
+    """Asking silently does nothing, which is worse than being told."""
+    silent = import_asset(str(media / "silent.mp4"))["id"]
+    project = build_project([video_track(), insert("s", silent, 0, 3)])
+    with pytest.raises(ValueError, match="has no sound to run"):
+        set_audio(project, "s", audio_lag=0.5)
+
+
+def test_fades_are_measured_against_the_sound_not_the_picture(two_clips: str) -> None:
+    """A lead and a lag make the sound longer than the clip, and a fade belongs to the sound."""
+    set_audio(two_clips, "b", audio_lead=1.5, audio_fade_in=Decimal("5"))
+    assert repo.get_project(two_clips).tracks[0].clips[1].audio_fade_in == 5
+    with pytest.raises(ValueError, match="longer than the clip's sound"):
+        set_audio(two_clips, "b", audio_fade_out=Decimal("2"))
+
+
+def test_putting_the_sound_back_with_its_picture(two_clips: str) -> None:
+    """Zero is how a J cut is undone."""
+    set_audio(two_clips, "b", audio_lead=1.5)
+    set_audio(two_clips, "b", audio_lead=Decimal(0))
+    clip = repo.get_project(two_clips).tracks[0].clips[1]
+    assert clip.audio_lead == 0
+    assert clip.audio_timeline_in == clip.timeline_in

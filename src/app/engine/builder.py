@@ -66,6 +66,17 @@ def _frame_to_sample(frame: int, fps: Fraction) -> int:
     """
     return _round_half_up(Fraction(frame) * AUDIO_SAMPLE_RATE / fps)
 
+def _seconds_to_samples(seconds: Decimal) -> int:
+    """Convert a length in seconds to a whole number of audio samples.
+
+    Args:
+        seconds: The length.
+
+    Returns:
+        The sample count at `AUDIO_SAMPLE_RATE`.
+    """
+    return _round_half_up(Fraction(seconds) * AUDIO_SAMPLE_RATE)
+
 def _format_seconds(value: Fraction) -> str:
     """Format a time value as a plain decimal string FFmpeg accepts.
 
@@ -119,15 +130,43 @@ def _input_args(clip: Clip, asset: Asset, frames: int, fps: Fraction) -> List[st
     Args:
         clip: Clip whose source segment is read.
         asset: Asset the clip references.
-        frames: Length of the clip on the output timeline, in frames.
+        frames: Frames to read, which is the clip's length on the output
+            timeline plus the run-up a dissolve needs.
         fps: Output frame rate.
+
+    Returns:
+        The `-ss`, `-t`, and `-i` options for the input. The seek starts at
+        `video_source_start`, which is the clip's own in point unless it
+        dissolves in, in which case it is that much earlier. The length is in
+        source seconds, so a clip running at double speed reads twice as much
+        of the file as it occupies on the timeline.
+    """
+    return [
+        "-ss", _format_seconds(Fraction(clip.video_source_start)),
+        "-t", _format_seconds(Fraction(frames + 1) * Fraction(str(clip.speed)) / fps),
+        "-i", asset.path,
+    ]
+
+def _audio_input_args(clip: Clip, asset: Asset, fps: Fraction) -> List[str]:
+    """Build the FFmpeg input options that read a clip's sound on its own.
+
+    A clip whose sound leads its picture needs audio from before the point the
+    picture input is seeked to, so it gets an input of its own rather than the
+    picture's being moved — moving it would shift every frame. Only clips that
+    actually lead or lag pay for the extra input.
+
+    Args:
+        clip: Clip whose sound is read.
+        asset: Asset the clip references.
+        fps: Output frame rate, used for the same one-frame margin the picture
+            input takes.
 
     Returns:
         The `-ss`, `-t`, and `-i` options for the input.
     """
     return [
-        "-ss", _format_seconds(Fraction(clip.source_range.start)),
-        "-t", _format_seconds(Fraction(frames + 1) / fps),
+        "-ss", _format_seconds(Fraction(clip.audio_source_range.start)),
+        "-t", _format_seconds(Fraction(clip.audio_source_range.duration) + Fraction(1) / fps),
         "-i", asset.path,
     ]
 
@@ -154,6 +193,48 @@ def _overlay_box(clip: Clip, width: int, height: int) -> Tuple[int, int, int, in
         box_width,
         box_height,
     )
+
+def _speed_video_filter(clip: Clip) -> str:
+    """Stretch or compress a clip's picture to its playback speed.
+
+    Applied before the output frame rate is settled, so that `fps` resamples
+    whatever the new timing produced rather than the other way round: doing it
+    after would drop or repeat frames that the stretch had already decided on.
+
+    Args:
+        clip: Clip whose speed is applied.
+
+    Returns:
+        The filter with a leading comma, or an empty string at normal speed.
+    """
+    if clip.speed == 1.0:
+        return ""
+    return f",setpts={_format_seconds(Fraction(1) / Fraction(str(clip.speed)))}*PTS"
+
+def _atempo_filters(speed: float) -> List[str]:
+    """Break a speed into the tempo changes FFmpeg will accept in one go.
+
+    `atempo` takes a factor between 0.5 and 2 before the result starts to fall
+    apart, so anything further is reached by applying it more than once. The
+    factors multiply back to the speed asked for.
+
+    Args:
+        speed: Playback speed.
+
+    Returns:
+        One `atempo` filter per step, or an empty list at normal speed.
+    """
+    if speed == 1.0:
+        return []
+    remaining, steps = Fraction(str(speed)), []
+    while remaining > 2:
+        steps.append(Fraction(2))
+        remaining /= 2
+    while remaining < Fraction(1, 2):
+        steps.append(Fraction(1, 2))
+        remaining *= 2
+    steps.append(remaining)
+    return [f"atempo={float(step):.6f}" for step in steps]
 
 def _clip_video_filter(clip: Clip, frames: int, fps: Fraction) -> str:
     """Build the look part of a clip's video chain: its colour and its fades.
@@ -232,6 +313,9 @@ def _clip_audio_filter(input_label: str, clip: Clip, samples: int, output_label:
         "asetpts=PTS-STARTPTS",
         f"aresample={AUDIO_SAMPLE_RATE}",
         "aformat=sample_fmts=fltp:channel_layouts=stereo",
+        # Before the length is settled: the stretch is what decides how long the sound runs,
+        # and padding or trimming it first would make that decision for it.
+        *_atempo_filters(clip.speed),
         f"apad=whole_len={samples}",
         f"atrim=end_sample={samples}",
     ]
@@ -262,8 +346,7 @@ class FFmpegRenderer:
 
         The first video track is the base and decides the output length.
         Further video tracks are drawn on top of it, each clip in the box its
-        `layout` gives. Every clip plays at normal speed. Video-track clips
-        need assets with a video stream, audio-track clips need assets with an
+        `layout` gives. Video-track clips need assets with a video stream, audio-track clips need assets with an
         audio stream, every asset needs a known duration, and every clip must
         be at least one frame long.
 
@@ -278,8 +361,6 @@ class FFmpegRenderer:
         fps = Fraction(project.fps_num, project.fps_den)
         for track in project.tracks:
             for clip in track.clips:
-                if clip.speed != 1.0:
-                    raise ValueError(f"clip {clip.id}: speed other than 1.0 is not supported yet")
                 asset = assets.get(clip.asset_id)
                 if asset is None:
                     raise ValueError(f"clip {clip.id}: asset {clip.asset_id} not found")
@@ -369,38 +450,108 @@ class FFmpegRenderer:
         filters: List[str] = []
         video_labels: List[str] = []
         audio_labels: List[str] = []
+        # A run is a stretch of straight cuts, which concatenates. Runs are separated by
+        # dissolves, which do not: each one mixes into the run before it.
+        runs: List[List[int]] = [[]]
+        dissolves: List[int] = []
 
         for index, segment in enumerate(segments):
             frames = segment.end_frame - segment.start_frame
             samples = _frame_to_sample(segment.end_frame, fps) - _frame_to_sample(segment.start_frame, fps)
 
+            # A dissolve needs a clip ending exactly where this one starts to mix into.
+            # validate_project has already refused anything else; this is what renders it.
+            run_up = 0
+            if segment.clip is not None and segment.clip.dissolve_in and index > 0:
+                run_up = _round_half_up(Fraction(segment.clip.dissolve_in) * fps)
+            if run_up and runs[-1]:
+                runs.append([index])
+                dissolves.append(run_up)
+            else:
+                run_up = 0
+                runs[-1].append(index)
+
             if segment.clip is None:
                 filters.append(f"color=c=black:s={size}:r={rate},format=yuv420p,trim=end_frame={frames}[v{index}]")
-                filters.append(_silence_filter(samples, f"[a{index}]"))
             else:
                 asset = assets[segment.clip.asset_id]
                 input_index = len(inputs)
-                inputs.append(_input_args(segment.clip, asset, frames, fps))
+                picture_frames = frames + run_up
+                inputs.append(_input_args(segment.clip, asset, picture_frames, fps))
                 filters.append(
-                    f"[{input_index}:v]setpts=PTS-STARTPTS,fps={rate},"
+                    f"[{input_index}:v]setpts=PTS-STARTPTS{_speed_video_filter(segment.clip)},fps={rate},"
                     f"scale={project.width}:{project.height}:force_original_aspect_ratio=increase,"
                     f"crop={project.width}:{project.height},setsar=1,format=yuv420p,"
-                    f"tpad=stop_mode=clone:stop_duration=1,trim=end_frame={frames},setpts=PTS-STARTPTS"
-                    f"{_clip_video_filter(segment.clip, frames, fps)}[v{index}]"
+                    f"tpad=stop_mode=clone:stop_duration=1,trim=end_frame={picture_frames},setpts=PTS-STARTPTS"
+                    f"{_clip_video_filter(segment.clip, picture_frames, fps)}[v{index}]"
                 )
                 if asset.has_audio:
-                    filters.append(_clip_audio_filter(f"[{input_index}:a]", segment.clip, samples, f"[a{index}]"))
-                else:
-                    filters.append(_silence_filter(samples, f"[a{index}]"))
+                    clip = segment.clip
+                    lead, lag = _seconds_to_samples(clip.audio_lead), _seconds_to_samples(clip.audio_lag)
+                    if lead or lag:
+                        audio_index = len(inputs)
+                        inputs.append(_audio_input_args(clip, asset, fps))
+                    else:
+                        audio_index = input_index
+                    at = _frame_to_sample(segment.start_frame, fps) - lead
+                    filters.append(
+                        _clip_audio_filter(f"[{audio_index}:a]", clip, samples + lead + lag, f"[araw{index}]")
+                    )
+                    placed = f"[a{index}]"
+                    if at:
+                        filters.append(f"[araw{index}]adelay={at}S:all=1{placed}")
+                    else:
+                        filters.append(f"[araw{index}]anull{placed}")
+                    audio_labels.append(placed)
 
             video_labels.append(f"[v{index}]")
-            audio_labels.append(f"[a{index}]")
 
-        # Concatenate video and audio separately: a joint concat pads each segment's audio up to its
-        # video duration, which would add sub-frame drift that accumulates across segments.
+        # The picture is concatenated; the sound is placed and mixed. Concatenating it too
+        # would put every clip's sound strictly after the one before, which is exactly what a
+        # J or an L cut is not. Each clip's sound is delayed to its own absolute position
+        # instead, so nothing accumulates across a long timeline either.
         joined = "[joinedv]"
-        filters.append(f"{''.join(video_labels)}concat=n={len(segments)}:v=1:a=0{joined}")
-        filters.append(f"{''.join(audio_labels)}concat=n={len(segments)}:v=0:a=1[mainaudio]")
+        run_labels: List[str] = []
+        for run_index, run in enumerate(runs):
+            labels = [video_labels[index] for index in run]
+            if len(labels) == 1:
+                run_labels.append(labels[0])
+                continue
+            run_label = f"[run{run_index}]"
+            filters.append(f"{''.join(labels)}concat=n={len(labels)}:v=1:a=0{run_label}")
+            run_labels.append(run_label)
+
+        # Each run after the first arrives carrying its own run-up, so the crossfade that
+        # eats the run-up leaves the timeline exactly as long as it was. The transition ends
+        # on the cut rather than straddling it, which is what keeps every clip where it is.
+        carried = run_labels[0]
+        covered = sum(segments[index].end_frame - segments[index].start_frame for index in runs[0])
+        for run_index in range(1, len(run_labels)):
+            run_up = dissolves[run_index - 1]
+            label = joined if run_index == len(run_labels) - 1 else f"[mixed{run_index}]"
+            filters.append(
+                f"{carried}{run_labels[run_index]}xfade=transition=fade"
+                f":duration={_format_seconds(Fraction(run_up) / fps)}"
+                f":offset={_format_seconds(Fraction(covered - run_up) / fps)}{label}"
+            )
+            carried = label
+            covered += sum(segments[index].end_frame - segments[index].start_frame for index in runs[run_index])
+        if len(run_labels) == 1:
+            filters.append(f"{carried}null{joined}")
+        if not audio_labels:
+            filters.append(_silence_filter(total_samples, "[mainaudio]"))
+        else:
+            mixed = audio_labels[0] if len(audio_labels) == 1 else "[laid]"
+            if len(audio_labels) > 1:
+                # normalize=0 sums rather than dividing by the number of inputs, so a clip
+                # playing alone keeps its own level and an overlap is the two of them together.
+                filters.append(
+                    f"{''.join(audio_labels)}amix=inputs={len(audio_labels)}"
+                    f":duration=longest:normalize=0{mixed}"
+                )
+            filters.append(
+                f"{mixed}apad=whole_len={total_samples},atrim=end_sample={total_samples}[mainaudio]"
+            )
         # Video tracks above the first are drawn on top of it, each clip inside the box its layout gives.
         overlay_audio: List[str] = []
         for track_index, track in enumerate(project.video_tracks[1:]):

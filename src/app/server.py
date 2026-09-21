@@ -1276,13 +1276,28 @@ def apply_edits(project_id: str, expected_version: int, operations: list[EditOpe
     with silence, and audio past its last clip is cut. Further video tracks
     are drawn on top of the base, each clip inside the box its `layout`
     gives, or over the whole frame without one. `set_clip_audio` changes a
-    clip's `volume` and `audio_fade_in` / `audio_fade_out`, `set_clip_look`
-    its fades through black and its `color`, and `set_track_audio` a whole
-    track's `duck_under_speech`. `set_subtitles` replaces the captions
+    clip's `volume`, its `audio_fade_in` / `audio_fade_out`, and how far its
+    sound runs outside its picture: `audio_lead` brings the sound in early,
+    so the next scene is heard under the end of the shot still on screen (a J
+    cut), and `audio_lag` lets it run on after the picture has gone, so a line
+    finishes over the shot that follows (an L cut). Both are seconds, both
+    take their extra sound from outside the clip's `source_range`, and 0 puts
+    the sound back with its picture. `set_clip_look`
+    its `dissolve_in` — a cross dissolve, mixing it in over the end of the
+    clip before it — along with its fades through black and its `color`.
+    `set_clip_speed` changes how fast a clip plays, and with it how long it
+    runs. `set_track_audio` sets a whole track's `duck_under_speech`.
+    `set_markers` replaces the timeline's structure markers — where each part
+    of the video begins. `compile_plan` writes one per beat, so a cut compiled
+    from a plan arrives with its shape on it; markers added by hand have no
+    beat behind them and survive the next compile. `set_subtitles` replaces the captions
     `render_project` burns in.
 
     The resulting timeline must satisfy these rules:
     - Clips stay within their asset's duration and do not overlap on a track.
+      Sound is the exception and deliberately so: a lead or a lag overlaps the
+      neighbouring clip's sound, which is what a J or an L cut is. It still
+      has to come from inside the file and start after the timeline does.
     - Audio and video fades fit within their clip.
     - Only clips above the base video track take a `layout`; base-track clips
       always fill the frame.

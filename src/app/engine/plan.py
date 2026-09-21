@@ -50,12 +50,15 @@ class Piece:
         from_clip_ids: The semantic clips it was made from, in order. This is
             what a second compile matches a hand-adjusted clip on, so it is
             the piece's identity rather than a note about it.
+        beat_id: The part of the video it belongs to, which is what the
+            timeline's markers are made from.
     """
 
     asset_id: str
     start: float
     end: float
     from_clip_ids: Tuple[str, ...]
+    beat_id: str = ""
 
     @property
     def duration(self) -> float:
@@ -85,6 +88,7 @@ def _piece(
     pad_head: bool = True,
     pad_tail: bool = True,
     cuts: Optional[CleanCuts] = None,
+    beat_id: str = "",
 ) -> Piece:
     """Cut one window out of a clip, with air around it where there is room.
 
@@ -122,7 +126,7 @@ def _piece(
     closing = round(closing, 3)
     if asset.duration is not None:
         closing = min(closing, float(asset.duration))
-    return Piece(asset.id, round(max(0.0, opening), 3), closing, (clip.id,))
+    return Piece(asset.id, round(max(0.0, opening), 3), closing, (clip.id,), beat_id)
 
 def _landed(
     seconds: float,
@@ -179,24 +183,28 @@ def _selection_pieces(
         The windows this selection puts on the timeline, in order.
     """
     trim = selection.trim
+    beat = selection.beat_id
     if trim.kind == TrimKind.KEEP:
         wanted = set(trim.keep_clip_ids)
-        return [_piece(child, asset) for child in children if child.id in wanted]
+        return [_piece(child, asset, beat_id=beat) for child in children if child.id in wanted]
     if trim.kind == TrimKind.TIGHTEN:
         # Drop what nobody would keep — the pauses and the unusable picture — and leave the rest.
         kept = [child for child in children if child.kind not in (ClipKind.SILENCE, ClipKind.UNUSABLE)]
-        return [_piece(child, asset) for child in kept] if kept else [_piece(clip, asset)]
+        return (
+            [_piece(child, asset, beat_id=beat) for child in kept]
+            if kept else [_piece(clip, asset, beat_id=beat)]
+        )
     if trim.kind == TrimKind.HEAD and trim.seconds is not None:
         return [_piece(
             clip, asset, end=min(clip.source_range.start + trim.seconds, clip.source_range.end),
-            pad_tail=False, cuts=cuts,
+            pad_tail=False, cuts=cuts, beat_id=beat,
         )]
     if trim.kind == TrimKind.TAIL and trim.seconds is not None:
         return [_piece(
             clip, asset, start=max(clip.source_range.end - trim.seconds, clip.source_range.start),
-            pad_head=False, cuts=cuts,
+            pad_head=False, cuts=cuts, beat_id=beat,
         )]
-    return [_piece(clip, asset)]
+    return [_piece(clip, asset, beat_id=beat)]
 
 def _merge(pieces: Sequence[Piece]) -> List[Piece]:
     """Join pieces that follow one another closely enough to be one shot.
@@ -212,9 +220,11 @@ def _merge(pieces: Sequence[Piece]) -> List[Piece]:
     for piece in pieces:
         last = merged[-1] if merged else None
         if last is not None and last.asset_id == piece.asset_id and piece.start - last.end <= MERGE_GAP_SECONDS:
+            # The first piece's beat wins. Two pieces this close are one shot, and a
+            # marker inside a shot would say a new part starts partway through it.
             merged[-1] = Piece(
                 last.asset_id, last.start, max(last.end, piece.end),
-                (*last.from_clip_ids, *piece.from_clip_ids),
+                (*last.from_clip_ids, *piece.from_clip_ids), last.beat_id,
             )
         else:
             merged.append(piece)
@@ -517,6 +527,43 @@ def check_recompile(plan: EditPlan, project: Project, pieces: Sequence[Piece]) -
             )
     return problems
 
+def plan_markers(plan: EditPlan, pieces: Sequence[Piece]) -> List[dict]:
+    """Work out where each part of the video begins on the compiled timeline.
+
+    A plan's beats are its shape, and until they are written onto the timeline
+    that shape exists only in the plan: nothing downstream — where the music
+    changes, how dense the B-roll is, which caption style applies — can read
+    it. This is where they land.
+
+    A beat whose first piece was merged into the one before it begins where
+    that merged shot begins. Two pieces close enough to merge are one shot,
+    and a marker partway through a shot would be claiming a cut that is not
+    there.
+
+    Args:
+        plan: The plan being compiled.
+        pieces: Its windows, in order, as `plan_pieces` merged them.
+
+    Returns:
+        One marker per beat that any piece belongs to, in timeline order,
+        ready for a `set_markers` operation.
+    """
+    names = {beat.id: beat.name for beat in plan.beats}
+    markers: List[dict] = []
+    started: set = set()
+    position = 0.0
+    for piece in pieces:
+        if piece.beat_id and piece.beat_id not in started and piece.beat_id in names:
+            started.add(piece.beat_id)
+            markers.append({
+                "id": piece.beat_id,
+                "name": names[piece.beat_id],
+                "timeline_in": round(position, 3),
+                "from_beat_id": piece.beat_id,
+            })
+        position += piece.duration
+    return markers
+
 def compile_operations(
     plan: EditPlan,
     clips: Mapping[str, SemanticClip],
@@ -582,8 +629,12 @@ def compile_operations(
             }
             placed.update({
                 "volume": pinned.volume,
+                "speed": pinned.speed,
                 "audio_fade_in": float(pinned.audio_fade_in),
                 "audio_fade_out": float(pinned.audio_fade_out),
+                "audio_lead": float(pinned.audio_lead),
+                "audio_lag": float(pinned.audio_lag),
+                "dissolve_in": float(pinned.dissolve_in),
                 "video_fade_in": float(pinned.video_fade_in),
                 "video_fade_out": float(pinned.video_fade_out),
                 "color": pinned.color.model_dump() if pinned.color else None,
@@ -595,6 +646,17 @@ def compile_operations(
             "from_clip_ids": list(piece.from_clip_ids),
             "pinned": pinned is not None,
         }
+
+    # The compiler owns the markers it made and nothing else: one somebody added by hand
+    # has no beat behind it, so it is carried across rather than rebuilt.
+    by_hand = [
+        marker.model_dump(mode="json")
+        for marker in (project.markers if project is not None else [])
+        if marker.from_beat_id is None
+    ]
+    markers = plan_markers(plan, pieces)
+    if markers or by_hand:
+        operations.append({"action": "set_markers", "markers": [*markers, *by_hand]})
 
     if plan.music is not None and pieces:
         music = plan.music

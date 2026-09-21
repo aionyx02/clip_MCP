@@ -15,6 +15,7 @@ import pytest
 from pydantic import TypeAdapter
 
 from app.engine.plan import (
+    plan_markers,
     BREATH_SECONDS,
     SNAP_SECONDS,
     check_plan,
@@ -30,6 +31,7 @@ from app.models.plan import (
     Beat, EditPlan, MusicPlan, PlanAmendment, PlanTarget, Rejection, Selection, Trim, TrimKind,
 )
 from app.models.semantic import SectionChoice, SemanticClip
+from app.models.timeline import Marker, Project
 from app.server import (
     amend_plan,
     apply_edits,
@@ -498,8 +500,14 @@ def test_the_operations_build_one_video_track_in_order() -> None:
     operations, provenance = compile_operations(plan, by_id, children, assets)
     assert operations[0]["action"] == "add_track"
     assert [origin["from_plan_id"] for origin in provenance.values()] == [plan.id, plan.id]
-    assert [operation["action"] for operation in operations[1:]] == ["insert_clip", "insert_clip"]
+    assert [operation["action"] for operation in operations[1:]] == [
+        "insert_clip", "insert_clip", "set_markers",
+    ]
     assert operations[1]["source_range"]["start"] < operations[2]["source_range"]["start"]
+    # Both selections are the one beat, so the timeline gets one marker, at its start.
+    assert operations[3]["markers"] == [
+        {"id": "b1", "name": "主體", "timeline_in": 0.0, "from_beat_id": "b1"},
+    ]
 
 def test_music_is_laid_under_the_picture_and_fitted_to_it() -> None:
     by_id, children, assets, clips = footage()
@@ -800,3 +808,90 @@ def test_two_plans_can_be_compared_through_the_tools(planned: dict) -> None:
     changes = diff_plan(planned["plan_id"], other["plan_id"])["changes"]
     assert any("另一種剪法" in line for line in changes["goal"])
     assert planned["plan_id"] in {plan["plan_id"] for plan in get_plan(other["plan_id"])["other_plans"]}
+
+
+# --- structure markers ------------------------------------------------------------------------
+
+def beats_plan(selections: List[Selection], beats: List[Beat]) -> EditPlan:
+    """Build a plan whose beats are given rather than assumed.
+
+    Args:
+        selections: The chosen footage.
+        beats: The parts of the video.
+
+    Returns:
+        The plan.
+    """
+    return EditPlan(
+        timeline_id="tl_test", timeline_input_hash="hash", beats=beats, selections=selections,
+    )
+
+
+def test_each_beat_becomes_a_marker_where_it_starts() -> None:
+    """A plan's shape used to exist only in the plan, and be gone the moment it compiled."""
+    by_id, children, assets, clips = footage()
+    first, second, third = speech_of(clips)[:3]
+    plan = beats_plan(
+        [
+            Selection(clip_id=first.id, beat_id="open"),
+            Selection(clip_id=third.id, beat_id="middle"),
+        ],
+        [Beat(id="open", name="開場"), Beat(id="middle", name="主體")],
+    )
+    pieces = plan_pieces(plan, by_id, children, assets)
+    markers = plan_markers(plan, pieces)
+    assert [marker["name"] for marker in markers] == ["開場", "主體"]
+    assert markers[0]["timeline_in"] == 0.0
+    # The second part starts where the first one's footage ends.
+    assert markers[1]["timeline_in"] == pytest.approx(pieces[0].duration, abs=0.001)
+
+
+def test_a_beat_nothing_was_chosen_for_gets_no_marker() -> None:
+    """A part of the plan with no footage in it is not a part of the video."""
+    by_id, children, assets, clips = footage()
+    plan = beats_plan(
+        [Selection(clip_id=speech_of(clips)[0].id, beat_id="open")],
+        [Beat(id="open", name="開場"), Beat(id="empty", name="沒拍到")],
+    )
+    markers = plan_markers(plan, plan_pieces(plan, by_id, children, assets))
+    assert [marker["id"] for marker in markers] == ["open"]
+
+
+def test_a_marker_somebody_added_survives_the_next_compile() -> None:
+    """The compiler owns what it made. A marker with no beat behind it is not that."""
+    by_id, children, assets, clips = footage()
+    plan = beats_plan(
+        [Selection(clip_id=speech_of(clips)[0].id, beat_id="open")],
+        [Beat(id="open", name="開場")],
+    )
+    project = Project(id="p", width=1920, height=1080, markers=[
+        Marker(id="mine", name="這裡要配樂", timeline_in=Decimal("1.5")),
+        Marker(id="open", name="舊的開場", timeline_in=Decimal(0), from_beat_id="open"),
+    ])
+    operations, _ = compile_operations(plan, by_id, children, assets, project)
+    written = next(op for op in operations if op["action"] == "set_markers")["markers"]
+    names = {marker["id"]: marker["name"] for marker in written}
+    # The compiler's own marker is rebuilt from the plan; the hand-made one is carried over.
+    assert names["open"] == "開場"
+    assert names["mine"] == "這裡要配樂"
+
+
+def test_markers_land_on_the_timeline_in_order() -> None:
+    """They are written as one set, and read back sorted by where they are."""
+    project_id = create_project(width=1920, height=1080)["id"]
+    apply_edits(project_id, 1, ops({"action": "set_markers", "markers": [
+        {"id": "b", "name": "結尾", "timeline_in": 9},
+        {"id": "a", "name": "開場", "timeline_in": 0},
+    ]}))
+    stored = server_repo.get_project(project_id)
+    assert [marker.name for marker in stored.markers] == ["開場", "結尾"]
+
+
+def test_two_markers_cannot_share_a_name_on_the_timeline() -> None:
+    """An id is how a marker is referred to, so two of them is a broken set."""
+    project_id = create_project(width=1920, height=1080)["id"]
+    with pytest.raises(ValueError, match="share the id"):
+        apply_edits(project_id, 1, ops({"action": "set_markers", "markers": [
+            {"id": "a", "name": "開場", "timeline_in": 0},
+            {"id": "a", "name": "結尾", "timeline_in": 9},
+        ]}))
