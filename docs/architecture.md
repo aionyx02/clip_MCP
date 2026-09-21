@@ -82,6 +82,7 @@ clip_MCP/
 │   ├── clip_mcp.db                # 專案、素材、分析結果、工作狀態
 │   ├── models/                    # 模型權重（CLIP_MCP_MODELS 可覆寫）
 │   ├── outputs/<job_id>/          # 每次 render 各自一個目錄，成品與字幕 ASS 都在裡面
+│   │                              #   成品以專案名稱命名，沒名字才退回 ID
 │   └── jobs/<job_id>/             # 分析工作的暫存
 ├── .mcp.json                      # 客戶端設定：在此目錄啟動的 MCP 客戶端會自動掛上本伺服器
 ├── fastmcp.json                   # 伺服器設定：fastmcp CLI 的進入點與環境（fastmcp run / dev）

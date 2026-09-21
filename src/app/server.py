@@ -55,6 +55,11 @@ MAX_STORYBOARD_TILES = 36
 MAX_CLIP_RESULTS = 200
 # Reading a whole timeline at once: an hour of talk is a few hundred utterances.
 MAX_TIMELINE_CLIPS = 5000
+# Characters a Windows or POSIX filesystem will not take in a name, plus the control
+# range. A project is named by whoever is editing, so a render cannot assume anything
+# about what is in that name.
+FORBIDDEN_IN_NAMES = frozenset('<>:"/\\|?*') | {chr(code) for code in range(32)}
+MAX_OUTPUT_NAME = 60
 # A summary says enough to judge a clip by; the whole text is one call away.
 CLIP_SUMMARY_CHARACTERS = 80
 # Which scores a search result carries: the ones describing what is in a clip, which is
@@ -1978,6 +1983,29 @@ def get_subtitles(
         "window": {"start": start, "end": limit},
     }
 
+def _output_name(project: Project, kind: str) -> str:
+    """Name a rendered file after the project it came from.
+
+    A render used to be `<job uuid>/<project uuid>_output.mp4`, which is two
+    identifiers and nothing a person can pick out of a folder. That is why
+    finished cuts end up copied somewhere else under a name somebody made up
+    — and next to the footage is the worst of the places they end up, because
+    a cut sitting among its own sources is indistinguishable from source.
+
+    Args:
+        project: The project being rendered.
+        kind: `output` or `preview`.
+
+    Returns:
+        A file name. The project's name where it has one, with anything a
+        filesystem would refuse taken out, and its ID where the name is
+        missing or survives sanitising as nothing. Each render has its own
+        directory, so two of the same project do not collide.
+    """
+    stem = "".join(" " if character in FORBIDDEN_IN_NAMES else character for character in (project.name or ""))
+    stem = " ".join(stem.split())[:MAX_OUTPUT_NAME].strip(" .")
+    return f"{stem or project.id}_{kind}.mp4"
+
 @mcp.tool()
 def render_project(
     project_id: str,
@@ -2007,7 +2035,8 @@ def render_project(
 
     Returns:
         A dictionary with the `job_id`, the initial `status`, `stage`, and the
-        absolute `output_path` the file will be written to. Each job writes to
+        absolute `output_path` the file will be written to, named after the
+        project so the outputs folder can be read at a glance. Each job writes to
         its own directory, so repeated renders never overwrite each other.
         Renders and analyses run one or two at a time, so that several of them
         cannot exhaust the machine's memory between them; `stage` says what a
@@ -2025,7 +2054,7 @@ def render_project(
     kind = "preview" if is_preview else "output"
     job = Job(kind=JobKind.RENDER, project_id=project_id)
     job.work_dir = os.path.join(WORKSPACE_DIR, "outputs", job.job_id)
-    job.output_path = os.path.join(job.work_dir, f"{project_id}_{kind}.mp4")
+    job.output_path = os.path.join(job.work_dir, _output_name(project, kind))
 
     subtitle_path = None
     if burn_subtitles:

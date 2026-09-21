@@ -187,7 +187,8 @@ workspace/
 │   ├── whisper/       #   語音辨識（large-v3-turbo 約 1.5 GB）
 │   ├── diarization/   #   說話者切分（約 33 MB）
 │   └── faces/         #   人臉偵測（約 0.2 MB）
-├── outputs/<job_id>/  # 每次 render 各自一個目錄，不會互相覆蓋
+├── outputs/<job_id>/  # 每次 render 各自一個目錄，不會互相覆蓋；
+│                      #   檔名用專案名稱（`EP1 台北_output.mp4`），不是 UUID
 └── jobs/<job_id>/     # 分析工作的暫存
 ```
 
