@@ -8,9 +8,10 @@ numbers so that nothing downstream has to read a transcript and interpret it.
 
 Everything here is a pure function of what `analyze_asset` already stored:
 sentence boundaries from the transcript, shot changes from scene detection,
-and measured silences. No model is involved and nothing is sampled, so the
-same analysis always yields the same clips, and every rule below can be
-checked by a unit test rather than by watching a video.
+measured silences, what each shot and second measured, and which voice was
+talking. No model is run here and nothing is sampled, so the same analysis
+always yields the same clips, and every rule below can be checked by a unit
+test rather than by watching a video.
 
 The coarser `section` and `topic` levels are not built here. Those need a
 model to decide which candidate boundaries are real ones, and thresholds
@@ -18,16 +19,17 @@ that cannot be picked honestly without a corpus to pick them against.
 """
 
 import hashlib
-from dataclasses import dataclass
 import json
-from typing import List, Mapping, Optional, Sequence, Tuple
+import math
+from dataclasses import dataclass
+from typing import Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
-from app.models.media import Asset, MediaAnalysis, Span, TranscriptSegment
+from app.models.media import SILENCE_DB, Asset, MediaAnalysis, Measured, Span, SpeakerTurn, TranscriptSegment
 from app.models.semantic import ClipKind, ClipLevel, SemanticClip, SemanticTimeline
 
 # Bumped whenever the rules below change, so timelines built by an older
 # version are recognised as out of date rather than silently reused.
-DERIVATION_VERSION = 2
+DERIVATION_VERSION = 5
 # A stretch without speech shorter than this is not a thing on its own; it is the
 # breath between two sentences, and it is already described by their headroom.
 MIN_UTTERANCE_SECONDS = 0.4
@@ -36,6 +38,9 @@ MIN_UTTERANCE_SECONDS = 0.4
 EDGE_TOLERANCE_SECONDS = 0.02
 MOSTLY = 0.5
 NEARLY_ALL = 0.9
+# How much of the talking in a stretch one voice has to hold before the stretch is called
+# theirs. A sentence that straddles a handover belongs to neither, and says so.
+SPEAKER_MAJORITY = 0.8
 
 def share_covered(start: float, end: float, spans: Sequence[Span]) -> float:
     """Measure how much of a stretch is covered by a set of spans.
@@ -53,6 +58,259 @@ def share_covered(start: float, end: float, spans: Sequence[Span]) -> float:
         return 0.0
     covered = sum(max(0.0, min(end, span.end) - max(start, span.start)) for span in spans)
     return min(1.0, covered / length)
+
+def _weighted_mean(parts: Sequence[Tuple[float, float]]) -> float:
+    """Average values by how many seconds each one covers.
+
+    Args:
+        parts: `(value, seconds)` pairs.
+
+    Returns:
+        The weighted mean, or the plain mean when the parts cover no time at
+        all, which nothing should produce but which must not divide by zero.
+    """
+    weight = sum(seconds for _, seconds in parts)
+    if weight <= 0:
+        return sum(value for value, _ in parts) / len(parts)
+    return sum(value * seconds for value, seconds in parts) / weight
+
+def _decibel_mean(parts: Sequence[Tuple[float, float]]) -> float:
+    """Average levels by the energy they stand for, not by their decibel numbers.
+
+    Decibels are logarithmic, so their arithmetic mean is not the level of
+    anything. One second of digital silence — `SILENCE_DB`, which is -120 —
+    among nine seconds of ordinary speech at -20 dB averages out to -30 dB,
+    and a clip that is perfectly well recorded reads as far too quiet.
+    Converted to energy first, that same second contributes a millionth of
+    nothing and the clip reads as -20 dB, which is what it is.
+
+    Args:
+        parts: `(decibels, seconds)` pairs.
+
+    Returns:
+        The level of the whole stretch, in decibels.
+    """
+    energy = _weighted_mean([(10 ** (value / 10), seconds) for value, seconds in parts])
+    return SILENCE_DB if energy <= 0 else max(SILENCE_DB, 10 * math.log10(energy))
+
+def _highest(parts: Sequence[Tuple[float, float]]) -> float:
+    """Take the largest value there was.
+
+    For a peak or for how squared-off the waveform got, the whole question is
+    whether it ever happened. Averaging it away is how a clipped second inside
+    a clean clip stops being visible.
+
+    Args:
+        parts: `(value, seconds)` pairs.
+
+    Returns:
+        The largest value.
+    """
+    return max(value for value, _ in parts)
+
+def _typical(parts: Sequence[Tuple[float, float]]) -> float:
+    """Take the value holding the middle second of a stretch.
+
+    What a noise floor is asked for is the hiss under most of a stretch. Both
+    a mean and a minimum would answer with the quietest second instead — and a
+    second of digital silence has no hiss at all, so it would report a
+    beautifully quiet recording that does not exist.
+
+    The middle is by time rather than by count, because the parts are not all
+    the same length. A section made of twenty half-second lines and one shot
+    running a minute is mostly that minute, and a plain median would let the
+    twenty short ones outvote it.
+
+    Args:
+        parts: `(value, seconds)` pairs.
+
+    Returns:
+        The value covering the middle of the total time. Always one that was
+        really measured, rather than the midpoint between two of them, which
+        for a level is the more useful of the two answers.
+    """
+    ordered = sorted(parts)
+    half = sum(seconds for _, seconds in ordered) / 2
+    covered = 0.0
+    for value, seconds in ordered:
+        covered += seconds
+        if covered >= half:
+            return value
+    return ordered[-1][0]
+
+@dataclass(frozen=True)
+class ScoreRule:
+    """How one score is combined out of the parts it was measured in.
+
+    Attributes:
+        combine: Takes `(value, seconds)` pairs and returns the one number
+            standing for all of them.
+        precision: Decimal places to keep. Three is right for a share and
+            wrong for shake, where an even pan and a handheld shot are a
+            hundredfold apart and both round to zero.
+        about_content: True for a score describing what is in a stretch —
+            how much of it carries speech, how fast it is spoken — rather than
+            how the stretch was shot or recorded. The distinction decides two
+            things. A part carrying no content score really does carry none,
+            so it counts as zero across its whole length, while a part nothing
+            was measured in counts for nothing at all. And a search result
+            shows the content scores, because they answer what a search asks;
+            how well a shot was shot is a question for the few clips that
+            survive it.
+    """
+
+    combine: Callable[[Sequence[Tuple[float, float]]], float] = _weighted_mean
+    precision: int = 3
+    about_content: bool = False
+
+# Anything not named here is a weighted mean kept to three decimals, which is what an
+# unremarkable new measurement will want.
+SCORE_RULES: Dict[str, ScoreRule] = {
+    "speech": ScoreRule(about_content=True),
+    "silence": ScoreRule(about_content=True),
+    "black": ScoreRule(about_content=True),
+    "frozen": ScoreRule(about_content=True),
+    "words_per_second": ScoreRule(about_content=True),
+    "exposure": ScoreRule(precision=4),
+    "contrast": ScoreRule(precision=4),
+    "motion": ScoreRule(precision=4),
+    "shake": ScoreRule(precision=5),
+    "loudness": ScoreRule(combine=_decibel_mean, precision=2),
+    "peak": ScoreRule(combine=_highest, precision=2),
+    "noise_floor": ScoreRule(combine=_typical, precision=2),
+    "flatness": ScoreRule(combine=_highest),
+    "face_share": ScoreRule(precision=4),
+    "face_x": ScoreRule(precision=4),
+    "face_y": ScoreRule(precision=4),
+}
+DEFAULT_RULE = ScoreRule()
+
+def rule_for(name: str) -> ScoreRule:
+    """Find how a score combines.
+
+    Args:
+        name: The score's name.
+
+    Returns:
+        Its rule, or the default for a score nothing has been decided about.
+    """
+    return SCORE_RULES.get(name, DEFAULT_RULE)
+
+def content_scores() -> Tuple[str, ...]:
+    """Name the scores that describe what is in a stretch rather than how it was captured.
+
+    Returns:
+        Their names, in the order the rules declare them.
+    """
+    return tuple(name for name, rule in SCORE_RULES.items() if rule.about_content)
+
+def _combined(parts: Mapping[str, Sequence[Tuple[float, float]]], whole: Optional[float] = None) -> dict:
+    """Combine each score from the parts that carried it.
+
+    Args:
+        parts: `(value, seconds)` pairs per score name.
+        whole: Length of the stretch in seconds. When given, a content score
+            is spread across all of it rather than across the parts that
+            carried it, so that a stretch nobody speaks over reads as quiet
+            rather than as unmeasured.
+
+    Returns:
+        One number per score, rounded as its rule asks.
+    """
+    scores = {}
+    for name in sorted(parts):
+        rule = rule_for(name)
+        value = rule.combine(parts[name])
+        if whole is not None and rule.about_content and whole > 0:
+            value *= sum(seconds for _, seconds in parts[name]) / whole
+        scores[name] = round(value, rule.precision)
+    return scores
+
+def combined_over(start: float, end: float, measurements: Sequence[Measured]) -> dict:
+    """Combine what was measured across a stretch, weighted by how much of it each covers.
+
+    Measurements are taken per shot and per second, and a clip is neither: a
+    sentence can run across two shots and end mid-second. Weighting by the
+    overlap is the only reading that does not quietly favour a measurement
+    that barely touches the clip.
+
+    Args:
+        start: Start of the stretch in seconds.
+        end: End of the stretch in seconds.
+        measurements: Records to combine; they need not be sorted, and a field
+            of one that was not measured is skipped rather than counted as
+            zero.
+
+    Returns:
+        One number per score. A score nothing overlapping measured is absent,
+        which says it was not measured here — not that it was measured and
+        came out unremarkable.
+    """
+    parts: Dict[str, List[Tuple[float, float]]] = {}
+    for measurement in measurements:
+        overlap = min(end, measurement.end) - max(start, measurement.start)
+        if overlap <= 0:
+            continue
+        for name, value in measurement.model_dump(exclude={"start", "end"}).items():
+            if value is not None:
+                parts.setdefault(name, []).append((float(value), overlap))
+    return _combined(parts)
+
+def combined_from_clips(members: Sequence["SemanticClip"], whole: float) -> dict:
+    """Combine the scores of the clips a coarser clip is made of.
+
+    Args:
+        members: The clips it covers, in order.
+        whole: Its length in seconds.
+
+    Returns:
+        One number per score any member carried. A content score is spread
+        across the whole stretch — a part with nobody talking really does
+        carry no speech — while a measurement is combined only from the parts
+        it was taken in, since a part whose blur nobody measured does not make
+        the whole any sharper.
+    """
+    parts: Dict[str, List[Tuple[float, float]]] = {}
+    for clip in members:
+        for name, value in clip.scores.items():
+            parts.setdefault(name, []).append((value, clip.duration))
+    return _combined(parts, whole)
+
+def speaker_at(
+    turns: Sequence[SpeakerTurn],
+    start: float,
+    end: float,
+    majority: float = SPEAKER_MAJORITY,
+) -> Optional[str]:
+    """Say whose stretch this is, when it is clearly one person's.
+
+    Silence in the stretch is not held against anybody: what is weighed is the
+    talking in it, so a sentence with a long pause in the middle still belongs
+    to whoever said both halves of it.
+
+    Args:
+        turns: The file's speaker turns.
+        start: Start of the stretch in seconds.
+        end: End of the stretch in seconds.
+        majority: Share of the talking one voice has to hold before the
+            stretch is called theirs.
+
+    Returns:
+        The label, or `None` when nobody is speaking over the stretch or when
+        it straddles a handover evenly enough that naming one of them would be
+        a guess. An unlabelled clip is the honest answer there: the label goes
+        on screen and into an edit, and a wrong one is worse than none.
+    """
+    held: dict = {}
+    for turn in turns:
+        overlap = min(end, turn.end) - max(start, turn.start)
+        if overlap > 0:
+            held[turn.speaker] = held.get(turn.speaker, 0.0) + overlap
+    if not held:
+        return None
+    spoken = sum(held.values())
+    longest = max(sorted(held), key=lambda speaker: held[speaker])
+    return longest if held[longest] / spoken >= majority else None
 
 def was_audible(silence_share: float, has_audio: bool) -> bool:
     """Decide whether words transcribed over a stretch were ever actually said.
@@ -185,12 +443,18 @@ def _scores(
         segment: Transcribed sentence, for a speech stretch.
 
     Returns:
-        Scores keyed by name, each rounded to three decimals. `speech` is the
-        share carrying transcribed words, `silence`, `black` and `frozen` the
-        shares each detector marked, and `words_per_second` the pace — whose
-        unit is whatever the transcript counts as a word, so a Chinese
-        transcript counts characters and the number compares within a
-        language rather than across them.
+        Scores keyed by name. `speech` is the share carrying transcribed
+        words, `silence`, `black` and `frozen` the shares each detector
+        marked, and `words_per_second` the pace — whose unit is whatever the
+        transcript counts as a word, so a Chinese transcript counts characters
+        and the number compares within a language rather than across them.
+        The rest are the picture and sound measurements averaged over the
+        stretch: `exposure`, `contrast`, `blur`, `motion` and `shake` from the
+        shots it spans, `loudness`, `peak`, `noise_floor` and `flatness` from
+        the seconds it spans, and `faces`, `face_share`, `face_x` and `face_y`
+        from who was on screen during them. A measurement that was not taken
+        is absent rather than zero, which is why `face_x` is missing from a
+        clip with nobody in it rather than sitting in the middle of the frame.
     """
     words = segment.words if segment is not None else []
     scores = {
@@ -201,7 +465,10 @@ def _scores(
     }
     if words and end > start:
         scores["words_per_second"] = len(words) / (end - start)
-    return {name: round(value, 3) for name, value in scores.items()}
+    scores = {name: round(value, rule_for(name).precision) for name, value in scores.items()}
+    for measurements in (analysis.shots, analysis.sound, analysis.faces):
+        scores.update(combined_over(start, end, measurements))
+    return scores
 
 def _kind(has_speech: bool, has_audio: bool, scores: Mapping[str, float]) -> ClipKind:
     """Decide what a stretch is from what was measured in it.
@@ -302,6 +569,7 @@ def build_timeline(
                 safe_out=round(safe_out, 3),
                 kind=_kind(bool(text), asset.has_audio, scores),
                 text=text,
+                speaker=speaker_at(analysis.speakers, start, end),
                 scores=scores,
             ))
     return timeline, clips

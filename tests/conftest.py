@@ -15,6 +15,11 @@ import pytest
 
 WORKSPACE = tempfile.mkdtemp(prefix="clip-mcp-tests-")
 os.environ["CLIP_MCP_WORKSPACE"] = WORKSPACE
+# The workspace is thrown away after every run, and the models in it are tens of megabytes
+# fetched over the network. Kept in the workspace they would be downloaded again on every
+# run, so the suite points them at somewhere that survives between runs. Production keeps
+# them in the workspace, which is what makes deleting a project delete its models.
+os.environ.setdefault("CLIP_MCP_MODELS", os.path.join(tempfile.gettempdir(), "clip-mcp-test-models"))
 
 FFMPEG = shutil.which("ffmpeg")
 

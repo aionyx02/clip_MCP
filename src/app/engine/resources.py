@@ -26,8 +26,17 @@ DEFAULT_MAX_DECODERS = 4
 # filter graph and the encoder.
 RENDER_BASE_BYTES = 256 * MEGABYTE
 RENDER_PER_INPUT_BYTES = 64 * MEGABYTE
-# Detection decodes one file at 320 px wide, so its cost barely depends on the source.
+# The detection pass decodes one file once and splits it into branches no wider than
+# 480 px, so its cost barely depends on how big the source is.
 DETECTION_BYTES = 384 * MEGABYTE
+# Diarization is the one stage whose cost follows the length of the file rather than the
+# size of a model: the whole soundtrack is decoded to 16 kHz mono floats and handed over
+# in one piece, so it is held twice over while the models read it. An hour of audio is
+# about 440 MB of that, which is too much to leave out of the gate.
+DIARIZATION_BYTES = 192 * MEGABYTE
+DIARIZATION_BYTES_PER_SECOND = 16000 * 4 * 2
+# Face detection reads stills a few hundred pixels wide, one at a time.
+FACE_DETECTION_BYTES = 128 * MEGABYTE
 # Weights plus CTranslate2's working set, by model name. int8 on the CPU is the expensive case.
 WHISPER_MODEL_BYTES = {
     "tiny": 400 * MEGABYTE,
@@ -192,17 +201,38 @@ def whisper_memory_bytes(model_name: str) -> int:
     """
     return WHISPER_MODEL_BYTES.get(model_name, DEFAULT_WHISPER_BYTES)
 
-def analysis_memory_bytes(transcribe: bool, model_name: str) -> int:
+def analysis_memory_bytes(
+    transcribe: bool,
+    model_name: str,
+    duration: float = 0.0,
+    diarize: bool = False,
+    detect_faces: bool = False,
+) -> int:
     """Estimate what analyzing one asset needs.
+
+    The stages do not all run at once, so this is the largest of them rather
+    than their sum — except for diarization, which is counted on its own
+    because what it holds is the file itself and not a model.
 
     Args:
         transcribe: Whether speech recognition runs as well as detection.
         model_name: Speech recognition model that would be loaded.
+        duration: Length of the asset in seconds, which is what diarization's
+            cost follows.
+        diarize: Whether voices are told apart as well.
+        detect_faces: Whether faces are looked for.
 
     Returns:
         The estimate in bytes.
     """
-    return DETECTION_BYTES + (whisper_memory_bytes(model_name) if transcribe else 0)
+    stages = [DETECTION_BYTES]
+    if transcribe:
+        stages.append(whisper_memory_bytes(model_name))
+    if detect_faces:
+        stages.append(FACE_DETECTION_BYTES)
+    if diarize:
+        stages.append(DIARIZATION_BYTES + int(max(0.0, duration) * DIARIZATION_BYTES_PER_SECOND))
+    return max(stages)
 
 def render_memory_bytes(input_count: int) -> int:
     """Estimate what rendering a timeline needs.

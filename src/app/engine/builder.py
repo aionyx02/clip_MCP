@@ -4,6 +4,7 @@ from decimal import Decimal
 from fractions import Fraction
 from typing import List, Mapping, Optional, Tuple
 from app.engine import resources
+from app.engine.ffmpeg import escape_filter_path
 from app.models.media import Asset
 from app.models.timeline import Clip, Project, TrackType
 
@@ -153,24 +154,6 @@ def _overlay_box(clip: Clip, width: int, height: int) -> Tuple[int, int, int, in
         box_width,
         box_height,
     )
-
-def _escape_filter_path(path: str) -> str:
-    """Make a file path safe to put inside a quoted filtergraph argument.
-
-    A path breaks a filtergraph three times over: on Windows the backslashes
-    are escapes and the drive letter's colon separates filter options, and an
-    apostrophe anywhere in the path closes the quoted section, which then
-    leaves any comma or bracket in it to the graph parser.
-
-    Args:
-        path: Path to a file the filtergraph reads, written between single
-            quotes at the call site.
-
-    Returns:
-        The path with forward slashes, an escaped colon, and each apostrophe
-        quoted out and escaped for both the filter and the graph.
-    """
-    return path.replace("\\", "/").replace("'", r"'\\\''").replace(":", r"\:")
 
 def _clip_video_filter(clip: Clip, frames: int, fps: Fraction) -> str:
     """Build the look part of a clip's video chain: its colour and its fades.
@@ -471,7 +454,7 @@ class FFmpegRenderer:
 
         if subtitle_path is not None:
             # Burn before any preview downscale, so the ASS file's own resolution matches the picture.
-            filters.append(f"{joined}subtitles=filename='{_escape_filter_path(subtitle_path)}'[subbedv]")
+            filters.append(f"{joined}subtitles=filename='{escape_filter_path(subtitle_path)}'[subbedv]")
             joined = "[subbedv]"
         if is_preview:
             filters.append(f"{joined}scale=-2:480[outv]")

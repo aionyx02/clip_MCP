@@ -18,6 +18,24 @@ def hidden_window_flags() -> int:
     """
     return subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
 
+def escape_filter_path(path: str) -> str:
+    """Make a file path safe to put inside a quoted filtergraph argument.
+
+    A path breaks a filtergraph three times over: on Windows the backslashes
+    are escapes and the drive letter's colon separates filter options, and an
+    apostrophe anywhere in the path closes the quoted section, which then
+    leaves any comma or bracket in it to the graph parser.
+
+    Args:
+        path: Path to a file the filtergraph reads or writes, written between
+            single quotes at the call site.
+
+    Returns:
+        The path with forward slashes, an escaped colon, and each apostrophe
+        quoted out and escaped for both the filter and the graph.
+    """
+    return path.replace("\\", "/").replace("'", r"'\\\''").replace(":", r"\:")
+
 def read_tail(path: str, limit: int = 500) -> str:
     """Read the end of a text file.
 

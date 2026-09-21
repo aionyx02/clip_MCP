@@ -352,8 +352,8 @@ def _run_analysis(repo: Repository, job: Job, spec: Dict[str, Any], context: Job
     Args:
         repo: Repository holding the asset and receiving the analysis.
         job: Analyze job being run.
-        spec: Job specification with `transcribe`, `language`, `prompt`, and
-            `chinese_variant`.
+        spec: Job specification with `transcribe`, `language`, `prompt`,
+            `chinese_variant`, `diarize`, and `speakers`.
         context: Progress and cancellation for the job.
 
     Raises:
@@ -373,6 +373,8 @@ def _run_analysis(repo: Repository, job: Job, spec: Dict[str, Any], context: Job
         chinese_variant=spec.get("chinese_variant"),
         on_progress=context.report,
         is_cancelled=context.is_cancelled,
+        diarize=spec.get("diarize", True),
+        speakers=spec.get("speakers"),
     )
     repo.save_analysis(analysis)
 

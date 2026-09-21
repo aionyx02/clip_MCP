@@ -27,6 +27,7 @@ from collections import Counter
 from dataclasses import dataclass
 from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 
+from app.engine.semantic import combined_from_clips
 from app.models.media import MediaAnalysis, Span
 from app.models.semantic import ClipKind, ClipLevel, SectionChoice, SemanticClip
 
@@ -370,7 +371,6 @@ def build_sections(
         ]
         section_id = f"{timeline_id}:s{position:04d}"
         length = sum(clip.duration for clip in members) or 1.0
-        names = {name for clip in members for name in clip.scores}
         sections.append(SemanticClip(
             id=section_id,
             timeline_id=timeline_id,
@@ -383,11 +383,7 @@ def build_sections(
             name=choice.name,
             topic=choice.topic,
             text=choice.summary,
-            # Each score is what its members measured, weighted by how much of the section they are.
-            scores={
-                name: round(sum(clip.scores.get(name, 0.0) * clip.duration for clip in members) / length, 3)
-                for name in sorted(names)
-            },
+            scores=combined_from_clips(members, length),
         ))
         for clip in members:
             attached[clip.id] = clip.model_copy(update={"parent_id": section_id})

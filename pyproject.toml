@@ -8,8 +8,14 @@ dependencies = [
     "faster-whisper>=1.2.1",
     "fastmcp>=4.0.4",
     "opencc>=1.4.2",
+    # Face detection, for its YuNet wrapper. The headless build leaves out the GUI
+    # windowing a server has no use for and cannot open anyway.
+    "opencv-python-headless>=4.10",
     "pillow>=12",
     "pydantic>=2.13.5",
+    # Speaker diarization, on onnxruntime rather than torch: the models are plain
+    # files this server fetches and stores itself, and none of them is gated.
+    "sherpa-onnx>=1.13",
     "typing-extensions>=4.16.0",
 ]
 

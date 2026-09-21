@@ -247,7 +247,9 @@ so a conversation can be continued days later.
 Use this whenever a request depends on content: what someone says, what is on
 screen, where the pauses or mistakes are, or which parts are best.
 
-1. Call `analyze_asset` for each source. Set `language` when you know it. For
+1. Call `analyze_asset` for each source. Set `language` when you know it.
+   Set `speakers` when you know how many people are talking — told the
+   number, the server cannot split one person into two. For
    Chinese speech, set `chinese_variant` to match how the user writes:
    `zh-TW` for Traditional Chinese as used in Taiwan (the default for users
    who write Traditional Chinese), `zh-HK` for Hong Kong, `zh-Hant` for
@@ -261,9 +263,16 @@ screen, where the pauses or mistakes are, or which parts are best.
    the same IDs, so call it rather than trying to remember one.
 3. Find material with `query_clips`, not by reading a transcript end to end.
    Ask for what you need and let the search narrow it: a kind, a phrase, a
-   minimum length, a stretch of the file, a bound on the scores. Then call
+   minimum length, a stretch of the file, a bound on the scores. The scores
+   cover how well a shot was shot as well as what is in it — exposure, blur,
+   camera shake, whether anybody is on screen and where, and the sound's
+   level, noise floor and clipping. They are measurements, not verdicts:
+   there is no number above which a shot is too dark or too wobbly, so read
+   a few and set the bound from what this footage actually looks like. On a
+   conversation each clip also carries a `speaker` label, which is that
+   file's own: `S1` in one recording is not `S1` in another. Then call
    `get_semantic_clip` on the few worth a closer look, which gives the full
-   text and, with `include_words`, every word's timing.
+   text, every score, and with `include_words` every word's timing.
    `get_analysis` is still there for checking what a detector actually found,
    but it is not how to read footage any more.
 4. On anything longer than a few minutes, break it into sections before you
@@ -389,9 +398,10 @@ Work through it in three passes, so the slow one runs only on what survives:
    shaky, or a stray recording.
 2. **Triage, one decoding pass per file.** On the files that look usable,
    call `analyze_asset` with `transcribe: false`. That finds scene changes,
-   silences, and black or frozen picture without running speech recognition,
-   which is the slow part. Use it to find where anything happens and to drop
-   files that are mostly nothing.
+   silences, and black or frozen picture, measures each shot's exposure, blur,
+   motion and shake along with the sound's levels, and looks for faces — all
+   without running speech recognition, which is the slow part. Use it to find
+   where anything happens and to drop files that are mostly nothing.
 3. **Propose, then transcribe.** Offer two or three directions and let the
    user pick. Only once they have picked, run `analyze_asset` with
    transcription, on the files that direction needs. Build the semantic

@@ -22,8 +22,9 @@ from app.engine.sections import (
     propose_candidates,
     section_kind,
 )
-from app.engine.semantic import build_timeline
-from app.models.semantic import ClipKind, ClipLevel, SectionChoice
+from app.engine.semantic import build_timeline, combined_from_clips
+from app.models.media import Span
+from app.models.semantic import ClipKind, ClipLevel, SectionChoice, SemanticClip
 from app.server import (
     build_semantic_timeline,
     import_asset,
@@ -272,3 +273,44 @@ def test_sending_sections_again_replaces_them(sectioned: dict) -> None:
 def test_setting_sections_needs_some(sectioned: dict) -> None:
     with pytest.raises(ValueError, match="at least one section"):
         set_sections([], timeline_id=sectioned["timeline_id"])
+
+def test_a_section_averages_a_measurement_over_only_the_parts_it_was_taken_in() -> None:
+    """A stretch nobody measured must not read as a stretch that measured well."""
+    members = [
+        SemanticClip(
+            id="c1", timeline_id="tl", asset_id=ASSET_ID, level=ClipLevel.UTTERANCE,
+            source_range=Span(start=0, end=1), kind=ClipKind.SPEECH,
+            scores={"speech": 1.0, "blur": 6.0, "shake": 0.04},
+        ),
+        SemanticClip(
+            id="c2", timeline_id="tl", asset_id=ASSET_ID, level=ClipLevel.UTTERANCE,
+            source_range=Span(start=1, end=4), kind=ClipKind.AMBIENT,
+            scores={"speech": 0.0},
+        ),
+    ]
+    scores = combined_from_clips(members, whole=4.0)
+    # Three of the four seconds carry no speech, and that is what makes the section quiet.
+    assert scores["speech"] == 0.25
+    # Those same three seconds were never measured for blur, so they say nothing about it.
+    assert scores["blur"] == 6.0
+    # Three decimals would round an unsteady section down to nothing.
+    assert scores["shake"] == 0.04
+
+def test_a_long_member_is_not_outvoted_by_a_crowd_of_short_ones() -> None:
+    """A section made mostly of one long shot sounds like that shot, not like the lines."""
+    lines = [
+        SemanticClip(
+            id=f"s{index}", timeline_id="tl", asset_id=ASSET_ID, level=ClipLevel.UTTERANCE,
+            source_range=Span(start=index * 0.5, end=index * 0.5 + 0.5), kind=ClipKind.SPEECH,
+            scores={"noise_floor": -50.0},
+        )
+        for index in range(20)
+    ]
+    long_shot = SemanticClip(
+        id="long", timeline_id="tl", asset_id=ASSET_ID, level=ClipLevel.UTTERANCE,
+        source_range=Span(start=10, end=70), kind=ClipKind.AMBIENT,
+        scores={"noise_floor": -30.0},
+    )
+    scores = combined_from_clips([*lines, long_shot], whole=70.0)
+    # Ten seconds of lines against a minute of hiss: the minute is what the section is.
+    assert scores["noise_floor"] == -30.0

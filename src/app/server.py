@@ -3,7 +3,7 @@ import re
 import uuid
 from decimal import Decimal
 from pathlib import Path
-from typing import Annotated, Callable, List, Literal, Optional
+from typing import Annotated, Callable, List, Literal, Optional, Sequence
 
 from fastmcp import FastMCP
 from fastmcp.server.providers.skills import SkillsDirectoryProvider
@@ -11,7 +11,7 @@ from fastmcp.server.transforms import ResourcesAsTools
 from fastmcp.tools import ToolResult
 from fastmcp.utilities.types import Image
 from pydantic import Field, TypeAdapter
-from app.models.media import Asset, Span
+from app.models.media import Asset, Measured, MediaAnalysis, Span
 from app.models.plan import EditPlan, PlanAmendment, apply_amendment
 from app.models.semantic import (
     ClipDescription, ClipKind, ClipLevel, SectionChoice, SemanticClip, SemanticTimeline, Tag, TagSource,
@@ -26,13 +26,15 @@ from app.models.timeline import (
 )
 from app.models.job import Job, JobKind, JobStatus
 from app.engine import resources
-from app.engine.analysis import whisper_model_name
+from app.engine.analysis import current_recipe, sound_note, whisper_model_name
+from app.engine.diarize import speaker_model_name
+from app.engine.faces import framing_note
 from app.engine.plan import (
     MUSIC_TRACK_ID, VIDEO_TRACK_ID, check_plan, check_recompile, compile_operations, compiled_duration,
     diff_plans, plan_pieces,
 )
 from app.engine.sections import build_sections, candidate_hash, check_sections, propose_candidates
-from app.engine.semantic import build_timeline, clean_cuts, timeline_input_hash
+from app.engine.semantic import build_timeline, clean_cuts, content_scores, timeline_input_hash
 from app.engine.probe import probe_file
 from app.engine.builder import DEFAULT_LOUDNESS_TARGET, FFmpegRenderer
 from app.engine.frames import format_timestamp, storyboard_sheet
@@ -55,6 +57,14 @@ MAX_CLIP_RESULTS = 200
 MAX_TIMELINE_CLIPS = 5000
 # A summary says enough to judge a clip by; the whole text is one call away.
 CLIP_SUMMARY_CHARACTERS = 80
+# Which scores a search result carries: the ones describing what is in a clip, which is
+# what a search asks about, while how well it was shot is a question for the few clips
+# that survive it and `get_semantic_clip` carries those. Taken from where the scores are
+# defined rather than listed again here, so a new one lands on the right side by saying
+# what it is. Every score can be filtered on either way: `query_clips` matches
+# `min_scores` and `max_scores` against all of them, so narrowing by one that is not
+# shown here works and returns a shorter list.
+SUMMARY_SCORES = content_scores()
 MEDIA_EXTENSIONS = frozenset({
     ".mp4", ".mov", ".m4v", ".mkv", ".avi", ".webm", ".mpg", ".mpeg", ".mts", ".m2ts", ".wmv", ".flv", ".3gp",
     ".mp3", ".m4a", ".wav", ".aac", ".flac", ".ogg", ".opus", ".wma", ".aiff",
@@ -124,7 +134,20 @@ def _get_asset(asset_id: str) -> Asset:
         raise ValueError(f"asset {asset_id} not found")
     return asset
 
-def _overlapping(spans: List[Span], start: float, end: float) -> List[dict]:
+def _covering(records: Sequence[Measured], start: float, end: float) -> list:
+    """Select the records that reach into a time range.
+
+    Args:
+        records: Records to filter; anything with `start` and `end`.
+        start: Range start in seconds.
+        end: Range end in seconds.
+
+    Returns:
+        The overlapping records themselves, for a caller that has to read them.
+    """
+    return [record for record in records if record.end > start and record.start < end]
+
+def _overlapping(spans: Sequence[Measured], start: float, end: float) -> List[dict]:
     """Select the spans that overlap a time range.
 
     Args:
@@ -135,7 +158,7 @@ def _overlapping(spans: List[Span], start: float, end: float) -> List[dict]:
     Returns:
         The overlapping spans, serialized as dictionaries.
     """
-    return [span.model_dump() for span in spans if span.end > start and span.start < end]
+    return [span.model_dump() for span in _covering(spans, start, end)]
 
 @mcp.tool()
 def inspect_media(filepath: str) -> dict:
@@ -230,13 +253,25 @@ def import_asset(filepath: str) -> dict:
 
 @mcp.tool()
 def list_assets() -> dict:
-    """List all imported assets.
+    """List all imported assets, and say which of them have been analyzed.
 
     Returns:
-        A dictionary with an `assets` list, each item in the same format as
-        returned by `import_asset`.
+        A dictionary with an `assets` list, each item in the format
+        `import_asset` returns plus `analyzed` and `stale`. `stale` is true
+        for an asset analyzed with detection settings or a speech model the
+        server no longer uses: its analysis still works, but it was measured
+        with different instruments from a fresh one, so analyze those assets
+        again before comparing them with each other.
     """
-    return {"assets": [asset.model_dump() for asset in repo.list_assets()]}
+    assets = []
+    for asset in repo.list_assets():
+        analysis = repo.get_analysis(asset.id)
+        assets.append({
+            **asset.model_dump(),
+            "analyzed": analysis is not None,
+            "stale": analysis is not None and _is_stale(analysis),
+        })
+    return {"assets": assets}
 
 @mcp.tool()
 def import_folder(folderpath: str, recursive: bool = False) -> dict:
@@ -288,6 +323,20 @@ def import_folder(folderpath: str, recursive: bool = False) -> dict:
     total = sum((asset.duration for asset in assets if asset.duration is not None), Decimal(0))
     return {"assets": [asset.model_dump() for asset in assets], "total_duration": total, "skipped": skipped}
 
+def _is_stale(analysis: MediaAnalysis) -> bool:
+    """Say whether an analysis was taken in a way the server no longer uses.
+
+    Args:
+        analysis: Analysis to check.
+
+    Returns:
+        True when the detection thresholds, the measurements taken, or the
+        speech model have changed since it was made. Nothing in it is wrong;
+        it just answers a slightly different question from a fresh one, which
+        matters most when two assets are being compared with each other.
+    """
+    return analysis.recipe.differs_from(current_recipe(whisper_model_name(), speaker_model=speaker_model_name()))
+
 @mcp.tool()
 def analyze_asset(
     asset_id: str,
@@ -295,15 +344,30 @@ def analyze_asset(
     language: Optional[str] = None,
     prompt: Optional[str] = None,
     chinese_variant: Optional[Literal["zh-TW", "zh-HK", "zh-Hant", "zh-Hans"]] = None,
+    diarize: bool = True,
+    speakers: Annotated[Optional[int], Field(ge=1, le=20)] = None,
 ) -> dict:
     """Start analyzing what an asset contains, in the background.
 
-    Detects scene changes, black and frozen picture, and silences. If
-    `transcribe` is true and the asset has audio, also transcribes speech
-    locally with word-level timestamps that stay accurate on long recordings.
+    One decoding pass detects scene changes, black and frozen picture, and
+    silences, and alongside them measures each shot — exposure, contrast,
+    blur, motion, camera shake — each second of sound (level, peak, noise
+    floor, and how squared off the waveform is where it peaks), and each
+    second of picture for faces: how many, how big the largest is, and where
+    it sits in frame. If `transcribe` is true and the asset has audio, speech
+    is then transcribed locally with word-level timestamps that stay accurate
+    on long recordings, which is the slow part by far, and the voices are told
+    apart so that each clip knows who was speaking.
+
     Returns immediately: poll `get_job` until the job completes, then read the
-    results with `get_analysis`. Analyzing again replaces earlier results. The
-    first transcription downloads the speech recognition model.
+    results with `get_analysis`, or search them through `query_clips` once a
+    semantic timeline is built. Analyzing again replaces earlier results.
+
+    Everything runs on this machine. The models are downloaded the first time
+    they are needed — the speech model is the large one, the rest are tens of
+    megabytes — and they are kept inside the workspace, so deleting the
+    workspace deletes them too. `stage` says when a download is what a job is
+    waiting on.
 
     Args:
         asset_id: ID of the asset to analyze.
@@ -311,6 +375,15 @@ def analyze_asset(
         language: Spoken language code, such as "zh" or "en"; omit to detect it.
         prompt: Text that guides transcription, such as names and terms that
             appear in the recording.
+        diarize: Whether to tell the voices apart. Only done alongside a
+            transcript, since a speaker label with nothing said under it has
+            nowhere to go. Turn it off for footage with one person in it if
+            the extra minute matters.
+        speakers: How many people are talking, when that is known. Worth
+            giving for an interview or a two-hander: told the number, the
+            server has to find exactly that many, and cannot split one person
+            who leaned closer to the microphone into two. Omit it to let the
+            number be worked out.
         chinese_variant: Convert a Chinese transcript to this script and
             regional variant: "zh-TW" (Traditional, Taiwan characters and
             vocabulary, e.g. 視頻 becomes 影片), "zh-HK" (Traditional, Hong
@@ -335,8 +408,22 @@ def analyze_asset(
 
     job = Job(kind=JobKind.ANALYZE, asset_id=asset_id)
     job.work_dir = os.path.join(WORKSPACE_DIR, "jobs", job.job_id)
-    job.memory_estimate = resources.analysis_memory_bytes(transcribe and asset.has_audio, whisper_model_name())
-    job = job_manager.start_job(job, {"transcribe": transcribe, "language": language, "prompt": prompt, "chinese_variant": chinese_variant})
+    with_speech = transcribe and asset.has_audio
+    job.memory_estimate = resources.analysis_memory_bytes(
+        with_speech,
+        whisper_model_name(),
+        duration=float(asset.duration),
+        diarize=with_speech and diarize,
+        detect_faces=asset.has_video,
+    )
+    job = job_manager.start_job(job, {
+        "transcribe": transcribe,
+        "language": language,
+        "prompt": prompt,
+        "chinese_variant": chinese_variant,
+        "diarize": diarize,
+        "speakers": speakers,
+    })
     return {"job_id": job.job_id, "status": job.status.value, "stage": job.stage}
 
 @mcp.tool()
@@ -363,10 +450,28 @@ def get_analysis(
 
     Returns:
         A dictionary with the asset `duration`, `analyzed_at`, and the
-        overlapping `scenes`, `black_frames`, `frozen_frames`, `silences`, and
-        `transcript` (`language`, `model`, `chinese_variant`, and `segments`
-        with `start`, `end`, and `text`), or null for `transcript` if speech
-        was not transcribed.
+        overlapping `scenes`, `black_frames`, `frozen_frames`, `silences`,
+        `shots`, and `transcript` (`language`, `model`, `chinese_variant`, and
+        `segments` with `start`, `end`, and `text`), or null for `transcript`
+        if speech was not transcribed.
+
+        `shots` carries one record per shot in the range — `exposure`,
+        `contrast`, `blur`, `motion` and `shake` — while `sound` and `faces`
+        summarise the range's per-second records rather than listing them,
+        since an hour of those is thousands of rows. `faces` says how much of
+        the range had anybody on screen, how many there usually were, and
+        where the largest face sat across the frame and how far it moved,
+        which is what a vertical reframe needs. `speakers` lists the stretches
+        each voice held; the labels are this file's own and mean nothing
+        outside it.
+
+        All of these are measurements and none of them is a verdict: whether a
+        shot is too dark or too wobbly depends on what it is for.
+
+        `recipe` says what measured it, and `stale` is true when the server
+        has since changed how it measures. To pick material out of this, use
+        `query_clips`: every measurement here is also averaged onto the
+        semantic clips, where it can be filtered on.
 
     Raises:
         ValueError: If the asset has not been analyzed yet.
@@ -393,11 +498,17 @@ def get_analysis(
         "asset_id": asset_id,
         "duration": analysis.duration,
         "analyzed_at": analysis.analyzed_at.isoformat(),
+        "recipe": analysis.recipe.model_dump(),
+        "stale": _is_stale(analysis),
         "range": {"start": start, "end": end},
         "scenes": _overlapping(analysis.scenes, start, end),
         "black_frames": _overlapping(analysis.black_frames, start, end),
         "frozen_frames": _overlapping(analysis.frozen_frames, start, end),
         "silences": _overlapping(analysis.silences, start, end),
+        "shots": _overlapping(analysis.shots, start, end),
+        "sound": sound_note(_covering(analysis.sound, start, end)),
+        "faces": framing_note(_covering(analysis.faces, start, end)),
+        "speakers": _overlapping(analysis.speakers, start, end),
         "transcript": transcript,
     }
 
@@ -408,8 +519,9 @@ def _clip_summary(clip: SemanticClip) -> dict:
         clip: Clip to describe.
 
     Returns:
-        The clip's identity, placement, headroom, measurements, and its text
-        cut to `CLIP_SUMMARY_CHARACTERS`; `get_semantic_clip` has the rest.
+        The clip's identity, placement, headroom, the `SUMMARY_SCORES`, and
+        its text cut to `CLIP_SUMMARY_CHARACTERS`; `get_semantic_clip` has the
+        rest of both.
     """
     text = clip.text if len(clip.text) <= CLIP_SUMMARY_CHARACTERS else clip.text[:CLIP_SUMMARY_CHARACTERS] + "…"
     return {
@@ -417,6 +529,7 @@ def _clip_summary(clip: SemanticClip) -> dict:
         "asset_id": clip.asset_id,
         **({"name": clip.name} if clip.name else {}),
         **({"topic": clip.topic} if clip.topic else {}),
+        **({"speaker": clip.speaker} if clip.speaker else {}),
         "kind": clip.kind.value,
         "start": clip.source_range.start,
         "end": clip.source_range.end,
@@ -426,7 +539,7 @@ def _clip_summary(clip: SemanticClip) -> dict:
         "text": text,
         **({"description": clip.description} if clip.description else {}),
         **({"tags": [tag.value for tag in clip.tags]} if clip.tags else {}),
-        "scores": clip.scores,
+        "scores": {name: clip.scores[name] for name in SUMMARY_SCORES if name in clip.scores},
     }
 
 def _require_timeline(timeline_id: Optional[str]) -> SemanticTimeline:
@@ -476,7 +589,14 @@ def build_semantic_timeline(asset_ids: List[str], rebuild: bool = False) -> dict
     Returns:
         A dictionary with the `timeline_id`, the `asset_ids` it covers,
         `reused` saying whether an existing build was returned untouched,
-        `total_clips`, and `counts` of clips by level and kind.
+        `total_clips`, `counts` of clips by level and kind, and `stale`.
+
+        `stale` lists assets analyzed with detection settings or a speech
+        model the server no longer uses. The build goes ahead with them,
+        because re-analyzing an hour of footage to change nothing is worse
+        than a number measured slightly differently — but those assets are
+        being compared with the rest on an uneven footing, so analyze them
+        again when the comparison matters.
 
     Raises:
         ValueError: If no assets were given, an asset does not exist, or an
@@ -490,6 +610,7 @@ def build_semantic_timeline(asset_ids: List[str], rebuild: bool = False) -> dict
     if missing:
         raise ValueError(f"these assets have not been analyzed yet, call analyze_asset on them first: {', '.join(missing)}")
 
+    stale = sorted(asset_id for asset_id, analysis in analyses.items() if _is_stale(analysis))
     existing = repo.find_semantic_timeline(timeline_input_hash(analyses))
     if existing is not None and not rebuild:
         return {
@@ -498,6 +619,7 @@ def build_semantic_timeline(asset_ids: List[str], rebuild: bool = False) -> dict
             "reused": True,
             "total_clips": sum(repo.count_semantic_clips(existing.id).values()),
             "counts": repo.count_semantic_clips(existing.id),
+            "stale": stale,
         }
 
     timeline, clips = build_timeline(assets, analyses)
@@ -539,12 +661,40 @@ def query_clips(
     and `get_semantic_clip` has the full text and word timings for the few
     that matter.
 
-    The scores each clip carries are measurements, not opinions:
-    `speech` and `silence` are the shares of the clip covered by words and by
-    detected silence, `black` and `frozen` the shares the picture detectors
-    marked, and `words_per_second` its pace. Pace counts whatever the
-    transcript counts as a word, which for Chinese is characters, so compare
-    it within one language rather than across two.
+    The scores each clip carries are measurements, not opinions. A result
+    shows the ones that say whether there is usable content here: `speech` and
+    `silence` are the shares of the clip covered by words and by detected
+    silence, `black` and `frozen` the shares the picture detectors marked, and
+    `words_per_second` its pace. Pace counts whatever the transcript counts as
+    a word, which for Chinese is characters, so compare it within one language
+    rather than across two.
+
+    A clip from a file whose voices were told apart also carries `speaker`,
+    a label like `S1`. The labels are that file's own — `S1` in one recording
+    is not `S1` in another — and a sentence that straddles a handover carries
+    none at all rather than a guess.
+
+    Each clip carries more than a result shows — how well it was shot, who was
+    on screen, and what the sound was like — and `min_scores` and `max_scores`
+    filter on those too. `exposure` is mean brightness from 0 to 1 and `contrast` the
+    spread between the dark and bright ends; `blur` rises as the picture goes
+    soft, with a sharp shot near 5; `motion` is how much changes from frame to
+    frame, 0 for a locked-off shot; `shake` is how unsteady the camera itself
+    was, near 0 on a tripod or an even pan and far higher handheld. For the
+    sound, in decibels relative to full scale: `loudness`, `peak`,
+    `noise_floor` — the hiss under everything — and `flatness`, which is high
+    where the waveform is squared off at its peaks, so a `peak` near 0 with a
+    high `flatness` is what a clipped recording looks like. For who is on
+    screen: `faces` is how many were up, averaged over the clip, so 0.5 means
+    somebody was there half the time; `face_share` is how much of the frame
+    the largest one filled, which is the difference between a close-up and a
+    wide; and `face_x` and `face_y` are where it sat, 0 to 1 across and down.
+    Faces are found, not people, so `faces` of 0 means no face was seen and
+    not that the shot is empty.
+
+    None of these has a threshold behind it, because what counts as too dark
+    or too wobbly depends on the shot. Filter on them to shorten a list, then
+    read `get_semantic_clip` for the few that matter — it carries every score.
 
     Args:
         timeline_id: Timeline to search; omit for the one built most recently.
@@ -569,8 +719,10 @@ def query_clips(
         min_duration: Keep only clips at least this many seconds long.
         max_duration: Keep only clips at most this many seconds long.
         min_scores: Lower bounds on scores, such as `{"speech": 0.5}`. A clip
-            without that score is left out.
-        max_scores: Upper bounds on scores, such as `{"black": 0.1}`.
+            without that score is left out, since a measurement nobody took
+            cannot be said to pass.
+        max_scores: Upper bounds on scores, such as `{"black": 0.1}` or
+            `{"shake": 0.01}` for shots steady enough to hold on screen.
         limit: Largest number of clips to return.
 
     Returns:

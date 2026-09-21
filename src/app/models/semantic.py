@@ -37,9 +37,11 @@ class ClipLevel(str, Enum):
 class ClipKind(str, Enum):
     """What a semantic clip is made of.
 
-    `ACTION` is not produced yet: telling a shot where something happens from
-    a shot that merely holds still needs the motion measurement the analysis
-    layer does not take. Until then such shots are `AMBIENT`.
+    `ACTION` is not produced yet. The analysis layer does now measure motion,
+    and every clip carries it as a score, but how much of it makes a shot one
+    where something is happening is a number nobody can pick honestly without
+    a corpus to pick it against. Until there is one, such shots are `AMBIENT`
+    and the measurement is there to be filtered on directly.
     """
 
     SPEECH = "speech"
