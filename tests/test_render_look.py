@@ -328,3 +328,37 @@ def test_a_speed_nobody_could_listen_to_is_refused(counting: str, speed: float) 
     project = sped(counting, 1.0)
     with pytest.raises(ValidationError):
         edit(project, [{"action": "set_clip_speed", "track_id": "main", "clip_id": "r", "speed": speed}])
+
+
+def test_a_dissolve_after_a_run_of_straight_cuts(tmp_path: Path) -> None:
+    """A run of one clip and a run of several do not arrive on the same timebase.
+
+    They meet at the crossfade, which refuses them unless both are settled
+    first. Two clips alone never show it, because neither side is
+    concatenated; this is the shape that does.
+    """
+    folder = tmp_path / "three"
+    folder.mkdir()
+    assets = []
+    for name, colour in (("a.mp4", "red"), ("b.mp4", "blue"), ("c.mp4", "green")):
+        path = folder / name
+        result = subprocess.run([
+            "ffmpeg", "-y", "-loglevel", "error",
+            "-f", "lavfi", "-i", f"color=c={colour}:size=320x240:rate=30:duration=5",
+            "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", str(path),
+        ], capture_output=True)
+        assert result.returncode == 0, result.stderr.decode("utf-8", errors="replace")
+        assets.append(import_asset(str(path))["id"])
+    first, second, third = assets
+
+    # Two straight cuts, then a dissolve: the first run holds two segments and is
+    # concatenated, the second holds one and is not.
+    project = build_project([
+        video_track(), insert("a", first, 0, 2), insert("b", second, 0, 2), insert("c", third, 1, 3),
+    ], width=320, height=240)
+    edit(project, [{"action": "set_clip_look", "track_id": "main", "clip_id": "c", "dissolve_in": 0.6}])
+    render(project, tmp_path / "three.mp4")
+    assert seconds_long(tmp_path / "three.mp4") == pytest.approx(6.0, abs=0.1)
+    # Mid-dissolve the frame holds both the blue it is leaving and the green it is joining.
+    blue, green = channels(tmp_path / "three.mp4", 3.7)[2], channels(tmp_path / "three.mp4", 3.7)[1]
+    assert blue > 20 and green > 20, (blue, green)

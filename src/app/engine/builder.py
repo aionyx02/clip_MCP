@@ -524,6 +524,15 @@ class FFmpegRenderer:
         # Each run after the first arrives carrying its own run-up, so the crossfade that
         # eats the run-up leaves the timeline exactly as long as it was. The transition ends
         # on the cut rather than straddling it, which is what keeps every clip where it is.
+        if len(run_labels) > 1:
+            # xfade refuses two inputs whose timebases differ, and they do: a run of one
+            # segment carries the frame rate's, a concatenated run carries the muxer's.
+            # Both are put on the frame rate's before they meet.
+            for run_index, run_label in enumerate(run_labels):
+                settled = f"[tb{run_index}]"
+                filters.append(f"{run_label}settb={project.fps_den}/{project.fps_num}{settled}")
+                run_labels[run_index] = settled
+
         carried = run_labels[0]
         covered = sum(segments[index].end_frame - segments[index].start_frame for index in runs[0])
         for run_index in range(1, len(run_labels)):
