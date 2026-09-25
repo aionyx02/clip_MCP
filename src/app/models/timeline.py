@@ -175,20 +175,25 @@ class CaptionStyle(BaseModel):
         default=0.75, gt=0, le=1, description="How big the second line of a bilingual caption is, against the first",
     )
 
-# Where each platform's own furniture sits over the picture, and how large text has to be
-# to read on a phone held at arm's length. Conventions, not measurements: they move when
-# the apps move, which is why they are in one place.
+# Where each platform's own furniture sits over the picture, how large text has to be to
+# read on a phone held at arm's length, and how heavy an outline it takes to stay legible
+# there. A phone is watched over whatever the footage is doing, so the vertical presets
+# carry more outline than the one meant for a screen. Conventions, not measurements: they
+# move when the apps move, which is why they are in one place.
 CAPTION_PRESETS: Dict[str, CaptionStyle] = {
     # What the server did before there were presets: clear of a phone's controls on a
     # vertical video, lower on a landscape one.
     "plain": CaptionStyle(),
     # Landscape, watched on a screen rather than held: smaller text, and only the player's
     # own control bar to stay above.
-    "youtube": CaptionStyle(size_fraction=1 / 20, bottom_fraction=0.10, side_fraction=0.10),
+    "youtube": CaptionStyle(size_fraction=1 / 20, bottom_fraction=0.10, side_fraction=0.10,
+                            outline_fraction=1 / 18),
     # The caption, the handle and the audio credit stack up the bottom fifth of a Reel.
-    "reels": CaptionStyle(size_fraction=1 / 14, bottom_fraction=0.22, side_fraction=0.10, karaoke=True),
+    "reels": CaptionStyle(size_fraction=1 / 14, bottom_fraction=0.22, side_fraction=0.10,
+                          outline_fraction=1 / 10, karaoke=True),
     # Same again, and the buttons up the right-hand side push the safe area in further.
-    "tiktok": CaptionStyle(size_fraction=1 / 13, bottom_fraction=0.26, side_fraction=0.14, karaoke=True),
+    "tiktok": CaptionStyle(size_fraction=1 / 13, bottom_fraction=0.26, side_fraction=0.14,
+                           outline_fraction=1 / 9, karaoke=True),
 }
 
 class ClipLayout(BaseModel):
@@ -274,6 +279,25 @@ class _Transition(BaseModel):
 
     seconds: Decimal = Field(..., gt=0, description="How long the transition runs, ending on the cut")
 
+    @property
+    def run_up(self) -> Decimal:
+        """How much picture the incoming clip has to supply from before its in point.
+
+        Returns:
+            The seconds it reaches back, which for a single mix is the whole
+            transition.
+        """
+        return self.seconds
+
+    @property
+    def least_frames(self) -> int:
+        """How many frames this transition needs to exist at all.
+
+        Returns:
+            One, for a transition that is a single mix.
+        """
+        return 1
+
 class Dissolve(_Transition):
     """The incoming picture mixes up through the outgoing one."""
 
@@ -302,6 +326,25 @@ class Dip(_Transition):
         pattern=COLOUR,
         description="The colour to pass through: `black`, `white`, or a hex colour such as `#1b2a4a`",
     )
+
+    @property
+    def run_up(self) -> Decimal:
+        """How much picture the incoming clip has to supply from before its in point.
+
+        Returns:
+            Half the transition: the colour covers the first mix, and only the
+            second one reaches into this clip.
+        """
+        return self.seconds / 2
+
+    @property
+    def least_frames(self) -> int:
+        """How many frames this transition needs to exist at all.
+
+        Returns:
+            Two: one to go into the colour and one to come out of it.
+        """
+        return 2
 
 Transition = Annotated[Union[Dissolve, Wipe, Dip], Field(discriminator="kind")]
 
@@ -389,12 +432,7 @@ class Clip(BaseModel):
         Returns:
             The seconds of run-up, 0 for a straight cut.
         """
-        transition = self.transition_in
-        if transition is None:
-            return Decimal(0)
-        if isinstance(transition, Dip):
-            return transition.seconds / 2
-        return transition.seconds
+        return Decimal(0) if self.transition_in is None else self.transition_in.run_up
 
     @property
     def video_source_start(self) -> Decimal:
@@ -1504,13 +1542,13 @@ def validate_project(project: Project, assets: Mapping[str, Asset]) -> None:
                     )
                 # A dip is two mixes with a colour between them, so it needs a frame for
                 # each. Shorter than that and there is no dip to see, only a filtergraph
-                # asking for a mix of no length.
+                # asking for a mix of no length. Each kind says how little it can live on.
                 frames = transition.seconds * project.fps_num / project.fps_den
-                if isinstance(transition, Dip) and frames < 2:
+                if frames < transition.least_frames:
                     raise ValueError(
-                        f"clip {clip.id}: a {transition.seconds}s dip is under two frames at "
-                        f"{project.fps_num}/{project.fps_den}fps, and a dip needs one to go into the colour "
-                        "and one to come out of it"
+                        f"clip {clip.id}: a {transition.seconds}s {transition.kind} is under "
+                        f"{transition.least_frames} frame(s) at {project.fps_num}/{project.fps_den}fps, "
+                        "which is less than it takes to draw one"
                     )
             if (clip.audio_lead or clip.audio_lag) and not asset.has_audio:
                 raise ValueError(

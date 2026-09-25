@@ -1619,7 +1619,8 @@ def compile_plan(project_id: str, expected_version: int, plan_id: Optional[str] 
     made from, nothing is compiled and you are told which clips are in the
     way, because losing somebody's work to a recompile is worse than stopping.
 
-    Only the sequence and the music bed belong to the plan. Other tracks — an
+    The sequence, the music bed and the covering picture belong to the plan,
+    each on its own track, and all three are rebuilt. Other tracks — an
     inset, a second music bed — are left exactly as they are.
 
     Args:
@@ -1743,7 +1744,7 @@ def propose_broll(plan_id: Optional[str] = None) -> dict:
     plan = _require_plan(plan_id)
     _, clips, children, assets, cuts = _plan_context(plan)
     pieces = plan_pieces(plan, clips, children, assets, cuts)
-    return {"plan_id": plan.id, "slots": broll_slots(plan, pieces, clips)}
+    return {"plan_id": plan.id, "slots": broll_slots(plan, pieces, clips, cuts)}
 
 @mcp.tool()
 def preview_project(

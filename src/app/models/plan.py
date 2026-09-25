@@ -96,11 +96,15 @@ class BrollShot(BaseModel):
     and a shot pinned to a second of it would be somewhere else by the next
     compile.
 
-    It starts at the start of a semantic clip, so it always cuts in on a
-    sentence boundary. Where it cuts back out is a length the person planning
-    chose, and the compiler reports rather than moves it: lengthening a shot
-    to let a sentence finish would be deciding how long the video runs, which
-    is not the compiler's to decide.
+    It cuts in where the clip it names begins *in the cut*, which is usually
+    that clip's own start and so a sentence boundary — but not always: a window
+    that opens partway into a clip, because a pause was taken out of it or its
+    head was trimmed, begins somewhere else. So the compiler checks rather than
+    assumes, and refuses a shot that would cut in mid-sentence; moving it costs
+    nothing. Where it cuts back out is a length the person planning chose, and
+    that one is reported rather than moved: lengthening a shot to let a sentence
+    finish would be deciding how long the video runs, which is not the
+    compiler's to decide.
     """
 
     clip_id: str = Field(..., description="Semantic clip the covering picture comes from, played from its start")

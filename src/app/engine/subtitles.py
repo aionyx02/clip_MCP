@@ -272,6 +272,20 @@ def _karaoke_text(cue: PlacedCue, max_units: float) -> str:
         width += size
     return "".join(parts)
 
+def _wrapped(text: str, max_units: float) -> str:
+    """Escape a caption and break it into lines that fit the frame.
+
+    Args:
+        text: The caption text.
+        max_units: Line width as a multiple of the font size.
+
+    Returns:
+        The lines joined the way an ASS event wants them, empty when the text
+        holds nothing to show.
+    """
+    parts = [part for part in escape_ass_text(text).split("\\N") if part]
+    return "\\N".join(line for part in parts for line in wrap_caption(part, max_units))
+
 def build_ass(
     cues: Sequence[PlacedCue],
     width: int,
@@ -334,8 +348,7 @@ def build_ass(
         if style.karaoke and cue.words:
             text = _karaoke_text(cue, max_units)
         else:
-            parts = [part for part in escape_ass_text(cue.text).split("\\N") if part]
-            text = "\\N".join(line for part in parts for line in wrap_caption(part, max_units))
+            text = _wrapped(cue.text, max_units)
         if not text:
             continue
         if named and cue.speaker:
@@ -344,11 +357,8 @@ def build_ass(
             who = style.speaker_names.get(cue.speaker, cue.speaker)
             text = f"{escape_ass_inline(who)}：{text}"
         if cue.secondary:
-            second = "\\N".join(
-                line
-                for part in escape_ass_text(cue.secondary).split("\\N") if part
-                for line in wrap_caption(part, max_units / style.secondary_scale)
-            )
+            # Measured against its own size: a smaller line fits more before it wraps.
+            second = _wrapped(cue.secondary, max_units / style.secondary_scale)
             if second:
                 text = f"{text}\\N{{\\fs{max(8, round(font_size * style.secondary_scale))}}}{second}"
         colour = colours.get(cue.speaker or "")

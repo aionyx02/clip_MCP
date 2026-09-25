@@ -324,7 +324,7 @@ def test_a_dip_ends_on_the_cut_like_every_other_transition(red_then_green, tmp_p
 def test_a_dip_with_no_room_for_both_halves_is_refused(red_then_green) -> None:
     """A dip needs a frame to go into the colour and a frame to come out of it."""
     project = red_then_green()
-    with pytest.raises(ValueError, match="two frames"):
+    with pytest.raises(ValueError, match="under 2 frame"):
         edit(project, [{"action": "set_clip_look", "track_id": "main", "clip_id": "b",
                         "transition_in": {"kind": "dip", "seconds": 0.03, "through": "black"}}])
 

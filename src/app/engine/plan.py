@@ -147,8 +147,8 @@ def _piece(
         # disagree: a breath can reach back into a word the detector called quiet. So
         # every edge is checked, and a padded one that lands in a word gives the breath
         # back rather than clipping a syllable.
-        opening = _landed(opening, opened if pad_head else None, clip, cuts)
-        closing = _landed(closing, closed if pad_tail else None, clip, cuts)
+        opening = _off_a_word(opening, opened if pad_head else None, clip, cuts)
+        closing = _off_a_word(closing, closed if pad_tail else None, clip, cuts)
     # Round to milliseconds before clamping, never after: rounding 36.266667 up to 36.267
     # would put the window past the end of a file that is only 36.266667s long.
     closing = round(closing, 3)
@@ -156,13 +156,16 @@ def _piece(
         closing = min(closing, float(asset.duration))
     return Piece(asset.id, round(max(0.0, opening), 3), closing, (clip.id,), beat_id)
 
-def _landed(
+def _off_a_word(
     seconds: float,
     unpadded: Optional[float],
     clip: SemanticClip,
     cuts: CleanCuts,
 ) -> float:
     """Move a cut off the middle of a word, if there is somewhere near to put it.
+
+    Words only. Bad frames are weighed later, by the stage that owns them, so
+    that moving off one cannot undo the breath this gives back.
 
     Args:
         seconds: Where the cut would fall.
@@ -411,7 +414,7 @@ def _without_retakes(
         )
     return kept, notes
 
-def _settled(seconds: float, known: CleanCuts, opens: bool) -> float:
+def _somewhere_clean(seconds: float, known: CleanCuts, opens: bool) -> float:
     """Move a time onto somewhere a cut may land, if anywhere near enough is.
 
     Args:
@@ -465,11 +468,19 @@ def _without_pauses(
             # the gap is trusted where it falls — each is settled onto somewhere a cut
             # may actually land, which for an edge inside a word is that word's own
             # boundary.
-            closing = _settled(round(quiet + BREATH_SECONDS, 3), known, opens=False)
-            opening = _settled(round(loud - BREATH_SECONDS, 3), known, opens=True)
+            closing = _somewhere_clean(round(quiet + BREATH_SECONDS, 3), known, opens=False)
+            opening = _somewhere_clean(round(loud - BREATH_SECONDS, 3), known, opens=True)
             if closing <= opened or opening <= closing or opening >= piece.end:
                 # One side would be left with no length at all, so the gap stays
                 # rather than a window of nothing being put on the timeline.
+                continue
+            if opening - closing <= MERGE_GAP_SECONDS:
+                # `_merge` runs after every stage and joins two halves this close back
+                # together. Splitting here would leave the cut exactly as it was while
+                # the note claimed seconds had been taken out of it, and a report that
+                # is wrong is worse than a pause that stayed. The constant is chosen so
+                # an unsettled gap always clears this; settling each edge inward by as
+                # much as a second is what can still close it.
                 continue
             if not known.is_clean(closing, opens=False) or not known.is_clean(opening, opens=True):
                 # Nowhere near enough to settle onto. Cutting here would go through a
@@ -592,8 +603,7 @@ def _off_bad_frames(
                 settled.append(seconds)
                 continue
             objected += 1
-            landed = known.nearest_clean_point(seconds, SNAP_SECONDS, opens)
-            settled.append(seconds if landed is None else round(landed, 3))
+            settled.append(_somewhere_clean(seconds, known, opens))
         opening, closing = settled
         if closing <= opening:
             # Moving both ends has closed the window. A bad frame is a smaller loss
@@ -779,6 +789,27 @@ def _under(placed: Sequence[Tuple[Piece, float]], seconds: float) -> Optional[Tu
             return piece, at
     return None
 
+def _splits_a_sentence(
+    under: Tuple[Piece, float],
+    seconds: float,
+    cuts: Optional[Mapping[str, CleanCuts]],
+) -> bool:
+    """Say whether a moment of the timeline falls partway through a spoken sentence.
+
+    Args:
+        under: The window playing there, with the second it starts at.
+        seconds: The moment on the timeline.
+        cuts: What is known about each file, keyed by asset ID.
+
+    Returns:
+        True when somebody is midway through a sentence at that moment. False
+        when nothing is known about the file, which is not the same answer as
+        nobody talking, but is the only honest one available.
+    """
+    piece, at = under
+    known = cuts.get(piece.asset_id) if cuts else None
+    return known is not None and known.splits_a_sentence(piece.start + (seconds - at))
+
 def broll_covers(
     plan: EditPlan,
     pieces: Sequence[Piece],
@@ -888,6 +919,15 @@ def broll_covers(
             continue
 
         beat = _under(placed, opened)
+        if beat is not None and _splits_a_sentence(beat, opened, cuts):
+            # Cutting away mid-sentence is the half of the boundary rule that can be
+            # fixed for nothing: the shot moves to another clip and the cut keeps its
+            # length. The other half — cutting back — cannot, so that one is reported.
+            problems.append(
+                f"{where}: cuts in partway through a sentence. Start it over a clip that opens one, "
+                "or the viewer loses the line as the picture changes"
+            )
+            continue
         beat_id = beat[0].beat_id if beat is not None else ""
         running = covered_in_beat.get(beat_id, 0.0) + shot.seconds
         allowed = in_beat.get(beat_id, 0.0) * BROLL_MAX_SHARE
@@ -917,11 +957,7 @@ def broll_covers(
         interrupted = []
         for cover in covers:
             under = _under(placed, cover.timeline_out)
-            known = None if under is None else cuts.get(under[0].asset_id)
-            if under is None or known is None:
-                continue
-            piece, at = under
-            if known.splits_a_sentence(piece.start + (cover.timeline_out - at)):
+            if under is not None and _splits_a_sentence(under, cover.timeline_out, cuts):
                 interrupted.append(cover.over_clip_id)
         if interrupted:
             notes.append(
@@ -935,6 +971,7 @@ def broll_slots(
     plan: EditPlan,
     pieces: Sequence[Piece],
     clips: Mapping[str, SemanticClip],
+    cuts: Optional[Mapping[str, CleanCuts]] = None,
 ) -> List[dict]:
     """Offer the places in a cut where covering picture would help.
 
@@ -953,6 +990,10 @@ def broll_slots(
         plan: Plan to read, for which shots are held and which beats exist.
         pieces: The compiled windows, in order.
         clips: The timeline's clips, keyed by ID.
+        cuts: What is known about each file, keyed by asset ID. Given them, a
+            place where a shot would cut in partway through a sentence is not
+            offered — the compiler refuses those, and offering a position it
+            will not accept is worse than offering nothing.
 
     Returns:
         One slot per stretch worth covering, worst first, each saying where a
@@ -1000,6 +1041,9 @@ def broll_slots(
                 if span is None or clip_id in holding:
                     continue
                 if span[0] - offered < BROLL_MAX_SECONDS:
+                    continue
+                under = _under(placed, span[0])
+                if under is not None and _splits_a_sentence(under, span[0], cuts):
                     continue
                 room = min(BROLL_MAX_SECONDS, round(closed - span[0], 3))
                 if room < BROLL_MIN_SECONDS:
@@ -1385,9 +1429,14 @@ def compile_operations(
         surface.
     """
     pieces = plan_pieces(plan, clips, children, assets, cuts)
+    # Keyed by track as well as by what it was made of. The three kinds of clip the
+    # compiler owns mean different things by `from_clip_ids` — merged semantic clips on
+    # the sequence, a (cover, covered) pair on the B-roll track, nothing at all for the
+    # music — and one namespace for all three lets a sequence clip made of exactly those
+    # two semantic clips take the B-roll's hand-made settings.
     kept = {
-        tuple(clip.from_clip_ids): clip
-        for _, clip in _compiled_clips(project) if clip.pinned
+        (track_id, tuple(clip.from_clip_ids)): clip
+        for track_id, clip in _compiled_clips(project) if clip.pinned
     }
 
     operations: List[dict] = [
@@ -1406,7 +1455,7 @@ def compile_operations(
         # Taken rather than read: taking a pause out of the middle of a shot leaves two
         # windows carrying the clip IDs one of them had, and one hand-made range must
         # not be stamped onto both of them. The earlier window keeps it.
-        pinned = kept.pop(piece.from_clip_ids, None)
+        pinned = kept.pop((VIDEO_TRACK_ID, piece.from_clip_ids), None)
         placed = {
             "action": "insert_clip",
             "track_id": VIDEO_TRACK_ID,
@@ -1427,14 +1476,19 @@ def compile_operations(
     # than in a row: a cover sits where the words it belongs to are, and the gaps between
     # covers are where the sequence shows through. Silent, because the point is the sound
     # underneath carrying on.
-    covers, _, _ = broll_covers(plan, pieces, clips, assets, cuts)
+    covers, refused, _ = broll_covers(plan, pieces, clips, assets, cuts)
+    if refused:
+        # `check_plan` reports these, and `compile_plan` stops on them — but the engine
+        # is meant to stand on its own, and a compiler that silently left a shot out of
+        # the cut would be repairing a plan instead of handing it back.
+        raise ValueError("this plan's B-roll does not hold up: " + "; ".join(refused))
     if covers:
         if BROLL_TRACK_ID not in present:
             operations.append({"action": "add_track", "track_id": BROLL_TRACK_ID, "track_type": "video"})
         for position, cover in enumerate(covers, start=1):
             clip_id = f"b{position:03d}"
             identity = (cover.clip_id, cover.over_clip_id)
-            pinned = kept.pop(identity, None)
+            pinned = kept.pop((BROLL_TRACK_ID, identity), None)
             laid = {
                 "action": "add_clip",
                 "track_id": BROLL_TRACK_ID,

@@ -6,7 +6,7 @@ from typing import List, Mapping, Optional, Tuple
 from app.engine import resources
 from app.engine.ffmpeg import escape_filter_path
 from app.models.media import Asset
-from app.models.timeline import Clip, Dip, Project, TrackType, Wipe
+from app.models.timeline import Clip, Dip, Project, TrackType, Transition, Wipe
 
 AUDIO_SAMPLE_RATE = 48000
 # Streaming platforms normalize to about -14 LUFS, so delivering at that level avoids being turned down.
@@ -211,8 +211,13 @@ def _speed_video_filter(clip: Clip) -> str:
         return ""
     return f",setpts={_format_seconds(Fraction(1) / Fraction(str(clip.speed)))}*PTS"
 
-def _xfade_name(transition) -> str:
+def _xfade_name(transition: Transition) -> str:
     """Name the FFmpeg transition that draws this one.
+
+    Asked here rather than answered by the transition itself: `xfade` names are
+    this renderer's vocabulary, and `models/` is meant to hold data and rules
+    with no idea what draws them. How much picture a transition needs and how
+    few frames it can live on are facts about the transition and do live there.
 
     Args:
         transition: The clip's transition.
@@ -499,7 +504,7 @@ class FFmpegRenderer:
         # A run is a stretch of straight cuts, which concatenates. Runs are separated by
         # transitions, which do not: each one runs over the run before it.
         runs: List[List[int]] = [[]]
-        transitions: List[Tuple[object, int]] = []
+        transitions: List[Tuple[Transition, int]] = []
 
         for index, segment in enumerate(segments):
             frames = segment.end_frame - segment.start_frame

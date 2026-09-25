@@ -55,7 +55,7 @@ from app.server import (
 )
 from app.server import repo as server_repo
 from helpers import video_track
-from test_semantic_timeline import ASSET_ID, analysis, asset
+from test_semantic_timeline import ASSET_ID, analysis, asset, spans
 
 FOOTAGE = dict(
     duration=20.0,
@@ -1354,3 +1354,105 @@ def test_two_markers_cannot_share_a_name_on_the_timeline() -> None:
             {"id": "a", "name": "開場", "timeline_in": 0},
             {"id": "a", "name": "結尾", "timeline_in": 9},
         ]}))
+
+# What the review found: three places where the compiler said one thing and did another.
+
+def test_a_pause_the_merge_would_put_back_is_not_taken_out_or_claimed() -> None:
+    """Both new edges settle inward, closing the gap to under the merge gap.
+
+    The stage would split, `_merge` would join the halves straight back, and the
+    note would report seconds that stayed in the cut. A report that is wrong is
+    worse than a pause that stayed.
+    """
+    made = MediaAnalysis(
+        asset_id=ASSET_ID, duration=10.0,
+        silences=spans([(0.0, 4.8), (5.0, 5.75), (6.0, 10.0)]),
+        transcript=Transcript(language="zh", model="test", segments=[TranscriptSegment(
+            start=4.8, end=6.0, text="一二",
+            words=[TranscriptWord(start=4.8, end=5.3, text="一"),
+                   TranscriptWord(start=5.45, end=6.0, text="二")],
+        )]),
+    )
+    one = sourced(seconds=10.0)
+    _, clips = build_timeline({ASSET_ID: one}, {ASSET_ID: made})
+    plan = plan_for([Selection(clip_id=clip.id, beat_id="b1") for clip in speech_of(clips)])
+    pieces, notes = compile_pieces(plan, {c.id: c for c in clips}, {}, {ASSET_ID: one},
+                                   {ASSET_ID: clean_cuts(made)})
+    # The silence runs 0.75s, well over the threshold, but settling the two new edges
+    # leaves only 0.15s between them — inside the merge gap.
+    assert [(piece.start, piece.end) for piece in pieces] == [(4.7, 6.1)]
+    assert not any("taken out" in note for note in notes)
+
+def test_covering_picture_may_not_cut_in_partway_through_a_sentence() -> None:
+    """The half of the boundary rule that costs nothing to fix, so it is refused.
+
+    Cutting back out is reported instead, because lengthening a shot to let a
+    sentence finish decides how long the video runs.
+    """
+    made = MediaAnalysis(
+        asset_id=ASSET_ID, duration=30.0,
+        silences=spans([(0.0, 1.0), (3.0, 5.0), (15.0, 30.0)]),
+        transcript=Transcript(language="zh", model="test", segments=[
+            TranscriptSegment(start=1.0, end=3.0, text="開場", words=[
+                TranscriptWord(start=1.0 + step * 0.5, end=1.5 + step * 0.5, text="字")
+                for step in range(4)
+            ]),
+            TranscriptSegment(start=5.0, end=15.0, text="主體", words=[
+                TranscriptWord(start=5.0 + step * 0.5, end=5.5 + step * 0.5, text="字")
+                for step in range(20)
+            ]),
+        ]),
+    )
+    quiet = analysis(duration=20.0, silences=[(0.0, 20.0)], scenes=[(0.0, 20.0)], asset_id=BROLL_ASSET)
+    assets = {ASSET_ID: sourced(seconds=30.0), BROLL_ASSET: sourced(BROLL_ASSET)}
+    _, clips = build_timeline(assets, {ASSET_ID: made, BROLL_ASSET: quiet})
+    by_id = {clip.id: clip for clip in clips}
+    speech = speech_of(clips)
+    cover = next(clip for clip in clips if clip.asset_id == BROLL_ASSET)
+    cuts = {ASSET_ID: clean_cuts(made), BROLL_ASSET: clean_cuts(quiet)}
+    # A tail trim opens the first window two seconds into the sentence it belongs to.
+    plan = plan_for(
+        [Selection(clip_id=speech[0].id, beat_id="b1", trim=Trim(kind=TrimKind.TAIL, seconds=1.0)),
+         Selection(clip_id=speech[1].id, beat_id="b1")],
+        broll=[BrollShot(clip_id=cover.id, over_clip_id=speech[0].id, seconds=1.5)],
+    )
+    pieces = plan_pieces(plan, by_id, {}, assets, cuts)
+    covers, problems, _ = broll_covers(plan, pieces, by_id, assets, cuts)
+    assert covers == []
+    assert any("cuts in partway through a sentence" in problem for problem in problems)
+    # And the server never offers such a place to begin with.
+    assert all(slot["over_clip_id"] != speech[0].id
+               for slot in broll_slots(plan, pieces, by_id, cuts))
+
+def test_compiling_covering_picture_that_does_not_hold_up_is_refused() -> None:
+    """The engine stands on its own, so it cannot leave a shot out and say nothing."""
+    by_id, children, assets, clips = covered()
+    speech = speech_of(clips)
+    quiet = next(clip for clip in clips if clip.asset_id == BROLL_ASSET)
+    plan = plan_for(
+        [Selection(clip_id=clip.id, beat_id="b1") for clip in speech],
+        broll=[BrollShot(clip_id=quiet.id, over_clip_id=speech[0].id, seconds=0.4)],
+    )
+    with pytest.raises(ValueError, match="does not hold up"):
+        compile_operations(plan, by_id, children, assets, None, {ASSET_ID: clean_cuts(analysis(**FOOTAGE))})
+
+def test_a_pinned_clip_is_matched_on_its_own_track() -> None:
+    """Three kinds of clip mean different things by `from_clip_ids`, so one namespace clashes.
+
+    A sequence window merged from exactly the two clips a cover is made of would
+    take that cover's hand-made settings, and the music bed — made of no
+    semantic clips at all — would match anything else made of none.
+    """
+    by_id, children, assets, clips = covered()
+    speech = speech_of(clips)
+    quiet = next(clip for clip in clips if clip.asset_id == BROLL_ASSET)
+    plan = plan_for(
+        [Selection(clip_id=clip.id, beat_id="b1") for clip in speech],
+        broll=[BrollShot(clip_id=quiet.id, over_clip_id=speech[0].id, seconds=2.0)],
+    )
+    operations, provenance = compile_operations(
+        plan, by_id, children, assets, None, {ASSET_ID: clean_cuts(analysis(**FOOTAGE))},
+    )
+    laid = [op for op in operations if op.get("track_id") == "broll" and op["action"] == "add_clip"]
+    assert len(laid) == 1
+    assert provenance[laid[0]["clip_id"]]["from_clip_ids"] == [quiet.id, speech[0].id]
