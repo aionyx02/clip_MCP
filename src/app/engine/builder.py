@@ -6,7 +6,7 @@ from typing import List, Mapping, Optional, Tuple
 from app.engine import resources
 from app.engine.ffmpeg import escape_filter_path
 from app.models.media import Asset
-from app.models.timeline import Clip, Project, TrackType
+from app.models.timeline import Clip, Dip, Project, TrackType, Wipe
 
 AUDIO_SAMPLE_RATE = 48000
 # Streaming platforms normalize to about -14 LUFS, so delivering at that level avoids being turned down.
@@ -131,13 +131,13 @@ def _input_args(clip: Clip, asset: Asset, frames: int, fps: Fraction) -> List[st
         clip: Clip whose source segment is read.
         asset: Asset the clip references.
         frames: Frames to read, which is the clip's length on the output
-            timeline plus the run-up a dissolve needs.
+            timeline plus the run-up a transition needs.
         fps: Output frame rate.
 
     Returns:
         The `-ss`, `-t`, and `-i` options for the input. The seek starts at
-        `video_source_start`, which is the clip's own in point unless it
-        dissolves in, in which case it is that much earlier. The length is in
+        `video_source_start`, which is the clip's own in point unless a
+        transition runs it in, in which case it is that much earlier. The length is in
         source seconds, so a clip running at double speed reads twice as much
         of the file as it occupies on the timeline.
     """
@@ -211,22 +211,63 @@ def _speed_video_filter(clip: Clip) -> str:
         return ""
     return f",setpts={_format_seconds(Fraction(1) / Fraction(str(clip.speed)))}*PTS"
 
-def _atempo_filters(speed: float) -> List[str]:
-    """Break a speed into the tempo changes FFmpeg will accept in one go.
+def _xfade_name(transition) -> str:
+    """Name the FFmpeg transition that draws this one.
+
+    Args:
+        transition: The clip's transition.
+
+    Returns:
+        The `xfade` transition name. A dip is drawn as two plain mixes through
+        a colour rather than one named transition, so it answers with the mix
+        each of its halves uses.
+    """
+    if isinstance(transition, Wipe):
+        return f"wipe{transition.direction.value}"
+    return "fade"
+
+def _colour_source(colour: str) -> str:
+    """Write a colour the way the `color` filter reads it.
+
+    Args:
+        colour: `black`, `white`, or a `#RRGGBB` hex colour.
+
+    Returns:
+        The colour as a filter argument. Hex is rewritten with an `0x` prefix:
+        a `#` is not special to a filtergraph today, and relying on that to
+        stay true is not worth the saving.
+    """
+    return f"0x{colour[1:]}" if colour.startswith("#") else colour
+
+def _speed_audio_filters(clip: Clip) -> List[str]:
+    """Stretch a clip's sound to its playback speed, with or without its pitch.
+
+    Two different things, which is why the clip says which it wants.
+    `atempo` resamples the sound in the time domain and leaves the pitch where
+    it was, so a person sped up still sounds like themselves. Changing the
+    sample rate under it and resampling back is what tape did: everything
+    rises and falls with the speed. The first is what somebody talking needs;
+    the second is the whole point of a comedy speed-up, and there was no way
+    to ask for it.
 
     `atempo` takes a factor between 0.5 and 2 before the result starts to fall
     apart, so anything further is reached by applying it more than once. The
     factors multiply back to the speed asked for.
 
     Args:
-        speed: Playback speed.
+        clip: Clip whose speed and pitch setting are applied.
 
     Returns:
-        One `atempo` filter per step, or an empty list at normal speed.
+        The filters, or an empty list at normal speed.
     """
-    if speed == 1.0:
+    if clip.speed == 1.0:
         return []
-    remaining, steps = Fraction(str(speed)), []
+    speed = Fraction(str(clip.speed))
+    if not clip.preserve_pitch:
+        # Rounded to a whole rate because that is what asetrate takes; the length is
+        # settled by the pad and trim straight after, so the rounding costs nothing.
+        return [f"asetrate={round(AUDIO_SAMPLE_RATE * speed)}", f"aresample={AUDIO_SAMPLE_RATE}"]
+    remaining, steps = speed, []
     while remaining > 2:
         steps.append(Fraction(2))
         remaining /= 2
@@ -234,7 +275,12 @@ def _atempo_filters(speed: float) -> List[str]:
         steps.append(Fraction(1, 2))
         remaining *= 2
     steps.append(remaining)
-    return [f"atempo={float(step):.6f}" for step in steps]
+    # Resampled again afterwards, which looks redundant and is not. `atempo` hands on a
+    # stream whose timing the `apad` and `atrim` that settle the length then read wrong,
+    # and they cut it to a quarter of its length and pad the rest with silence — so a
+    # clip with any speed on it came out mostly silent. `aresample` reclocks the stream
+    # and they measure it correctly. The other branch ends in one already.
+    return [f"atempo={float(step):.6f}" for step in steps] + [f"aresample={AUDIO_SAMPLE_RATE}"]
 
 def _clip_video_filter(clip: Clip, frames: int, fps: Fraction) -> str:
     """Build the look part of a clip's video chain: its colour and its fades.
@@ -315,7 +361,7 @@ def _clip_audio_filter(input_label: str, clip: Clip, samples: int, output_label:
         "aformat=sample_fmts=fltp:channel_layouts=stereo",
         # Before the length is settled: the stretch is what decides how long the sound runs,
         # and padding or trimming it first would make that decision for it.
-        *_atempo_filters(clip.speed),
+        *_speed_audio_filters(clip),
         f"apad=whole_len={samples}",
         f"atrim=end_sample={samples}",
     ]
@@ -451,22 +497,24 @@ class FFmpegRenderer:
         video_labels: List[str] = []
         audio_labels: List[str] = []
         # A run is a stretch of straight cuts, which concatenates. Runs are separated by
-        # dissolves, which do not: each one mixes into the run before it.
+        # transitions, which do not: each one runs over the run before it.
         runs: List[List[int]] = [[]]
-        dissolves: List[int] = []
+        transitions: List[Tuple[object, int]] = []
 
         for index, segment in enumerate(segments):
             frames = segment.end_frame - segment.start_frame
             samples = _frame_to_sample(segment.end_frame, fps) - _frame_to_sample(segment.start_frame, fps)
 
-            # A dissolve needs a clip ending exactly where this one starts to mix into.
+            # A transition needs a clip ending exactly where this one starts to run over.
             # validate_project has already refused anything else; this is what renders it.
+            # The run-up is what this clip carries, which for a dip is only its second
+            # half — the colour covers the first.
             run_up = 0
-            if segment.clip is not None and segment.clip.dissolve_in and index > 0:
-                run_up = _round_half_up(Fraction(segment.clip.dissolve_in) * fps)
+            if segment.clip is not None and segment.clip.transition_in is not None and index > 0:
+                run_up = _round_half_up(Fraction(segment.clip.run_up) * fps)
             if run_up and runs[-1]:
                 runs.append([index])
-                dissolves.append(run_up)
+                transitions.append((segment.clip.transition_in, run_up))
             else:
                 run_up = 0
                 runs[-1].append(index)
@@ -521,25 +569,45 @@ class FFmpegRenderer:
             filters.append(f"{''.join(labels)}concat=n={len(labels)}:v=1:a=0{run_label}")
             run_labels.append(run_label)
 
-        # Each run after the first arrives carrying its own run-up, so the crossfade that
+        # Each run after the first arrives carrying its own run-up, so the transition that
         # eats the run-up leaves the timeline exactly as long as it was. The transition ends
         # on the cut rather than straddling it, which is what keeps every clip where it is.
+        timebase = f"settb={project.fps_den}/{project.fps_num}"
         if len(run_labels) > 1:
             # xfade refuses two inputs whose timebases differ, and they do: a run of one
             # segment carries the frame rate's, a concatenated run carries the muxer's.
             # Both are put on the frame rate's before they meet.
             for run_index, run_label in enumerate(run_labels):
                 settled = f"[tb{run_index}]"
-                filters.append(f"{run_label}settb={project.fps_den}/{project.fps_num}{settled}")
+                filters.append(f"{run_label}{timebase}{settled}")
                 run_labels[run_index] = settled
 
         carried = run_labels[0]
         covered = sum(segments[index].end_frame - segments[index].start_frame for index in runs[0])
         for run_index in range(1, len(run_labels)):
-            run_up = dissolves[run_index - 1]
+            transition, run_up = transitions[run_index - 1]
             label = joined if run_index == len(run_labels) - 1 else f"[mixed{run_index}]"
+            if isinstance(transition, Dip):
+                # Two mixes with a colour between them. The colour runs the whole length
+                # of the dip, the outgoing picture fades into it over the first half, and
+                # the incoming rises out of it over the second — which is the half the
+                # incoming clip carried its run-up for. The first mix hands on something
+                # exactly as long as the timeline was, so the second mix's offset is the
+                # same arithmetic a one-mix transition uses.
+                whole = _round_half_up(Fraction(transition.seconds) * fps)
+                colour, dipped = f"[dip{run_index}]", f"[dipped{run_index}]"
+                filters.append(
+                    f"color=c={_colour_source(transition.through)}:s={size}:r={rate},format=yuv420p,"
+                    f"trim=end_frame={whole},setpts=PTS-STARTPTS,{timebase}{colour}"
+                )
+                filters.append(
+                    f"{carried}{colour}xfade=transition=fade"
+                    f":duration={_format_seconds(Fraction(whole - run_up) / fps)}"
+                    f":offset={_format_seconds(Fraction(covered - whole) / fps)}{dipped}"
+                )
+                carried = dipped
             filters.append(
-                f"{carried}{run_labels[run_index]}xfade=transition=fade"
+                f"{carried}{run_labels[run_index]}xfade=transition={_xfade_name(transition)}"
                 f":duration={_format_seconds(Fraction(run_up) / fps)}"
                 f":offset={_format_seconds(Fraction(covered - run_up) / fps)}{label}"
             )

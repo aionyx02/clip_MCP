@@ -1030,7 +1030,10 @@ def compile_operations(
                 "audio_fade_out": float(pinned.audio_fade_out),
                 "audio_lead": float(pinned.audio_lead),
                 "audio_lag": float(pinned.audio_lag),
-                "dissolve_in": float(pinned.dissolve_in),
+                "preserve_pitch": pinned.preserve_pitch,
+                "transition_in": (
+                    None if pinned.transition_in is None else pinned.transition_in.model_dump(mode="json")
+                ),
                 "video_fade_in": float(pinned.video_fade_in),
                 "video_fade_out": float(pinned.video_fade_out),
                 "color": pinned.color.model_dump() if pinned.color else None,

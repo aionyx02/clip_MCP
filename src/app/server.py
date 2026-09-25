@@ -88,9 +88,10 @@ mcp = FastMCP(
         "what to ask when a request is incomplete, how music ducks under "
         "speech and how every render is normalized to one consistent "
         "loudness, how to caption an edit with generate_subtitles and "
-        "burn_subtitles, and the current limits: no overlapping clips on a "
-        "track, speed fixed at 1.0, no still images, and fades through black "
-        "rather than cross dissolves. The person using this server is "
+        "burn_subtitles, and the current limits: no overlapping picture on a "
+        "track, no still images, and no graphics beyond captions. "
+        "Transitions end on the cut rather than straddling it, so adding one "
+        "never changes how long the video runs. The person using this server is "
         "editing their own video, not writing code: reply in plain language "
         "with no tool names, IDs, or JSON, and read the plan back in one "
         "sentence for confirmation before the first render. Projects, assets, "
@@ -1282,11 +1283,14 @@ def apply_edits(project_id: str, expected_version: int, operations: list[EditOpe
     cut), and `audio_lag` lets it run on after the picture has gone, so a line
     finishes over the shot that follows (an L cut). Both are seconds, both
     take their extra sound from outside the clip's `source_range`, and 0 puts
-    the sound back with its picture. `set_clip_look`
-    its `dissolve_in` — a cross dissolve, mixing it in over the end of the
-    clip before it — along with its fades through black and its `color`.
+    the sound back with its picture. `set_clip_look` sets its `transition_in`
+    — a dissolve, a wipe, or a dip through a colour, running it in over the end
+    of the clip before it — along with its fades through black and its `color`.
+    A transition ends on the cut rather than straddling it, so it never changes
+    how long the sequence runs; `clear_transition` puts a straight cut back.
     `set_clip_speed` changes how fast a clip plays, and with it how long it
-    runs. `set_track_audio` sets a whole track's `duck_under_speech`.
+    runs, and `preserve_pitch` decides whether the sound keeps its pitch or
+    rises and falls with the speed. `set_track_audio` sets a whole track's `duck_under_speech`.
     `set_markers` replaces the timeline's structure markers — where each part
     of the video begins. `compile_plan` writes one per beat, so a cut compiled
     from a plan arrives with its shape on it; markers added by hand have no

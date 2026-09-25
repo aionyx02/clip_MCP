@@ -932,6 +932,30 @@ def test_a_hand_adjustment_survives_the_next_compile(planned: dict) -> None:
     assert kept["volume"] == 0.25
     assert kept["pinned"] is True
 
+def test_a_hand_made_transition_and_j_cut_survive_the_next_compile(planned: dict) -> None:
+    """A pinned clip is rebuilt by inserting it again, and the insert used to drop these.
+
+    `audio_lead`, `audio_lag` and the transition were not on the operation that
+    creates a clip, so a recompile silently handed back a straight cut with its
+    sound back on its picture — the one thing pinning promises not to do.
+    """
+    project = compiled_project(planned)
+    clips = main_clips(project)
+    second = clips[1]
+    apply_edits(project, get_project(project)["version"], ops(
+        {"action": "set_clip_audio", "track_id": "main", "clip_id": second["id"], "audio_lead": 0.2},
+        {"action": "set_clip_look", "track_id": "main", "clip_id": second["id"],
+         "transition_in": {"kind": "wipe", "seconds": 0.3, "direction": "up"}},
+    ))
+    compile_plan(project_id=project, expected_version=get_project(project)["version"],
+                 plan_id=planned["plan_id"])
+    kept = server_repo.get_project(project).tracks[0].clips[1]
+    assert kept.pinned is True
+    assert float(kept.audio_lead) == pytest.approx(0.2)
+    assert kept.transition_in is not None
+    assert (kept.transition_in.kind, float(kept.transition_in.seconds)) == ("wipe", 0.3)
+    assert kept.transition_in.direction.value == "up"
+
 def test_a_recompile_that_would_lose_a_pinned_clip_is_refused(planned: dict) -> None:
     project = compiled_project(planned)
     first = main_clips(project)[0]

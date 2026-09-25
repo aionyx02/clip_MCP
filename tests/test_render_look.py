@@ -1,11 +1,13 @@
-"""Tests for per-clip colour adjustments, fades from and to black, and cross dissolves."""
+"""Tests for per-clip colour adjustments, fades from and to black, transitions and speed."""
 
 import subprocess
 from pathlib import Path
 
+import numpy
 import pytest
 from pydantic import ValidationError
 
+from app.engine.diarize import SAMPLE_RATE, read_samples
 from app.engine.frames import extract_frame
 from app.server import import_asset, repo
 from helpers import build_project, clips_of, edit, insert, render, video_track
@@ -170,7 +172,8 @@ def red_then_green(tmp_path_factory: pytest.TempPathFactory):
     """Two solid-colour clips, cut at three seconds, the second with a second of run-up.
 
     Returns:
-        A function taking the dissolve length and returning the project ID.
+        A function taking a transition, or None for a straight cut, and
+        returning the project ID.
     """
     folder = tmp_path_factory.mktemp("colours")
     assets = []
@@ -185,22 +188,22 @@ def red_then_green(tmp_path_factory: pytest.TempPathFactory):
         assets.append(import_asset(str(path))["id"])
     red, green = assets
 
-    def build(dissolve: float) -> str:
-        # The second clip takes its source from one second in, so a dissolve has picture
-        # to run up from without moving the cut.
+    def build(transition: dict = None) -> str:
+        # The second clip takes its source from one second in, so a transition has
+        # picture to run up from without moving the cut.
         project = build_project([video_track(), insert("a", red, 0, 3), insert("b", green, 1, 4)],
                                 width=320, height=240)
-        if dissolve:
+        if transition:
             edit(project, [{"action": "set_clip_look", "track_id": "main", "clip_id": "b",
-                            "dissolve_in": dissolve}])
+                            "transition_in": transition}])
         return project
 
     return build
 
 
 def test_a_straight_cut_shows_one_clip_or_the_other(red_then_green, tmp_path: Path) -> None:
-    """The baseline the dissolve is compared against: nothing is ever mixed."""
-    render(red_then_green(0), tmp_path / "cut.mp4")
+    """The baseline every transition is compared against: nothing is ever mixed."""
+    render(red_then_green(), tmp_path / "cut.mp4")
     before_red, before_green, _ = channels(tmp_path / "cut.mp4", 2.5)
     after_red, after_green, _ = channels(tmp_path / "cut.mp4", 3.5)
     assert before_red > 100 and before_green < 60
@@ -210,8 +213,8 @@ def test_a_straight_cut_shows_one_clip_or_the_other(red_then_green, tmp_path: Pa
 def test_a_dissolve_shows_both_clips_at_once(red_then_green, tmp_path: Path) -> None:
     """Half a second into a one-second dissolve, the frame is half of each clip."""
     straight, mixed = tmp_path / "cut.mp4", tmp_path / "mix.mp4"
-    render(red_then_green(0), straight)
-    render(red_then_green(1.0), mixed)
+    render(red_then_green(), straight)
+    render(red_then_green({"kind": "dissolve", "seconds": 1.0}), mixed)
     # What each clip looks like on its own, so the mix is judged against them and not
     # against numbers that depend on what FFmpeg calls "red".
     only_red = channels(straight, 1.5)
@@ -226,8 +229,8 @@ def test_a_dissolve_ends_on_the_cut_and_leaves_the_clips_where_they_are(
 ) -> None:
     """The mix runs up to the cut, so nothing after it moves and the length is unchanged."""
     straight, mixed = tmp_path / "cut.mp4", tmp_path / "mix.mp4"
-    render(red_then_green(0), straight)
-    project = red_then_green(1.0)
+    render(red_then_green(), straight)
+    project = red_then_green({"kind": "dissolve", "seconds": 1.0})
     render(project, mixed)
     assert seconds_long(mixed) == pytest.approx(seconds_long(straight), abs=0.05)
     assert [clip["timeline_in"] for clip in clips_of(project)] == [0, 3]
@@ -235,6 +238,113 @@ def test_a_dissolve_ends_on_the_cut_and_leaves_the_clips_where_they_are(
     # second one is fully itself.
     assert channels(mixed, 1.5)[0] > 100 and channels(mixed, 1.5)[1] < 60
     assert channels(mixed, 3.5)[1] > 100 and channels(mixed, 3.5)[0] < 60
+
+
+# --- wipe and dip ---------------------------------------------------------------------------
+
+def halves(path: Path, seconds: float) -> tuple:
+    """Measure the average colour of the left and right halves of one frame.
+
+    A wipe is the one transition whose whole point is that the two clips are
+    somewhere different in the frame rather than mixed everywhere, so reading
+    the frame as one average would say nothing about it.
+
+    Args:
+        path: Video to sample.
+        seconds: Time of the frame.
+
+    Returns:
+        `(left, right)`, each `(red, green, blue)` from 0 to 255.
+    """
+    frame = extract_frame(str(path), seconds)
+    pixels = list(frame.get_flattened_data())
+    rows = [pixels[line * frame.width:(line + 1) * frame.width] for line in range(frame.height)]
+
+    def mean(part: list) -> tuple:
+        """Average one set of pixels per channel."""
+        return tuple(sum(pixel[channel] for pixel in part) / len(part) for channel in range(3))
+
+    return (
+        mean([pixel for row in rows for pixel in row[: frame.width // 3]]),
+        mean([pixel for row in rows for pixel in row[frame.width // 3 * 2:]]),
+    )
+
+
+def test_a_wipe_puts_the_two_clips_side_by_side(red_then_green, tmp_path: Path) -> None:
+    """Halfway through, the frame is one clip on one side and the other on the other."""
+    out = tmp_path / "wipe.mp4"
+    render(red_then_green({"kind": "wipe", "seconds": 1.0, "direction": "left"}), out)
+    left, right = halves(out, 2.5)
+    # Nowhere in the frame is it a mix of the two: each side is one clip or the other,
+    # which is what makes it a wipe rather than a dissolve.
+    assert (left[0] > 100) != (right[0] > 100), (left, right)
+    assert (left[1] > 100) != (right[1] > 100), (left, right)
+
+
+def test_a_wipe_goes_the_way_it_is_told(red_then_green, tmp_path: Path) -> None:
+    """The two directions are mirror images, so the direction is not being ignored."""
+    leftwards, rightwards = tmp_path / "left.mp4", tmp_path / "right.mp4"
+    render(red_then_green({"kind": "wipe", "seconds": 1.0, "direction": "left"}), leftwards)
+    render(red_then_green({"kind": "wipe", "seconds": 1.0, "direction": "right"}), rightwards)
+    near_left, near_right = halves(leftwards, 2.5)
+    far_left, far_right = halves(rightwards, 2.5)
+    assert near_left == pytest.approx(far_right, abs=8), (near_left, far_right)
+    assert near_right == pytest.approx(far_left, abs=8), (near_right, far_left)
+
+
+def test_a_dip_passes_through_its_colour(red_then_green, tmp_path: Path) -> None:
+    """The picture goes to the colour and comes back out of it on the other side."""
+    out = tmp_path / "dip.mp4"
+    render(red_then_green({"kind": "dip", "seconds": 2.0, "through": "white"}), out)
+    # The dip runs from 1s to the cut at 3s, so the colour is at its fullest halfway.
+    assert min(channels(out, 2.0)) > 200, channels(out, 2.0)
+    # And the clips either side are still themselves.
+    assert channels(out, 0.5)[0] > 100 and channels(out, 0.5)[1] < 60
+    assert channels(out, 3.5)[1] > 100 and channels(out, 3.5)[0] < 60
+
+
+def test_a_dip_takes_a_colour_of_its_own(red_then_green, tmp_path: Path) -> None:
+    """Black and white are the two worth naming; anything else is given as hex."""
+    out = tmp_path / "blue.mp4"
+    render(red_then_green({"kind": "dip", "seconds": 2.0, "through": "#0000ff"}), out)
+    red, green, blue = channels(out, 2.0)
+    assert blue > 200 and red < 60 and green < 60, (red, green, blue)
+
+
+def test_a_dip_ends_on_the_cut_like_every_other_transition(red_then_green, tmp_path: Path) -> None:
+    """Two mixes rather than one, but the sequence still keeps its length."""
+    straight, dipped = tmp_path / "cut.mp4", tmp_path / "dip.mp4"
+    render(red_then_green(), straight)
+    project = red_then_green({"kind": "dip", "seconds": 2.0, "through": "black"})
+    render(project, dipped)
+    assert seconds_long(dipped) == pytest.approx(seconds_long(straight), abs=0.05)
+    assert [clip["timeline_in"] for clip in clips_of(project)] == [0, 3]
+
+
+def test_a_dip_with_no_room_for_both_halves_is_refused(red_then_green) -> None:
+    """A dip needs a frame to go into the colour and a frame to come out of it."""
+    project = red_then_green()
+    with pytest.raises(ValueError, match="two frames"):
+        edit(project, [{"action": "set_clip_look", "track_id": "main", "clip_id": "b",
+                        "transition_in": {"kind": "dip", "seconds": 0.03, "through": "black"}}])
+
+
+def test_a_transition_without_a_kind_is_refused(red_then_green) -> None:
+    """Three kinds now, so which one is not something to be inferred from the length."""
+    project = red_then_green()
+    with pytest.raises(ValidationError):
+        edit(project, [{"action": "set_clip_look", "track_id": "main", "clip_id": "b",
+                        "transition_in": {"seconds": 1.0}}])
+
+
+def test_a_transition_can_be_taken_off_again(red_then_green, tmp_path: Path) -> None:
+    """Back to a straight cut, which is what null means and what clearing it gives."""
+    project = red_then_green({"kind": "dissolve", "seconds": 1.0})
+    edit(project, [{"action": "set_clip_look", "track_id": "main", "clip_id": "b",
+                    "clear_transition": True}])
+    assert repo.get_project(project).tracks[0].clips[1].transition_in is None
+    render(project, tmp_path / "cut.mp4")
+    assert channels(tmp_path / "cut.mp4", 2.5)[0] > 100
 
 
 # --- variable speed --------------------------------------------------------------------------
@@ -259,20 +369,40 @@ def counting(tmp_path_factory: pytest.TempPathFactory) -> str:
     return import_asset(str(path))["id"]
 
 
-def sped(asset: str, speed: float) -> str:
+def sped(asset: str, speed: float, **fields) -> str:
     """Put four seconds of the ramp on a timeline at a given speed.
 
     Args:
         asset: The ramp asset.
         speed: Playback speed.
+        **fields: Anything else the speed operation takes, such as `preserve_pitch`.
 
     Returns:
         The project ID.
     """
     project = build_project([video_track(), insert("r", asset, 0, 4)], width=320, height=240)
-    if speed != 1.0:
-        edit(project, [{"action": "set_clip_speed", "track_id": "main", "clip_id": "r", "speed": speed}])
+    if speed != 1.0 or fields:
+        edit(project, [{"action": "set_clip_speed", "track_id": "main", "clip_id": "r",
+                        "speed": speed, **fields}])
     return project
+
+
+def tone_hz(path: Path) -> float:
+    """Measure the strongest frequency in a file's sound.
+
+    Args:
+        path: Video to listen to.
+
+    Returns:
+        The frequency in hertz. The ramp carries one pure tone, so the
+        strongest bin is that tone and nothing else.
+    """
+    samples = numpy.array(read_samples(str(path)), dtype=numpy.float64)
+    # The middle half only: a render is loudness-normalized and can be faded at the
+    # edges, and neither has anything to say about pitch.
+    middle = samples[len(samples) // 4: len(samples) // 4 * 3]
+    spectrum = numpy.abs(numpy.fft.rfft(middle * numpy.hanning(len(middle))))
+    return float(numpy.fft.rfftfreq(len(middle), 1 / SAMPLE_RATE)[spectrum.argmax()])
 
 
 @pytest.mark.parametrize("speed, expected", [(1.0, 4.0), (2.0, 2.0), (0.5, 8.0)])
@@ -322,6 +452,53 @@ def test_a_speed_change_can_leave_the_rest_where_it_is(counting: str) -> None:
     assert [clip["timeline_in"] for clip in clips_of(project)] == [0, 4]
 
 
+def test_a_sped_up_clip_keeps_its_sound_all_the_way_through(counting: str, tmp_path: Path) -> None:
+    """A speed change used to take most of the sound with it.
+
+    `atempo` hands on a stream whose timing the `apad` and `atrim` that settle
+    the clip's length then read wrong: they cut it to a quarter and padded the
+    rest with silence, so any clip with a speed on it came out mostly silent.
+    Measured in quarters rather than as one peak, because a peak at the front
+    of a file that fades to nothing looks exactly like a file that is fine.
+    """
+    out = tmp_path / "fast.mp4"
+    render(sped(counting, 2.0), out)
+    samples = numpy.array(read_samples(str(out)), dtype=numpy.float64)
+    quarters = [round(float(numpy.abs(part).max()), 3) for part in numpy.array_split(samples, 4)]
+    assert min(quarters) > 0.05, quarters
+
+
+def test_a_sped_up_voice_keeps_its_own_pitch_by_default(counting: str, tmp_path: Path) -> None:
+    """The tone is 440Hz however fast it is played, which is what a person needs."""
+    normal, fast = tmp_path / "normal.mp4", tmp_path / "fast.mp4"
+    render(sped(counting, 1.0), normal)
+    render(sped(counting, 2.0), fast)
+    assert tone_hz(normal) == pytest.approx(440, abs=15)
+    assert tone_hz(fast) == pytest.approx(440, abs=15)
+
+
+def test_the_pitch_can_be_let_rise_with_the_speed(counting: str, tmp_path: Path) -> None:
+    """What tape did: twice as fast is an octave up. A mistake on speech, the point of a gag."""
+    out = tmp_path / "chipmunk.mp4"
+    render(sped(counting, 2.0, preserve_pitch=False), out)
+    assert tone_hz(out) == pytest.approx(880, abs=30)
+
+
+def test_a_slowed_clip_can_be_let_fall_too(counting: str, tmp_path: Path) -> None:
+    """The same in the other direction, so it is the speed being followed and not a trick."""
+    out = tmp_path / "slow.mp4"
+    render(sped(counting, 0.5, preserve_pitch=False), out)
+    assert tone_hz(out) == pytest.approx(220, abs=15)
+
+
+def test_the_pitch_setting_survives_a_speed_change_that_does_not_mention_it(counting: str) -> None:
+    """Omitting it leaves the clip as it was, rather than quietly putting it back."""
+    project = sped(counting, 2.0, preserve_pitch=False)
+    edit(project, [{"action": "set_clip_speed", "track_id": "main", "clip_id": "r", "speed": 1.5}])
+    clip = repo.get_project(project).tracks[0].clips[0]
+    assert clip.speed == 1.5 and clip.preserve_pitch is False
+
+
 @pytest.mark.parametrize("speed", [0.1, 20.0])
 def test_a_speed_nobody_could_listen_to_is_refused(counting: str, speed: float) -> None:
     """The sound is stretched to match, and past these it stops being sound."""
@@ -356,7 +533,8 @@ def test_a_dissolve_after_a_run_of_straight_cuts(tmp_path: Path) -> None:
     project = build_project([
         video_track(), insert("a", first, 0, 2), insert("b", second, 0, 2), insert("c", third, 1, 3),
     ], width=320, height=240)
-    edit(project, [{"action": "set_clip_look", "track_id": "main", "clip_id": "c", "dissolve_in": 0.6}])
+    edit(project, [{"action": "set_clip_look", "track_id": "main", "clip_id": "c",
+                    "transition_in": {"kind": "dissolve", "seconds": 0.6}}])
     render(project, tmp_path / "three.mp4")
     assert seconds_long(tmp_path / "three.mp4") == pytest.approx(6.0, abs=0.1)
     # Mid-dissolve the frame holds both the blue it is leaving and the green it is joining.

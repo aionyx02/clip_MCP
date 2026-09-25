@@ -141,6 +141,63 @@ class ColorAdjust(BaseModel):
             and self.temperature is None
         )
 
+class WipeDirection(str, Enum):
+    """Which way a wipe travels across the frame."""
+
+    LEFT = "left"
+    RIGHT = "right"
+    UP = "up"
+    DOWN = "down"
+
+# A colour a dip can pass through: six hex digits, or the two names worth having by name.
+# Anything else has to be given as hex on purpose — FFmpeg knows a long list of colour
+# names, and a typo in one of them would only ever surface as a render that failed.
+COLOUR = r"^(#[0-9a-fA-F]{6}|black|white)$"
+
+class _Transition(BaseModel):
+    """What every transition has: how long it runs.
+
+    The length is the whole of it, and it ends on the cut rather than
+    straddling it. That is what keeps every clip where it is: the transition
+    eats the incoming clip's run-up, which comes from outside its source
+    range, so the sequence never changes length and nothing after it has to
+    be shifted. A transition centred on the cut would move both sides, which
+    is a different design and not this one.
+    """
+
+    seconds: Decimal = Field(..., gt=0, description="How long the transition runs, ending on the cut")
+
+class Dissolve(_Transition):
+    """The incoming picture mixes up through the outgoing one."""
+
+    kind: Literal["dissolve"]
+
+class Wipe(_Transition):
+    """The incoming picture travels across the frame over the outgoing one."""
+
+    kind: Literal["wipe"]
+    direction: WipeDirection = Field(
+        default=WipeDirection.LEFT, description="Which way it travels; `left` moves the edge towards the left",
+    )
+
+class Dip(_Transition):
+    """The picture goes to a colour and comes back out of it on the other side.
+
+    Two mixes rather than one: the outgoing picture fades to the colour over
+    the first half, the incoming rises out of it over the second. So a dip
+    only reaches back into the incoming clip for half its length, where a
+    dissolve or a wipe reaches back for all of it.
+    """
+
+    kind: Literal["dip"]
+    through: str = Field(
+        default="black",
+        pattern=COLOUR,
+        description="The colour to pass through: `black`, `white`, or a hex colour such as `#1b2a4a`",
+    )
+
+Transition = Annotated[Union[Dissolve, Wipe, Dip], Field(discriminator="kind")]
+
 # What the renderer can stretch sound to without stacking filters on top of each other
 # past the point where anybody would want to listen to the result.
 MIN_SPEED = 0.25
@@ -174,7 +231,13 @@ class Clip(BaseModel):
         ge=MIN_SPEED,
         le=MAX_SPEED,
         description="How fast the clip plays. 2.0 runs it at double speed and half the length, 0.5 at half speed "
-                    "and twice the length. The sound is stretched to match, so voices keep their pitch",
+                    "and twice the length. The sound is stretched to match",
+    )
+    preserve_pitch: bool = Field(
+        default=True,
+        description="Keep voices at the pitch they were recorded at when the clip is sped up or slowed down. "
+                    "False resamples instead, so the sound rises and falls with the speed the way tape does — "
+                    "which is a mistake on someone talking and the whole point of a comedy speed-up",
     )
     volume: float = Field(default=1.0, ge=0, description="Audio gain; 1.0 keeps the original level, 0.5 halves it")
     audio_lead: Decimal = Field(
@@ -191,12 +254,12 @@ class Clip(BaseModel):
     )
     audio_fade_in: Decimal = Field(default=Decimal(0), ge=0, description="Audio fade-in length at the clip start (seconds)")
     audio_fade_out: Decimal = Field(default=Decimal(0), ge=0, description="Audio fade-out length at the clip end (seconds)")
-    dissolve_in: Decimal = Field(
-        default=Decimal(0),
-        ge=0,
-        description="Seconds this clip's picture mixes in over the end of the clip before it — a cross dissolve. "
-                    "The mix ends where this clip starts, and the extra picture comes from before its source "
-                    "range, so the cut stays where it is and the sequence keeps its length. 0 is a straight cut",
+    transition_in: Optional[Transition] = Field(
+        default=None,
+        description="How this clip's picture arrives over the end of the clip before it: a dissolve, a wipe, or a "
+                    "dip through a colour. The transition ends where this clip starts and the extra picture comes "
+                    "from before its source range, so the cut stays where it is and the sequence keeps its "
+                    "length. Null is a straight cut",
     )
     video_fade_in: Decimal = Field(default=Decimal(0), ge=0, description="Fade in from black at the clip start (seconds)")
     video_fade_out: Decimal = Field(default=Decimal(0), ge=0, description="Fade out to black at the clip end (seconds)")
@@ -207,19 +270,37 @@ class Clip(BaseModel):
     )
 
     @property
+    def run_up(self) -> Decimal:
+        """How much picture this clip needs from before its in point.
+
+        A transition is fed from there, so that it can run under the outgoing
+        clip while this one is still to come. A dissolve and a wipe are one
+        mix and reach back for their whole length; a dip is two mixes with a
+        colour between them, and only the second of those touches this clip,
+        so it reaches back for half.
+
+        Returns:
+            The seconds of run-up, 0 for a straight cut.
+        """
+        transition = self.transition_in
+        if transition is None:
+            return Decimal(0)
+        if isinstance(transition, Dip):
+            return transition.seconds / 2
+        return transition.seconds
+
+    @property
     def video_source_start(self) -> Decimal:
         """Where in the source this clip's picture begins.
 
-        A dissolve is fed from before the clip's in point, so that the mix can
-        run under the outgoing clip while this one is still to come. Plain
-        arithmetic, for the same reason `audio_source_start` is: a dissolve
-        reaching past the start of the file has to be reportable.
+        Plain arithmetic, for the same reason `audio_source_start` is: a
+        transition reaching past the start of the file has to be reportable.
 
         Returns:
-            The second in the source, which is negative when the dissolve asks
-            for more picture than the file has before the clip.
+            The second in the source, which is negative when the transition
+            asks for more picture than the file has before the clip.
         """
-        return self.source_range.start - self.dissolve_in * Decimal(str(self.speed))
+        return self.source_range.start - self.run_up * Decimal(str(self.speed))
 
     @property
     def audio_source_start(self) -> Decimal:
@@ -443,9 +524,18 @@ class _NewClipSpec(BaseModel):
     asset_id: str = Field(..., description="ID returned by import_asset")
     source_range: TimeRange = Field(..., description="Segment of the asset to use")
     speed: float = Field(default=1.0, gt=0)
+    preserve_pitch: bool = Field(default=True, description="Keep voices at their recorded pitch when the speed changes")
     volume: float = Field(default=1.0, ge=0, description="Audio gain; 1.0 keeps the original level, 0.5 halves it")
     audio_fade_in: Decimal = Field(default=Decimal(0), ge=0, description="Audio fade-in length at the clip start (seconds)")
     audio_fade_out: Decimal = Field(default=Decimal(0), ge=0, description="Audio fade-out length at the clip end (seconds)")
+    # These three are on the spec because `compile_plan` rebuilds a pinned clip by
+    # inserting it again. Leaving them off silently dropped a hand-made J cut or
+    # transition on the next compile, which is the one thing pinning promises not to do.
+    audio_lead: Decimal = Field(default=Decimal(0), ge=0, description="Seconds the sound starts before the picture (J cut)")
+    audio_lag: Decimal = Field(default=Decimal(0), ge=0, description="Seconds the sound runs on after the picture (L cut)")
+    transition_in: Optional[Transition] = Field(
+        default=None, description="How the picture arrives over the clip before it; null is a straight cut",
+    )
     video_fade_in: Decimal = Field(default=Decimal(0), ge=0, description="Fade in from black at the clip start (seconds)")
     video_fade_out: Decimal = Field(default=Decimal(0), ge=0, description="Fade out to black at the clip end (seconds)")
     color: Optional[ColorAdjust] = Field(default=None, description="Picture adjustments; null leaves the picture as shot")
@@ -606,12 +696,12 @@ class SetClipLookOp(BaseModel):
     action: Literal["set_clip_look"] = "set_clip_look"
     track_id: str
     clip_id: str
-    dissolve_in: Optional[Decimal] = Field(
+    transition_in: Optional[Transition] = Field(
         default=None,
-        ge=0,
-        description="Seconds this clip's picture mixes in over the end of the clip before it — a cross dissolve. "
-                    "0 makes it a straight cut again",
+        description="How this clip's picture arrives over the end of the clip before it: a dissolve, a wipe, or a "
+                    "dip through a colour. Use clear_transition to go back to a straight cut",
     )
+    clear_transition: bool = Field(default=False, description="Make the clip a straight cut again")
     video_fade_in: Optional[Decimal] = Field(default=None, ge=0, description="Fade in from black at the clip start (seconds)")
     video_fade_out: Optional[Decimal] = Field(default=None, ge=0, description="Fade out to black at the clip end (seconds)")
     color: Optional[ColorAdjust] = Field(
@@ -632,12 +722,13 @@ class SetClipLookOp(BaseModel):
         Raises:
             ValueError: If a value is given alongside the flag that clears it.
         """
-        for value, clear, name in (
-            (self.color, self.clear_color, "color"),
-            (self.layout, self.clear_layout, "layout"),
+        for value, clear, name, cleared in (
+            (self.color, self.clear_color, "color", "clear_color"),
+            (self.layout, self.clear_layout, "layout", "clear_layout"),
+            (self.transition_in, self.clear_transition, "transition_in", "clear_transition"),
         ):
             if value is not None and clear:
-                raise ValueError(f"give either {name} or clear_{name}, not both")
+                raise ValueError(f"give either {name} or {cleared}, not both")
         return self
 
 class RenameProjectOp(BaseModel):
@@ -707,6 +798,11 @@ class SetClipSpeedOp(BaseModel):
         ge=MIN_SPEED,
         le=MAX_SPEED,
         description="1.0 is as shot, 2.0 twice as fast and half as long, 0.5 half as fast and twice as long",
+    )
+    preserve_pitch: Optional[bool] = Field(
+        default=None,
+        description="True keeps voices at their recorded pitch; false lets the sound rise and fall with the speed. "
+                    "Omit to leave the clip's current setting alone",
     )
     ripple: bool = Field(
         default=True,
@@ -837,9 +933,13 @@ def _new_clip(track: Track, spec: _NewClipSpec, timeline_in: Decimal) -> Clip:
         source_range=spec.source_range,
         timeline_in=timeline_in,
         speed=spec.speed,
+        preserve_pitch=spec.preserve_pitch,
         volume=spec.volume,
         audio_fade_in=spec.audio_fade_in,
         audio_fade_out=spec.audio_fade_out,
+        audio_lead=spec.audio_lead,
+        audio_lag=spec.audio_lag,
+        transition_in=spec.transition_in,
         video_fade_in=spec.video_fade_in,
         video_fade_out=spec.video_fade_out,
         color=spec.color,
@@ -1127,10 +1227,14 @@ def apply_operation(project: Project, op: EditOperation, assets: Mapping[str, As
         _fit_track(project, track, op, assets)
     elif isinstance(op, SetClipLookOp):
         clip = _find_clip(track, op.clip_id)
-        for field in ("dissolve_in", "video_fade_in", "video_fade_out"):
+        for field in ("video_fade_in", "video_fade_out"):
             value = getattr(op, field)
             if value is not None:
                 setattr(clip, field, value)
+        if op.clear_transition:
+            clip.transition_in = None
+        elif op.transition_in is not None:
+            clip.transition_in = op.transition_in
         if op.clear_color:
             clip.color = None
         elif op.color is not None:
@@ -1152,6 +1256,8 @@ def apply_operation(project: Project, op: EditOperation, assets: Mapping[str, As
         clip = _find_clip(track, op.clip_id)
         was = clip.timeline_out
         clip.speed = op.speed
+        if op.preserve_pitch is not None:
+            clip.preserve_pitch = op.preserve_pitch
         if op.ripple:
             _shift_clips(track, was, clip.timeline_out - was)
     elif isinstance(op, SetClipPinnedOp):
@@ -1174,10 +1280,10 @@ def validate_project(project: Project, assets: Mapping[str, Asset]) -> None:
     not overlap another clip on the same track, and has fades that fit within
     its length. Overlap has two deliberate exceptions. A clip whose sound
     leads or lags overlaps its neighbour's sound, which is what a J or an L
-    cut is. A clip that dissolves in mixes its picture over the end of the one
-    before it, which is what a cross dissolve is. Neither moves a clip: the
-    cut stays where it is, and both draw the extra media from outside the
-    clip's own source range. Only audio tracks duck under speech, and only clips on a
+    cut is. A clip with a transition runs its picture over the end of the one
+    before it, whether that is a dissolve, a wipe or a dip through a colour.
+    Neither moves a clip: the cut stays where it is, and both draw the extra
+    media from outside the clip's own source range. Only audio tracks duck under speech, and only clips on a
     video track above the base one are drawn in a layout box.
 
     Args:
@@ -1207,22 +1313,33 @@ def validate_project(project: Project, assets: Mapping[str, Asset]) -> None:
                     f"clip {clip.id}: source range ends at {clip.source_range.end}s, "
                     f"but asset {asset.id} is only {asset.duration}s long"
                 )
-            if clip.dissolve_in:
+            if clip.transition_in is not None:
+                transition = clip.transition_in
                 if previous is None or previous.timeline_out != clip.timeline_in:
                     raise ValueError(
-                        f"clip {clip.id}: a dissolve mixes this clip in over the one before it, and there is no "
-                        f"clip ending where this one starts on track {track.id}. To come up from black, "
+                        f"clip {clip.id}: a {transition.kind} runs this clip in over the one before it, and there "
+                        f"is no clip ending where this one starts on track {track.id}. To come up from black, "
                         "use video_fade_in"
                     )
-                if clip.dissolve_in > previous.timeline_duration:
+                if transition.seconds > previous.timeline_duration:
                     raise ValueError(
-                        f"clip {clip.id}: a {clip.dissolve_in}s dissolve is longer than clip {previous.id}, "
-                        f"which runs {previous.timeline_duration}s and is what it would mix in over"
+                        f"clip {clip.id}: a {transition.seconds}s {transition.kind} is longer than clip "
+                        f"{previous.id}, which runs {previous.timeline_duration}s and is what it would run over"
                     )
                 if clip.video_source_start < 0:
                     raise ValueError(
-                        f"clip {clip.id}: a {clip.dissolve_in}s dissolve reaches back to "
+                        f"clip {clip.id}: a {transition.seconds}s {transition.kind} reaches back to "
                         f"{clip.video_source_start}s of asset {asset.id}, before the file starts"
+                    )
+                # A dip is two mixes with a colour between them, so it needs a frame for
+                # each. Shorter than that and there is no dip to see, only a filtergraph
+                # asking for a mix of no length.
+                frames = transition.seconds * project.fps_num / project.fps_den
+                if isinstance(transition, Dip) and frames < 2:
+                    raise ValueError(
+                        f"clip {clip.id}: a {transition.seconds}s dip is under two frames at "
+                        f"{project.fps_num}/{project.fps_den}fps, and a dip needs one to go into the colour "
+                        "and one to come out of it"
                     )
             if (clip.audio_lead or clip.audio_lag) and not asset.has_audio:
                 raise ValueError(

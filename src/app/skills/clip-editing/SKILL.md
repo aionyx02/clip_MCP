@@ -61,13 +61,16 @@ Supported:
   `validate_plan`, `compile_plan`, `diff_plan`), with hand adjustments kept
   across recompiles (`set_clip_pinned`).
 
-Not supported yet: still images, speed changes, cross dissolves and wipes
-between clips (only fades through black), sound leading or trailing the
-picture (J and L cuts), free text and graphics other than captions, and
-filters beyond the colour controls above. When a request needs one of these,
-say so plainly, offer the closest supported result, and never pretend it was
-done. For example:
-「目前還做不出兩段重疊淡入淡出的疊化。我可以讓前一段淡出到黑、後一段再淡入，看起來也很自然，可以嗎？」
+Not supported yet: still images, free text and graphics other than captions,
+and filters beyond the colour controls above. When a request needs one of
+these, say so plainly, offer the closest supported result, and never pretend
+it was done. For example:
+「目前還放不進靜態圖片。這一段我可以用附近的空鏡蓋過去，可以嗎？」
+
+Transitions end on the cut rather than straddling it, so adding one never
+changes how long the video runs or moves anything after it. A transition needs
+a clip ending exactly where the one taking it begins; to come up from black at
+the very start of a video, use `video_fade_in` instead.
 
 ## Concepts
 
@@ -473,8 +476,12 @@ times refer to the source file.
 | 「音樂小聲一點／大聲一點」 / music quieter or louder | `set_clip_audio` on every music clip, `volume` × 0.6 or × 1.5 |
 | 「把影片原音關掉」 / mute the original sound | `set_clip_audio` `volume: 0` on every video clip |
 | 「聲音先進來」「上一句講完再切」 / J cut, L cut | `set_clip_audio` with `audio_lead` on the incoming clip, or `audio_lag` on the outgoing one |
-| 「這裡用溶接」「不要硬切」 / cross dissolve | `set_clip_look` with `dissolve_in` on the incoming clip |
-| 「這段快轉」「放慢一點」 / speed it up or slow it down | `set_clip_speed` with `speed`; 2.0 is twice as fast, 0.5 half |
+| 「這裡用溶接」「不要硬切」 / cross dissolve | `set_clip_look` on the incoming clip with `transition_in: {kind: "dissolve", seconds: 1}` |
+| 「用擦劃轉場」「從左邊掃過去」 / wipe | `set_clip_look` with `transition_in: {kind: "wipe", seconds: 0.6, direction: "left"}` |
+| 「這裡淡到黑再進來」「過白場」 / dip through a colour | `set_clip_look` with `transition_in: {kind: "dip", seconds: 1, through: "black"}`; `white` or a hex colour such as `#1b2a4a` also work |
+| 「轉場拿掉，改回硬切」 / back to a straight cut | `set_clip_look` with `clear_transition: true` |
+| 「這段快轉」「放慢一點」 / speed it up or slow it down | `set_clip_speed` with `speed`; 2.0 is twice as fast, 0.5 half. Voices keep their pitch |
+| 「快轉聲音也要變高」「花栗鼠聲」 / let the pitch rise with the speed | `set_clip_speed` with `preserve_pitch: false` |
 | 「標一下開場到哪裡」 / mark where a part begins | `set_markers`; `compile_plan` already writes one per beat |
 | 「音樂淡出」 / fade the music out | `fit_track` with `fade_out: 2`; it trims the music to the video and puts the fade on whichever clip ends up last |
 | 「拿掉背景音樂」 / remove the music | `delete_clip` every clip on the audio track |
