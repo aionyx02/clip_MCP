@@ -16,6 +16,7 @@ making the decisions it was built to stay out of.
 """
 
 from dataclasses import dataclass
+from difflib import SequenceMatcher
 from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 
 from app.models.media import Asset
@@ -34,6 +35,20 @@ MERGE_GAP_SECONDS = 0.3
 # second and never more than about two, so this buys a clean cut for almost nothing.
 # Provisional until there is a corpus to tune it against.
 SNAP_SECONDS = 1.0
+# How long a silence has to run before it is dead air rather than a breath. It has to
+# exceed `2 * BREATH_SECONDS + MERGE_GAP_SECONDS`: taking a pause out leaves a breath on
+# each side, and if what is left between the two halves fits inside the merge gap they
+# are joined straight back together and the whole stage is a no-op nobody can see.
+# Provisional until there is a corpus to tune it against.
+PAUSE_SECONDS = 0.6
+# How alike two neighbouring windows from one file have to sound before they are taken
+# for two goes at the same line. 1.0 is word for word. Provisional.
+RETAKE_SIMILARITY = 0.85
+# How much of the opening a lead-in may cost before it is left alone, and the same for a
+# trailing reach towards the camera. Enough to lose someone gathering themselves, small
+# enough that an establishing shot held on purpose survives it. Provisional.
+HEAD_TRIM_SECONDS = 2.0
+TAIL_TRIM_SECONDS = 2.0
 VIDEO_TRACK_ID = "main"
 MUSIC_TRACK_ID = "music"
 # How far the compiled length may sit from what the plan asked for before it is worth saying.
@@ -247,6 +262,385 @@ def _ordered_selections(plan: EditPlan) -> List[Selection]:
     position = {beat.id: index for index, beat in enumerate(plan.beats)}
     return sorted(plan.selections, key=lambda selection: position.get(selection.beat_id, len(position)))
 
+def _selected(
+    plan: EditPlan,
+    clips: Mapping[str, SemanticClip],
+    children: Mapping[str, List[SemanticClip]],
+    assets: Mapping[str, Asset],
+    cuts: Optional[Mapping[str, CleanCuts]],
+) -> List[Piece]:
+    """Work out what the selections alone put on the timeline, before any cleaning.
+
+    One window per selection, or per kept child, and in that order — which is
+    what lets the snapping be reported piece for piece. The cleaning stages
+    after this one split and drop windows, so they count what they did
+    themselves rather than being counted by comparison.
+
+    Args:
+        plan: Plan to lay out.
+        clips: The timeline's clips, keyed by ID.
+        children: Each section's own clips in time order, keyed by section ID.
+        assets: The assets they play from, keyed by asset ID.
+        cuts: What is known about each file, keyed by asset ID.
+
+    Returns:
+        The windows, in order, unmerged.
+    """
+    pieces: List[Piece] = []
+    for selection in _ordered_selections(plan):
+        clip = clips.get(selection.clip_id)
+        asset = assets.get(clip.asset_id) if clip is not None else None
+        if clip is None or asset is None:
+            continue
+        pieces.extend(_selection_pieces(
+            selection, clip, children.get(clip.id, []), asset,
+            None if cuts is None else cuts.get(clip.asset_id),
+        ))
+    return pieces
+
+def _bare(text: str) -> str:
+    """Strip a line down to what was said, for comparing two goes at it.
+
+    Args:
+        text: Transcribed text.
+
+    Returns:
+        The letters and digits, punctuation and spacing gone. Written with
+        `isalnum` rather than a list of marks because these transcripts are
+        Chinese as often as not, and every CJK character answers to it.
+    """
+    return "".join(character for character in text if character.isalnum())
+
+def _same_line(first: Piece, second: Piece, cuts: Mapping[str, CleanCuts]) -> bool:
+    """Decide whether two neighbouring windows are two goes at the same line.
+
+    Args:
+        first: The earlier window.
+        second: The one straight after it.
+        cuts: What is known about each file, keyed by asset ID.
+
+    Returns:
+        True when both come from one file, both have somebody talking in them,
+        and what is said is near enough identical. Two windows with nobody
+        talking are never a retake: they would compare as identical for having
+        nothing to compare, and silent B-roll is not a stammer.
+    """
+    if first.asset_id != second.asset_id:
+        return False
+    known = cuts.get(first.asset_id)
+    if known is None:
+        return False
+    said = _bare(known.spoken_between(first.start, first.end))
+    again = _bare(known.spoken_between(second.start, second.end))
+    if not said or not again:
+        return False
+    return SequenceMatcher(None, said, again).ratio() >= RETAKE_SIMILARITY
+
+def _without_retakes(
+    pieces: Sequence[Piece],
+    cuts: Optional[Mapping[str, CleanCuts]],
+) -> Tuple[List[Piece], List[str]]:
+    """Keep one go at each line, where the same one was said more than once.
+
+    The last complete one, because a retake happens when somebody stumbles and
+    starts again, so the finished attempt is usually the last. Complete means
+    the window does not stop partway through a sentence; where none of them is
+    complete the last is kept anyway, since something has to be.
+
+    This stage drops footage the plan chose, so every window it takes out is
+    named. A cleanup nobody can see is a cleanup nobody can argue with.
+
+    Args:
+        pieces: The windows, in order.
+        cuts: What is known about each file, keyed by asset ID.
+
+    Returns:
+        `(pieces, notes)`.
+    """
+    if not cuts:
+        return list(pieces), []
+    kept: List[Piece] = []
+    dropped: List[Piece] = []
+
+    def settle(run: List[Piece]) -> None:
+        """Choose which window of one run of retakes survives.
+
+        Args:
+            run: The windows saying the same line, in order.
+        """
+        if len(run) == 1:
+            kept.append(run[0])
+            return
+        known = cuts[run[0].asset_id]
+        finished = [piece for piece in run if not known.splits_a_sentence(piece.end)]
+        survives = finished[-1] if finished else run[-1]
+        kept.append(survives)
+        dropped.extend(piece for piece in run if piece is not survives)
+
+    run: List[Piece] = []
+    for piece in pieces:
+        if run and _same_line(run[-1], piece, cuts):
+            run.append(piece)
+            continue
+        if run:
+            settle(run)
+        run = [piece]
+    if run:
+        settle(run)
+
+    notes: List[str] = []
+    if dropped:
+        seconds = sum(piece.duration for piece in dropped)
+        notes.append(
+            f"{len(dropped)} window(s) say a line that is said again straight after, and were dropped, "
+            f"{seconds:.1f}s in all: {', '.join(piece.from_clip_ids[0] for piece in dropped)}. "
+            "The last complete go at each was kept"
+        )
+    return kept, notes
+
+def _settled(seconds: float, known: CleanCuts, opens: bool) -> float:
+    """Move a time onto somewhere a cut may land, if anywhere near enough is.
+
+    Args:
+        seconds: The time as worked out.
+        known: What is known about the file.
+        opens: Whether the point opens a window rather than closing it.
+
+    Returns:
+        The nearest second that splits no word and shows no bad frame, or the
+        time as asked when nothing within `SNAP_SECONDS` qualifies. Callers
+        check the answer rather than assume it moved: leaving it is the honest
+        result and has to stay visible.
+    """
+    if known.is_clean(seconds, opens):
+        return seconds
+    landed = known.nearest_clean_point(seconds, SNAP_SECONDS, opens)
+    return seconds if landed is None else round(landed, 3)
+
+def _without_pauses(
+    pieces: Sequence[Piece],
+    cuts: Optional[Mapping[str, CleanCuts]],
+) -> Tuple[List[Piece], List[str]]:
+    """Take the dead air out of the middle of a window.
+
+    A window covering a whole section covers the gaps inside it too, and a gap
+    this long is not a breath, it is the edit waiting. The window is split
+    around it, keeping a breath on each side so neither half sounds clipped.
+    Both halves keep the clip IDs the window had, because they do still come
+    from the same footage.
+
+    Args:
+        pieces: The windows, in order.
+        cuts: What is known about each file, keyed by asset ID.
+
+    Returns:
+        `(pieces, notes)`.
+    """
+    if not cuts:
+        return list(pieces), []
+    out: List[Piece] = []
+    taken: List[float] = []
+    talked_through = 0
+    for piece in pieces:
+        known = cuts.get(piece.asset_id)
+        dead = known.pauses_inside(piece.start, piece.end, PAUSE_SECONDS) if known is not None else ()
+        opened = piece.start
+        for quiet, loud in dead:
+            # The silence came from the detector and the words came from the
+            # transcriber, and on real footage the two disagree all the time: a word's
+            # reported end runs on into a stretch measured as quiet. So neither edge of
+            # the gap is trusted where it falls — each is settled onto somewhere a cut
+            # may actually land, which for an edge inside a word is that word's own
+            # boundary.
+            closing = _settled(round(quiet + BREATH_SECONDS, 3), known, opens=False)
+            opening = _settled(round(loud - BREATH_SECONDS, 3), known, opens=True)
+            if closing <= opened or opening <= closing or opening >= piece.end:
+                # One side would be left with no length at all, so the gap stays
+                # rather than a window of nothing being put on the timeline.
+                continue
+            if not known.is_clean(closing, opens=False) or not known.is_clean(opening, opens=True):
+                # Nowhere near enough to settle onto. Cutting here would go through a
+                # word, which is worse than the pause it saves, so it stays and the
+                # disagreement is reported rather than papered over.
+                talked_through += 1
+                continue
+            out.append(Piece(piece.asset_id, opened, closing, piece.from_clip_ids, piece.beat_id))
+            taken.append(round(opening - closing, 3))
+            opened = opening
+        out.append(Piece(piece.asset_id, opened, piece.end, piece.from_clip_ids, piece.beat_id))
+
+    notes: List[str] = []
+    if taken:
+        notes.append(
+            f"{len(taken)} pause(s) longer than {PAUSE_SECONDS:g}s were taken out of the middle of a shot, "
+            f"{sum(taken):.1f}s in all"
+        )
+    if talked_through:
+        notes.append(
+            f"{talked_through} pause(s) were left in: they were measured as quiet, but the transcript "
+            "has somebody talking across them, and cutting there would go through a word"
+        )
+    return out, notes
+
+def _trimmed_ends(
+    pieces: Sequence[Piece],
+    cuts: Optional[Mapping[str, CleanCuts]],
+) -> Tuple[List[Piece], List[str]]:
+    """Take the run-up off the first window and the wind-down off the last.
+
+    Nobody wants to open on somebody gathering themselves to speak, or close
+    on them reaching for the camera. Both ends are pulled in to a breath
+    either side of the talking — but only where there is talking to measure
+    against, and never by more than the trims allow, so a shot held silent on
+    purpose survives.
+
+    Args:
+        pieces: The windows, in order.
+        cuts: What is known about each file, keyed by asset ID.
+
+    Returns:
+        `(pieces, notes)`.
+    """
+    if not cuts or not pieces:
+        return list(pieces), []
+    out = list(pieces)
+    notes: List[str] = []
+
+    def say(where: str, taken: float, left: float, limit: float) -> None:
+        """Say what was trimmed, and what the limit would not let go of.
+
+        Args:
+            where: Which end of the cut, for the sentence.
+            taken: Seconds removed.
+            left: Seconds of the run-up or wind-down still there.
+            limit: The trim that stopped it going further.
+        """
+        said = f"{taken:.1f}s {where} was trimmed off"
+        if left > 0:
+            said += (
+                f", and {left:.1f}s of it is still there: the trim goes no further than "
+                f"{limit:g}s in case the shot is being held on purpose"
+            )
+        notes.append(said)
+
+    head = out[0]
+    known = cuts.get(head.asset_id)
+    first_word = known.first_word_in(head.start, head.end) if known is not None else None
+    if first_word is not None:
+        wanted = round(first_word - BREATH_SECONDS, 3)
+        opening = round(min(wanted, head.start + HEAD_TRIM_SECONDS), 3)
+        if opening > head.start:
+            say("before the first word", opening - head.start, round(wanted - opening, 3), HEAD_TRIM_SECONDS)
+            out[0] = Piece(head.asset_id, opening, head.end, head.from_clip_ids, head.beat_id)
+
+    tail = out[-1]
+    known = cuts.get(tail.asset_id)
+    last_word = known.last_word_in(tail.start, tail.end) if known is not None else None
+    if last_word is not None:
+        wanted = round(last_word + BREATH_SECONDS, 3)
+        closing = round(max(wanted, tail.end - TAIL_TRIM_SECONDS), 3)
+        if closing < tail.end:
+            say("after the last word", tail.end - closing, round(closing - wanted, 3), TAIL_TRIM_SECONDS)
+            out[-1] = Piece(tail.asset_id, tail.start, closing, tail.from_clip_ids, tail.beat_id)
+
+    return out, notes
+
+def _off_bad_frames(
+    pieces: Sequence[Piece],
+    cuts: Optional[Mapping[str, CleanCuts]],
+) -> Tuple[List[Piece], List[str]]:
+    """Move any cut point that shows black or frozen picture.
+
+    Run last, so it has the final say over every edge the stages before it
+    made. It travels no further than the word snapping does, and every
+    candidate it weighs has to clear both objections, so getting off a bad
+    frame can never land in the middle of a word.
+
+    Args:
+        pieces: The windows, in order.
+        cuts: What is known about each file, keyed by asset ID.
+
+    Returns:
+        `(pieces, notes)`.
+    """
+    if not cuts:
+        return list(pieces), []
+    out: List[Piece] = []
+    moved, stuck = 0, 0
+    for piece in pieces:
+        known = cuts.get(piece.asset_id)
+        if known is None:
+            out.append(piece)
+            continue
+        settled: List[float] = []
+        objected = 0
+        for seconds, opens in ((piece.start, True), (piece.end, False)):
+            if not known.shows_bad_picture(seconds, opens):
+                settled.append(seconds)
+                continue
+            objected += 1
+            landed = known.nearest_clean_point(seconds, SNAP_SECONDS, opens)
+            settled.append(seconds if landed is None else round(landed, 3))
+        opening, closing = settled
+        if closing <= opening:
+            # Moving both ends has closed the window. A bad frame is a smaller loss
+            # than a shot, so it goes back as it was and is counted as stuck.
+            stuck += objected
+            out.append(piece)
+            continue
+        shifted = sum(1 for now, before in zip(settled, (piece.start, piece.end)) if now != before)
+        moved += shifted
+        stuck += objected - shifted
+        out.append(Piece(piece.asset_id, opening, closing, piece.from_clip_ids, piece.beat_id))
+
+    notes: List[str] = []
+    if moved:
+        notes.append(f"{moved} cut(s) moved off black or frozen picture")
+    if stuck:
+        notes.append(
+            f"{stuck} cut(s) still land on black or frozen picture: no clean frame is within "
+            f"{SNAP_SECONDS:g}s of them, so they were left as asked"
+        )
+    return out, notes
+
+def compile_pieces(
+    plan: EditPlan,
+    clips: Mapping[str, SemanticClip],
+    children: Mapping[str, List[SemanticClip]],
+    assets: Mapping[str, Asset],
+    cuts: Optional[Mapping[str, CleanCuts]] = None,
+) -> Tuple[List[Piece], List[str]]:
+    """Work out every window the plan puts on the timeline, cleaned up, in order.
+
+    The cleaning runs in this order for a reason. Retakes go first: there is
+    no sense taking the pauses out of a take about to be dropped. Pauses next,
+    which is the stage that splits a window in two. Then the ends, which want
+    the first and last window as they will finally be. Bad frames last of all,
+    so they have the final say over every edge the others made.
+
+    All of it depends on `cuts`. Without them the compiler knows nothing about
+    the footage, and a stage that cleaned anyway would be guessing.
+
+    Args:
+        plan: Plan to lay out.
+        clips: The timeline's clips, keyed by ID.
+        children: Each section's own clips in time order, keyed by section ID.
+        assets: The assets they play from, keyed by asset ID.
+        cuts: What is known about each file, keyed by asset ID. Without them a
+            `head` or `tail` lands at exactly the second it was given, which is
+            how a cut ends mid-syllable, and nothing is cleaned.
+
+    Returns:
+        `(pieces, notes)` — the windows, merged where they nearly touch, and a
+        line for each cleaning stage that did something.
+    """
+    pieces = _selected(plan, clips, children, assets, cuts)
+    notes: List[str] = []
+    for stage in (_without_retakes, _without_pauses, _trimmed_ends, _off_bad_frames):
+        pieces, said = stage(pieces, cuts)
+        notes.extend(said)
+    return _merge(pieces), notes
+
 def plan_pieces(
     plan: EditPlan,
     clips: Mapping[str, SemanticClip],
@@ -261,24 +655,13 @@ def plan_pieces(
         clips: The timeline's clips, keyed by ID.
         children: Each section's own clips in time order, keyed by section ID.
         assets: The assets they play from, keyed by asset ID.
-        cuts: Where each file may be cut without splitting a word, keyed by
-            asset ID. Without them a `head` or `tail` lands at exactly the
-            second it was given, which is how a cut ends mid-syllable.
+        cuts: What is known about each file, keyed by asset ID.
 
     Returns:
-        The windows, merged where they nearly touch.
+        The windows, merged where they nearly touch. Use `compile_pieces`
+        where what the compiler did to them also matters.
     """
-    pieces: List[Piece] = []
-    for selection in _ordered_selections(plan):
-        clip = clips.get(selection.clip_id)
-        asset = assets.get(clip.asset_id) if clip is not None else None
-        if clip is None or asset is None:
-            continue
-        pieces.extend(_selection_pieces(
-            selection, clip, children.get(clip.id, []), asset,
-            None if cuts is None else cuts.get(clip.asset_id),
-        ))
-    return _merge(pieces)
+    return compile_pieces(plan, clips, children, assets, cuts)[0]
 
 def compiled_duration(pieces: Sequence[Piece]) -> float:
     """Measure how long the compiled cut runs.
@@ -293,6 +676,7 @@ def compiled_duration(pieces: Sequence[Piece]) -> float:
 
 def _cut_notes(
     pieces: Sequence[Piece],
+    selected: Sequence[Piece],
     unsnapped: Sequence[Piece],
     cuts: Optional[Mapping[str, CleanCuts]],
     duration: float,
@@ -310,9 +694,12 @@ def _cut_notes(
     second is near enough is a failure to say plainly rather than to hide.
 
     Args:
-        pieces: The compiled windows.
-        unsnapped: The same windows as they would be without the cut points,
-            for saying how many moved.
+        pieces: The finished windows, cleaning and all, for the faults that
+            survived to the end.
+        selected: The windows the selections alone produced, for counting what
+            the snapping moved. One per selection, so they pair off exactly
+            with `unsnapped`, which the cleaned windows would not.
+        unsnapped: The same windows as they would be without the cut points.
         cuts: Where each file may be cut without splitting a word, keyed by
             asset ID.
         duration: How long the compiled cut runs, for costing what is owed.
@@ -326,7 +713,7 @@ def _cut_notes(
 
     moved = [
         abs(new_edge - old_edge)
-        for new, old in zip(pieces, unsnapped)
+        for new, old in zip(selected, unsnapped)
         for new_edge, old_edge in ((new.start, old.start), (new.end, old.end))
         if new_edge != old_edge
     ]
@@ -449,9 +836,15 @@ def check_plan(
             problems.append(f"the music asset {plan.music.asset_id} has no sound")
 
     if not problems:
-        pieces = plan_pieces(plan, clips, children, assets, cuts)
+        pieces, cleaned = compile_pieces(plan, clips, children, assets, cuts)
         duration = compiled_duration(pieces)
-        notes.extend(_cut_notes(pieces, plan_pieces(plan, clips, children, assets, None), cuts, duration))
+        notes.extend(_cut_notes(
+            pieces,
+            _selected(plan, clips, children, assets, cuts),
+            _selected(plan, clips, children, assets, None),
+            cuts, duration,
+        ))
+        notes.extend(cleaned)
         if plan.target.seconds:
             drift = abs(duration - plan.target.seconds) / plan.target.seconds
             if drift > LENGTH_TOLERANCE:
@@ -614,7 +1007,10 @@ def compile_operations(
     provenance: Dict[str, dict] = {}
     for position, piece in enumerate(pieces, start=1):
         clip_id = f"p{position:03d}"
-        pinned = kept.get(piece.from_clip_ids)
+        # Taken rather than read: taking a pause out of the middle of a shot leaves two
+        # windows carrying the clip IDs one of them had, and one hand-made range must
+        # not be stamped onto both of them. The earlier window keeps it.
+        pinned = kept.pop(piece.from_clip_ids, None)
         placed = {
             "action": "insert_clip",
             "track_id": VIDEO_TRACK_ID,

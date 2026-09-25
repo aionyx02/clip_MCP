@@ -576,22 +576,43 @@ def build_timeline(
 
 @dataclass(frozen=True)
 class CleanCuts:
-    """Where a cut may land in one file without breaking something.
+    """What the compiler is allowed to know about one file.
 
-    Two questions, kept apart because they have different answers and very
+    Everything here is a number or a string lifted off the analysis, never the
+    analysis itself. Reading a transcript is interpretation, and the compiler
+    has to stay a pure function of what it is given, so the interpretation
+    happens once in `clean_cuts` and the compiler is handed the result.
+
+    The questions are kept apart because they have different answers and very
     different costs. Moving a cut off the middle of a word costs a fraction of
     a second and is never worth refusing. Moving it to the end of the sentence
     can cost many seconds, which changes how long somebody's video runs — so
     that one is reported rather than done to them.
 
+    Empty is always read as not knowing rather than as nothing being there. A
+    file nobody transcribed has no words to split and a file analyzed before
+    the picture detectors ran has no bad frames to land on, and in neither
+    case has anything been cleared.
+
     Attributes:
         words: Every transcribed word as `(start, end)` in source seconds, in
             order.
         sentences: Every transcribed sentence the same way.
+        said: What each of those sentences says, in the same order, for
+            telling two takes of one line apart.
+        pauses: Every measured silence, which is where the dead air is.
+        bad_picture: Every stretch the viewer should not be shown a frame of:
+            black and frozen picture, merged into one list because a cut point
+            has the same objection to either. Soft focus is not in here — it
+            would need a threshold on the blur measurement, and that is one of
+            the numbers the roadmap refuses to pick without a corpus.
     """
 
     words: Tuple[Tuple[float, float], ...] = ()
     sentences: Tuple[Tuple[float, float], ...] = ()
+    said: Tuple[str, ...] = ()
+    pauses: Tuple[Tuple[float, float], ...] = ()
+    bad_picture: Tuple[Tuple[float, float], ...] = ()
 
     def splits_a_word(self, seconds: float) -> bool:
         """Say whether a cut here would land inside a word.
@@ -662,28 +683,183 @@ class CleanCuts:
                 best = edge
         return best
 
-def clean_cuts(analysis: MediaAnalysis) -> CleanCuts:
-    """Work out where a cut may land in one file without breaking a word.
+    def shows_bad_picture(self, seconds: float, opens: bool) -> bool:
+        """Say whether the frame a cut point puts on screen is one nobody wants to see.
 
-    A pure function of the transcript already on disk, so the compiler can be
+        Half-open, and which half is open depends on the end. An opening point
+        is the first frame the viewer sees, so black starting exactly there is
+        seen. A closing point is the first frame they do not, so black
+        starting exactly there is not, while black ending exactly there was on
+        screen until the last moment. The benchmark's `bad_frame_cuts` asks
+        this same question of a finished cut and has to get the same answer,
+        or the compiler would be chasing a fault the scorer cannot see.
+
+        Args:
+            seconds: The time to check.
+            opens: Whether the cut point opens the window rather than closing it.
+
+        Returns:
+            True when the frame shown there is black or frozen.
+        """
+        if opens:
+            return any(start <= seconds < end for start, end in self.bad_picture)
+        return any(start < seconds <= end for start, end in self.bad_picture)
+
+    def is_clean(self, seconds: float, opens: bool) -> bool:
+        """Say whether a cut may land here at all.
+
+        Args:
+            seconds: The time to check.
+            opens: Whether the cut point opens the window rather than closing it.
+
+        Returns:
+            True when no word is in progress and no bad frame is on screen.
+        """
+        return not self.splits_a_word(seconds) and not self.shows_bad_picture(seconds, opens)
+
+    def nearest_clean_point(self, seconds: float, within: float, opens: bool) -> Optional[float]:
+        """Find the closest second near a time where a cut may land.
+
+        The places worth trying are the edges of the things being avoided: the
+        edge of a word keeps the word whole, and the edge of a black stretch
+        is the first frame either side of it that is worth showing. Every
+        candidate is checked against both objections, so moving off a bad
+        frame cannot land in the middle of a word.
+
+        Args:
+            seconds: The time a cut was asked for.
+            within: How far the cut may move, in seconds.
+            opens: Whether the cut point opens the window rather than closing it.
+
+        Returns:
+            The nearest such second, or None when the file offers none that
+            close.
+        """
+        best: Optional[float] = None
+        for edge in {edge for span in (*self.words, *self.bad_picture) for edge in span}:
+            if abs(edge - seconds) > within or not self.is_clean(edge, opens):
+                continue
+            # Nearest wins. A tie goes to the later edge, which keeps the word whole
+            # rather than dropping it — hence the sort key falling on -edge.
+            if best is None or (abs(edge - seconds), -edge) < (abs(best - seconds), -best):
+                best = edge
+        return best
+
+    def pauses_inside(self, start: float, end: float, longer_than: float) -> Tuple[Tuple[float, float], ...]:
+        """List the dead air strictly inside a window.
+
+        Strictly inside, because a silence that reaches either edge is the
+        breath the window was given rather than a pause in the middle of it,
+        and trimming that is the head and tail trim's job, not this one.
+
+        Args:
+            start: Where the window opens, in source seconds.
+            end: Where it closes.
+            longer_than: How long a silence has to run to count as dead air.
+
+        Returns:
+            The qualifying silences, in order.
+        """
+        return tuple(
+            (quiet, loud) for quiet, loud in self.pauses
+            if quiet > start and loud < end and loud - quiet > longer_than
+        )
+
+    def spoken_between(self, start: float, end: float) -> str:
+        """Collect what is said across a window.
+
+        Args:
+            start: Where the window opens, in source seconds.
+            end: Where it closes.
+
+        Returns:
+            The text of every sentence that overlaps it, joined in order.
+            Empty for a window with nobody talking in it, and also for a file
+            nobody transcribed — which is why the retake pass refuses to act
+            on an empty answer.
+        """
+        return "".join(
+            text for (opened, closed), text in zip(self.sentences, self.said)
+            if opened < end and start < closed
+        )
+
+    def first_word_in(self, start: float, end: float) -> Optional[float]:
+        """Find where the talking starts inside a window.
+
+        Args:
+            start: Where the window opens, in source seconds.
+            end: Where it closes.
+
+        Returns:
+            The start of the earliest word inside it, or None when nobody
+            talks there.
+        """
+        inside = [opened for opened, closed in self.words if opened >= start and closed <= end]
+        return min(inside) if inside else None
+
+    def last_word_in(self, start: float, end: float) -> Optional[float]:
+        """Find where the talking stops inside a window.
+
+        Args:
+            start: Where the window opens, in source seconds.
+            end: Where it closes.
+
+        Returns:
+            The end of the latest word inside it, or None when nobody talks
+            there.
+        """
+        inside = [closed for opened, closed in self.words if opened >= start and closed <= end]
+        return max(inside) if inside else None
+
+def _joined(spans: Sequence[Span]) -> Tuple[Tuple[float, float], ...]:
+    """Merge overlapping stretches into one list, in order.
+
+    Black and frozen picture are detected separately and overlap constantly —
+    a frozen shot that is also black is reported by both. A cut point has the
+    same objection to either, so they are counted once.
+
+    Args:
+        spans: The stretches, in any order.
+
+    Returns:
+        The stretches, sorted and with overlaps joined.
+    """
+    joined: List[Tuple[float, float]] = []
+    for span in sorted(spans, key=lambda item: item.start):
+        if joined and span.start <= joined[-1][1]:
+            joined[-1] = (joined[-1][0], max(joined[-1][1], span.end))
+        else:
+            joined.append((span.start, span.end))
+    return tuple(joined)
+
+def clean_cuts(analysis: MediaAnalysis) -> CleanCuts:
+    """Work out what the compiler may know about one file.
+
+    A pure function of the detections already on disk, so the compiler can be
     handed numbers rather than transcripts to interpret.
+
+    The transcript and the picture detectors are read separately on purpose. A
+    file analyzed without transcription still has silences and black frames
+    worth avoiding, and refusing to report them because nobody transcribed it
+    would leave the compiler blind to things it was told.
 
     Args:
         analysis: The file's analysis.
 
     Returns:
-        The clean cut points. Empty for a file that was never transcribed,
-        which the compiler reads as knowing nothing about it rather than as
-        everything in it being safe to cut.
+        What may be known. Any part of it can be empty, and empty always means
+        nothing is known rather than nothing is there.
     """
     transcript = analysis.transcript
-    if transcript is None:
-        return CleanCuts()
+    segments = transcript.segments if transcript is not None else []
     return CleanCuts(
         words=tuple(
             (word.start, word.end)
-            for segment in transcript.segments
+            for segment in segments
             for word in segment.words
         ),
-        sentences=tuple((segment.start, segment.end) for segment in transcript.segments),
+        sentences=tuple((segment.start, segment.end) for segment in segments),
+        said=tuple(segment.text for segment in segments),
+        pauses=tuple((span.start, span.end) for span in analysis.silences),
+        bad_picture=_joined([*analysis.black_frames, *analysis.frozen_frames]),
     )

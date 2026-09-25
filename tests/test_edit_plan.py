@@ -17,16 +17,22 @@ from pydantic import TypeAdapter
 from app.engine.plan import (
     plan_markers,
     BREATH_SECONDS,
+    MERGE_GAP_SECONDS,
+    PAUSE_SECONDS,
     SNAP_SECONDS,
+    TAIL_TRIM_SECONDS,
     check_plan,
     compile_operations,
+    compile_pieces,
     compiled_duration,
     diff_plans,
     plan_pieces,
 )
 from app.engine.sections import build_sections
 from app.engine.semantic import build_timeline, clean_cuts
-from app.models.media import Asset, MediaAnalysis, TranscriptWord
+from app.models.media import (
+    Asset, MediaAnalysis, Span, Transcript, TranscriptSegment, TranscriptWord,
+)
 from app.models.plan import (
     Beat, EditPlan, MusicPlan, PlanAmendment, PlanTarget, Rejection, Selection, Trim, TrimKind,
 )
@@ -398,6 +404,196 @@ def test_tighten_drops_the_pauses_out_of_a_section() -> None:
     ))
     # Three seconds of silence in the middle alone; the tightened cut has to be shorter.
     assert tightened < whole
+
+# The mechanical cleanups: the things a rough cut needs that take no judgement, so they
+# belong to the compiler rather than to a sentence in a guide hoping to be followed.
+# Every one of them changes somebody's edit, so every one of them also says what it did.
+
+LINE = ("我要", "講一", "件", "事")
+
+def said_again(*at: float) -> MediaAnalysis:
+    """Build a file where the same line is said over and over.
+
+    Each go runs two seconds and is transcribed four words to the line, so a
+    trim can land between words rather than through one, and the silence
+    between two goes is what the semantic layer splits them on.
+
+    Args:
+        *at: Where each go starts, in seconds.
+
+    Returns:
+        The analysis.
+    """
+    segments, silences, after = [], [], 0.0
+    for start in at:
+        silences.append(Span(start=after, end=start))
+        segments.append(TranscriptSegment(
+            start=start, end=start + 2.0, text="".join(LINE),
+            words=[
+                TranscriptWord(start=start + place * 0.5, end=start + place * 0.5 + 0.5, text=word)
+                for place, word in enumerate(LINE)
+            ],
+        ))
+        after = start + 2.0
+    silences.append(Span(start=after, end=after + 2.0))
+    return MediaAnalysis(
+        asset_id=ASSET_ID, duration=after + 2.0, silences=silences,
+        transcript=Transcript(language="zh", model="test", segments=segments),
+    )
+
+def compiled(made: MediaAnalysis, trims: Dict[int, Trim] = {}, which: str = "speech") -> tuple:
+    """Compile every clip of one kind in a file, in order.
+
+    Args:
+        made: The analysis to derive the timeline from.
+        trims: A trim for the selection at that position, where one is wanted.
+        which: `speech` to select the talking, `quiet` to select the rest.
+
+    Returns:
+        `(pieces, notes)`.
+    """
+    one = sourced(seconds=made.duration)
+    _, clips = build_timeline({ASSET_ID: one}, {ASSET_ID: made})
+    chosen = speech_of(clips) if which == "speech" else [clip for clip in clips if not clip.text]
+    plan = plan_for([
+        Selection(clip_id=clip.id, beat_id="b1", trim=trims.get(place, Trim()))
+        for place, clip in enumerate(chosen)
+    ])
+    return compile_pieces(plan, {clip.id: clip for clip in clips}, {}, {ASSET_ID: one},
+                          {ASSET_ID: clean_cuts(made)})
+
+def test_dead_air_in_the_middle_of_a_shot_is_taken_out() -> None:
+    by_id, children, assets, section_id = sectioned()
+    made = analysis(**FOOTAGE)
+    plan = plan_for([Selection(clip_id=section_id, beat_id="b1")])
+    pieces, notes = compile_pieces(plan, by_id, children, assets, {ASSET_ID: clean_cuts(made)})
+    # The section covers the whole file, so it covers the three-second gap at 5s and the
+    # two-second one at 10s. Each is taken out, leaving a breath on both sides of it.
+    assert [(piece.start, piece.end) for piece in pieces] == [(0.9, 5.1), (7.9, 10.1), (11.9, 18.0)]
+    assert any("2 pause(s)" in note for note in notes)
+
+def test_a_pause_short_enough_to_be_a_breath_is_left_alone() -> None:
+    by_id, children, assets, section_id = sectioned()
+    made = analysis(**FOOTAGE)
+    pieces, _ = compile_pieces(plan_for([Selection(clip_id=section_id, beat_id="b1")]),
+                               by_id, children, assets, {ASSET_ID: clean_cuts(made)})
+    # There is half a second of quiet at 3.0s. Cutting there would be cutting between
+    # two sentences that belong together, so nothing opens or closes anywhere near it.
+    assert not any(3.0 <= edge <= 3.5 for piece in pieces for edge in (piece.start, piece.end))
+
+def test_a_pause_somebody_is_talking_across_is_left_in_and_said() -> None:
+    # The two detectors disagree, which on real footage they do constantly: the stretch
+    # was measured as quiet while the transcript has a word running the whole way over
+    # it. Taking it out would cut through that word, which is the worse of the two.
+    made = analysis(
+        duration=12.0,
+        segments=[(1.0, 2.0, "開頭"), (4.0, 8.0, "一直講"), (10.0, 11.0, "結尾")],
+        silences=[(0.0, 1.0), (2.0, 4.0), (5.0, 7.0), (8.0, 10.0), (11.0, 12.0)],
+    )
+    pieces, notes = compiled(made)
+    assert (pieces[1].start, pieces[1].end) == (3.9, 8.1)
+    assert any("talking across them" in note for note in notes)
+    assert not any("were taken out" in note for note in notes)
+
+def test_taking_a_pause_out_has_to_outlast_the_merge_that_would_undo_it() -> None:
+    # Both halves keep a breath, so what is left between them is the pause less two of
+    # them. Any shorter than the merge gap and they are joined straight back together
+    # and the stage is a no-op nobody could see.
+    assert PAUSE_SECONDS > 2 * BREATH_SECONDS + MERGE_GAP_SECONDS
+
+def test_the_last_complete_go_at_a_line_is_the_one_that_survives() -> None:
+    pieces, notes = compiled(said_again(1.0, 4.0, 7.0))
+    assert [(piece.start, piece.end) for piece in pieces] == [(6.9, 9.1)]
+    assert any("said again" in note or "said a line" in note for note in notes)
+    assert any("4.4s in all" in note for note in notes)
+
+def test_where_the_last_go_at_a_line_is_unfinished_the_one_before_it_is_kept() -> None:
+    # The third go is trimmed to a second and a half, so it stops partway through the
+    # sentence. The second go is the last one that finishes.
+    pieces, _ = compiled(said_again(1.0, 4.0, 7.0), {2: Trim(kind=TrimKind.HEAD, seconds=1.5)})
+    assert [(piece.start, piece.end) for piece in pieces] == [(3.9, 6.1)]
+
+def test_two_silent_windows_are_not_taken_for_two_goes_at_a_line() -> None:
+    # Both say nothing, which compares as identical for having nothing to compare.
+    # Silent B-roll is not a stammer, so neither of them goes.
+    pieces, notes = compiled(said_again(1.0, 4.0, 7.0), which="quiet")
+    assert len(pieces) > 1
+    assert not any("said again" in note for note in notes)
+
+def test_a_cut_landing_on_black_moves_off_it() -> None:
+    made = analysis(
+        duration=20.0,
+        segments=[(1.0, 3.0, "第一句話"), (3.5, 5.0, "第二句話")],
+        silences=[(0.0, 1.0), (3.0, 3.5), (5.0, 20.0)],
+        black=[(3.3, 3.45)],
+    )
+    pieces, notes = compiled(made)
+    # The second sentence opens a breath early, at 3.4, which is inside the black. The
+    # first frame after it is 3.45, and that is where the cut goes.
+    assert pieces[-1].start == pytest.approx(3.45)
+    assert any("moved off black" in note for note in notes)
+
+def test_a_cut_with_no_clean_frame_near_enough_is_left_and_said() -> None:
+    made = analysis(
+        duration=20.0,
+        segments=[(1.0, 3.0, "第一句話"), (4.5, 6.0, "第二句話")],
+        silences=[(0.0, 1.0), (3.0, 4.5), (6.0, 20.0)],
+        black=[(2.5, 5.4)],
+    )
+    pieces, notes = compiled(made)
+    # Nearly three seconds of black, so everything within a second of 4.4 is either
+    # still black or in the middle of a word. The cut stays where it was asked for and
+    # the fault is said out loud rather than hidden.
+    assert pieces[-1].start == pytest.approx(4.4)
+    assert any("still land on black" in note for note in notes)
+    assert not any("moved off black" in note for note in notes)
+
+def test_the_opening_does_not_start_on_somebody_about_to_speak() -> None:
+    by_id, children, assets, section_id = sectioned()
+    made = analysis(**FOOTAGE)
+    pieces, notes = compile_pieces(plan_for([Selection(clip_id=section_id, beat_id="b1")]),
+                                  by_id, children, assets, {ASSET_ID: clean_cuts(made)})
+    # A second of nothing before the first word; the cut opens a breath before it instead.
+    assert pieces[0].start == pytest.approx(1.0 - BREATH_SECONDS)
+    assert any("before the first word" in note for note in notes)
+
+def test_a_trim_that_hits_its_limit_says_how_much_is_still_there() -> None:
+    by_id, children, assets, section_id = sectioned()
+    made = analysis(**FOOTAGE)
+    pieces, notes = compile_pieces(plan_for([Selection(clip_id=section_id, beat_id="b1")]),
+                                  by_id, children, assets, {ASSET_ID: clean_cuts(made)})
+    # Six seconds of nothing after the last word, and the trim will only take two of
+    # them. Saying how much was taken without saying how much is left would read as done.
+    assert pieces[-1].end == pytest.approx(20.0 - TAIL_TRIM_SECONDS)
+    assert any("is still there" in note for note in notes)
+
+def test_a_shot_held_silent_on_purpose_is_not_trimmed() -> None:
+    # Nobody talks anywhere in it, so there is no run-up to measure against and nothing
+    # to say the hold was a mistake.
+    made = analysis(duration=10.0, silences=[(0.0, 10.0)], scenes=[(0.0, 10.0)])
+    pieces, notes = compiled(made, which="quiet")
+    assert pieces[0].start == pytest.approx(0.0)
+    assert pieces[-1].end == pytest.approx(10.0)
+    assert notes == []
+
+def test_nothing_is_cleaned_when_the_compiler_knows_nothing_about_the_footage() -> None:
+    by_id, children, assets, section_id = sectioned()
+    plan = plan_for([Selection(clip_id=section_id, beat_id="b1")])
+    pieces, notes = compile_pieces(plan, by_id, children, assets, None)
+    # One window over the whole section, exactly as asked, and nothing claimed about it.
+    assert [(piece.start, piece.end) for piece in pieces] == [(0.0, 20.0)]
+    assert notes == []
+
+def test_silences_and_black_are_known_even_where_nobody_was_transcribed() -> None:
+    # The transcript and the picture detectors are separate passes. Refusing to report
+    # the second because the first did not run would leave the compiler blind to what
+    # it was told.
+    made = analysis(duration=10.0, silences=[(0.0, 2.0)], black=[(4.0, 5.0)], frozen=[(4.5, 6.0)])
+    known = clean_cuts(made)
+    assert known.words == () and known.sentences == ()
+    assert known.pauses == ((0.0, 2.0),)
+    # Black and frozen overlap, and a cut point objects to either, so they count once.
+    assert known.bad_picture == ((4.0, 6.0),)
 
 def context_for(plan: EditPlan, by_id: Dict[str, SemanticClip], children: dict, assets: dict) -> tuple:
     """Run the checks with a timeline matching the plan.
