@@ -51,6 +51,19 @@ HEAD_TRIM_SECONDS = 2.0
 TAIL_TRIM_SECONDS = 2.0
 VIDEO_TRACK_ID = "main"
 MUSIC_TRACK_ID = "music"
+BROLL_TRACK_ID = "broll"
+# How long one shot of covering picture may run. Under the first it reads as a flicker
+# rather than a shot; over the second the viewer has lost the thread of what is being
+# said underneath. Both provisional until there is a corpus to tune them against.
+BROLL_MIN_SECONDS = 1.0
+BROLL_MAX_SECONDS = 6.0
+# How much of one beat may be under covering picture. A beat that is mostly B-roll is not
+# a beat with B-roll on it, it is a beat made of B-roll with a voice over it — which is a
+# different thing and should be selected as such. Provisional.
+BROLL_MAX_SHARE = 0.4
+# How long one shot has to hold before it is worth offering something to cover it with.
+# Provisional.
+BROLL_LONG_SHOT_SECONDS = 8.0
 # How far the compiled length may sit from what the plan asked for before it is worth saying.
 LENGTH_TOLERANCE = 0.1
 
@@ -663,6 +676,83 @@ def plan_pieces(
     """
     return compile_pieces(plan, clips, children, assets, cuts)[0]
 
+@dataclass(frozen=True)
+class Cover:
+    """One shot of B-roll worked out onto the compiled timeline.
+
+    Attributes:
+        clip_id: Semantic clip the covering picture comes from.
+        asset_id: File that picture plays from.
+        start: Where it starts in that file, in seconds.
+        end: Where it ends, in seconds.
+        timeline_in: Where it lands on the timeline, in seconds.
+        over_clip_id: The clip in the cut it starts over.
+    """
+
+    clip_id: str
+    asset_id: str
+    start: float
+    end: float
+    timeline_in: float
+    over_clip_id: str
+
+    @property
+    def duration(self) -> float:
+        """Length of the shot in seconds.
+
+        Returns:
+            The seconds it covers.
+        """
+        return self.end - self.start
+
+    @property
+    def timeline_out(self) -> float:
+        """Where the shot stops covering, in timeline seconds.
+
+        Returns:
+            The second the picture underneath comes back.
+        """
+        return round(self.timeline_in + self.duration, 3)
+
+def _placed(pieces: Sequence[Piece]) -> List[Tuple[Piece, float]]:
+    """Say where each window lands on the timeline.
+
+    Args:
+        pieces: The compiled windows, in order.
+
+    Returns:
+        Each window with the second it starts at on the timeline.
+    """
+    placed, at = [], 0.0
+    for piece in pieces:
+        placed.append((piece, round(at, 3)))
+        at += piece.duration
+    return placed
+
+def _in_cut(clip: SemanticClip, placed: Sequence[Tuple[Piece, float]]) -> Optional[Tuple[float, float]]:
+    """Find where a semantic clip ended up on the compiled timeline.
+
+    The first window that shows any of it, because that is where it cuts in.
+    A clip split across two windows by the pause stage is therefore reported
+    from its first half, which is where it starts on screen.
+
+    Args:
+        clip: The semantic clip to locate.
+        placed: The windows with their timeline positions.
+
+    Returns:
+        `(start, end)` in timeline seconds, or None when the cut does not use
+        this clip at all.
+    """
+    for piece, at in placed:
+        if piece.asset_id != clip.asset_id:
+            continue
+        opened = max(piece.start, clip.source_range.start)
+        closed = min(piece.end, clip.source_range.end)
+        if closed > opened:
+            return round(at + (opened - piece.start), 3), round(at + (closed - piece.start), 3)
+    return None
+
 def compiled_duration(pieces: Sequence[Piece]) -> float:
     """Measure how long the compiled cut runs.
 
@@ -673,6 +763,256 @@ def compiled_duration(pieces: Sequence[Piece]) -> float:
         The total in seconds.
     """
     return round(sum(piece.duration for piece in pieces), 3)
+
+def _under(placed: Sequence[Tuple[Piece, float]], seconds: float) -> Optional[Tuple[Piece, float]]:
+    """Find the window playing at one second of the timeline.
+
+    Args:
+        placed: The windows with their timeline positions.
+        seconds: The second to look at.
+
+    Returns:
+        The window and where it starts, or None past the end of the cut.
+    """
+    for piece, at in placed:
+        if at <= seconds < round(at + piece.duration, 3):
+            return piece, at
+    return None
+
+def broll_covers(
+    plan: EditPlan,
+    pieces: Sequence[Piece],
+    clips: Mapping[str, SemanticClip],
+    assets: Mapping[str, Asset],
+    cuts: Optional[Mapping[str, CleanCuts]] = None,
+) -> Tuple[List[Cover], List[str], List[str]]:
+    """Work out where each shot of B-roll lands, and what is wrong with the ones that do not.
+
+    The coverage rules live here rather than in a guide, because none of them
+    needs judgement once the shot has been chosen: how long a shot may run, how
+    much of a beat may be under one, and which shots may not be covered at all
+    are arithmetic against the plan. What needs judgement — whether this
+    picture belongs over these words — is the plan's, and nothing here second
+    guesses it.
+
+    Args:
+        plan: Plan whose B-roll is being laid out.
+        pieces: The compiled windows of the main sequence, in order.
+        clips: The timeline's clips, keyed by ID.
+        assets: The assets they play from, keyed by asset ID.
+        cuts: What is known about each file, keyed by asset ID, for saying when
+            a shot cuts back partway through a sentence.
+
+    Returns:
+        `(covers, problems, notes)`. A problem stops the plan compiling; a
+        note is worth saying to whoever wrote it. Only shots with no problem
+        of their own come back as covers.
+    """
+    placed = _placed(pieces)
+    total = compiled_duration(pieces)
+    problems: List[str] = []
+    notes: List[str] = []
+
+    held: List[Tuple[str, float, float]] = []
+    for selection in plan.selections:
+        clip = clips.get(selection.clip_id)
+        span = None if clip is None else _in_cut(clip, placed)
+        if selection.hold_picture and span is not None:
+            held.append((selection.clip_id, *span))
+
+    in_beat: Dict[str, float] = {}
+    for piece in pieces:
+        in_beat[piece.beat_id] = in_beat.get(piece.beat_id, 0.0) + piece.duration
+
+    covers: List[Cover] = []
+    covered_in_beat: Dict[str, float] = {}
+    for position, shot in enumerate(plan.broll, start=1):
+        where = f"B-roll {position} (over {shot.over_clip_id})"
+        source = clips.get(shot.clip_id)
+        over = clips.get(shot.over_clip_id)
+        if source is None:
+            problems.append(f"{where}: {shot.clip_id} is not a clip in this timeline")
+            continue
+        if over is None:
+            problems.append(f"{where}: {shot.over_clip_id} is not a clip in this timeline")
+            continue
+        asset = assets.get(source.asset_id)
+        if asset is None:
+            problems.append(f"{where}: asset {source.asset_id} is no longer registered")
+            continue
+        if not asset.has_video:
+            problems.append(f"{where}: {asset.id} has no picture, so there is nothing to lay over anything")
+            continue
+        span = _in_cut(over, placed)
+        if span is None:
+            problems.append(
+                f"{where}: the cut does not use {shot.over_clip_id}, so there is nowhere for this to start"
+            )
+            continue
+        if not BROLL_MIN_SECONDS <= shot.seconds <= BROLL_MAX_SECONDS:
+            problems.append(
+                f"{where}: {shot.seconds:g}s is outside the {BROLL_MIN_SECONDS:g}–{BROLL_MAX_SECONDS:g}s a shot "
+                "may run; under that it reads as a flicker, over it the viewer loses what is being said"
+            )
+            continue
+        if shot.seconds > source.duration:
+            problems.append(
+                f"{where}: {shot.clip_id} runs {source.duration:.1f}s, which is not the {shot.seconds:g}s asked for"
+            )
+            continue
+
+        opened = span[0]
+        closed = round(opened + shot.seconds, 3)
+        if closed > total:
+            problems.append(
+                f"{where}: would run to {closed:.1f}s of a cut that is {total:.1f}s long"
+            )
+            continue
+        clashes = [
+            clip_id for clip_id, starts, ends in held
+            if starts < closed and opened < ends
+        ]
+        if clashes:
+            problems.append(
+                f"{where}: covers {', '.join(clashes)}, which the plan holds for what it shows"
+            )
+            continue
+        over_another = [
+            other for other in covers if other.timeline_in < closed and opened < other.timeline_out
+        ]
+        if over_another:
+            problems.append(
+                f"{where}: overlaps the shot over {over_another[0].over_clip_id}; "
+                "two pictures cannot be on screen at once"
+            )
+            continue
+
+        beat = _under(placed, opened)
+        beat_id = beat[0].beat_id if beat is not None else ""
+        running = covered_in_beat.get(beat_id, 0.0) + shot.seconds
+        allowed = in_beat.get(beat_id, 0.0) * BROLL_MAX_SHARE
+        if running > allowed:
+            problems.append(
+                f"{where}: would put {running:.1f}s of beat {beat_id or '(none)'} under B-roll, more than the "
+                f"{BROLL_MAX_SHARE:.0%} of its {in_beat.get(beat_id, 0.0):.1f}s that may be covered"
+            )
+            continue
+        covered_in_beat[beat_id] = running
+
+        covers.append(Cover(
+            clip_id=shot.clip_id,
+            asset_id=source.asset_id,
+            start=round(source.source_range.start, 3),
+            end=round(source.source_range.start + shot.seconds, 3),
+            timeline_in=opened,
+            over_clip_id=shot.over_clip_id,
+        ))
+        if not over.text:
+            notes.append(
+                f"{where}: nobody is talking under it, so this swaps one picture for another rather than "
+                "showing what is being said"
+            )
+
+    if cuts:
+        interrupted = []
+        for cover in covers:
+            under = _under(placed, cover.timeline_out)
+            known = None if under is None else cuts.get(under[0].asset_id)
+            if under is None or known is None:
+                continue
+            piece, at = under
+            if known.splits_a_sentence(piece.start + (cover.timeline_out - at)):
+                interrupted.append(cover.over_clip_id)
+        if interrupted:
+            notes.append(
+                f"{len(interrupted)} B-roll shot(s) cut back partway through a sentence: "
+                f"{', '.join(interrupted)}. Lengthening them would change how long the video runs, "
+                "so it is left to whoever chose the length"
+            )
+    return covers, problems, notes
+
+def broll_slots(
+    plan: EditPlan,
+    pieces: Sequence[Piece],
+    clips: Mapping[str, SemanticClip],
+) -> List[dict]:
+    """Offer the places in a cut where covering picture would help.
+
+    Two signals, both of them lengths rather than judgements about how a shot
+    looks. One shot held a long time is the clearest case: the sound carries
+    on and the picture has stopped saying anything new. A run of shots from
+    one file is the same problem wearing a different hat — the camera never
+    moved, so cutting between them changed nothing.
+
+    Deliberately not offered: "the sound is good but the picture is weak".
+    Weak needs a threshold on the exposure and blur measurements, and the
+    roadmap refuses to pick those against synthetic footage. The measurements
+    are on every clip's `scores` for whoever is choosing to read.
+
+    Args:
+        plan: Plan to read, for which shots are held and which beats exist.
+        pieces: The compiled windows, in order.
+        clips: The timeline's clips, keyed by ID.
+
+    Returns:
+        One slot per stretch worth covering, worst first, each saying where a
+        shot would start, how long it may run there, how long the stretch
+        holds, and which signal offered it. A cut made of long static shots
+        will have most of itself offered back — that is the answer, not noise,
+        which is why the order is by how long each stretch holds rather than
+        by where it falls.
+    """
+    placed = _placed(pieces)
+    holding = {
+        selection.clip_id for selection in plan.selections if selection.hold_picture
+    }
+    # A run is a stretch of unchanged picture: one file, and the source moving forward
+    # through it. Going backwards in the same file is somebody putting a later moment
+    # first, which is a real cut whatever the framing was.
+    runs: List[List[Tuple[Piece, float]]] = []
+    for piece, at in placed:
+        last = runs[-1][-1][0] if runs else None
+        if last is not None and last.asset_id == piece.asset_id and piece.start >= last.end:
+            runs[-1].append((piece, at))
+        else:
+            runs.append([(piece, at)])
+
+    slots: List[dict] = []
+    for run in runs:
+        opened = run[0][1]
+        closed = round(run[-1][1] + run[-1][0].duration, 3)
+        seconds = round(closed - opened, 3)
+        if seconds < BROLL_LONG_SHOT_SECONDS:
+            continue
+        why = (
+            f"one shot holds for {seconds:.1f}s"
+            if len(run) == 1 else
+            f"{len(run)} windows in a row hold the same picture, {seconds:.1f}s of it"
+        )
+        # A slot at the start, then one at every clip boundary far enough past the last
+        # offer that two shots taken from here could not overlap. Over-generating is the
+        # point: a shot held half a minute wants covering in more than one place.
+        offered = -BROLL_MAX_SECONDS
+        for piece, _ in run:
+            for clip_id in piece.from_clip_ids:
+                clip = clips.get(clip_id)
+                span = None if clip is None else _in_cut(clip, placed)
+                if span is None or clip_id in holding:
+                    continue
+                if span[0] - offered < BROLL_MAX_SECONDS:
+                    continue
+                room = min(BROLL_MAX_SECONDS, round(closed - span[0], 3))
+                if room < BROLL_MIN_SECONDS:
+                    continue
+                offered = span[0]
+                slots.append({
+                    "over_clip_id": clip_id,
+                    "seconds": room,
+                    "held_seconds": seconds,
+                    "why": why,
+                })
+    # Stable, so the slots inside one stretch keep the order they play in.
+    return sorted(slots, key=lambda slot: -slot["held_seconds"])
 
 def _cut_notes(
     pieces: Sequence[Piece],
@@ -805,6 +1145,14 @@ def check_plan(
             problems.append(f"{where}: asset {clip.asset_id} is no longer registered")
         elif not asset.has_video:
             problems.append(f"{where}: {asset.id} has no picture, so it cannot carry the sequence; put it under `music`")
+        elif asset.duration is not None and clip.source_range.start >= float(asset.duration):
+            # The timeline is derived from the analysis, so this only happens when the
+            # analysis is describing a different file from the one on disk. Said here
+            # because the alternative is an operation with an end before its start.
+            problems.append(
+                f"{where}: this clip starts at {clip.source_range.start:.1f}s of {asset.id}, which runs "
+                f"{float(asset.duration):.1f}s. The file and its analysis disagree; analyze it again"
+            )
 
         trim = selection.trim
         if trim.kind == TrimKind.KEEP:
@@ -845,6 +1193,9 @@ def check_plan(
             cuts, duration,
         ))
         notes.extend(cleaned)
+        _, covering, said = broll_covers(plan, pieces, clips, assets, cuts)
+        problems.extend(covering)
+        notes.extend(said)
         if plan.target.seconds:
             drift = abs(duration - plan.target.seconds) / plan.target.seconds
             if drift > LENGTH_TOLERANCE:
@@ -870,19 +1221,24 @@ def _compiled_clips(project: Optional[Project]) -> List[Tuple[str, Clip]]:
         project: Project to read, or `None` for an empty one.
 
     Returns:
-        One `(track_id, clip)` per clip on the video and music tracks the
-        compiler builds. Clips on any other track belong to whoever put them
-        there and are not listed.
+        One `(track_id, clip)` per clip on the sequence, music and B-roll
+        tracks the compiler builds. Clips on any other track belong to whoever
+        put them there and are not listed.
     """
     if project is None:
         return []
     return [
         (track.id, clip)
-        for track in project.tracks if track.id in (VIDEO_TRACK_ID, MUSIC_TRACK_ID)
+        for track in project.tracks if track.id in (VIDEO_TRACK_ID, MUSIC_TRACK_ID, BROLL_TRACK_ID)
         for clip in track.clips
     ]
 
-def check_recompile(plan: EditPlan, project: Project, pieces: Sequence[Piece]) -> List[str]:
+def check_recompile(
+    plan: EditPlan,
+    project: Project,
+    pieces: Sequence[Piece],
+    covers: Sequence[Cover] = (),
+) -> List[str]:
     """Check that compiling over a project would not destroy work done by hand.
 
     The compiler owns the sequence and the music bed, and rebuilds them both.
@@ -896,13 +1252,20 @@ def check_recompile(plan: EditPlan, project: Project, pieces: Sequence[Piece]) -
         plan: Plan about to be compiled.
         project: Project it would be compiled onto.
         pieces: The windows the plan compiles to.
+        covers: The B-roll the plan lays over them, which is identified by its
+            own pair of clips rather than by a window.
 
     Returns:
         One message per problem, empty when the project is safe to compile
         over.
     """
     problems: List[str] = []
-    available = [piece.from_clip_ids for piece in pieces]
+    available = {piece.from_clip_ids for piece in pieces}
+    available |= {(cover.clip_id, cover.over_clip_id) for cover in covers}
+    if plan.music is not None:
+        # The music bed is made of no semantic clips at all, so an empty identity is what
+        # it has. It still has a place in the new cut as long as the plan still has music.
+        available.add(())
     for track_id, clip in _compiled_clips(project):
         if clip.pinned:
             if tuple(clip.from_clip_ids) not in available:
@@ -956,6 +1319,39 @@ def plan_markers(plan: EditPlan, pieces: Sequence[Piece]) -> List[dict]:
             })
         position += piece.duration
     return markers
+
+def _as_made(pinned: Clip) -> dict:
+    """Describe a hand-adjusted clip so it can be put back exactly as it is.
+
+    Every field a person can change by hand, because a recompile rebuilds a
+    pinned clip by inserting it again and anything left out here is quietly
+    lost. Where it sits in the order is the one thing the plan still decides.
+
+    Args:
+        pinned: The clip as somebody left it.
+
+    Returns:
+        The fields, ready to go on the operation that recreates it.
+    """
+    return {
+        "source_range": {
+            "start": float(pinned.source_range.start), "end": float(pinned.source_range.end),
+        },
+        "volume": pinned.volume,
+        "speed": pinned.speed,
+        "audio_fade_in": float(pinned.audio_fade_in),
+        "audio_fade_out": float(pinned.audio_fade_out),
+        "audio_lead": float(pinned.audio_lead),
+        "audio_lag": float(pinned.audio_lag),
+        "preserve_pitch": pinned.preserve_pitch,
+        "transition_in": (
+            None if pinned.transition_in is None else pinned.transition_in.model_dump(mode="json")
+        ),
+        "video_fade_in": float(pinned.video_fade_in),
+        "video_fade_out": float(pinned.video_fade_out),
+        "color": pinned.color.model_dump() if pinned.color else None,
+        "layout": pinned.layout.model_dump() if pinned.layout else None,
+    }
 
 def compile_operations(
     plan: EditPlan,
@@ -1019,32 +1415,43 @@ def compile_operations(
             "source_range": {"start": piece.start, "end": piece.end},
         }
         if pinned is not None:
-            # The hand-made version wins on everything but where it sits in the order.
-            placed["source_range"] = {
-                "start": float(pinned.source_range.start), "end": float(pinned.source_range.end),
-            }
-            placed.update({
-                "volume": pinned.volume,
-                "speed": pinned.speed,
-                "audio_fade_in": float(pinned.audio_fade_in),
-                "audio_fade_out": float(pinned.audio_fade_out),
-                "audio_lead": float(pinned.audio_lead),
-                "audio_lag": float(pinned.audio_lag),
-                "preserve_pitch": pinned.preserve_pitch,
-                "transition_in": (
-                    None if pinned.transition_in is None else pinned.transition_in.model_dump(mode="json")
-                ),
-                "video_fade_in": float(pinned.video_fade_in),
-                "video_fade_out": float(pinned.video_fade_out),
-                "color": pinned.color.model_dump() if pinned.color else None,
-                "layout": pinned.layout.model_dump() if pinned.layout else None,
-            })
+            placed.update(_as_made(pinned))
         operations.append(placed)
         provenance[clip_id] = {
             "from_plan_id": plan.id,
             "from_clip_ids": list(piece.from_clip_ids),
             "pinned": pinned is not None,
         }
+
+    # B-roll goes on a track of its own above the sequence, at absolute positions rather
+    # than in a row: a cover sits where the words it belongs to are, and the gaps between
+    # covers are where the sequence shows through. Silent, because the point is the sound
+    # underneath carrying on.
+    covers, _, _ = broll_covers(plan, pieces, clips, assets, cuts)
+    if covers:
+        if BROLL_TRACK_ID not in present:
+            operations.append({"action": "add_track", "track_id": BROLL_TRACK_ID, "track_type": "video"})
+        for position, cover in enumerate(covers, start=1):
+            clip_id = f"b{position:03d}"
+            identity = (cover.clip_id, cover.over_clip_id)
+            pinned = kept.pop(identity, None)
+            laid = {
+                "action": "add_clip",
+                "track_id": BROLL_TRACK_ID,
+                "clip_id": clip_id,
+                "asset_id": cover.asset_id,
+                "source_range": {"start": cover.start, "end": cover.end},
+                "timeline_in": cover.timeline_in,
+                "volume": 0.0,
+            }
+            if pinned is not None:
+                laid.update(_as_made(pinned))
+            operations.append(laid)
+            provenance[clip_id] = {
+                "from_plan_id": plan.id,
+                "from_clip_ids": list(identity),
+                "pinned": pinned is not None,
+            }
 
     # The compiler owns the markers it made and nothing else: one somebody added by hand
     # has no beat behind it, so it is carried across rather than rebuilt.
@@ -1092,8 +1499,8 @@ def diff_plans(before: EditPlan, after: EditPlan) -> Dict[str, List[str]]:
         after: The later one.
 
     Returns:
-        Changes grouped as `goal`, `beats`, `selections` and `music`, each a
-        list of lines, with empty groups left out.
+        Changes grouped as `goal`, `beats`, `selections`, `broll` and
+        `music`, each a list of lines, with empty groups left out.
     """
     changes: Dict[str, List[str]] = {}
 
@@ -1132,8 +1539,27 @@ def diff_plans(before: EditPlan, after: EditPlan) -> Dict[str, List[str]]:
             selections.append(f"moved {clip_id}: {was_one.beat_id} → {now_one.beat_id}")
         if was_one.trim != now_one.trim:
             selections.append(f"retrimmed {clip_id}: {was_one.trim.kind.value} → {now_one.trim.kind.value}")
+        if was_one.hold_picture != now_one.hold_picture:
+            selections.append(
+                f"{'held' if now_one.hold_picture else 'released'} the picture of {clip_id}"
+            )
     if selections:
         changes["selections"] = sorted(selections)
+
+    laid_before = {shot.over_clip_id: shot for shot in before.broll}
+    laid_after = {shot.over_clip_id: shot for shot in after.broll}
+    broll = [
+        f"covered {over} with {laid_after[over].clip_id} for {laid_after[over].seconds:g}s"
+        for over in laid_after.keys() - laid_before.keys()
+    ]
+    broll += [f"uncovered {over}" for over in laid_before.keys() - laid_after.keys()]
+    broll += [
+        f"changed the cover over {over}: {laid_before[over].clip_id} for "
+        f"{laid_before[over].seconds:g}s → {laid_after[over].clip_id} for {laid_after[over].seconds:g}s"
+        for over in laid_before.keys() & laid_after.keys() if laid_before[over] != laid_after[over]
+    ]
+    if broll:
+        changes["broll"] = sorted(broll)
 
     if before.music != after.music:
         changes["music"] = [

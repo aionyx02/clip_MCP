@@ -30,8 +30,8 @@ from app.engine.analysis import current_recipe, sound_note, whisper_model_name
 from app.engine.diarize import speaker_model_name
 from app.engine.faces import framing_note
 from app.engine.plan import (
-    MUSIC_TRACK_ID, VIDEO_TRACK_ID, check_plan, check_recompile, compile_operations, compiled_duration,
-    diff_plans, plan_pieces,
+    BROLL_TRACK_ID, MUSIC_TRACK_ID, VIDEO_TRACK_ID, broll_covers, broll_slots, check_plan, check_recompile,
+    compile_operations, compiled_duration, diff_plans, plan_pieces,
 )
 from app.engine.sections import build_sections, candidate_hash, check_sections, propose_candidates
 from app.engine.semantic import build_timeline, clean_cuts, content_scores, timeline_input_hash
@@ -1645,7 +1645,9 @@ def compile_plan(project_id: str, expected_version: int, plan_id: Optional[str] 
     project = repo.get_project(project_id)
     if not project:
         raise ValueError(f"project {project_id} not found")
-    blocked = check_recompile(plan, project, plan_pieces(plan, clips, children, assets, cuts))
+    pieces = plan_pieces(plan, clips, children, assets, cuts)
+    covers, _, _ = broll_covers(plan, pieces, clips, assets, cuts)
+    blocked = check_recompile(plan, project, pieces, covers)
     if blocked:
         raise ValueError("compiling would undo work already on this project:\n- " + "\n- ".join(blocked))
 
@@ -1657,7 +1659,7 @@ def compile_plan(project_id: str, expected_version: int, plan_id: Optional[str] 
         for track in edited.tracks:
             for clip in track.clips:
                 origin = provenance.get(clip.id)
-                if origin is not None and track.id in (VIDEO_TRACK_ID, MUSIC_TRACK_ID):
+                if origin is not None and track.id in (VIDEO_TRACK_ID, MUSIC_TRACK_ID, BROLL_TRACK_ID):
                     clip.from_plan_id = origin["from_plan_id"]
                     clip.from_clip_ids = origin["from_clip_ids"]
                     clip.pinned = origin["pinned"]
@@ -1687,8 +1689,8 @@ def diff_plan(before_plan_id: str, after_plan_id: str) -> dict:
 
     Returns:
         A dictionary with the two plan ids and `changes`, grouped as `goal`,
-        `beats`, `selections` and `music`. A group with nothing in it is left
-        out, so an empty `changes` means the two plans are the same.
+        `beats`, `selections`, `broll` and `music`. A group with nothing in it
+        is left out, so an empty `changes` means the two plans are the same.
 
     Raises:
         ValueError: If either plan does not exist.
@@ -1698,6 +1700,48 @@ def diff_plan(before_plan_id: str, after_plan_id: str) -> dict:
         "after": after_plan_id,
         "changes": diff_plans(_require_plan(before_plan_id), _require_plan(after_plan_id)),
     }
+
+@mcp.tool()
+def propose_broll(plan_id: Optional[str] = None) -> dict:
+    """List the places in a cut where covering picture would help.
+
+    B-roll is a second pass over a rough cut, not something to write at the
+    same time as the selections: you have to be able to see where the picture
+    runs out of things to say before you can cover it. So plan the cut, then
+    come back here.
+
+    What comes back is where, not what. Each slot is a stretch the picture
+    holds too long — one shot held on, or several in a row from the same file,
+    which is the same problem since the camera never moved. Finding footage
+    that belongs over those words is yours: search for it with `query_clips`
+    by `tag` or `text`, then put each shot in the plan with an `add_broll`
+    amendment, or by saving a plan with `broll` on it.
+
+    What is deliberately not offered is "the sound is good but the picture is
+    weak". Weak means a threshold on the exposure and blur measurements, and
+    picking one against footage nobody has measured properly would be making a
+    number up. Those measurements are on every clip's `scores` if you want to
+    read them and decide yourself.
+
+    Args:
+        plan_id: Plan to read; omit for the one saved most recently.
+
+    Returns:
+        A dictionary with the `plan_id` and `slots`, worst first, each saying
+        the `over_clip_id` a shot would start over, the `seconds` it may run
+        there, how long the stretch `held_seconds`, and `why` it was offered.
+        Empty `slots` means nothing in the cut holds long enough to be worth
+        covering. A cut made of long static shots will have most of itself
+        offered back, which is the answer rather than a list to work through:
+        take the ones at the top.
+
+    Raises:
+        ValueError: If the plan does not exist, or its timeline is gone.
+    """
+    plan = _require_plan(plan_id)
+    _, clips, children, assets, cuts = _plan_context(plan)
+    pieces = plan_pieces(plan, clips, children, assets, cuts)
+    return {"plan_id": plan.id, "slots": broll_slots(plan, pieces, clips)}
 
 @mcp.tool()
 def preview_project(
@@ -1715,8 +1759,11 @@ def preview_project(
     Tiles are labeled with their time in the edited result and the clip they
     come from, and cropped the way the render crops, so a vertical project
     shows vertical tiles. Tiles come from the base video track, which is the
-    sequence itself. Black gaps, insets on higher video tracks, and audio
-    tracks are listed in the text, since they cannot be seen in the frames.
+    sequence itself. Black gaps and audio tracks are listed in the text, since
+    they cannot be seen in the frames, and so is anything on a higher video
+    track — an inset, or covering picture over the whole frame, in which case
+    the tiles for that stretch show the sequence underneath rather than what
+    the viewer will see.
 
     Args:
         project_id: ID of the project to look at.
@@ -1827,13 +1874,18 @@ def preview_project(
     for track in project.video_tracks[1:]:
         for clip in sorted(track.clips, key=lambda item: item.timeline_in):
             box = clip.layout
-            where = (
-                "over the whole frame" if box is None
-                else f"at {box.x:.0%} across and {box.y:.0%} down, {box.width:.0%} x {box.height:.0%} of the frame"
+            # A clip with no layout fills the frame, which means it replaces what the
+            # tiles show rather than sitting in a corner of it. Said plainly, because a
+            # storyboard of a B-roll pass otherwise looks like the pass never happened.
+            what = (
+                "covering picture, over the whole frame — the tiles in this stretch show "
+                "the sequence underneath, not this" if box is None
+                else f"inset at {box.x:.0%} across and {box.y:.0%} down, "
+                     f"{box.width:.0%} x {box.height:.0%} of the frame"
             )
             listing.append(
-                f"-- inset on track {track.id}: clip {clip.id}, "
-                f"{format_timestamp(float(clip.timeline_in))} to {format_timestamp(float(clip.timeline_out))}, {where}"
+                f"-- track {track.id}: clip {clip.id}, "
+                f"{format_timestamp(float(clip.timeline_in))} to {format_timestamp(float(clip.timeline_out))}, {what}"
             )
 
     for track in project.tracks:

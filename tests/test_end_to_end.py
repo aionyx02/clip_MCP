@@ -89,7 +89,7 @@ def test_a_whole_job_from_a_folder_to_a_finished_file(footage: Path, tmp_path: P
 
     lines = preview_project(project).content[0].text.splitlines()
     assert "1080x1920" in lines[0] and "00:12.0 long" in lines[0]
-    assert any("inset on track cam" in line for line in lines)
+    assert any("track cam" in line and "inset at" in line for line in lines)
     assert any("audio track music" in line for line in lines)
 
     # The workflow's own last steps: render in the background and poll until it lands.

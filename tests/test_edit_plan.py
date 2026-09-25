@@ -17,6 +17,8 @@ from pydantic import TypeAdapter
 from app.engine.plan import (
     plan_markers,
     BREATH_SECONDS,
+    broll_covers,
+    broll_slots,
     MERGE_GAP_SECONDS,
     PAUSE_SECONDS,
     SNAP_SECONDS,
@@ -34,7 +36,8 @@ from app.models.media import (
     Asset, MediaAnalysis, Span, Transcript, TranscriptSegment, TranscriptWord,
 )
 from app.models.plan import (
-    Beat, EditPlan, MusicPlan, PlanAmendment, PlanTarget, Rejection, Selection, Trim, TrimKind,
+    AddBrollOp, Beat, BrollShot, DropBrollOp, DropSelectionOp, EditPlan, MusicPlan, PlanAmendment,
+    PlanTarget, Rejection, Selection, Trim, TrimKind, apply_amendment,
 )
 from app.models.semantic import SectionChoice, SemanticClip
 from app.models.timeline import Marker, Project
@@ -738,6 +741,205 @@ def test_two_plans_that_are_the_same_diff_to_nothing() -> None:
     plan = plan_for([Selection(clip_id=speech_of(clips)[0].id, beat_id="b1")])
     assert diff_plans(plan, plan) == {}
 
+# B-roll: picture laid over the cut while the sound underneath keeps running. The rules
+# about how long it may run and what it may cover are arithmetic, so they live in the
+# compiler and are refused with a reason rather than hoped for in a guide.
+
+BROLL_ASSET = "asset-2"
+
+def covered() -> tuple:
+    """A timeline of talk, plus a second file of silent picture to lay over it.
+
+    Returns:
+        `(clips_by_id, children, assets, ordered_clips)`.
+    """
+    talk, quiet = analysis(**FOOTAGE), analysis(
+        duration=20.0, silences=[(0.0, 20.0)], scenes=[(0.0, 20.0)], asset_id=BROLL_ASSET,
+    )
+    assets = {ASSET_ID: sourced(), BROLL_ASSET: sourced(BROLL_ASSET)}
+    _, clips = build_timeline(assets, {ASSET_ID: talk, BROLL_ASSET: quiet})
+    return {clip.id: clip for clip in clips}, {}, assets, clips
+
+def laid_over(shots: List[dict], holds: List[int] = []) -> tuple:
+    """Compile a cut of the four sentences with some picture laid over it.
+
+    Args:
+        shots: Each `{over: <index into the speech clips>, seconds, from: <clip id>}`.
+        holds: Which of the four selections are held for what they show.
+
+    Returns:
+        `(covers, problems, notes)`.
+    """
+    by_id, children, assets, clips = covered()
+    speech = speech_of(clips)
+    cover_source = next(clip for clip in clips if clip.asset_id == BROLL_ASSET)
+    plan = plan_for(
+        [
+            Selection(clip_id=clip.id, beat_id="b1", hold_picture=place in holds)
+            for place, clip in enumerate(speech)
+        ],
+        broll=[
+            BrollShot(
+                clip_id=shot.get("from", cover_source.id),
+                over_clip_id=shot["over"] if isinstance(shot["over"], str) else speech[shot["over"]].id,
+                seconds=shot["seconds"],
+            )
+            for shot in shots
+        ],
+    )
+    pieces = plan_pieces(plan, by_id, children, assets)
+    return broll_covers(plan, pieces, by_id, assets)
+
+def test_covering_picture_lands_where_the_words_it_belongs_to_are() -> None:
+    covers, problems, _ = laid_over([{"over": 0, "seconds": 2.0}])
+    assert problems == []
+    # The first sentence runs 1.0 to 3.0 of a window that opens at 0.9, so it reaches the
+    # timeline a tenth of a second in — and that is where the cover cuts in.
+    assert (covers[0].timeline_in, covers[0].timeline_out) == (0.1, 2.1)
+    # Played from the start of the clip it was taken from, for exactly as long as asked.
+    assert (covers[0].start, covers[0].end) == (0.0, 2.0)
+
+@pytest.mark.parametrize("seconds", [0.4, 9.0])
+def test_a_shot_that_flickers_or_outstays_its_welcome_is_refused(seconds: float) -> None:
+    _, problems, _ = laid_over([{"over": 0, "seconds": seconds}])
+    assert any("may run" in problem for problem in problems)
+
+def test_a_shot_may_not_cover_what_the_plan_holds_for_what_it_shows() -> None:
+    # Nothing measures "the speaker is pointing at the thing", so the plan says it.
+    covers, problems, _ = laid_over([{"over": 0, "seconds": 2.0}], holds=[0])
+    assert covers == []
+    assert any("holds for what it shows" in problem for problem in problems)
+
+def test_two_shots_cannot_be_on_screen_at_once() -> None:
+    covers, problems, _ = laid_over([{"over": 0, "seconds": 3.0}, {"over": 1, "seconds": 2.0}])
+    # The first runs to 3.1s and the second would start at 2.6s.
+    assert len(covers) == 1
+    assert any("cannot be on screen at once" in problem for problem in problems)
+
+def test_a_beat_made_mostly_of_covering_picture_is_refused() -> None:
+    # The cut runs 8.6s, so four of them is nearly half of the only beat there is.
+    _, problems, _ = laid_over([{"over": 0, "seconds": 4.0}])
+    assert any("may be covered" in problem for problem in problems)
+
+def test_a_shot_longer_than_the_footage_it_plays_is_refused() -> None:
+    by_id, _, _, clips = covered()
+    short = speech_of(clips)[0]
+    _, problems, _ = laid_over([{"over": 2, "seconds": 5.0, "from": short.id}])
+    assert any("which is not the 5s asked for" in problem for problem in problems)
+
+def test_a_shot_over_footage_the_cut_does_not_use_is_refused() -> None:
+    _, _, _, clips = covered()
+    unused = next(clip for clip in clips if clip.asset_id == BROLL_ASSET)
+    _, problems, _ = laid_over([{"over": unused.id, "seconds": 2.0}])
+    assert any("nowhere for this to start" in problem for problem in problems)
+
+def test_a_shot_can_start_inside_a_window_rather_than_only_at_one() -> None:
+    # Where a clip is in the cut is a question about seconds, not about selections: two
+    # sentences merged into one window are still two places a cover can cut in on. That
+    # is what lets a long shot be covered in part rather than not at all.
+    covers, problems, _ = laid_over([{"over": 1, "seconds": 1.5}])
+    assert problems == []
+    # The second sentence runs 3.5 to 5.0 of a window that opened at 0.9.
+    assert covers[0].timeline_in == 2.6
+
+def test_a_shot_that_would_run_past_the_end_of_the_cut_is_refused() -> None:
+    _, problems, _ = laid_over([{"over": 3, "seconds": 3.0}])
+    assert any("of a cut that is" in problem for problem in problems)
+
+def test_covering_footage_nobody_is_talking_over_is_said_rather_than_refused() -> None:
+    # Swapping one silent picture for another is allowed; it is just rarely what is meant.
+    _, _, _, clips = covered()
+    quiet = next(clip for clip in clips if clip.asset_id == BROLL_ASSET)
+    by_id, children, assets, _ = covered()
+    speech = speech_of(clips)
+    plan = plan_for(
+        [Selection(clip_id=speech[0].id, beat_id="b1"),
+         Selection(clip_id=quiet.id, beat_id="b1")],
+        broll=[BrollShot(clip_id=quiet.id, over_clip_id=quiet.id, seconds=2.0)],
+    )
+    covers, problems, notes = broll_covers(
+        plan, plan_pieces(plan, by_id, children, assets), by_id, assets,
+    )
+    assert problems == [] and len(covers) == 1
+    assert any("nobody is talking under it" in note for note in notes)
+
+def test_the_places_worth_covering_are_the_ones_that_hold() -> None:
+    by_id, children, assets, clips = covered()
+    quiet = next(clip for clip in clips if clip.asset_id == BROLL_ASSET)
+    # The silent file is one twenty-second shot; the talk is three short windows.
+    plan = plan_for([
+        Selection(clip_id=speech_of(clips)[0].id, beat_id="b1"),
+        Selection(clip_id=quiet.id, beat_id="b1"),
+    ])
+    slots = broll_slots(plan, plan_pieces(plan, by_id, children, assets), by_id)
+    assert [slot["over_clip_id"] for slot in slots] == [quiet.id]
+    # Offered at the length a shot may run, not the length the stretch holds for.
+    assert slots[0]["seconds"] == 6.0 and slots[0]["held_seconds"] == 20.0
+    assert "holds for" in slots[0]["why"]
+
+def test_the_worst_stretch_is_offered_first() -> None:
+    # Most of a cut made of static shots gets offered back, so the order has to carry the
+    # priority: reading twenty slots to find the bad one is not an answer.
+    by_id, children, assets, clips = covered()
+    quiet = next(clip for clip in clips if clip.asset_id == BROLL_ASSET)
+    plan = plan_for(
+        [Selection(clip_id=clip.id, beat_id="b1") for clip in speech_of(clips)]
+        + [Selection(clip_id=quiet.id, beat_id="b1")]
+    )
+    slots = broll_slots(plan, plan_pieces(plan, by_id, children, assets), by_id)
+    held = [slot["held_seconds"] for slot in slots]
+    # Twenty seconds of one silent shot comes before the 8.6s of talk from the other
+    # file, however many places inside each of them are worth cutting in at.
+    assert held == sorted(held, reverse=True)
+    assert held[0] == 20.0 and set(held[1:]) == {8.6}
+
+def test_a_sentence_with_no_boundary_inside_it_offers_one_place_to_cut_in() -> None:
+    # A shot cuts in where a clip begins, and a fifteen-second sentence has one of those.
+    # Covering it from anywhere else would be cutting in mid-sentence, which is the rule
+    # this is built around rather than a limit of it.
+    long_take = analysis(
+        duration=40.0,
+        segments=[(1.0, 3.0, "第一句話"), (20.0, 35.0, "很長的一段話")],
+        silences=[(0.0, 1.0), (3.0, 20.0), (35.0, 40.0)],
+    )
+    assets = {ASSET_ID: sourced(seconds=40.0)}
+    _, clips = build_timeline(assets, {ASSET_ID: long_take})
+    by_id = {clip.id: clip for clip in clips}
+    plan = plan_for([Selection(clip_id=clip.id, beat_id="b1") for clip in speech_of(clips)])
+    slots = broll_slots(plan, plan_pieces(plan, by_id, {}, assets), by_id)
+    assert len(slots) == 1 and slots[0]["seconds"] == 6.0
+
+def test_nothing_is_offered_over_a_shot_the_plan_holds() -> None:
+    by_id, children, assets, clips = covered()
+    quiet = next(clip for clip in clips if clip.asset_id == BROLL_ASSET)
+    plan = plan_for([Selection(clip_id=quiet.id, beat_id="b1", hold_picture=True)])
+    assert broll_slots(plan, plan_pieces(plan, by_id, children, assets), by_id) == []
+
+def test_dropping_a_shot_takes_the_picture_laid_over_it() -> None:
+    _, _, _, clips = covered()
+    speech = speech_of(clips)
+    quiet = next(clip for clip in clips if clip.asset_id == BROLL_ASSET)
+    plan = plan_for(
+        [Selection(clip_id=clip.id, beat_id="b1") for clip in speech],
+        broll=[BrollShot(clip_id=quiet.id, over_clip_id=speech[0].id, seconds=2.0)],
+    )
+    apply_amendment(plan, DropSelectionOp(clip_id=speech[0].id, reason="不要了"))
+    # The place it named is gone, so the cover has nowhere to start. Leaving it would
+    # only fail the next compile with a message about a clip nobody asked about.
+    assert plan.broll == []
+
+def test_adding_a_shot_over_the_same_place_twice_replaces_it() -> None:
+    _, _, _, clips = covered()
+    speech, quiet = speech_of(clips), next(c for c in clips if c.asset_id == BROLL_ASSET)
+    plan = plan_for([Selection(clip_id=clip.id, beat_id="b1") for clip in speech])
+    for seconds in (2.0, 3.0):
+        apply_amendment(plan, AddBrollOp(shot=BrollShot(
+            clip_id=quiet.id, over_clip_id=speech[0].id, seconds=seconds,
+        )))
+    assert [shot.seconds for shot in plan.broll] == [3.0]
+    apply_amendment(plan, DropBrollOp(over_clip_id=speech[0].id))
+    assert plan.broll == []
+
 @pytest.fixture
 def planned(media: Path) -> dict:
     """Import a real file, build a timeline over it, and save a plan for it.
@@ -886,6 +1088,43 @@ def compiled_project(planned: dict) -> str:
     project = create_project(width=640, height=360)["id"]
     compile_plan(project_id=project, expected_version=1, plan_id=planned["plan_id"])
     return project
+
+def test_covering_picture_compiles_onto_a_track_of_its_own(planned: dict, media: Path) -> None:
+    """Above the sequence, silent, and without changing how long the video runs."""
+    from app.server import build_semantic_timeline, propose_broll, query_clips
+
+    quiet = import_asset(str(media / "silent.mp4"))["id"]
+    server_repo.save_analysis(analysis(duration=4.0, scenes=[(0.0, 4.0)], asset_id=quiet))
+    plan = EditPlan.model_validate(get_plan(planned["plan_id"])["plan"])
+    # Rebuilt over both files, so the plan is rewritten against the new timeline.
+    built = build_semantic_timeline([clip["asset_id"] for clip in planned["clips"]] + [quiet], rebuild=True)
+    speech = query_clips(timeline_id=built["timeline_id"], text="句話")["clips"]
+    cover = query_clips(timeline_id=built["timeline_id"], asset_ids=[quiet])["clips"][0]
+    saved = save_plan(EditPlan(
+        timeline_id=built["timeline_id"], timeline_input_hash="",
+        goal=plan.goal, beats=[Beat(id="b1", name="主體")],
+        # The same two sentences the fixture chose: `wide.mp4` runs ten seconds and the
+        # analysis describes twenty, so the later ones are not in the file at all.
+        selections=[Selection(clip_id=speech[place]["clip_id"], beat_id="b1") for place in (0, 2)],
+        broll=[BrollShot(clip_id=cover["clip_id"], over_clip_id=speech[0]["clip_id"], seconds=1.5)],
+    ))
+    assert saved["problems"] == []
+    # Nothing in this cut holds long enough to be worth offering something to cover it.
+    assert propose_broll(saved["plan_id"])["slots"] == []
+
+    project = create_project(width=640, height=360)["id"]
+    compile_plan(project_id=project, expected_version=1, plan_id=saved["plan_id"])
+    state = get_project(project)
+    tracks = {track["id"]: track for track in state["tracks"]}
+    assert list(tracks) == ["main", "broll"], list(tracks)
+    laid = tracks["broll"]["clips"]
+    assert len(laid) == 1 and laid[0]["volume"] == 0.0
+    # It remembers what it is made of, so the next compile can match it if it gets pinned.
+    assert laid[0]["from_clip_ids"] == [cover["clip_id"], speech[0]["clip_id"]]
+    # The sequence decides the length, so covering picture never stretches the video.
+    assert state["duration"] == sum(
+        clip["source_range"]["end"] - clip["source_range"]["start"] for clip in tracks["main"]["clips"]
+    )
 
 def test_a_compiled_clip_records_where_it_came_from(planned: dict) -> None:
     clips = main_clips(compiled_project(planned))

@@ -124,8 +124,18 @@ def test_the_storyboard_shows_the_sequence_and_names_the_insets(inset: str) -> N
     lines = preview_project(inset).content[0].text.splitlines()
     # The inset must not be mixed in as if it were a shot in the sequence.
     assert all("clip pip" not in line for line in lines if line.startswith("#"))
-    assert any(line.startswith("-- inset on track top: clip pip") for line in lines)
+    assert any(line.startswith("-- track top: clip pip") and "inset at" in line for line in lines)
     assert any("60% across and 60% down" in line for line in lines)
+
+def test_the_storyboard_says_when_the_tiles_are_not_what_will_be_seen(inset: str) -> None:
+    # Without a layout the clip fills the frame, so it replaces the tiles rather than
+    # sitting in a corner of them. A storyboard of a B-roll pass that did not say so
+    # would look exactly like a pass that never happened.
+    edit(inset, [{"action": "set_clip_look", "track_id": "top", "clip_id": "pip", "clear_layout": True}])
+    lines = preview_project(inset).content[0].text.splitlines()
+    covering = next(line for line in lines if line.startswith("-- track top: clip pip"))
+    assert "covering picture, over the whole frame" in covering
+    assert "the sequence underneath" in covering
 
 def test_a_layout_on_the_base_track_is_refused(sources: dict) -> None:
     # The base track is not drawn on top of anything, so a box there would be silently ignored.

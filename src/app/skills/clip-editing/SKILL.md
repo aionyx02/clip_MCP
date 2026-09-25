@@ -60,6 +60,8 @@ Supported:
   what was rejected — compiled to a timeline by the server (`save_plan`,
   `validate_plan`, `compile_plan`, `diff_plan`), with hand adjustments kept
   across recompiles (`set_clip_pinned`).
+- Covering picture: B-roll laid over the cut while the sound underneath keeps
+  running, as a second pass over a rough cut (`propose_broll`, `add_broll`).
 
 Not supported yet: still images, free text and graphics other than captions,
 and filters beyond the colour controls above. When a request needs one of
@@ -363,9 +365,26 @@ Change it with `amend_plan`, one amendment per thing that actually changed:
 `set_trim` to retrim a piece, `set_rationale` to rewrite why it is there or
 move it to another beat, `add_selection` to put something in, and
 `drop_selection` to take something out, which files it under `rejected` with
-the reason. Do not send the whole plan through `save_plan` again to move one
-edge: every other selection's reason is retyped to do it, and those reasons
-are the part that cannot be rebuilt.
+the reason. `add_broll` and `drop_broll` do the same for covering picture. Do
+not send the whole plan through `save_plan` again to move one edge: every
+other selection's reason is retyped to do it, and those reasons are the part
+that cannot be rebuilt.
+
+### Covering picture (B-roll)
+
+A second pass, after the rough cut is right. `propose_broll` says where the
+picture holds too long — one shot held on, or several in a row from the same
+file. Then find something that belongs over those words with `query_clips`,
+and add a shot with `add_broll`: the `clip_id` it plays from, the
+`over_clip_id` it starts over, and how many `seconds` it runs. The sound
+underneath keeps running, which is the whole point.
+
+The server enforces the rest and refuses with a reason: a shot runs 1 to 6
+seconds, no more than 40% of a beat may be covered, two shots may not overlap,
+and a selection marked `hold_picture` may not be covered at all. Set
+`hold_picture` on the shots where what the speaker is doing has to be seen —
+pointing at something, holding something up. Nothing measures that, so if you
+do not say it, it is not known.
 
 Compiling again is safe. A compiled clip remembers which plan and which
 footage it came from, and any clip you adjust by hand — trimmed, moved,
@@ -476,6 +495,8 @@ times refer to the source file.
 | 「音樂小聲一點／大聲一點」 / music quieter or louder | `set_clip_audio` on every music clip, `volume` × 0.6 or × 1.5 |
 | 「把影片原音關掉」 / mute the original sound | `set_clip_audio` `volume: 0` on every video clip |
 | 「聲音先進來」「上一句講完再切」 / J cut, L cut | `set_clip_audio` with `audio_lead` on the incoming clip, or `audio_lag` on the outgoing one |
+| 「這段畫面太悶，蓋點別的」 / cover this with other footage | `propose_broll`, then `amend_plan` with `add_broll` — see [Covering picture](#covering-picture-b-roll) |
+| 「這段畫面不能蓋掉」 / this shot has to be seen | `hold_picture: true` on that selection |
 | 「這裡用溶接」「不要硬切」 / cross dissolve | `set_clip_look` on the incoming clip with `transition_in: {kind: "dissolve", seconds: 1}` |
 | 「用擦劃轉場」「從左邊掃過去」 / wipe | `set_clip_look` with `transition_in: {kind: "wipe", seconds: 0.6, direction: "left"}` |
 | 「這裡淡到黑再進來」「過白場」 / dip through a colour | `set_clip_look` with `transition_in: {kind: "dip", seconds: 1, through: "black"}`; `white` or a hex colour such as `#1b2a4a` also work |
