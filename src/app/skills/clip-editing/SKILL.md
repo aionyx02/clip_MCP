@@ -62,6 +62,8 @@ Supported:
   across recompiles (`set_clip_pinned`).
 - Covering picture: B-roll laid over the cut while the sound underneath keeps
   running, as a second pass over a rough cut (`propose_broll`, `add_broll`).
+- Sound repair: taking the rumble, hiss or harsh S sounds out of one clip's
+  voice, and bringing two people recorded at very different levels together.
 
 Not supported yet: still images, free text and graphics other than captions,
 and filters beyond the colour controls above. When a request needs one of
@@ -371,6 +373,30 @@ not send the whole plan through `save_plan` again to move one edge: every
 other selection's reason is retyped to do it, and those reasons are the part
 that cannot be rebuilt.
 
+### Cleaning up the sound
+
+Two separate things, both off unless asked for.
+
+`set_clip_audio` with `cleanup` repairs one clip's voice: `rumble` takes out
+the low roar of traffic or air conditioning, `hiss` the steady background a
+phone leaves, `sibilance` the harsh S sounds a close microphone picks up. Each
+one works by throwing part of the recording away, which is why none of them is
+a default and why the settings are gentle — a voice scrubbed until it sounds
+underwater is a worse result than the hiss was. Ask which problem the user
+actually hears rather than turning all three on.
+
+`level_voices` on the plan is for a conversation where one person was much
+louder than the other. `validate_plan` says how far apart the voices are when
+it is worth saying, so read that first: under a few decibels there is nothing
+to fix. It turns the louder people down to match the quietest, so nothing
+clips, and the render's own loudness normalization brings the whole thing back
+up afterwards. A window where two people talk over each other is left alone —
+it belongs to neither of them.
+
+Softening the sound across a transition is not automatic, and deliberately so:
+how long and which side are judgements. Use `audio_fade_out` on the outgoing
+clip and `audio_fade_in` on the incoming one when the user asks for it.
+
 ### Caption style
 
 `set_caption_style` decides how burned-in captions are drawn. Start from the
@@ -525,6 +551,8 @@ times refer to the source file.
 | 「聲音先進來」「上一句講完再切」 / J cut, L cut | `set_clip_audio` with `audio_lead` on the incoming clip, or `audio_lag` on the outgoing one |
 | 「這段畫面太悶，蓋點別的」 / cover this with other footage | `propose_broll`, then `amend_plan` with `add_broll` — see [Covering picture](#covering-picture-b-roll) |
 | 「這段畫面不能蓋掉」 / this shot has to be seen | `hold_picture: true` on that selection |
+| 「這個人聲音小很多」「兩個人音量差很多」 / match two people's levels | `save_plan` or `amend_plan` with `level_voices: true`; `validate_plan` says how far apart they are |
+| 「有雜音」「背景很吵」「嘶嘶聲」 / clean up a voice | `set_clip_audio` with `cleanup`: `rumble` for the low roar, `hiss` for the background, `sibilance` for harsh S sounds |
 | 「這裡用溶接」「不要硬切」 / cross dissolve | `set_clip_look` on the incoming clip with `transition_in: {kind: "dissolve", seconds: 1}` |
 | 「用擦劃轉場」「從左邊掃過去」 / wipe | `set_clip_look` with `transition_in: {kind: "wipe", seconds: 0.6, direction: "left"}` |
 | 「這裡淡到黑再進來」「過白場」 / dip through a colour | `set_clip_look` with `transition_in: {kind: "dip", seconds: 1, through: "black"}`; `white` or a hex colour such as `#1b2a4a` also work |

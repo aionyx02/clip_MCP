@@ -34,7 +34,9 @@ from app.engine.plan import (
     compile_operations, compiled_duration, diff_plans, plan_pieces,
 )
 from app.engine.sections import build_sections, candidate_hash, check_sections, propose_candidates
-from app.engine.semantic import build_timeline, clean_cuts, content_scores, timeline_input_hash
+from app.engine.semantic import (
+    build_timeline, clean_cuts, content_scores, join_voices, timeline_input_hash, voice_levels,
+)
 from app.engine.probe import probe_file
 from app.engine.builder import DEFAULT_LOUDNESS_TARGET, FFmpegRenderer
 from app.engine.frames import format_timestamp, storyboard_sheet
@@ -1395,7 +1397,8 @@ def _plan_context(plan: EditPlan) -> tuple:
         plan: Plan to read.
 
     Returns:
-        `(timeline, clips_by_id, children_by_parent, assets_by_id, cuts_by_asset_id)`.
+        `(timeline, clips_by_id, children_by_parent, assets_by_id,
+        cuts_by_asset_id, levels_by_voice)`.
 
     Raises:
         ValueError: If the timeline the plan names is gone.
@@ -1414,12 +1417,16 @@ def _plan_context(plan: EditPlan) -> tuple:
     # Where each file may be cut without splitting a word. The compiler is handed these
     # numbers rather than the transcripts they come from: reading a transcript is
     # interpretation, and the compiler has to stay a pure function of what it is given.
-    cuts = {}
+    cuts, analyses = {}, {}
     for asset_id in {clip.asset_id for clip in clips}:
         analysis = repo.get_analysis(asset_id)
         if analysis is not None:
             cuts[asset_id] = clean_cuts(analysis)
-    return timeline, {clip.id: clip for clip in clips}, children, repo.get_assets(wanted), cuts
+            analyses[asset_id] = analysis
+    # How loudly each voice speaks, worked out over the same joined labels the timeline
+    # put on its clips — so a gain and the clip it applies to cannot mean different people.
+    levels = voice_levels(analyses, join_voices(analyses))
+    return timeline, {clip.id: clip for clip in clips}, children, repo.get_assets(wanted), cuts, levels
 
 def _require_plan(plan_id: Optional[str]) -> EditPlan:
     """Fetch a plan, or the one saved most recently.
@@ -1589,8 +1596,8 @@ def validate_plan(plan_id: Optional[str] = None) -> dict:
         ValueError: If the plan or its timeline does not exist.
     """
     plan = _require_plan(plan_id)
-    timeline, clips, children, assets, cuts = _plan_context(plan)
-    problems, notes = check_plan(plan, timeline, clips, children, assets, cuts)
+    timeline, clips, children, assets, cuts, levels = _plan_context(plan)
+    problems, notes = check_plan(plan, timeline, clips, children, assets, cuts, levels)
     pieces = [] if problems else plan_pieces(plan, clips, children, assets, cuts)
     return {
         "ok": not problems,
@@ -1640,8 +1647,8 @@ def compile_plan(project_id: str, expected_version: int, plan_id: Optional[str] 
             not match. Nothing is compiled in part.
     """
     plan = _require_plan(plan_id)
-    timeline, clips, children, assets, cuts = _plan_context(plan)
-    problems, notes = check_plan(plan, timeline, clips, children, assets, cuts)
+    timeline, clips, children, assets, cuts, levels = _plan_context(plan)
+    problems, notes = check_plan(plan, timeline, clips, children, assets, cuts, levels)
     if problems:
         raise ValueError("this plan cannot be compiled yet:\n- " + "\n- ".join(problems))
 
@@ -1654,7 +1661,7 @@ def compile_plan(project_id: str, expected_version: int, plan_id: Optional[str] 
     if blocked:
         raise ValueError("compiling would undo work already on this project:\n- " + "\n- ".join(blocked))
 
-    built, provenance = compile_operations(plan, clips, children, assets, project, cuts)
+    built, provenance = compile_operations(plan, clips, children, assets, project, cuts, levels)
     operations = _OPERATIONS.validate_python(built)
 
     def record(edited: Project) -> None:
@@ -1742,7 +1749,7 @@ def propose_broll(plan_id: Optional[str] = None) -> dict:
         ValueError: If the plan does not exist, or its timeline is gone.
     """
     plan = _require_plan(plan_id)
-    _, clips, children, assets, cuts = _plan_context(plan)
+    _, clips, children, assets, cuts, _ = _plan_context(plan)
     pieces = plan_pieces(plan, clips, children, assets, cuts)
     return {"plan_id": plan.id, "slots": broll_slots(plan, pieces, clips, cuts)}
 

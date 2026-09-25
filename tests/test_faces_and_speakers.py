@@ -31,7 +31,7 @@ from app.engine.analysis import (
 from app.engine.ffmpeg import OperationCancelled
 from app.engine.diarize import find_speakers
 from app.engine.faces import _per_second, detect_faces, framing_note, frames_dir
-from app.engine.semantic import SPEAKER_MAJORITY, build_timeline, speaker_at
+from app.engine.semantic import SPEAKER_MAJORITY, build_timeline, join_voices, speaker_at
 from app.models.media import (
     Asset,
     FaceMeasurement,
@@ -40,6 +40,7 @@ from app.models.media import (
     Transcript,
     TranscriptSegment,
     TranscriptWord,
+    Voice,
 )
 
 FFMPEG = os.environ.get("FFMPEG", "ffmpeg")
@@ -338,9 +339,12 @@ def test_the_scratch_goes_even_when_the_scan_is_cancelled(
 def test_two_voices_are_told_apart(conversation, speaker_models: None) -> None:
     """The positive case: two people really do come back as two."""
     asset, expected = conversation
-    turns = find_speakers(asset.path, lambda fraction: None, lambda: False, speakers=2, ffmpeg_bin=FFMPEG)
+    turns, voices = find_speakers(asset.path, lambda fraction: None, lambda: False, speakers=2, ffmpeg_bin=FFMPEG)
     assert len({turn.speaker for turn in turns}) == 2
     assert len(turns) == len(expected)
+    # And each of them was measured, so it can be recognised in another file.
+    assert sorted(voice.speaker for voice in voices) == sorted({turn.speaker for turn in turns})
+    assert all(voice.embedding and voice.seconds > 0 for voice in voices)
     # The same voice took the first and third turns, and the other took the second and fourth.
     labels = [turn.speaker for turn in turns]
     assert labels[0] == labels[2] and labels[1] == labels[3] and labels[0] != labels[1]
@@ -348,7 +352,7 @@ def test_two_voices_are_told_apart(conversation, speaker_models: None) -> None:
 def test_the_turns_land_where_the_voices_actually_change(conversation, speaker_models: None) -> None:
     """Turns that drift are turns no clip can be labelled from."""
     asset, expected = conversation
-    turns = find_speakers(asset.path, lambda fraction: None, lambda: False, speakers=2, ffmpeg_bin=FFMPEG)
+    turns, _ = find_speakers(asset.path, lambda fraction: None, lambda: False, speakers=2, ffmpeg_bin=FFMPEG)
     for turn, (_, start, end) in zip(turns, expected):
         assert turn.start == pytest.approx(start, abs=0.6)
         # Each turn is padded with silence, so its end is reported before the padding.
@@ -364,7 +368,7 @@ def test_progress_is_reported_and_cancellation_is_honoured(conversation, speaker
 def test_a_clip_is_labelled_with_whoever_said_it(conversation, speaker_models: None) -> None:
     """The point of all of it: `SemanticClip.speaker` stops being empty."""
     asset, _ = conversation
-    turns = find_speakers(asset.path, lambda fraction: None, lambda: False, speakers=2, ffmpeg_bin=FFMPEG)
+    turns, voices = find_speakers(asset.path, lambda fraction: None, lambda: False, speakers=2, ffmpeg_bin=FFMPEG)
     # A sentence per turn, which is what a transcript of this conversation looks like.
     segments = [
         TranscriptSegment(
@@ -378,17 +382,21 @@ def test_a_clip_is_labelled_with_whoever_said_it(conversation, speaker_models: N
         duration=asset.duration,
         transcript=Transcript(language="en", model="test", segments=segments),
         speakers=turns,
+        voices=voices,
     )
     _, clips = build_timeline({asset.id: asset}, {asset.id: analysis})
     spoken = [clip for clip in clips if clip.text]
-    assert [clip.speaker for clip in spoken] == [turn.speaker for turn in turns]
+    # Labelled with the joined names, which are what mean the same thing across files.
+    joined = {turn.speaker: label for turn, label in zip(turns, (clip.speaker for clip in spoken))}
+    assert [clip.speaker for clip in spoken] == [joined[turn.speaker] for turn in turns]
+    assert len(set(joined.values())) == 2 and all(label.startswith("V") for label in joined.values())
 
 def test_a_clip_that_straddles_a_handover_is_left_unlabelled(conversation, speaker_models: None) -> None:
     """A clip holding two people is not one of them, and saying so beats picking one."""
     asset, _ = conversation
-    turns = find_speakers(asset.path, lambda fraction: None, lambda: False, speakers=2, ffmpeg_bin=FFMPEG)
+    turns, voices = find_speakers(asset.path, lambda fraction: None, lambda: False, speakers=2, ffmpeg_bin=FFMPEG)
     # One clip over the whole conversation: everybody is in it, so nobody is.
-    analysis = MediaAnalysis(asset_id=asset.id, duration=asset.duration, speakers=turns)
+    analysis = MediaAnalysis(asset_id=asset.id, duration=asset.duration, speakers=turns, voices=voices)
     _, clips = build_timeline({asset.id: asset}, {asset.id: analysis})
     assert [clip.speaker for clip in clips] == [None]
 
@@ -428,3 +436,95 @@ def test_the_majority_a_label_needs_is_the_one_that_is_documented() -> None:
              SpeakerTurn(start=SPEAKER_MAJORITY * 10, end=10, speaker="S2")]
     assert speaker_at(turns, 0, 10) == "S1"
     assert speaker_at(turns, 0, 10, majority=1.0) is None
+
+# --- the same person in two files ---------------------------------------------------------
+
+@pytest.fixture(scope="module")
+def two_recordings(tmp_path_factory: pytest.TempPathFactory) -> Tuple[Asset, Asset]:
+    """Two files of the same two voices, each starting with a different one.
+
+    Returns:
+        The two assets. Nothing in either file says the voices are shared: the
+        labels are worked out per file, so one of them calls a voice `S1` that
+        the other calls `S2` — which is the whole problem being solved.
+    """
+    if not has_flite():
+        pytest.skip("this FFmpeg has no flite filter, so two voices cannot be synthesized")
+    folder = tmp_path_factory.mktemp("recordings")
+
+    def recording(name: str, order: Tuple[str, ...]) -> Asset:
+        """Build one file in which the voices speak in the given order."""
+        parts, seconds = [], 0.0
+        for index, voice in enumerate(order):
+            part = folder / f"{name}{index}.wav"
+            run(["-f", "lavfi", "-i", f"flite=text='{LINES[index % len(LINES)]}':voice={voice}",
+                 "-af", "apad=pad_dur=0.8", "-ar", "16000", "-ac", "1", str(part)])
+            parts.append(part)
+            seconds += float(subprocess.run(
+                ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "csv=p=0", str(part)],
+                capture_output=True, text=True,
+            ).stdout)
+        listing = folder / f"{name}.txt"
+        listing.write_text("\n".join(f"file '{part.as_posix()}'" for part in parts), encoding="utf-8")
+        sound = folder / f"{name}.wav"
+        run(["-f", "concat", "-safe", "0", "-i", str(listing), "-ar", "16000", "-ac", "1", str(sound)])
+        path = folder / f"{name}.mp4"
+        run(["-f", "lavfi", "-i", f"smptebars=size=320x180:rate=30:duration={seconds}", "-i", str(sound),
+             "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+             "-c:a", "aac", "-shortest", str(path)])
+        return Asset(id=name, path=str(path), duration=seconds, has_video=True, has_audio=True)
+
+    # The second file opens on the other voice, so the per-file labels disagree.
+    return recording("first", VOICES * 2), recording("second", tuple(reversed(VOICES)) * 2)
+
+def test_the_same_voice_in_two_files_is_joined_up(two_recordings, speaker_models: None) -> None:
+    """What `V1` is for: a two-camera interview is two people, not four."""
+    analyses = {}
+    for asset in two_recordings:
+        turns, voices = find_speakers(asset.path, lambda fraction: None, lambda: False,
+                                      speakers=2, ffmpeg_bin=FFMPEG)
+        analyses[asset.id] = MediaAnalysis(
+            asset_id=asset.id, duration=asset.duration, speakers=turns, voices=voices,
+        )
+    joined = join_voices(analyses)
+    assert len(joined) == 4, joined
+    # Two people across both files, not four.
+    assert len(set(joined.values())) == 2, joined
+    # And each file heard both of them.
+    for asset in two_recordings:
+        assert len({label for (asset_id, _), label in joined.items() if asset_id == asset.id}) == 2
+
+def test_a_file_nobody_measured_the_voices_of_is_absent_rather_than_nobody() -> None:
+    """Not knowing is not the same as there being nobody, so it is left out entirely."""
+    quiet = MediaAnalysis(asset_id="a", duration=10.0, speakers=[
+        SpeakerTurn(start=0.0, end=5.0, speaker="S1"),
+    ])
+    assert join_voices({"a": quiet}) == {}
+
+def test_voices_are_joined_in_a_fixed_order() -> None:
+    """Assigned by file and label, not by who speaks first, so a rebuild cannot rename them."""
+    def heard(asset_id: str, *labels: str) -> MediaAnalysis:
+        """One analysis whose voices sit at fixed points."""
+        points = {"a": [1.0, 0.0, 0.0], "b": [0.0, 1.0, 0.0]}
+        return MediaAnalysis(asset_id=asset_id, duration=10.0, voices=[
+            Voice(speaker=f"S{index + 1}", embedding=points[label], seconds=5.0)
+            for index, label in enumerate(labels)
+        ])
+
+    # The same two voices, met in the opposite order in the second file.
+    joined = join_voices({"one": heard("one", "a", "b"), "two": heard("two", "b", "a")})
+    assert joined[("one", "S1")] == "V1" and joined[("one", "S2")] == "V2"
+    assert joined[("two", "S1")] == "V2" and joined[("two", "S2")] == "V1"
+
+def test_two_voices_far_enough_apart_stay_apart() -> None:
+    """The threshold has to do something, or everybody is one person."""
+    def alone(asset_id: str, embedding: List[float]) -> MediaAnalysis:
+        """One analysis holding a single voice."""
+        return MediaAnalysis(asset_id=asset_id, duration=10.0, voices=[
+            Voice(speaker="S1", embedding=embedding, seconds=5.0),
+        ])
+
+    apart = join_voices({"one": alone("one", [1.0, 0.0]), "two": alone("two", [0.0, 1.0])})
+    assert len(set(apart.values())) == 2
+    together = join_voices({"one": alone("one", [1.0, 0.0]), "two": alone("two", [1.0, 0.05])})
+    assert len(set(together.values())) == 1

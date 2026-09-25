@@ -21,7 +21,7 @@ from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 
 from app.models.media import Asset
 from app.models.plan import EditPlan, Selection, TrimKind
-from app.engine.semantic import CleanCuts
+from app.engine.semantic import CleanCuts, voice_gains
 from app.models.semantic import ClipKind, SemanticClip, SemanticTimeline
 from app.models.timeline import Clip, Project
 
@@ -64,6 +64,10 @@ BROLL_MAX_SHARE = 0.4
 # How long one shot has to hold before it is worth offering something to cover it with.
 # Provisional.
 BROLL_LONG_SHOT_SECONDS = 8.0
+# How far apart two voices have to be before it is worth saying they do not match. Three
+# decibels is about where a difference stops being something you have to listen for.
+# Provisional.
+VOICE_SPREAD_DB = 3.0
 # How far the compiled length may sit from what the plan asked for before it is worth saying.
 LENGTH_TOLERANCE = 0.1
 
@@ -724,6 +728,35 @@ class Cover:
         """
         return round(self.timeline_in + self.duration, 3)
 
+def piece_gain(
+    piece: Piece,
+    clips: Mapping[str, SemanticClip],
+    gains: Optional[Mapping[str, float]],
+) -> float:
+    """Work out what to turn one window by so its voice matches the others.
+
+    Only a window that is one person's. A window merged across a handover
+    belongs to neither of them, so turning it by either one's gain would be
+    picking a side — the same reason `speaker_at` leaves such a stretch
+    unlabelled rather than guessing.
+
+    Args:
+        piece: The compiled window.
+        clips: The timeline's clips, keyed by ID.
+        gains: A multiplier per joined voice, or None to leave every window
+            at the level it was recorded.
+
+    Returns:
+        The multiplier, 1.0 when the window is nobody's in particular.
+    """
+    if not gains:
+        return 1.0
+    said_by = {
+        clips[clip_id].speaker for clip_id in piece.from_clip_ids
+        if clip_id in clips and clips[clip_id].speaker
+    }
+    return gains.get(next(iter(said_by)), 1.0) if len(said_by) == 1 else 1.0
+
 def _placed(pieces: Sequence[Piece]) -> List[Tuple[Piece, float]]:
     """Say where each window lands on the timeline.
 
@@ -1140,6 +1173,7 @@ def check_plan(
     children: Mapping[str, List[SemanticClip]],
     assets: Mapping[str, Asset],
     cuts: Optional[Mapping[str, CleanCuts]] = None,
+    levels: Optional[Mapping[str, float]] = None,
 ) -> Tuple[List[str], List[str]]:
     """Check a plan against the footage it claims to be made of.
 
@@ -1151,6 +1185,9 @@ def check_plan(
         assets: The assets they play from, keyed by asset ID.
         cuts: Where each file may be cut without splitting a word, keyed by
             asset ID.
+        levels: How loudly each joined voice speaks. Given them, how far apart
+            the voices are is reported, so whoever is planning can decide
+            whether to ask for them matched.
 
     Returns:
         `(problems, notes)`. A problem stops the plan compiling; a note is
@@ -1240,6 +1277,15 @@ def check_plan(
         _, covering, said = broll_covers(plan, pieces, clips, assets, cuts)
         problems.extend(covering)
         notes.extend(said)
+        heard = {
+            level for clip_id, level in (levels or {}).items()
+            if any(clip.speaker == clip_id for clip in clips.values())
+        }
+        if len(heard) > 1 and max(heard) - min(heard) >= VOICE_SPREAD_DB and not plan.level_voices:
+            notes.append(
+                f"the voices in this cut are {max(heard) - min(heard):.0f}dB apart, so one of them will sound "
+                "much louder than the other. Set `level_voices` to bring them together"
+            )
         if plan.target.seconds:
             drift = abs(duration - plan.target.seconds) / plan.target.seconds
             if drift > LENGTH_TOLERANCE:
@@ -1387,6 +1433,7 @@ def _as_made(pinned: Clip) -> dict:
         "audio_fade_out": float(pinned.audio_fade_out),
         "audio_lead": float(pinned.audio_lead),
         "audio_lag": float(pinned.audio_lag),
+        "cleanup": pinned.cleanup.model_dump(),
         "preserve_pitch": pinned.preserve_pitch,
         "transition_in": (
             None if pinned.transition_in is None else pinned.transition_in.model_dump(mode="json")
@@ -1404,6 +1451,7 @@ def compile_operations(
     assets: Mapping[str, Asset],
     project: Optional[Project] = None,
     cuts: Optional[Mapping[str, CleanCuts]] = None,
+    levels: Optional[Mapping[str, float]] = None,
 ) -> Tuple[List[dict], Dict[str, dict]]:
     """Turn a plan into the edit operations that build its cut.
 
@@ -1420,6 +1468,10 @@ def compile_operations(
         project: What is already on the timeline, if anything.
         cuts: Where each file may be cut without splitting a word, keyed by
             asset ID.
+        levels: How loudly each joined voice speaks, as
+            `semantic.voice_levels` measures it. Used only when the plan asked
+            for its voices matched; without that, or without them, every window
+            stays at the level it was recorded.
 
     Returns:
         `(operations, provenance)` — operations for `apply_edits`, and, keyed
@@ -1429,6 +1481,9 @@ def compile_operations(
         surface.
     """
     pieces = plan_pieces(plan, clips, children, assets, cuts)
+    # Only when the plan asked for it: matching two people's levels is a judgement about
+    # a conversation, and on one speaker there is nothing to match.
+    gains = voice_gains(levels) if plan.level_voices and levels else None
     # Keyed by track as well as by what it was made of. The three kinds of clip the
     # compiler owns mean different things by `from_clip_ids` — merged semantic clips on
     # the sequence, a (cover, covered) pair on the B-roll track, nothing at all for the
@@ -1463,6 +1518,9 @@ def compile_operations(
             "asset_id": piece.asset_id,
             "source_range": {"start": piece.start, "end": piece.end},
         }
+        level = piece_gain(piece, clips, gains)
+        if level != 1.0:
+            placed["volume"] = level
         if pinned is not None:
             placed.update(_as_made(pinned))
         operations.append(placed)

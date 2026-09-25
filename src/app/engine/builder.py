@@ -6,7 +6,7 @@ from typing import List, Mapping, Optional, Tuple
 from app.engine import resources
 from app.engine.ffmpeg import escape_filter_path
 from app.models.media import Asset
-from app.models.timeline import Clip, Dip, Project, TrackType, Transition, Wipe
+from app.models.timeline import Clip, Dip, Project, TrackType, Transition, VoiceCleanup, Wipe
 
 AUDIO_SAMPLE_RATE = 48000
 # Streaming platforms normalize to about -14 LUFS, so delivering at that level avoids being turned down.
@@ -28,6 +28,15 @@ DUCK_RELEASE_MS = 500
 # alternative: both turn the NaN into full-scale noise. Two expressions, because
 # everything reaching the mix has already been formatted to stereo.
 SILENCE_GUARD = r"aeval=exprs=if(isnan(val(0))\,0\,val(0))|if(isnan(val(1))\,0\,val(1)):c=same"
+# What the voice repairs are set to. All three are deliberately gentle: each one works by
+# throwing part of the recording away, and the failure people actually notice is not too
+# much hiss left but a voice that has been scrubbed until it sounds underwater. A hundred
+# hertz is below anything a human voice puts out, so the high-pass costs the voice nothing;
+# twelve decibels of noise reduction is about half of what afftdn will do. Provisional.
+RUMBLE_HZ = 100
+HISS_REDUCTION_DB = 12
+HISS_FLOOR_DB = -40
+SIBILANCE_INTENSITY = 0.4
 
 @dataclass(frozen=True)
 class Segment:
@@ -244,6 +253,34 @@ def _colour_source(colour: str) -> str:
     """
     return f"0x{colour[1:]}" if colour.startswith("#") else colour
 
+def _cleanup_filters(cleanup: VoiceCleanup) -> List[str]:
+    """Build the repairs asked for on one clip's voice.
+
+    Every one of these throws part of the recording away, so none of them runs
+    unless it was asked for by name. The settings are deliberately gentle: a
+    denoiser turned up far enough to remove all the hiss removes the top of the
+    voice with it, and the result is worse than the hiss was.
+
+    Args:
+        cleanup: The repairs asked for.
+
+    Returns:
+        The filters in the order they undo each other least: the rumble first,
+        so the denoiser is not busy modelling it; the sibilance last, on what
+        is left. Empty when nothing was asked for.
+    """
+    if cleanup.is_nothing:
+        return []
+    filters = []
+    if cleanup.rumble:
+        # Nothing in a human voice lives below this, so it costs the voice nothing.
+        filters.append(f"highpass=f={RUMBLE_HZ}")
+    if cleanup.hiss:
+        filters.append(f"afftdn=nr={HISS_REDUCTION_DB}:nf={HISS_FLOOR_DB}")
+    if cleanup.sibilance:
+        filters.append(f"deesser=i={SIBILANCE_INTENSITY}")
+    return filters
+
 def _speed_audio_filters(clip: Clip) -> List[str]:
     """Stretch a clip's sound to its playback speed, with or without its pitch.
 
@@ -364,6 +401,9 @@ def _clip_audio_filter(input_label: str, clip: Clip, samples: int, output_label:
         "asetpts=PTS-STARTPTS",
         f"aresample={AUDIO_SAMPLE_RATE}",
         "aformat=sample_fmts=fltp:channel_layouts=stereo",
+        # Before the stretch and before the level: a denoiser models what it is given, so
+        # giving it something already sped up or turned down is giving it the wrong thing.
+        *_cleanup_filters(clip.cleanup),
         # Before the length is settled: the stretch is what decides how long the sound runs,
         # and padding or trimming it first would make that decision for it.
         *_speed_audio_filters(clip),

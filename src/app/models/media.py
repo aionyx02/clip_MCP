@@ -140,6 +140,26 @@ class SpeakerTurn(BaseModel):
     end: float
     speaker: str = Field(..., description="Label for the voice, such as 'S1'; unique within this file only")
 
+class Voice(BaseModel):
+    """What one voice in a file sounds like, as a vector.
+
+    A diarization label only means something inside its own file, so two
+    recordings of the same conversation come back with two unrelated sets of
+    them. This is what makes them comparable: the embedding model turns a
+    voice into a point, and the same person lands near themselves in a
+    different file. Nothing here decides that two are the same — that is a
+    threshold, and it lives with the layer that joins them up.
+
+    Kept per label rather than per turn. A label's turns are the same person by
+    construction, so measuring them together gives a steadier point than any
+    one turn does, and one vector per voice rather than per turn keeps an
+    hour-long interview from carrying a few hundred of them.
+    """
+
+    speaker: str = Field(..., description="The label this belongs to, as the speaker split wrote it")
+    embedding: List[float] = Field(..., min_length=1, description="Where this voice sits in the embedding model's space")
+    seconds: float = Field(..., gt=0, description="How much talking it was measured over; a longer look is a surer one")
+
 class AnalysisRecipe(BaseModel):
     """What produced an analysis, so that an out-of-date one can be recognised.
 
@@ -188,6 +208,11 @@ class MediaAnalysis(BaseModel):
     sound: List[SoundMeasurement] = Field(default_factory=list, description="What the sound was like, one record per second")
     faces: List[FaceMeasurement] = Field(default_factory=list, description="Who was on screen, one record per second")
     speakers: List[SpeakerTurn] = Field(default_factory=list, description="Which voice was speaking when")
+    voices: List[Voice] = Field(
+        default_factory=list,
+        description="What each of those voices sounds like, one per label, so the same person can be "
+                    "recognised in another file",
+    )
     transcript: Optional[Transcript] = None
     recipe: AnalysisRecipe = Field(default_factory=AnalysisRecipe, description="What produced this analysis")
     analyzed_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))

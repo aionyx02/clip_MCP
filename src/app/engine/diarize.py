@@ -16,11 +16,11 @@ better-known ones.
 
 import array
 import subprocess
-from typing import Callable, List, Optional
+from typing import Callable, Dict, List, Optional, Tuple
 
 from app.engine import models
 from app.engine.ffmpeg import OperationCancelled, hidden_window_flags
-from app.models.media import SpeakerTurn
+from app.models.media import SpeakerTurn, Voice
 
 SAMPLE_RATE = 16000
 # A voice has to hold the floor this long to be a turn, and has to stop this long for the
@@ -33,6 +33,11 @@ MIN_PAUSE_SECONDS = 0.5
 # many and this is ignored.
 SPEAKER_DISTANCE = 0.5
 THREADS = 2
+# How much of a voice to measure before deciding what it sounds like. Longer is steadier,
+# but a person does not become a different person after twenty seconds, and an hour-long
+# interview would otherwise pay for the whole hour twice. The longest turns are taken
+# first: a two-second interjection carries more of the room than of the speaker.
+VOICE_SECONDS = 20.0
 
 def speaker_model_name() -> str:
     """Name the models that produced a set of speaker turns.
@@ -107,13 +112,66 @@ def _engine(speakers: Optional[int]):
         raise RuntimeError("the speaker models were downloaded but the diarizer would not accept them")
     return sherpa_onnx.OfflineSpeakerDiarization(config)
 
+def _voices(samples: array.array, turns: List[SpeakerTurn]) -> List[Voice]:
+    """Measure what each voice in a recording sounds like.
+
+    One vector per label, taken from that label's longest turns up to
+    `VOICE_SECONDS`. The samples are the ones diarization already decoded, so
+    this costs a few forward passes of a small model and no extra decoding.
+
+    Args:
+        samples: The recording's mono samples at `SAMPLE_RATE`.
+        turns: The turns diarization found.
+
+    Returns:
+        One `Voice` per label, in label order. Empty when the embedding model
+        cannot be had — a file whose voices were not measured simply cannot be
+        joined to another, which is the same answer as never having run the
+        speaker split at all.
+
+    Raises:
+        RuntimeError: If the model cannot be downloaded.
+    """
+    import sherpa_onnx
+
+    if not turns:
+        return []
+    extractor = sherpa_onnx.SpeakerEmbeddingExtractor(sherpa_onnx.SpeakerEmbeddingExtractorConfig(
+        model=models.ensure(models.SPEAKER_EMBEDDING), num_threads=THREADS,
+    ))
+    by_label: Dict[str, List[SpeakerTurn]] = {}
+    for turn in turns:
+        by_label.setdefault(turn.speaker, []).append(turn)
+
+    voices: List[Voice] = []
+    for label in sorted(by_label):
+        taken, heard = array.array("f"), 0.0
+        for turn in sorted(by_label[label], key=lambda item: item.start - item.end):
+            if heard >= VOICE_SECONDS:
+                break
+            first = max(0, int(turn.start * SAMPLE_RATE))
+            last = min(len(samples), int(turn.end * SAMPLE_RATE))
+            if last <= first:
+                continue
+            taken.extend(samples[first:last])
+            heard += (last - first) / SAMPLE_RATE
+        if heard <= 0:
+            continue
+        stream = extractor.create_stream()
+        stream.accept_waveform(SAMPLE_RATE, taken)
+        stream.input_finished()
+        voices.append(Voice(
+            speaker=label, embedding=list(extractor.compute(stream)), seconds=round(heard, 3),
+        ))
+    return voices
+
 def find_speakers(
     path: str,
     on_progress: Callable[[float], None],
     is_cancelled: Callable[[], bool],
     speakers: Optional[int] = None,
     ffmpeg_bin: str = "ffmpeg",
-) -> List[SpeakerTurn]:
+) -> Tuple[List[SpeakerTurn], List[Voice]]:
     """Work out how many voices are in a recording and when each one is talking.
 
     Args:
@@ -127,9 +185,11 @@ def find_speakers(
         ffmpeg_bin: Path to, or name of, the FFmpeg executable.
 
     Returns:
-        The turns in time order, labelled `S1`, `S2` and so on. Labels mean
-        nothing outside this file. A recording with nobody in it gives no
-        turns.
+        `(turns, voices)`. The turns are in time order, labelled `S1`, `S2` and
+        so on, and those labels mean nothing outside this file — which is what
+        the voices are for: one vector per label, so the same person can be
+        recognised in another recording. A file with nobody in it gives
+        neither.
 
     Raises:
         OperationCancelled: If cancellation was requested.
@@ -139,7 +199,7 @@ def find_speakers(
     engine = _engine(speakers)
     samples = read_samples(path, ffmpeg_bin)
     if not samples:
-        return []
+        return [], []
 
     def report(done: int, total: int) -> int:
         """Pass progress on, and tell the engine to stop when asked to.
@@ -160,7 +220,8 @@ def find_speakers(
     result = engine.process(samples, callback=report)
     if is_cancelled():
         raise OperationCancelled()
-    return [
+    turns = [
         SpeakerTurn(start=round(segment.start, 3), end=round(segment.end, 3), speaker=f"S{segment.speaker + 1}")
         for segment in result.sort_by_start_time()
     ]
+    return turns, _voices(samples, turns)

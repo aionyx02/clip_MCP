@@ -207,3 +207,75 @@ def test_the_two_are_heard_together_where_they_overlap(two_tones: tuple, tmp_pat
     render(jcut, tmp_path / "out.mp4", loudness_target=None)
     assert level(tmp_path / "out.mp4", 1.6, 1.2, freq=440) > -30
     assert level(tmp_path / "out.mp4", 1.6, 1.2, freq=1500) > -30
+
+
+# --- repairing a recorded voice ---------------------------------------------------------
+
+def band_level(path: Path, low: int, high: int) -> float:
+    """Measure how much energy a file carries in one band of the spectrum.
+
+    Args:
+        path: The rendered file.
+        low: Bottom of the band in hertz.
+        high: Top of the band.
+
+    Returns:
+        The mean volume in that band, in decibels.
+    """
+    probed = subprocess.run(
+        ["ffmpeg", "-hide_banner", "-nostats", "-i", str(path),
+         "-af", f"highpass=f={low},lowpass=f={high},volumedetect", "-f", "null", "-"],
+        capture_output=True, text=True,
+    ).stderr
+    line = next(part for part in probed.splitlines() if "mean_volume" in part)
+    return float(line.split("mean_volume:")[1].split("dB")[0])
+
+@pytest.fixture
+def rumbling(tmp_path_factory: pytest.TempPathFactory) -> str:
+    """A tone at speech pitch with a heavy low roar under it.
+
+    Returns:
+        The asset ID.
+    """
+    path = tmp_path_factory.mktemp("rumble") / "rumble.mp4"
+    subprocess.run([
+        "ffmpeg", "-y", "-loglevel", "error",
+        "-f", "lavfi", "-i", "color=c=black:size=320x240:rate=30:duration=4",
+        "-f", "lavfi", "-i", "sine=frequency=40:duration=4",
+        "-f", "lavfi", "-i", "sine=frequency=500:duration=4",
+        "-filter_complex", "[1:a][2:a]amix=inputs=2:normalize=0[a]",
+        "-map", "0:v", "-map", "[a]",
+        "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-c:a", "aac",
+        "-shortest", str(path),
+    ], check=True)
+    return import_asset(str(path))["id"]
+
+def test_taking_the_rumble_out_leaves_the_voice_where_it_was(rumbling: str, tmp_path: Path) -> None:
+    """The point of a high-pass: the roar goes and the part that carries words does not."""
+    plain = build_project([video_track(), insert("a", rumbling, 0, 4)], width=320, height=240)
+    render(plain, tmp_path / "plain.mp4", loudness_target=None)
+
+    cleaned = build_project([video_track(), insert("a", rumbling, 0, 4)], width=320, height=240)
+    edit(cleaned, [{"action": "set_clip_audio", "track_id": "main", "clip_id": "a",
+                    "cleanup": {"rumble": True}}])
+    render(cleaned, tmp_path / "cleaned.mp4", loudness_target=None)
+
+    # The 40Hz roar is far quieter; the 500Hz tone standing in for a voice is not.
+    assert band_level(tmp_path / "cleaned.mp4", 20, 80) < band_level(tmp_path / "plain.mp4", 20, 80) - 10
+    assert band_level(tmp_path / "cleaned.mp4", 400, 600) == pytest.approx(
+        band_level(tmp_path / "plain.mp4", 400, 600), abs=2
+    )
+
+def test_nothing_is_repaired_unless_it_was_asked_for(rumbling: str) -> None:
+    """Every repair throws part of the recording away, so none of them is a default."""
+    project = build_project([video_track(), insert("a", rumbling, 0, 4)], width=320, height=240)
+    assert repo.get_project(project).tracks[0].clips[0].cleanup.is_nothing
+
+def test_asking_for_one_repair_does_not_put_another_back(rumbling: str) -> None:
+    project = build_project([video_track(), insert("a", rumbling, 0, 4)], width=320, height=240)
+    edit(project, [{"action": "set_clip_audio", "track_id": "main", "clip_id": "a",
+                    "cleanup": {"rumble": True}}])
+    edit(project, [{"action": "set_clip_audio", "track_id": "main", "clip_id": "a",
+                    "cleanup": {"hiss": True}}])
+    cleanup = repo.get_project(project).tracks[0].clips[0].cleanup
+    assert cleanup.rumble and cleanup.hiss and not cleanup.sibilance

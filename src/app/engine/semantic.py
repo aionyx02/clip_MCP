@@ -29,7 +29,7 @@ from app.models.semantic import ClipKind, ClipLevel, SemanticClip, SemanticTimel
 
 # Bumped whenever the rules below change, so timelines built by an older
 # version are recognised as out of date rather than silently reused.
-DERIVATION_VERSION = 5
+DERIVATION_VERSION = 6
 # A stretch without speech shorter than this is not a thing on its own; it is the
 # breath between two sentences, and it is already described by their headroom.
 MIN_UTTERANCE_SECONDS = 0.4
@@ -41,6 +41,13 @@ NEARLY_ALL = 0.9
 # How much of the talking in a stretch one voice has to hold before the stretch is called
 # theirs. A sentence that straddles a handover belongs to neither, and says so.
 SPEAKER_MAJORITY = 0.8
+# How far apart two voices have to sit before they are two people, when the question is
+# whether a label in one file is the same person as a label in another. Cosine distance,
+# so 0 is the same direction and 1 is unrelated. Kept apart from `diarize.SPEAKER_DISTANCE`,
+# which asks a different question — that one splits one recording, this one joins several,
+# and a recording made on another day in another room is further from itself than two
+# people in one room are from each other. Provisional, like that one.
+VOICE_DISTANCE = 0.45
 
 def share_covered(start: float, end: float, spans: Sequence[Span]) -> float:
     """Measure how much of a stretch is covered by a set of spans.
@@ -495,6 +502,122 @@ def _kind(has_speech: bool, has_audio: bool, scores: Mapping[str, float]) -> Cli
         return ClipKind.SILENCE
     return ClipKind.AMBIENT
 
+def _cosine_distance(one: Sequence[float], two: Sequence[float]) -> float:
+    """Measure how far apart two voices sit.
+
+    Cosine rather than straight distance, because the embedding model's
+    vectors carry loudness in their length: the same person recorded closer to
+    the microphone is further away by every other measure and no different by
+    this one.
+
+    Args:
+        one: The first embedding.
+        two: The second.
+
+    Returns:
+        0.0 for the same direction, 1.0 for unrelated, 2.0 for opposite. Two
+        vectors of different lengths are not comparable at all and answer 2.0.
+    """
+    if len(one) != len(two):
+        return 2.0
+    size = math.sqrt(sum(value * value for value in one)) * math.sqrt(sum(value * value for value in two))
+    return 1.0 - sum(a * b for a, b in zip(one, two)) / size if size else 2.0
+
+def join_voices(analyses: Mapping[str, MediaAnalysis]) -> Dict[Tuple[str, str], str]:
+    """Work out which labels in different files are the same person.
+
+    Diarization labels only mean something inside their own file, so an
+    interview shot on two cameras comes back as four unrelated people. This is
+    where they are joined up: each voice is compared with the ones already
+    seen, and lands with the nearest of them when it is near enough.
+
+    Walked in a fixed order — files by ID, labels within a file by name — so
+    the same footage always produces the same joined labels. Assigning them by
+    who speaks first would make the answer depend on the order the analyses
+    happened to be read in.
+
+    Greedy rather than a proper clustering: with a handful of voices the two
+    agree, and a greedy pass can be read straight through. If a corpus ever
+    shows them disagreeing, that is the moment to pay for the better one.
+
+    Args:
+        analyses: The analyses to join, keyed by asset ID.
+
+    Returns:
+        A joined label, `V1`, `V2` and so on, for each `(asset_id, label)`.
+        Files whose voices were never measured are absent, which is not the
+        same as their being nobody: it means nobody looked.
+    """
+    joined: Dict[Tuple[str, str], str] = {}
+    known: List[Tuple[str, List[float]]] = []
+    for asset_id in sorted(analyses):
+        for voice in sorted(analyses[asset_id].voices, key=lambda item: item.speaker):
+            nearest, distance = None, VOICE_DISTANCE
+            for label, embedding in known:
+                apart = _cosine_distance(voice.embedding, embedding)
+                if apart < distance:
+                    nearest, distance = label, apart
+            if nearest is None:
+                nearest = f"V{len(known) + 1}"
+                known.append((nearest, list(voice.embedding)))
+            joined[(asset_id, voice.speaker)] = nearest
+    return joined
+
+def voice_levels(
+    analyses: Mapping[str, MediaAnalysis],
+    joined: Mapping[Tuple[str, str], str],
+) -> Dict[str, float]:
+    """Measure how loudly each voice speaks, across every file they are in.
+
+    Only the seconds that voice was actually holding the floor, so the room
+    tone between two people's turns is not counted against either of them.
+    Levels are combined as energy rather than as decibels, for the same reason
+    every other level in this module is.
+
+    Args:
+        analyses: The analyses to measure, keyed by asset ID.
+        joined: The joined label for each `(asset_id, per-file label)`, as
+            `join_voices` gives it.
+
+    Returns:
+        A level in decibels per joined voice. A voice whose files carry no
+        per-second sound measurements is absent: nobody measured it, which is
+        not the same as its being silent.
+    """
+    parts: Dict[str, List[Tuple[float, float]]] = {}
+    for asset_id, analysis in analyses.items():
+        for turn in analysis.speakers:
+            label = joined.get((asset_id, turn.speaker))
+            if label is None:
+                continue
+            for record in analysis.sound:
+                covered = min(turn.end, record.end) - max(turn.start, record.start)
+                if covered > 0:
+                    parts.setdefault(label, []).append((record.loudness, covered))
+    return {label: round(_decibel_mean(heard), 2) for label, heard in parts.items()}
+
+def voice_gains(levels: Mapping[str, float]) -> Dict[str, float]:
+    """Work out what to turn each voice by so they match each other.
+
+    Everybody is brought down to the quietest of them rather than up to the
+    loudest. Which one is the reference makes no difference to the result — the
+    render is normalized to one loudness afterwards, so a shift applied to
+    every voice alike is undone — but turning down can never clip, and turning
+    up would also bring up whatever hiss was under the quiet one.
+
+    Args:
+        levels: The level each voice speaks at, in decibels.
+
+    Returns:
+        A multiplier per voice, 1.0 for the quietest. Empty when fewer than
+        two voices were measured: one voice is already consistent with itself,
+        and this is not a loudness target.
+    """
+    if len(levels) < 2:
+        return {}
+    quietest = min(levels.values())
+    return {label: round(10 ** ((quietest - level) / 20), 4) for label, level in levels.items()}
+
 def timeline_input_hash(analyses: Mapping[str, MediaAnalysis]) -> str:
     """Fingerprint everything a build depends on.
 
@@ -552,6 +675,11 @@ def build_timeline(
         levels=[ClipLevel.UTTERANCE],
     )
 
+    # The first place that sees more than one file at once, so the first place a label
+    # can mean the same person in two of them. The analyses keep their own `S1` and `S2`,
+    # which is what diarization actually said; the joined labels are `V1`, `V2`, so that
+    # nobody reads one for the other.
+    voices = join_voices(analyses)
     clips: List[SemanticClip] = []
     for asset_id in timeline.asset_ids:
         asset, analysis = assets[asset_id], analyses[asset_id]
@@ -569,7 +697,9 @@ def build_timeline(
                 safe_out=round(safe_out, 3),
                 kind=_kind(bool(text), asset.has_audio, scores),
                 text=text,
-                speaker=speaker_at(analysis.speakers, start, end),
+                speaker=voices.get((asset_id, said_by)) if (
+                    said_by := speaker_at(analysis.speakers, start, end)
+                ) else None,
                 scores=scores,
             ))
     return timeline, clips

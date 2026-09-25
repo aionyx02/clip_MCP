@@ -154,6 +154,13 @@ class EditPlan(BaseModel):
                     "not something to write at the same time as the selections",
     )
     music: Optional[MusicPlan] = None
+    level_voices: bool = Field(
+        default=False,
+        description="Turn each person down to match the quietest of them, so two people recorded at very "
+                    "different levels do not jump between shots. Off by default: matching voices is a "
+                    "judgement about a conversation, and on a single speaker there is nothing to match. "
+                    "`validate_plan` says how far apart the voices are, which is what it is worth deciding from",
+    )
     created_at: datetime = Field(default_factory=_utc_now)
     updated_at: datetime = Field(default_factory=_utc_now)
 

@@ -29,6 +29,7 @@ from app.models.media import (
     SoundMeasurement,
     Span,
     SpeakerTurn,
+    Voice,
     Transcript,
     TranscriptSegment,
     TranscriptWord,
@@ -1047,6 +1048,7 @@ def analyze_media(
 
     transcript = None
     turns: List[SpeakerTurn] = []
+    voices: List[Voice] = []
     if with_speech:
         on_progress(shares["speech"][0], "loading the speech recognition model")
         transcript = transcribe_speech(
@@ -1060,7 +1062,7 @@ def analyze_media(
             is_cancelled,
         )
     if with_speakers:
-        turns = find_speakers(
+        turns, voices = find_speakers(
             asset.path, report("speakers", "telling the voices apart"), is_cancelled, speakers, ffmpeg_bin
         )
     return MediaAnalysis(
@@ -1074,6 +1076,7 @@ def analyze_media(
         sound=scan.sound,
         faces=on_screen,
         speakers=turns,
+        voices=voices,
         transcript=transcript,
         recipe=current_recipe(
             transcript.model if transcript is not None else None,

@@ -117,6 +117,45 @@ class PlacedCue(BaseModel):
         default_factory=list, description="Word timings, in timeline seconds; empty when the caption has none",
     )
 
+class VoiceCleanup(BaseModel):
+    """Repairs applied to a recorded voice, each one asked for on purpose.
+
+    Off unless somebody says otherwise, and never guessed at from a
+    measurement: every one of these throws part of the recording away, and
+    which part is worth losing depends on what the recording is for. A room
+    tone somebody wanted is hiss to a denoiser.
+
+    They run in this order, which is the order they undo each other least in:
+    the rumble goes first so the denoiser is not busy modelling it, and the
+    sibilance last, on what is left.
+    """
+
+    rumble: bool = Field(
+        default=False,
+        description="Take out the low roar under a recording — traffic, air conditioning, a hand on the "
+                    "camera. Costs nothing on a voice, which has nothing down there",
+    )
+    hiss: bool = Field(
+        default=False,
+        description="Take out the steady background hiss a phone or a clip-on microphone leaves. Overdone it "
+                    "makes a voice sound like it is underwater, so this is a light pass rather than a deep one",
+    )
+    sibilance: bool = Field(
+        default=False,
+        description="Soften harsh S sounds, which a microphone held close picks up. Leave it off unless they "
+                    "are actually harsh: it takes the edge off the whole voice with them",
+    )
+
+    @property
+    def is_nothing(self) -> bool:
+        """Whether this asks for no repair at all.
+
+        Returns:
+            True when every repair is off, which is what a clip with nothing
+            wrong with it wants.
+        """
+        return not (self.rumble or self.hiss or self.sibilance)
+
 class SpeakerMark(str, Enum):
     """How a caption says who is talking."""
 
@@ -404,6 +443,10 @@ class Clip(BaseModel):
     )
     audio_fade_in: Decimal = Field(default=Decimal(0), ge=0, description="Audio fade-in length at the clip start (seconds)")
     audio_fade_out: Decimal = Field(default=Decimal(0), ge=0, description="Audio fade-out length at the clip end (seconds)")
+    cleanup: VoiceCleanup = Field(
+        default_factory=VoiceCleanup,
+        description="Repairs applied to the voice on this clip; nothing by default",
+    )
     transition_in: Optional[Transition] = Field(
         default=None,
         description="How this clip's picture arrives over the end of the clip before it: a dissolve, a wipe, or a "
@@ -683,6 +726,7 @@ class _NewClipSpec(BaseModel):
     # transition on the next compile, which is the one thing pinning promises not to do.
     audio_lead: Decimal = Field(default=Decimal(0), ge=0, description="Seconds the sound starts before the picture (J cut)")
     audio_lag: Decimal = Field(default=Decimal(0), ge=0, description="Seconds the sound runs on after the picture (L cut)")
+    cleanup: VoiceCleanup = Field(default_factory=VoiceCleanup, description="Repairs applied to the voice")
     transition_in: Optional[Transition] = Field(
         default=None, description="How the picture arrives over the clip before it; null is a straight cut",
     )
@@ -962,6 +1006,11 @@ class SetClipAudioOp(BaseModel):
         ge=0,
         description="Seconds this clip's sound runs on after its picture — an L cut. 0 puts them back together",
     )
+    cleanup: Optional[VoiceCleanup] = Field(
+        default=None,
+        description="Repairs to apply to the voice on this clip. Only the ones named here change, so asking "
+                    "for the hiss to go does not put the rumble back",
+    )
 
 class SetMarkersOp(BaseModel):
     """Edit operation that replaces the timeline's structure markers.
@@ -1130,6 +1179,7 @@ def _new_clip(track: Track, spec: _NewClipSpec, timeline_in: Decimal) -> Clip:
         audio_fade_out=spec.audio_fade_out,
         audio_lead=spec.audio_lead,
         audio_lag=spec.audio_lag,
+        cleanup=spec.cleanup,
         transition_in=spec.transition_in,
         video_fade_in=spec.video_fade_in,
         video_fade_out=spec.video_fade_out,
@@ -1461,6 +1511,10 @@ def apply_operation(project: Project, op: EditOperation, assets: Mapping[str, As
             value = getattr(op, field)
             if value is not None:
                 setattr(clip, field, value)
+        if op.cleanup is not None:
+            # Only the repairs the caller named, so asking for the hiss to go does not
+            # put the rumble back — the same rule the colour adjustments follow.
+            clip.cleanup = clip.cleanup.model_copy(update=op.cleanup.model_dump(exclude_unset=True))
     elif isinstance(op, SetClipSpeedOp):
         clip = _find_clip(track, op.clip_id)
         was = clip.timeline_out
