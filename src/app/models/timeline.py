@@ -1,6 +1,6 @@
 from decimal import Decimal
 from enum import Enum
-from typing import Annotated, List, Literal, Mapping, Optional, Tuple, Union
+from typing import Annotated, Dict, List, Literal, Mapping, Optional, Tuple, Union
 
 from pydantic import BaseModel, Field, computed_field, field_validator, model_validator
 
@@ -36,6 +36,19 @@ class TimeRange(BaseModel):
         """
         return self.end - self.start
 
+class CueWord(BaseModel):
+    """One word of a caption with its own timing, for captions that light up word by word.
+
+    The times are in whatever the caption holding them is measured in: source
+    seconds on a stored caption, timeline seconds once it has been placed. The
+    caption is the anchor either way, so the words never need rewriting on
+    their own.
+    """
+
+    start: Decimal = Field(..., ge=0, description="When the word begins (seconds)")
+    end: Decimal = Field(..., ge=0, description="When it ends (seconds)")
+    text: str = Field(..., description="The word itself")
+
 class SubtitleCue(BaseModel):
     """One caption, anchored to the words it transcribes rather than to a moment in the cut.
 
@@ -55,6 +68,21 @@ class SubtitleCue(BaseModel):
     source_start: Decimal = Field(..., ge=0, description="When they begin in that file (seconds)")
     source_end: Decimal = Field(..., ge=0, description="When they end in that file (seconds)")
     text: str = Field(..., description="The caption text; it is wrapped to fit the frame when rendered")
+    secondary: str = Field(
+        default="",
+        description="A second line under the first, for a bilingual caption. Whoever writes the captions "
+                    "writes this too — nothing here translates anything",
+    )
+    speaker: Optional[str] = Field(
+        default=None,
+        description="Who said it, as the speaker split labelled them (`S1`, `S2`). The caption style decides "
+                    "whether that reaches the screen as a name, a colour, or not at all",
+    )
+    words: List[CueWord] = Field(
+        default_factory=list,
+        description="Word timings inside this caption, in source seconds, for captions that light up word by "
+                    "word. Empty is normal: a caption written by hand has none, and one lights up whole instead",
+    )
 
     @model_validator(mode="after")
     def validate_span(self):
@@ -83,6 +111,85 @@ class PlacedCue(BaseModel):
     start: Decimal = Field(..., ge=0, description="When it appears (seconds on the timeline)")
     end: Decimal = Field(..., ge=0, description="When it disappears (seconds on the timeline)")
     text: str = Field(..., description="The caption text")
+    secondary: str = Field(default="", description="The second line, for a bilingual caption")
+    speaker: Optional[str] = Field(default=None, description="Who said it, as the speaker split labelled them")
+    words: List[CueWord] = Field(
+        default_factory=list, description="Word timings, in timeline seconds; empty when the caption has none",
+    )
+
+class SpeakerMark(str, Enum):
+    """How a caption says who is talking."""
+
+    OFF = "off"
+    NAME = "name"
+    COLOUR = "colour"
+    BOTH = "both"
+
+class CaptionStyle(BaseModel):
+    """How burned-in captions are drawn, as fractions of the frame.
+
+    Fractions rather than pixels, for the same reason a layout box is: the
+    same style has to work at 1080 and at 4K, and at whatever shape the
+    project is. Every number here is a platform convention rather than a
+    measurement of anything — where a phone puts its own buttons over the
+    picture, and how big text has to be to read on one. They are collected in
+    `CAPTION_PRESETS` so that changing one changes it everywhere.
+    """
+
+    font: Optional[str] = Field(
+        default=None, description="Font family to ask for; null uses the server's configured default",
+    )
+    size_fraction: float = Field(
+        default=1 / 16, gt=0, le=0.5, description="Text size as a fraction of the frame's shorter side",
+    )
+    bottom_fraction: Optional[float] = Field(
+        default=None,
+        ge=0,
+        lt=1,
+        description="How far above the bottom the text sits, as a fraction of the height. Null keeps clear of "
+                    "the controls a phone draws over a vertical video, and sits lower on a landscape one",
+    )
+    side_fraction: float = Field(
+        default=0.08, ge=0, lt=0.5, description="Margin at each side, as a fraction of the width",
+    )
+    outline_fraction: float = Field(
+        default=1 / 16, ge=0, le=0.5, description="Outline thickness as a fraction of the text size",
+    )
+    karaoke: bool = Field(
+        default=False,
+        description="Light each word as it is said, rather than showing the whole caption at once. Needs the "
+                    "word timings `generate_subtitles` puts on a caption; one without them lights up whole",
+    )
+    speaker_mark: SpeakerMark = Field(
+        default=SpeakerMark.OFF,
+        description="How a caption says who is talking: `name` puts it in front of the line, `colour` gives "
+                    "each speaker their own, `both` does both, `off` says nothing",
+    )
+    speaker_names: Dict[str, str] = Field(
+        default_factory=dict,
+        description="Real names for the speaker split's labels, such as {'S1': '阿明'}. A label with no name "
+                    "keeps the label, because a caption reading 'S2' is still better than one crediting the "
+                    "wrong person",
+    )
+    secondary_scale: float = Field(
+        default=0.75, gt=0, le=1, description="How big the second line of a bilingual caption is, against the first",
+    )
+
+# Where each platform's own furniture sits over the picture, and how large text has to be
+# to read on a phone held at arm's length. Conventions, not measurements: they move when
+# the apps move, which is why they are in one place.
+CAPTION_PRESETS: Dict[str, CaptionStyle] = {
+    # What the server did before there were presets: clear of a phone's controls on a
+    # vertical video, lower on a landscape one.
+    "plain": CaptionStyle(),
+    # Landscape, watched on a screen rather than held: smaller text, and only the player's
+    # own control bar to stay above.
+    "youtube": CaptionStyle(size_fraction=1 / 20, bottom_fraction=0.10, side_fraction=0.10),
+    # The caption, the handle and the audio credit stack up the bottom fifth of a Reel.
+    "reels": CaptionStyle(size_fraction=1 / 14, bottom_fraction=0.22, side_fraction=0.10, karaoke=True),
+    # Same again, and the buttons up the right-hand side push the safe area in further.
+    "tiktok": CaptionStyle(size_fraction=1 / 13, bottom_fraction=0.26, side_fraction=0.14, karaoke=True),
+}
 
 class ClipLayout(BaseModel):
     """Where a clip is drawn in the frame, as fractions of the output size.
@@ -447,6 +554,11 @@ class Project(BaseModel):
         default_factory=list,
         description="Captions burned into the picture when render_project is called with burn_subtitles",
     )
+    caption_style: CaptionStyle = Field(
+        default_factory=CaptionStyle,
+        description="How those captions are drawn: where they sit, how big they are, whether they light up "
+                    "word by word, and whether they say who is talking",
+    )
 
     @field_validator("subtitles", mode="before")
     @classmethod
@@ -659,6 +771,10 @@ class EditSubtitleOp(BaseModel):
         description="ID of the caption: `id` as generate_subtitles reports it, `cue_id` as get_subtitles does",
     )
     text: Optional[str] = Field(default=None, description="New text for this caption")
+    secondary: Optional[str] = Field(
+        default=None, description="New second line for a bilingual caption; an empty string takes it away",
+    )
+    speaker: Optional[str] = Field(default=None, description="Who said it, overriding what the speaker split decided")
     source_start: Optional[Decimal] = Field(
         default=None, ge=0, description="New start in the source file (seconds), to catch a line that comes up early",
     )
@@ -686,6 +802,43 @@ class SetSubtitlesOp(BaseModel):
 
     action: Literal["set_subtitles"] = "set_subtitles"
     cues: List[SubtitleCue] = Field(default_factory=list, description="The complete new set of captions; an empty list removes them")
+
+class SetCaptionStyleOp(BaseModel):
+    """Edit operation that changes how the captions are drawn.
+
+    A preset is a starting point, not a lock: anything given alongside it wins,
+    so `{"preset": "tiktok", "karaoke": false}` is that platform's safe area
+    without the word-by-word lighting.
+    """
+
+    action: Literal["set_caption_style"] = "set_caption_style"
+    preset: Optional[str] = Field(
+        default=None,
+        description="Where the video is going: `youtube`, `reels`, `tiktok`, or `plain` for no platform's "
+                    "furniture at all. Each one sets the safe area, the text size and the outline",
+    )
+    style: Optional[CaptionStyle] = Field(
+        default=None, description="Settings to apply on top of the preset, or on their own",
+    )
+
+    @model_validator(mode="after")
+    def validate_preset(self):
+        """Ensure the operation names a preset that exists and asks for something.
+
+        Returns:
+            The validated `SetCaptionStyleOp` instance.
+
+        Raises:
+            ValueError: If the preset is unknown, or neither field is given.
+        """
+        if self.preset is not None and self.preset not in CAPTION_PRESETS:
+            raise ValueError(
+                f"there is no caption preset called {self.preset!r}; the presets are "
+                f"{', '.join(sorted(CAPTION_PRESETS))}"
+            )
+        if self.preset is None and self.style is None:
+            raise ValueError("give a preset, a style, or both")
+        return self
 
 class SetClipLookOp(BaseModel):
     """Edit operation that changes a clip's picture: how it comes in, its colour, and where it sits.
@@ -827,7 +980,7 @@ EditOperation = Annotated[
         AddTrackOp, AddClipOp, InsertClipOp, TrimClipOp, DeleteOp, MoveClipOp,
         SplitClipOp, ReorderClipOp, RenameProjectOp, SetTrackAudioOp, SetClipAudioOp,
         SetClipLookOp, SetClipPinnedOp, SetClipSpeedOp, SetMarkersOp, SetSubtitlesOp, EditSubtitleOp,
-        FitTrackOp,
+        SetCaptionStyleOp, FitTrackOp,
     ],
     Field(discriminator="action"),
 ]
@@ -1130,16 +1283,34 @@ def apply_operation(project: Project, op: EditOperation, assets: Mapping[str, As
         if op.delete:
             project.subtitles = [item for item in project.subtitles if item.id != op.cue_id]
             return
-        # Re-run the model's own rules on the edited cue: model_copy skips them.
-        updated = SubtitleCue.model_validate(cue.model_copy(update={
+        named = {
             field: value for field, value in
-            (("text", op.text), ("source_start", op.source_start), ("source_end", op.source_end))
+            (("text", op.text), ("secondary", op.secondary), ("speaker", op.speaker),
+             ("source_start", op.source_start), ("source_end", op.source_end))
             if value is not None
-        }).model_dump())
+        }
+        # Correcting the words leaves the word timings describing words that are no longer
+        # there, and a caption lighting up against the wrong syllables is worse than one
+        # lighting up whole. They go, and `generate_subtitles` makes them again.
+        if op.text is not None:
+            named["words"] = []
+        # Re-run the model's own rules on the edited cue: model_copy skips them.
+        updated = SubtitleCue.model_validate(cue.model_copy(update=named).model_dump())
         project.subtitles = sorted(
             [updated if item.id == op.cue_id else item for item in project.subtitles],
             key=cue_order,
         )
+        return
+
+    if isinstance(op, SetCaptionStyleOp):
+        # A preset is where the settings start, so anything given with it wins. Applied
+        # over the preset rather than over the project's current style: asking for a
+        # platform and getting it half-mixed with the last one is nobody's intent.
+        base = CAPTION_PRESETS[op.preset] if op.preset else project.caption_style
+        if op.style is None:
+            project.caption_style = base.model_copy(deep=True)
+        else:
+            project.caption_style = base.model_copy(update=op.style.model_dump(exclude_unset=True), deep=True)
         return
 
     track = _find_track(project, op.track_id)

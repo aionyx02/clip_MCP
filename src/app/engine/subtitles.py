@@ -3,27 +3,30 @@
 import os
 import unicodedata
 from decimal import Decimal
-from typing import Dict, Iterable, Iterator, List, Mapping, Optional, Sequence, Tuple
+from typing import Dict, Iterator, List, Mapping, Optional, Sequence, Tuple
 
-from app.engine.semantic import share_covered, was_audible
-from app.models.media import Span, Transcript, TranscriptSegment, TranscriptWord
+from app.engine.semantic import share_covered, speaker_at, was_audible
+from app.models.media import Span, SpeakerTurn, Transcript, TranscriptSegment, TranscriptWord
 from app.models.timeline import (
+    CaptionStyle,
     Clip,
     CueOrder,
+    CueWord,
     PlacedCue,
     Project,
+    SpeakerMark,
     SubtitleCue,
     TrackType,
     cue_order,
     number_cues,
 )
 
-# Burned captions sit larger than broadcast subtitles, at about six percent of the shorter side.
-FONT_DIVISOR = 16
-# Phones cover roughly the bottom eighth of a vertical video with their own controls and captions.
+# Where captions sit when the style names no platform to keep clear of. Phones cover
+# roughly the bottom eighth of a vertical video with their own controls and captions; a
+# landscape one only has a player's control bar. The size and the side margins moved onto
+# `CaptionStyle`, because a platform changes those and does not change this.
 PORTRAIT_BOTTOM_FRACTION = 0.13
 LANDSCAPE_BOTTOM_FRACTION = 0.06
-SIDE_FRACTION = 0.08
 # libass falls back to a font that has the glyphs, but the starting point can be set for unusual systems.
 DEFAULT_FONT = os.environ.get("CLIP_MCP_SUBTITLE_FONT", "Arial")
 # A caption much longer than this is hard to read at a glance, and one much shorter flickers past.
@@ -34,6 +37,13 @@ MINIMUM_CUE_SECONDS = 0.05
 MINIMUM_CUE = Decimal(str(MINIMUM_CUE_SECONDS))
 # Times on the timeline are kept to milliseconds; Decimal division does not stop there by itself.
 MILLISECOND = Decimal('0.001')
+# ASS writes colours as &HBBGGRR, backwards from everywhere else. White, yellow, cyan and
+# magenta: four that stay apart from each other over any picture, and over each other's
+# outlines. A fifth speaker starts round again, which is better than inventing a colour
+# nobody can tell from the first four.
+SPEAKER_COLOURS = ("&H00FFFFFF", "&H0000FFFF", "&H00FFFF00", "&H00FF00FF")
+# What a word looks like before it is said, when the caption lights up word by word.
+UNSPOKEN_COLOUR = "&H00909090"
 
 def format_ass_time(seconds: float) -> str:
     """Format a time the way an ASS event line expects it.
@@ -183,29 +193,122 @@ def place_cues(project: Project, cues: Sequence[SubtitleCue]) -> List[PlacedCue]
                 start=_at(clip.timeline_in, first - window_start, speed),
                 end=_at(clip.timeline_in, last - window_start, speed),
                 text=cue.text,
+                secondary=cue.secondary,
+                speaker=cue.speaker,
+                # Only the words still on screen: a caption cut in half lights up the
+                # half that survived, and the rest belongs to the other placement.
+                words=[
+                    CueWord(
+                        start=_at(clip.timeline_in, max(word.start, first) - window_start, speed),
+                        end=_at(clip.timeline_in, min(word.end, last) - window_start, speed),
+                        text=word.text,
+                    )
+                    for word in cue.words
+                    if word.end > first and word.start < last
+                ],
             ))
     return sorted(placed, key=lambda item: (item.start, item.end))
 
-def build_ass(cues: Iterable[PlacedCue], width: int, height: int, font: str = DEFAULT_FONT) -> str:
+def escape_ass_inline(text: str) -> str:
+    """Make one word safe to drop into an ASS event without joining it to anything.
+
+    `escape_ass_text` also strips and rejoins lines, which is right for a whole
+    caption and wrong for a word: the spacing between words is what a line is
+    made of.
+
+    Args:
+        text: Text to escape.
+
+    Returns:
+        The escaped text, spacing intact.
+    """
+    return text.replace("{", "(").replace("}", ")").replace("\\", "/").replace("\n", " ")
+
+def _speaker_colours(cues: Sequence[PlacedCue]) -> Dict[str, str]:
+    """Give each voice a colour, the same one every time.
+
+    Args:
+        cues: The placed captions.
+
+    Returns:
+        An ASS colour per speaker label. Assigned in label order rather than in
+        the order they happen to speak, so the same footage always comes out
+        the same way and a re-render does not swap two people's colours.
+    """
+    labels = sorted({cue.speaker for cue in cues if cue.speaker})
+    return {label: SPEAKER_COLOURS[index % len(SPEAKER_COLOURS)] for index, label in enumerate(labels)}
+
+def _karaoke_text(cue: PlacedCue, max_units: float) -> str:
+    """Write a caption as word-by-word timings inside one event.
+
+    Wrapped here rather than by `wrap_caption`, which measures plain text: the
+    override tags between the words are not on screen and must not count
+    towards the width of a line.
+
+    Args:
+        cue: The placed caption, with word timings in timeline seconds.
+        max_units: Line width as a multiple of the font size.
+
+    Returns:
+        The event text, with a `\\k` per word and the gaps between them.
+    """
+    parts: List[str] = []
+    width, cursor = 0.0, cue.start
+    for word in cue.words:
+        text = escape_ass_inline(word.text)
+        if not text.strip():
+            continue
+        size = sum(_display_width(character) for character in text)
+        if parts and width + size > max_units:
+            parts.append("\\N")
+            width = 0.0
+        # The silence before a word is timed too, or every word would light up early by
+        # however long the pause before it ran.
+        gap = round(float(word.start - cursor) * 100)
+        if gap > 0:
+            parts.append(f"{{\\k{gap}}}")
+        parts.append(f"{{\\k{max(1, round(float(word.end - word.start) * 100))}}}{text}")
+        cursor = word.end
+        width += size
+    return "".join(parts)
+
+def build_ass(
+    cues: Sequence[PlacedCue],
+    width: int,
+    height: int,
+    style: Optional[CaptionStyle] = None,
+) -> str:
     """Render subtitle cues as a complete ASS subtitle file.
 
-    The style is sized and positioned from the output format, so captions
-    keep clear of the controls a phone draws over a vertical video.
+    The style is sized and positioned from the output format, so captions keep
+    clear of the controls a phone draws over a vertical video, and from the
+    project's caption style, which says which platform's furniture to stay out
+    of the way of.
 
     Args:
         cues: Placed cues to write, in timeline order.
         width: Output width in pixels.
         height: Output height in pixels.
-        font: Font family name to ask for.
+        style: How to draw them; the plain style when not given.
 
     Returns:
         The ASS file contents.
     """
-    font_size = max(12, round(min(width, height) / FONT_DIVISOR))
-    bottom = PORTRAIT_BOTTOM_FRACTION if height > width else LANDSCAPE_BOTTOM_FRACTION
+    style = style or CaptionStyle()
+    font = style.font or DEFAULT_FONT
+    font_size = max(12, round(min(width, height) * style.size_fraction))
+    bottom = style.bottom_fraction
+    if bottom is None:
+        bottom = PORTRAIT_BOTTOM_FRACTION if height > width else LANDSCAPE_BOTTOM_FRACTION
     margin_v = round(height * bottom)
-    margin_h = round(width * SIDE_FRACTION)
-    outline = max(1, round(font_size / 16))
+    margin_h = round(width * style.side_fraction)
+    outline = max(1, round(font_size * style.outline_fraction))
+    # With karaoke the secondary colour is what a word looks like before it is said, so it
+    # has to differ from the primary or nothing appears to happen. Without it the two are
+    # the same, which is what a caption that simply sits there wants.
+    waiting = UNSPOKEN_COLOUR if style.karaoke else "&H00FFFFFF"
+    colours = _speaker_colours(cues) if style.speaker_mark in (SpeakerMark.COLOUR, SpeakerMark.BOTH) else {}
+    named = style.speaker_mark in (SpeakerMark.NAME, SpeakerMark.BOTH)
 
     lines: List[str] = [
         "[Script Info]",
@@ -219,7 +322,7 @@ def build_ass(cues: Iterable[PlacedCue], width: int, height: int, font: str = DE
         "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, "
         "Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, "
         "Shadow, Alignment, MarginL, MarginR, MarginV, Encoding",
-        f"Style: Default,{font},{font_size},&H00FFFFFF,&H00FFFFFF,&H00000000,&H80000000,"
+        f"Style: Default,{font},{font_size},&H00FFFFFF,{waiting},&H00000000,&H80000000,"
         f"-1,0,0,0,100,100,0,0,1,{outline},{max(1, outline // 2)},2,{margin_h},{margin_h},{margin_v},1",
         "",
         "[Events]",
@@ -228,10 +331,29 @@ def build_ass(cues: Iterable[PlacedCue], width: int, height: int, font: str = DE
     # libass measures in the ASS resolution, so the usable width is the frame minus both margins.
     max_units = max(4.0, (width - 2 * margin_h) / font_size)
     for cue in cues:
-        parts = [part for part in escape_ass_text(cue.text).split("\\N") if part]
-        text = "\\N".join(line for part in parts for line in wrap_caption(part, max_units))
+        if style.karaoke and cue.words:
+            text = _karaoke_text(cue, max_units)
+        else:
+            parts = [part for part in escape_ass_text(cue.text).split("\\N") if part]
+            text = "\\N".join(line for part in parts for line in wrap_caption(part, max_units))
         if not text:
             continue
+        if named and cue.speaker:
+            # The label when there is no name for it: a caption reading `S2` is still
+            # better than one putting the words in the wrong person's mouth.
+            who = style.speaker_names.get(cue.speaker, cue.speaker)
+            text = f"{escape_ass_inline(who)}：{text}"
+        if cue.secondary:
+            second = "\\N".join(
+                line
+                for part in escape_ass_text(cue.secondary).split("\\N") if part
+                for line in wrap_caption(part, max_units / style.secondary_scale)
+            )
+            if second:
+                text = f"{text}\\N{{\\fs{max(8, round(font_size * style.secondary_scale))}}}{second}"
+        colour = colours.get(cue.speaker or "")
+        if colour:
+            text = f"{{\\c{colour}}}{text}"
         lines.append(
             f"Dialogue: 0,{format_ass_time(cue.start)},{format_ass_time(cue.end)},Default,,0,0,0,,{text}"
         )
@@ -258,14 +380,17 @@ def _pieces(
         max_seconds: Longest caption before it is broken up.
 
     Yields:
-        One `(start, end, text)` per caption, in source-file seconds.
+        One `(start, end, text, words)` per caption, in source-file seconds.
+        The words are what lets a caption light up as it is said; a segment
+        transcribed without them yields none, and such a caption lights up
+        whole.
     """
     words = [word for word in segment.words if word.end > start and word.start < end]
     if not words:
         text = segment.text.strip()
         piece_start, piece_end = max(segment.start, start), min(segment.end, end)
         if text and piece_end - piece_start > MINIMUM_CUE_SECONDS:
-            yield piece_start, piece_end, text
+            yield piece_start, piece_end, text, []
         return
 
     chunks: List[List[TranscriptWord]] = []
@@ -285,7 +410,16 @@ def _pieces(
         text = "".join(word.text for word in chunk).strip()
         piece_start, piece_end = max(chunk[0].start, start), min(chunk[-1].end, end)
         if text and piece_end - piece_start > MINIMUM_CUE_SECONDS:
-            yield piece_start, piece_end, text
+            timed = [
+                CueWord(
+                    start=Decimal(str(round(max(word.start, piece_start), 3))),
+                    end=Decimal(str(round(min(word.end, piece_end), 3))),
+                    text=word.text,
+                )
+                for word in chunk
+                if min(word.end, piece_end) > max(word.start, piece_start)
+            ]
+            yield piece_start, piece_end, text, timed
 
 def timeline_cues(
     project: Project,
@@ -293,6 +427,7 @@ def timeline_cues(
     max_characters: int = DEFAULT_MAX_CHARACTERS,
     max_seconds: float = DEFAULT_MAX_SECONDS,
     silences: Optional[Mapping[str, Sequence[Span]]] = None,
+    speakers: Optional[Mapping[str, Sequence[SpeakerTurn]]] = None,
 ) -> List[SubtitleCue]:
     """Propose captions for the speech that survived the edit.
 
@@ -317,11 +452,19 @@ def timeline_cues(
         silences: Measured silences per asset. Given them, a sentence the
             transcriber wrote over a stretch that was silent is left out
             rather than captioned: see `was_audible`.
+        speakers: The speaker split's turns per asset. Given them, each caption
+            records whose stretch it is when it is clearly one person's — the
+            same eighty percent rule the semantic layer uses, so a caption and
+            the clip it sits in cannot credit different people. A label is
+            carried whether or not the style draws it: whether to show it is a
+            decision for later, and losing it here would mean transcribing
+            again to get it back.
 
     Returns:
         The captions, ordered by the footage they come from.
     """
     measured = silences or {}
+    turns = speakers or {}
     cues: List[SubtitleCue] = []
     seen: set[CueOrder] = set()
     for clip in captioned_clips(project):
@@ -336,12 +479,16 @@ def timeline_cues(
             # A sentence the recogniser invented over an empty shot is not a caption.
             if quiet and not was_audible(share_covered(segment.start, segment.end, quiet), True):
                 continue
-            for piece_start, piece_end, text in _pieces(segment, start, end, max_characters, max_seconds):
+            for piece_start, piece_end, text, timed in _pieces(
+                segment, start, end, max_characters, max_seconds,
+            ):
                 cue = SubtitleCue(
                     asset_id=clip.asset_id,
                     source_start=Decimal(str(round(piece_start, 3))),
                     source_end=Decimal(str(round(piece_end, 3))),
                     text=text,
+                    speaker=speaker_at(turns.get(clip.asset_id, ()), piece_start, piece_end),
+                    words=timed,
                 )
                 # The same words can survive in two places — a clip split in two, or used
                 # twice — and that is one caption placed twice, not two to proofread. The

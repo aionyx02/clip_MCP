@@ -112,7 +112,8 @@ the very start of a video, use `video_fade_in` instead.
   in the cut, so it follows the footage: move a clip and its lines go with it,
   drop a clip and its lines stop appearing, split one and the line shows on
   both sides. `get_project` reports how many are stored as `subtitle_count`,
-  and `get_subtitles` reports both `total`, how many land in the cut as it
+  `set_caption_style` decides how they are drawn — see the section below.
+  `get_subtitles` reports both `total`, how many land in the cut as it
   stands, and `stored`, how many the project holds — `stored` above `total`
   means some belong to footage the edit dropped.
 - **Clip**: the part of an asset between `source_range.start` and
@@ -370,6 +371,33 @@ not send the whole plan through `save_plan` again to move one edge: every
 other selection's reason is retyped to do it, and those reasons are the part
 that cannot be rebuilt.
 
+### Caption style
+
+`set_caption_style` decides how burned-in captions are drawn. Start from the
+platform the video is going to — `youtube`, `reels`, `tiktok`, or `plain` —
+because each sets the safe area that platform's own buttons and captions take
+up, along with the text size and outline. Anything given alongside the preset
+wins, so `{"preset": "tiktok", "style": {"karaoke": false}}` is that safe area
+without the word-by-word lighting.
+
+- **Word-by-word lighting** (`karaoke`): each word brightens as it is said. On
+  for `reels` and `tiktok`, which is where it is expected. It needs the word
+  timings `generate_subtitles` puts on a caption; one written by hand has none
+  and simply lights up whole. Correcting a caption's text drops its timings,
+  so run `generate_subtitles` again if you want them back.
+- **Bilingual**: put the second language in a caption's `secondary`, either in
+  the `set_subtitles` you store or with `edit_subtitle`. It is drawn smaller
+  under the first line. Nothing here translates anything — the words are yours.
+- **Who is talking** (`speaker_mark`): `name` puts the speaker in front of the
+  line, `colour` gives each one their own, `both` does both, `off` says
+  nothing. The labels come from the speaker split as `S1`, `S2`; map them to
+  real names with `speaker_names`, for example `{"S1": "阿明"}`. A label with
+  no name keeps the label, because `S2` is better than crediting the wrong
+  person. Ask the user who is who rather than guessing from the transcript.
+  The same person in two different files gets two different labels — the
+  server cannot yet tell they are the same — so say so rather than mapping
+  both to one name and hoping.
+
 ### Covering picture (B-roll)
 
 A second pass, after the rough cut is right. `propose_broll` says where the
@@ -522,6 +550,9 @@ times refer to the source file.
 | 「右上角放一個小視窗」 / put an inset in the top right | `add_track` a second video track, then `add_clip` with `timeline_in` and a `layout` box |
 | 「中間插一段別的畫面蓋掉原本的」 / cut away to other footage over the same sound | `add_clip` on the upper video track with no `layout`, so it covers the frame, and `volume: 0` so the sound underneath keeps running |
 | 「加字幕」 / add captions | `generate_subtitles`, show the user the lines, `set_subtitles`, then render with `burn_subtitles: true` |
+| 「字幕要 TikTok 那種」「一個字一個字跳」 / platform captions, word-by-word | `set_caption_style` with `preset: "tiktok"` (or `reels`, `youtube`, `plain`) |
+| 「字幕加英文」「中英對照」 / bilingual captions | Put the other language in each caption's `secondary`, with `set_subtitles` or `edit_subtitle` |
+| 「誰在講話要標出來」「兩個人不同顏色」 / show who is speaking | `set_caption_style` with `speaker_mark` and `speaker_names` |
 | 「字幕有個字打錯了」 / a caption has the wrong word | `get_subtitles` around that moment to find the cue's `cue_id`, then one `edit_subtitle` with its new `text` |
 | 「後來又加了一段，那段沒有字幕」 / the footage added since has no captions | `generate_subtitles` again and store the new set; the captions already there follow the cut on their own |
 | 「這句字幕多停一下」 / hold this caption longer | `edit_subtitle` with a new `source_end` |

@@ -14,8 +14,13 @@ from app.engine.subtitles import (
     place_cues,
     wrap_caption,
 )
-from app.models.media import MediaAnalysis, Span, Transcript, TranscriptSegment, TranscriptWord
-from app.models.timeline import PlacedCue, Project
+from app.models.media import (
+    MediaAnalysis, Span, SpeakerTurn, Transcript, TranscriptSegment, TranscriptWord,
+)
+from app.models.timeline import (
+    CAPTION_PRESETS, CaptionStyle, CueWord, EditSubtitleOp, PlacedCue, Project, SetCaptionStyleOp,
+    SpeakerMark, SubtitleCue, apply_operation,
+)
 from app.server import generate_subtitles, get_project, get_subtitles, import_asset, render_project, repo
 from helpers import build_project, edit, insert, render, video_track
 
@@ -438,3 +443,182 @@ def test_burning_captions_that_all_belong_to_dropped_footage_is_refused(spoken: 
     assert get_subtitles(project)["placed"] == 0
     with pytest.raises(ValueError, match="none of the footage they transcribe"):
         render_project(project, is_preview=True, burn_subtitles=True)
+
+# Caption style: where the text sits, whether it lights up as it is said, a second
+# language under the first, and who is talking. Every number in a preset is a platform
+# convention rather than a measurement, so what is tested here is that the settings
+# reach the file — not that 26% is the right number for TikTok.
+
+def dialogue_of(ass: str) -> list:
+    """Pull the event lines out of an ASS file.
+
+    Args:
+        ass: The file contents.
+
+    Returns:
+        One string per `Dialogue` line.
+    """
+    return [line for line in ass.splitlines() if line.startswith("Dialogue")]
+
+def style_of(ass: str) -> list:
+    """Pull the fields of the default style out of an ASS file.
+
+    Args:
+        ass: The file contents.
+
+    Returns:
+        The style's fields, in the order the format line names them.
+    """
+    return ass.split("Style: Default,")[1].splitlines()[0].split(",")
+
+def test_a_platform_preset_moves_the_captions_out_of_its_furniture() -> None:
+    plain = style_of(build_ass([], 1080, 1920, CAPTION_PRESETS["plain"]))
+    tiktok = style_of(build_ass([], 1080, 1920, CAPTION_PRESETS["tiktok"]))
+    # Buttons up the right and a caption along the bottom, so the text sits higher and
+    # further in, and is larger to read on a phone.
+    assert int(tiktok[-2]) > int(plain[-2])
+    assert int(tiktok[-4]) > int(plain[-4])
+    assert int(tiktok[1]) > int(plain[1])
+
+def test_a_preset_is_a_starting_point_rather_than_a_lock() -> None:
+    project = Project(id="p", width=1080, height=1920)
+    apply_operation(project, SetCaptionStyleOp(preset="tiktok", style=CaptionStyle(karaoke=False)), {})
+    assert project.caption_style.karaoke is False
+    # And everything the preset said that was not argued with is still there.
+    assert project.caption_style.bottom_fraction == CAPTION_PRESETS["tiktok"].bottom_fraction
+
+def test_a_preset_nobody_has_is_refused_by_name() -> None:
+    with pytest.raises(ValidationError, match="no caption preset"):
+        SetCaptionStyleOp(preset="vimeo")
+
+def test_a_caption_lights_up_word_by_word_when_it_has_the_timings() -> None:
+    cue = PlacedCue(cue_id="c1", start=0, end=2, text="一二三", words=[
+        CueWord(start=Decimal("0.0"), end=Decimal("0.5"), text="一"),
+        CueWord(start=Decimal("0.8"), end=Decimal("1.2"), text="二"),
+        CueWord(start=Decimal("1.2"), end=Decimal("2.0"), text="三"),
+    ])
+    line = dialogue_of(build_ass([cue], 1080, 1920, CaptionStyle(karaoke=True)))[0]
+    # Fifty centiseconds for the first word, thirty of silence before the second.
+    assert r"{\k50}一" in line and r"{\k30}" in line and r"{\k40}二" in line
+    # The colour a word waits in has to differ from the one it lands on, or the lighting
+    # happens and nothing looks any different.
+    fields = style_of(build_ass([], 1080, 1920, CaptionStyle(karaoke=True)))
+    assert fields[2] != fields[3]
+
+def test_a_caption_with_no_timings_lights_up_whole() -> None:
+    cue = PlacedCue(cue_id="c1", start=0, end=2, text="沒有逐字時間")
+    line = dialogue_of(build_ass([cue], 1080, 1920, CaptionStyle(karaoke=True)))[0]
+    assert r"{\k" not in line and "沒有逐字時間" in line
+
+def test_the_second_line_of_a_bilingual_caption_is_drawn_smaller() -> None:
+    cue = PlacedCue(cue_id="c1", start=0, end=2, text="第一句", secondary="The first line")
+    line = dialogue_of(build_ass([cue], 1080, 1920, CaptionStyle()))[0]
+    assert "第一句" in line and "The first line" in line
+    assert chr(92) + "N" + r"{\fs" in line
+
+def test_who_is_talking_reaches_the_screen_as_a_name_a_colour_or_neither() -> None:
+    cues = [
+        PlacedCue(cue_id="c1", start=0, end=2, text="早安", speaker="S1"),
+        PlacedCue(cue_id="c2", start=2, end=4, text="你好", speaker="S2"),
+    ]
+    off = dialogue_of(build_ass(cues, 1080, 1920, CaptionStyle()))
+    assert not any("阿明" in line or r"{\c" in line for line in off)
+
+    named = dialogue_of(build_ass(cues, 1080, 1920, CaptionStyle(
+        speaker_mark=SpeakerMark.NAME, speaker_names={"S1": "阿明"},
+    )))
+    assert "阿明：早安" in named[0]
+    # No name for S2, so the label stands: better than putting the words in 阿明's mouth.
+    assert "S2：你好" in named[1]
+
+    coloured = dialogue_of(build_ass(cues, 1080, 1920, CaptionStyle(speaker_mark=SpeakerMark.COLOUR)))
+    assert coloured[0].split(r"{\c")[1] != coloured[1].split(r"{\c")[1]
+    assert "S1" not in coloured[0]
+
+def test_a_speaker_keeps_one_colour_however_the_cut_is_ordered() -> None:
+    # Assigned by label rather than by who speaks first, so re-rendering a cut that was
+    # rearranged does not swap two people's colours.
+    forwards = [
+        PlacedCue(cue_id="c1", start=0, end=2, text="一", speaker="S1"),
+        PlacedCue(cue_id="c2", start=2, end=4, text="二", speaker="S2"),
+    ]
+    style = CaptionStyle(speaker_mark=SpeakerMark.COLOUR)
+    backwards = [forwards[1].model_copy(update={"start": Decimal(0), "end": Decimal(2)}),
+                 forwards[0].model_copy(update={"start": Decimal(2), "end": Decimal(4)})]
+    first = {line.split(",,0,0,0,,")[1][:12] for line in dialogue_of(build_ass(forwards, 1080, 1920, style))}
+    second = {line.split(",,0,0,0,,")[1][:12] for line in dialogue_of(build_ass(backwards, 1080, 1920, style))}
+    assert first == second
+
+def test_generated_captions_carry_the_words_and_who_said_them(media: Path) -> None:
+    asset = import_asset(str(media / "wide.mp4"))["id"]
+    repo.save_analysis(MediaAnalysis(
+        asset_id=asset, duration=10.0,
+        speakers=[SpeakerTurn(start=0.0, end=10.0, speaker="S1")],
+        transcript=Transcript(language="zh", model="test", segments=[
+            TranscriptSegment(start=1.0, end=3.0, text="一二", words=words(("一", 1.0, 2.0), ("二", 2.0, 3.0))),
+        ]),
+    ))
+    project = build_project([video_track(), insert("a", asset, 0, 5)], width=640, height=360)
+    cue = generate_subtitles(project)["cues"][0]
+    assert cue["speaker"] == "S1"
+    assert [word["text"] for word in cue["words"]] == ["一", "二"]
+
+def test_correcting_a_caption_drops_word_timings_that_no_longer_describe_it() -> None:
+    project = Project(id="p", width=640, height=360, subtitles=[SubtitleCue(
+        id="c1", asset_id="a", source_start=Decimal("1.0"), source_end=Decimal("3.0"),
+        text="一二", words=[CueWord(start=Decimal("1.0"), end=Decimal("3.0"), text="一二")],
+    )])
+    apply_operation(project, EditSubtitleOp(cue_id="c1", text="一二三"), {})
+    # Lighting up against the wrong syllables is worse than lighting up whole.
+    assert project.subtitles[0].text == "一二三" and project.subtitles[0].words == []
+    apply_operation(project, EditSubtitleOp(cue_id="c1", secondary="one two three"), {})
+    assert project.subtitles[0].secondary == "one two three"
+
+def test_word_timings_follow_the_footage_onto_the_timeline(media: Path) -> None:
+    asset = import_asset(str(media / "wide.mp4"))["id"]
+    project = build_project([video_track(), insert("a", asset, 2, 6)], width=640, height=360)
+    stored = repo.get_project(project)
+    stored.subtitles = [SubtitleCue(
+        id="c1", asset_id=asset, source_start=Decimal("3.0"), source_end=Decimal("5.0"), text="一二",
+        words=[CueWord(start=Decimal("3.0"), end=Decimal("4.0"), text="一"),
+               CueWord(start=Decimal("4.0"), end=Decimal("5.0"), text="二")],
+    )]
+    placed = place_cues(stored, stored.subtitles)[0]
+    # The clip opens two seconds into the file, so everything in it lands two earlier.
+    assert (placed.start, placed.end) == (Decimal("1.000"), Decimal("3.000"))
+    assert [(word.start, word.end) for word in placed.words] == [
+        (Decimal("1.000"), Decimal("2.000")), (Decimal("2.000"), Decimal("3.000")),
+    ]
+
+def test_a_platform_preset_really_moves_the_text_in_the_rendered_picture(
+    media: Path, tmp_path: Path
+) -> None:
+    """Measured off a render, because every step between the preset and the picture can drop it."""
+    asset = import_asset(str(media / "black.mp4"))["id"]
+    transcribe(asset, [TranscriptSegment(
+        start=1.0, end=3.0, text="字幕測試", words=words(("字", 1.0, 1.5), ("幕測試", 1.5, 3.0)),
+    )])
+
+    def lowest_lit_row(preset: str) -> float:
+        """Render with one preset and find how far down the picture its text reaches."""
+        project = build_project([video_track(), insert("a", asset, 0, 5)], width=360, height=640)
+        edit(project, [
+            {"action": "set_subtitles", "cues": generate_subtitles(project)["cues"]},
+            {"action": "set_caption_style", "preset": preset},
+        ])
+        stored = repo.get_project(project)
+        subtitle_file = tmp_path / f"{preset}.ass"
+        subtitle_file.write_text(
+            build_ass(place_cues(stored, stored.subtitles), 360, 640, stored.caption_style),
+            encoding="utf-8",
+        )
+        out = tmp_path / f"{preset}.mp4"
+        render(project, out, loudness_target=None, subtitle_path=str(subtitle_file))
+        frame = extract_frame(str(out), 2.0, max_size=360).convert("L")
+        width, height = frame.size
+        lit = [y for y in range(height) for x in range(width) if frame.getpixel((x, y)) > 160]
+        assert lit, preset
+        return max(lit) / height
+
+    # TikTok's own buttons and caption take the bottom quarter, so the text stops higher.
+    assert lowest_lit_row("tiktok") < lowest_lit_row("plain")

@@ -11,7 +11,7 @@ from fastmcp.server.transforms import ResourcesAsTools
 from fastmcp.tools import ToolResult
 from fastmcp.utilities.types import Image
 from pydantic import Field, TypeAdapter
-from app.models.media import Asset, Measured, MediaAnalysis, Span
+from app.models.media import Asset, Measured, MediaAnalysis, Span, SpeakerTurn
 from app.models.plan import EditPlan, PlanAmendment, apply_amendment
 from app.models.semantic import (
     ClipDescription, ClipKind, ClipLevel, SectionChoice, SemanticClip, SemanticTimeline, Tag, TagSource,
@@ -1295,7 +1295,9 @@ def apply_edits(project_id: str, expected_version: int, operations: list[EditOpe
     of the video begins. `compile_plan` writes one per beat, so a cut compiled
     from a plan arrives with its shape on it; markers added by hand have no
     beat behind them and survive the next compile. `set_subtitles` replaces the captions
-    `render_project` burns in.
+    `render_project` burns in, and `set_caption_style` says how they are drawn:
+    a platform preset for the safe area its own buttons take up, whether each
+    word lights as it is said, and whether a caption says who is talking.
 
     The resulting timeline must satisfy these rules:
     - Clips stay within their asset's duration and do not overlap on a track.
@@ -1940,7 +1942,10 @@ def generate_subtitles(
     Returns:
         A dictionary with `cues`, each holding its `id`, the `asset_id` the
         words were spoken in, `source_start` and `source_end` in seconds
-        within that file, and its `text`; `assets_without_transcript`, the
+        within that file, its `text`, the `speaker` the speaker split credits
+        it to where one voice clearly holds it, and the `words` inside it with
+        their own timings, which is what lets a caption light up as it is
+        said; `assets_without_transcript`, the
         video sources that still need `analyze_asset` before they can be
         captioned; and `overlapping`, how many captions land on top of the one
         before them once the cut puts them on screen, which is worth a look
@@ -1956,6 +1961,7 @@ def generate_subtitles(
 
     transcripts = {}
     silences: dict[str, List[Span]] = {}
+    speakers: dict[str, List[SpeakerTurn]] = {}
     untranscribed: List[str] = []
     base = project.base_video_track
     # Reported as a gap only for the sequence itself: a music bed has no transcript and
@@ -1969,6 +1975,7 @@ def generate_subtitles(
         if analysis is not None and analysis.transcript is not None:
             transcripts[clip.asset_id] = analysis.transcript
             silences[clip.asset_id] = analysis.silences
+            speakers[clip.asset_id] = analysis.speakers
         elif clip.asset_id in sequence:
             untranscribed.append(clip.asset_id)
 
@@ -1987,7 +1994,8 @@ def generate_subtitles(
             "call analyze_asset on its sources first"
         )
     cues = timeline_cues(
-        project, transcripts, max_characters=max_characters, max_seconds=max_seconds, silences=silences,
+        project, transcripts, max_characters=max_characters, max_seconds=max_seconds,
+        silences=silences, speakers=speakers,
     )
     # Counted where the captions land, not where the words were said: two lines from
     # different files overlap only once the cut puts them on screen together.
@@ -2143,7 +2151,7 @@ def render_project(
         os.makedirs(job.work_dir, exist_ok=True)
         subtitle_path = os.path.join(job.work_dir, "subtitles.ass")
         with open(subtitle_path, "w", encoding="utf-8") as handle:
-            handle.write(build_ass(placed, project.width, project.height))
+            handle.write(build_ass(placed, project.width, project.height, project.caption_style))
 
     command = renderer.build_command(
         project, _referenced_assets(project), job.output_path,
