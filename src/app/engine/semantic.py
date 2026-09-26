@@ -40,6 +40,7 @@ MOSTLY = 0.5
 NEARLY_ALL = 0.9
 # How much of the talking in a stretch one voice has to hold before the stretch is called
 # theirs. A sentence that straddles a handover belongs to neither, and says so.
+# Provisional.
 SPEAKER_MAJORITY = 0.8
 # How far apart two voices have to sit before they are two people, when the question is
 # whether a label in one file is the same person as a label in another. Cosine distance,

@@ -26,12 +26,14 @@ from app.engine.ffmpeg import OperationCancelled
 from app.models.media import FaceMeasurement
 
 # Stills are written this often, and named by their position in that sequence.
+# Provisional: twice a second is also how often the reframing can react.
 FRAME_FPS = 2
 FRAME_WIDTH = 480
 FRAME_PATTERN = "face_%06d.jpg"
 FRAME_NAME = re.compile(r"face_(\d+)\.jpg$")
 # Below this the detector is guessing. Raising it loses small faces in the background,
 # which is the right trade for "is there somebody in this shot and where are they".
+# Provisional.
 SCORE_THRESHOLD = 0.6
 NMS_THRESHOLD = 0.3
 TOP_K = 50

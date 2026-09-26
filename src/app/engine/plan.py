@@ -28,7 +28,8 @@ from app.models.semantic import ClipKind, SemanticClip, SemanticTimeline
 from app.models.timeline import Clip, Project
 
 # Air left around a cut, taken from the clip's measured headroom, so a line does not
-# begin the instant the picture does. Never more than the headroom allows.
+# begin the instant the picture does. Never more than the headroom allows. The default
+# for a plan's `pacing.breath_seconds`. Provisional.
 BREATH_SECONDS = 0.1
 # Two pieces this close together become one clip; a gap this short reads as a stumble.
 MERGE_GAP_SECONDS = 0.3

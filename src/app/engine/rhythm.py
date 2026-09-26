@@ -50,7 +50,7 @@ TIGHTNESS = 100.0
 # about one — music without a pulse, where a beat would be made up. Provisional.
 MIN_CONTRAST = 3.0
 # The bands the spectrum is summed into, spaced evenly in pitch from a kick drum's
-# fundamental to the top of a snare's crack.
+# fundamental to the top of a snare's crack. Provisional.
 BANDS = 24
 LOWEST_HZ = 40.0
 HIGHEST_HZ = 5000.0

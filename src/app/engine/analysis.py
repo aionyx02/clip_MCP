@@ -50,11 +50,12 @@ SILENCE_NOISE_DB = -35
 SILENCE_MIN_SECONDS = 0.3
 # Picture measurements: four samples a second is far more than exposure or blur need,
 # and enough for motion to tell a still shot from one where something is happening.
+# Provisional.
 PICTURE_FPS = 4
 PICTURE_WIDTH = 480
 # Shake is a fast wobble, so it has to be sampled fast; the camera's own movement is
 # measured on a small picture because a displacement in frame widths does not depend
-# on how many pixels the frame has.
+# on how many pixels the frame has. Provisional.
 CAMERA_FPS = 15
 CAMERA_WIDTH = 320
 # Full accuracy is for stabilising footage. This only measures how much it moves.

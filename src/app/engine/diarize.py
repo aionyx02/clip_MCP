@@ -30,7 +30,7 @@ MIN_SPEECH_SECONDS = 0.3
 MIN_PAUSE_SECONDS = 0.5
 # How far apart two voices have to be before they are two people. Only used when the
 # number of speakers is not known; given one, the clustering is told to find exactly that
-# many and this is ignored.
+# many and this is ignored. Provisional.
 SPEAKER_DISTANCE = 0.5
 THREADS = 2
 # How much of a voice to measure before deciding what it sounds like. Longer is steadier,
