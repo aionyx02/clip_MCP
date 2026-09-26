@@ -301,6 +301,12 @@ class ColorAdjust(BaseModel):
             and self.temperature is None
         )
 
+# Said the same way on a clip and on the operations that set it.
+KEEP_LEVEL = (
+    "Play this clip's sound at the level it was recorded, relative to everything else, instead of bringing its "
+    "talking to the level of the rest — for a whisper or a shout that is meant to be one. Its volume still applies"
+)
+
 class WipeDirection(str, Enum):
     """Which way a wipe travels across the frame."""
 
@@ -456,6 +462,7 @@ class Clip(BaseModel):
         default_factory=VoiceCleanup,
         description="Repairs applied to the voice on this clip; nothing by default",
     )
+    keep_level: bool = Field(default=False, description=KEEP_LEVEL)
     transition_in: Optional[Transition] = Field(
         default=None,
         description="How this clip's picture arrives over the end of the clip before it: a dissolve, a wipe, or a "
@@ -747,6 +754,7 @@ class _NewClipSpec(BaseModel):
     audio_lead: Decimal = Field(default=Decimal(0), ge=0, description="Seconds the sound starts before the picture (J cut)")
     audio_lag: Decimal = Field(default=Decimal(0), ge=0, description="Seconds the sound runs on after the picture (L cut)")
     cleanup: VoiceCleanup = Field(default_factory=VoiceCleanup, description="Repairs applied to the voice")
+    keep_level: bool = Field(default=False, description=KEEP_LEVEL)
     transition_in: Optional[Transition] = Field(
         default=None, description="How the picture arrives over the clip before it; null is a straight cut",
     )
@@ -1040,6 +1048,7 @@ class SetClipAudioOp(BaseModel):
         description="Repairs to apply to the voice on this clip. Only the ones named here change, so asking "
                     "for the hiss to go does not put the rumble back",
     )
+    keep_level: Optional[bool] = Field(default=None, description=KEEP_LEVEL)
 
 class SetMarkersOp(BaseModel):
     """Edit operation that replaces the timeline's structure markers.
@@ -1209,6 +1218,7 @@ def _new_clip(track: Track, spec: _NewClipSpec, timeline_in: Decimal) -> Clip:
         audio_lead=spec.audio_lead,
         audio_lag=spec.audio_lag,
         cleanup=spec.cleanup,
+        keep_level=spec.keep_level,
         transition_in=spec.transition_in,
         video_fade_in=spec.video_fade_in,
         video_fade_out=spec.video_fade_out,
@@ -1540,7 +1550,7 @@ def apply_operation(project: Project, op: EditOperation, assets: Mapping[str, As
             clip.layout = op.layout
     elif isinstance(op, SetClipAudioOp):
         clip = _find_clip(track, op.clip_id)
-        for field in ("volume", "audio_fade_in", "audio_fade_out", "audio_lead", "audio_lag"):
+        for field in ("volume", "audio_fade_in", "audio_fade_out", "audio_lead", "audio_lag", "keep_level"):
             value = getattr(op, field)
             if value is not None:
                 setattr(clip, field, value)

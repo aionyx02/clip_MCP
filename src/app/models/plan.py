@@ -145,6 +145,11 @@ class Selection(BaseModel):
         description="How loud this piece's own sound plays: 0 mutes it (a shout, wind, a street under music), "
                     "0.5 halves it. Null for as recorded",
     )
+    keep_level: bool = Field(
+        default=False,
+        description="Leave this piece's talking at the level it was recorded instead of bringing it to the level "
+                    "of the rest: a whisper, a shout, somebody far from the microphone on purpose",
+    )
     hold_picture: bool = Field(
         default=False,
         description="This shot is here for what it shows, not only for what is said over it, so B-roll may not "
@@ -306,13 +311,6 @@ class EditPlan(BaseModel):
     )
     music: Optional[MusicPlan] = None
     pacing: Pacing = Field(default_factory=Pacing, description="How tight the whole cut is")
-    level_voices: bool = Field(
-        default=False,
-        description="Turn each person down to match the quietest of them, so two people recorded at very "
-                    "different levels do not jump between shots. Off by default: matching voices is a "
-                    "judgement about a conversation, and on a single speaker there is nothing to match. "
-                    "`validate_plan` says how far apart the voices are, which is what it is worth deciding from",
-    )
     created_at: datetime = Field(default_factory=_utc_now)
     updated_at: datetime = Field(default_factory=_utc_now)
 
@@ -400,6 +398,7 @@ class SetPlaybackOp(BaseModel):
     clip_id: str = Field(..., description="Semantic clip whose selection plays differently")
     speed: Optional[float] = Field(default=None, ge=0.25, le=8, description="As on a selection; null for as shot")
     volume: Optional[float] = Field(default=None, ge=0, le=4, description="As on a selection; null for as recorded")
+    keep_level: bool = Field(default=False, description="As on a selection")
 
 class SetBeatJoinOp(BaseModel):
     """Amendment that changes how the picture and the sound pass into a beat from the one before."""
@@ -512,7 +511,7 @@ def apply_amendment(plan: EditPlan, op: PlanAmendment) -> None:
 
     if isinstance(op, SetPlaybackOp):
         selection = plan.selections[_selection_index(plan, op.clip_id)]
-        selection.speed, selection.volume = op.speed, op.volume
+        selection.speed, selection.volume, selection.keep_level = op.speed, op.volume, op.keep_level
         return
 
     if isinstance(op, SetBeatJoinOp):

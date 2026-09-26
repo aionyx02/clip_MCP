@@ -253,7 +253,7 @@ feedback are mapped in their own files.
 | 「人聲出現時音樂小聲一點」 / duck the music under the talking | `set_track_audio` on the music track with `duck_under_speech: true` |
 | 「把影片原音關掉」 / mute the original sound | `set_clip_audio` `volume: 0` on every video clip |
 | 「聲音先進來」「上一句講完再切」 / J cut, L cut | `set_clip_audio` with `audio_lead` on the incoming clip, or `audio_lag` on the outgoing one |
-| 「每段音量差很多」 / the volume jumps between clips | Nothing: `render_project` normalizes the finished mix |
+| 「每段音量差很多」 / the volume jumps between clips | Nothing where the footage is transcribed: every clip's talking is brought to one level and the places nobody talks in are kept under it. Otherwise `render_project` normalizes the finished mix |
 | 「這裡用溶接」「不要硬切」 / cross dissolve | `set_clip_look` on the incoming clip with `transition_in: {kind: "dissolve", seconds: 1}` |
 | 「用擦劃轉場」「從左邊掃過去」 / wipe | `set_clip_look` with `transition_in: {kind: "wipe", seconds: 0.6, direction: "left"}` |
 | 「這裡淡到黑再進來」「過白場」 / dip through a colour | `set_clip_look` with `transition_in: {kind: "dip", seconds: 1, through: "black"}`; `white` or a hex colour also work |

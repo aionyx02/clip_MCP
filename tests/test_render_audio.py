@@ -344,3 +344,13 @@ def test_the_duck_is_held_between_sentences_close_together() -> None:
     # The first two are half a second apart and held as one; the third is its own.
     assert envelope.count("clip((t-") == 2
     assert _duck_volume([]) == "anull"
+
+def test_each_clip_is_turned_by_what_brings_it_to_the_rest(audio_media: Path, tmp_path: Path) -> None:
+    quiet = import_asset(str(audio_media / "quiet.mp4"))["id"]
+    loud = import_asset(str(audio_media / "loud.mp4"))["id"]
+    project = build_project(
+        [video_track(), insert("q", quiet, 0, 4), insert("l", loud, 0, 4)], width=320, height=240
+    )
+    # 0.05 against 0.6 is about 21.6 dB; the loud clip is turned down by that much.
+    render(project, tmp_path / "out.mp4", loudness_target=None, talking=Talking(clip_gains={"l": -21.6}))
+    assert level(tmp_path / "out.mp4", 4.5, 3.0) - level(tmp_path / "out.mp4", 0.5, 3.0) == pytest.approx(0, abs=1.0)

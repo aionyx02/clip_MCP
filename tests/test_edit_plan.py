@@ -22,7 +22,6 @@ from app.engine.plan import (
     BREATH_SECONDS,
     broll_covers,
     broll_slots,
-    piece_gain,
     Piece,
     MERGE_GAP_SECONDS,
     PAUSE_SECONDS,
@@ -39,7 +38,7 @@ from app.engine.plan import (
     plan_pieces,
 )
 from app.engine.sections import build_sections
-from app.engine.semantic import build_timeline, clean_cuts, join_voices, voice_gains, voice_levels
+from app.engine.semantic import build_timeline, clean_cuts, join_voices
 from app.models.media import (
     Asset, MediaAnalysis, Rhythm, SoundMeasurement, Span, SpeakerTurn, Transcript, TranscriptSegment,
     TranscriptWord, Voice,
@@ -1487,83 +1486,6 @@ def test_a_pinned_clip_is_matched_on_its_own_track() -> None:
     laid = [op for op in operations if op.get("track_id") == "broll" and op["action"] == "add_clip"]
     assert len(laid) == 1
     assert provenance[laid[0]["clip_id"]]["from_clip_ids"] == [quiet.id, speech[0].id]
-
-# Matching two people's levels: the server measures how far apart they are, the plan
-# decides whether to do anything about it, and the compiler does the arithmetic.
-
-def two_voices(quiet_db: float = -30.0, loud_db: float = -18.0) -> tuple:
-    """A file where two people speak in turn at very different levels.
-
-    Args:
-        quiet_db: The level the first voice speaks at.
-        loud_db: The level the second one speaks at.
-
-    Returns:
-        `(clips_by_id, assets, ordered_clips, levels)`.
-    """
-    made = MediaAnalysis(
-        asset_id=ASSET_ID, duration=20.0,
-        silences=spans([(0.0, 1.0), (3.0, 5.0), (7.0, 20.0)]),
-        speakers=[SpeakerTurn(start=1.0, end=3.0, speaker="S1"),
-                  SpeakerTurn(start=5.0, end=7.0, speaker="S2")],
-        voices=[Voice(speaker="S1", embedding=[1.0, 0.0], seconds=2.0),
-                Voice(speaker="S2", embedding=[0.0, 1.0], seconds=2.0)],
-        sound=[
-            SoundMeasurement(start=float(second), end=float(second + 1),
-                             loudness=quiet_db if second < 4 else loud_db,
-                             peak=-3.0, noise_floor=-60.0, flatness=0.1)
-            for second in range(1, 7)
-        ],
-        transcript=Transcript(language="zh", model="test", segments=[
-            TranscriptSegment(start=1.0, end=3.0, text="第一個人",
-                              words=[TranscriptWord(start=1.0, end=3.0, text="第一個人")]),
-            TranscriptSegment(start=5.0, end=7.0, text="第二個人",
-                              words=[TranscriptWord(start=5.0, end=7.0, text="第二個人")]),
-        ]),
-    )
-    one = sourced(seconds=20.0)
-    _, clips = build_timeline({ASSET_ID: one}, {ASSET_ID: made})
-    analyses = {ASSET_ID: made}
-    return ({c.id: c for c in clips}, {ASSET_ID: one}, clips,
-            voice_levels(analyses, join_voices(analyses)))
-
-def test_how_far_apart_the_voices_are_is_measured_and_said() -> None:
-    by_id, assets, clips, levels = two_voices()
-    assert round(max(levels.values()) - min(levels.values())) == 12
-    plan = plan_for([Selection(clip_id=clip.id, beat_id="b1") for clip in speech_of(clips)])
-    _, notes = check_plan(plan, SemanticTimeline(
-        id=plan.timeline_id, asset_ids=[ASSET_ID], input_hash=plan.timeline_input_hash,
-        derivation_version=1,
-    ), by_id, {}, assets, None, levels)
-    assert any("apart" in note and "level_voices" in note for note in notes)
-
-def test_nothing_is_levelled_until_the_plan_asks() -> None:
-    by_id, assets, clips, levels = two_voices()
-    plan = plan_for([Selection(clip_id=clip.id, beat_id="b1") for clip in speech_of(clips)])
-    operations, _ = compile_operations(plan, by_id, {}, assets, None, None, levels)
-    assert all("volume" not in op for op in operations if op["action"] == "insert_clip")
-
-def test_asking_for_it_turns_the_louder_voice_down_to_the_quieter() -> None:
-    by_id, assets, clips, levels = two_voices()
-    plan = plan_for([Selection(clip_id=clip.id, beat_id="b1") for clip in speech_of(clips)],
-                    level_voices=True)
-    operations, _ = compile_operations(plan, by_id, {}, assets, None, None, levels)
-    volumes = [op.get("volume", 1.0) for op in operations
-               if op["action"] == "insert_clip" and op["track_id"] == "main"]
-    # Twelve decibels down is a quarter of the amplitude; the quiet one is left alone.
-    assert volumes[0] == 1.0
-    assert volumes[1] == pytest.approx(10 ** (-12 / 20), abs=0.01)
-    # Turning down rather than up, so nothing can clip and no hiss is brought up with it.
-    assert all(volume <= 1.0 for volume in volumes)
-
-def test_a_window_that_holds_two_people_is_left_alone() -> None:
-    """Turning it by either one's gain would be picking a side."""
-    by_id, assets, clips, levels = two_voices()
-    both = next(clip for clip in clips if clip.speaker is None)
-    assert piece_gain(Piece(ASSET_ID, 0.0, 8.0, (both.id,)), by_id, {"V1": 0.25, "V2": 1.0}) == 1.0
-
-def test_one_voice_on_its_own_is_already_consistent_with_itself() -> None:
-    assert voice_gains({"V1": -20.0}) == {}
 
 # Music that changes with the parts of the video, and cuts put on its beat. Where the
 # beat is comes from the analysis; everything here is arithmetic on those times.

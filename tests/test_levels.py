@@ -6,7 +6,7 @@ import pytest
 
 from app.engine.builder import Talking
 from app.engine.delivery import check_delivery
-from app.engine.levels import talking_in
+from app.engine.levels import AMBIENCE_UNDER_TALK_DB, LEVEL_RANGE_DB, TALK_DB, talking_in
 from app.models.media import Asset, MediaAnalysis, SoundMeasurement, Transcript, TranscriptSegment
 from app.models.timeline import Clip, Project, Track
 
@@ -46,8 +46,10 @@ def test_the_talking_is_placed_on_the_timeline_and_the_music_brought_to_it() -> 
     # Three seconds into the file is half a second into a clip played twice as fast from two
     # seconds in; the sentence at eight seconds is not in the clip at all.
     assert talking.spans == ((0.5, 1.5),)
-    # Heard at -30 dB turned down by half (-6 dB): the song goes to that level.
-    assert talking.music_gains["music"] == pytest.approx(-36.02 + 12.0, abs=0.01)
+    # The talking is brought from -30 dB to TALK_DB, then turned down by half (-6 dB); the
+    # song goes to that level.
+    assert talking.clip_gains == {"c": pytest.approx(TALK_DB + 30.0)}
+    assert talking.music_gains["music"] == pytest.approx(TALK_DB - 6.02 + 12.0, abs=0.01)
 
 def test_footage_nobody_transcribed_leaves_the_talking_unknown() -> None:
     analyses = {"cam": MediaAnalysis(asset_id="cam", duration=10, sound=sound(-30))}
@@ -65,8 +67,10 @@ def test_a_cutaway_analyzed_without_its_words_counts_as_nobody_talking() -> None
     }
     talking = talking_in(cut, assets, analyses, {}, lambda clip: -12.0)
     assert talking.spans == ((1.0, 3.0),)
-    # The loud street is not part of the level the music is set against.
-    assert talking.music_gains["music"] == pytest.approx(-30.0 + 12.0, abs=0.01)
+    # The loud street is not part of the level the music is set against, and it is turned
+    # down under the talking — as far as it may be turned.
+    assert talking.music_gains["music"] == pytest.approx(TALK_DB + 12.0, abs=0.01)
+    assert talking.clip_gains["b"] == -LEVEL_RANGE_DB
 
 def test_a_song_that_cannot_be_measured_is_left_at_its_own_level() -> None:
     analyses = {"cam": MediaAnalysis(asset_id="cam", duration=10, transcript=said((3, 5)), sound=sound(-30))}
@@ -85,3 +89,57 @@ def test_music_close_under_the_talking_is_found_before_the_render() -> None:
     assert not [finding for finding in check_delivery(loud, {}, talking=talking) if finding.check == "music"]
     # Nothing is said about music that was never brought to the talking.
     assert not check_delivery(loud, {}, talking=Talking(spans=((0.5, 1.5),)))
+
+def sequence(*clips: Clip) -> Project:
+    """A project whose sequence is these clips."""
+    return Project(id="p", tracks=[Track(id="main", track_type="video", clips=list(clips))])
+
+def cut_from(asset_id: str, clip_id: str, at: float, low: float, high: float, **fields) -> Clip:
+    """A clip of `asset_id` from `low` to `high` seconds, placed at `at`."""
+    return Clip(id=clip_id, asset_id=asset_id, timeline_in=Decimal(str(at)),
+                source_range={"start": low, "end": high}, **fields)
+
+def test_a_voice_far_from_the_camera_and_one_close_to_it_come_out_alike() -> None:
+    assets = {
+        name: Asset(id=name, path=f"{name}.mp4", duration=Decimal(10), has_video=True, has_audio=True)
+        for name in ("far", "near")
+    }
+    analyses = {
+        "far": MediaAnalysis(asset_id="far", duration=10, transcript=said((0, 10)), sound=sound(-32)),
+        "near": MediaAnalysis(asset_id="near", duration=10, transcript=said((0, 10)), sound=sound(-14)),
+    }
+    project = sequence(cut_from("far", "a", 0, 0, 5), cut_from("near", "b", 5, 0, 5))
+    gains = talking_in(project, assets, analyses, {}, lambda clip: None).clip_gains
+    assert -32 + gains["a"] == pytest.approx(TALK_DB) and -14 + gains["b"] == pytest.approx(TALK_DB)
+
+def test_a_line_too_short_to_measure_takes_the_level_of_its_file() -> None:
+    made = MediaAnalysis(asset_id="cam", duration=10, transcript=said((1, 2), (5, 9)), sound=[
+        *sound(-20, 5), *[
+            SoundMeasurement(start=second, end=second + 1, loudness=-30, peak=-24, noise_floor=-80, flatness=0)
+            for second in range(5, 10)
+        ],
+    ])
+    # One second of talking: not enough to measure, so the file's talking as a whole is used —
+    # one second at -20 and four at -30, which add up as sound to -25.5.
+    project = sequence(cut_from("cam", "a", 0, 0.5, 2.5))
+    gain = talking_in(project, ASSETS, {"cam": made}, {}, lambda clip: None).clip_gains["a"]
+    assert gain == pytest.approx(TALK_DB + 25.53, abs=0.01)
+
+def test_a_quiet_place_is_not_brought_up_and_a_kept_clip_moves_with_the_rest() -> None:
+    assets = {
+        name: Asset(id=name, path=f"{name}.mp4", duration=Decimal(10), has_video=True, has_audio=True)
+        for name in ("cam", "room")
+    }
+    analyses = {
+        "cam": MediaAnalysis(asset_id="cam", duration=10, transcript=said((0, 10)), sound=sound(-26)),
+        "room": MediaAnalysis(asset_id="room", duration=10, transcript=said(), sound=sound(-50)),
+    }
+    project = sequence(
+        cut_from("cam", "a", 0, 0, 4), cut_from("room", "b", 4, 0, 3),
+        cut_from("cam", "c", 7, 5, 9, keep_level=True),
+    )
+    gains = talking_in(project, assets, analyses, {}, lambda clip: None).clip_gains
+    assert gains["b"] == 0.0
+    assert -50 < TALK_DB - AMBIENCE_UNDER_TALK_DB
+    # Kept at its recorded level against the others: moved as the typical clip was.
+    assert gains["c"] == gains["a"] or gains["c"] == gains["b"]

@@ -168,13 +168,15 @@ a default and why the settings are gentle — a voice scrubbed until it sounds
 underwater is a worse result than the hiss was. Ask which problem the user
 actually hears rather than turning all three on.
 
-`level_voices` on the plan is for a conversation where one person was much
-louder than the other. `validate_plan` says how far apart the voices are when
-it is worth saying, so read that first: under a few decibels there is nothing
-to fix. It turns the louder people down to match the quietest, so nothing
-clips, and the render's own loudness normalization brings the whole thing back
-up afterwards. A window where two people talk over each other is left alone —
-it belongs to neither of them.
+Levels are set for you where the footage is transcribed. The talking in every
+clip is brought to one level, measured over its sentences alone, so somebody
+far from the camera and somebody shouting into it come out alike; a clip
+nobody talks in — a street, a café, a timelapse — is kept under that talking
+rather than over it; the music sits against the talking too. So do not even
+out voices by hand. A whisper or a shout that is meant to be one is the
+exception: `keep_level` on that selection leaves it where it was recorded
+against the rest. A clip's `volume` still applies on top of all this, so 0.5
+still means half as loud as its neighbours.
 
 Softening the sound across a transition is not automatic, and deliberately so:
 how long and which side are judgements. Use `audio_fade_out` on the outgoing
@@ -186,7 +188,8 @@ clip and `audio_fade_in` on the incoming one when the user asks for it.
 |---|---|
 | 「這段畫面太悶，蓋點別的」 / cover this with other footage | `propose_broll`, then `amend_plan` with `add_broll` |
 | 「這段畫面不能蓋掉」 / this shot has to be seen | `hold_picture: true` on that selection |
-| 「這個人聲音小很多」「兩個人音量差很多」 / match two people's levels | `save_plan` or `amend_plan` with `level_voices: true`; `validate_plan` says how far apart they are |
+| 「這個人聲音小很多」「兩個人音量差很多」 / match two people's levels | Already matched where the footage is transcribed; `preview_sound` to check. If one stays apart, it was not transcribed — analyze it with transcription |
+| 「這句悄悄話要小聲」「這裡大叫要保留」 / keep this one as loud or quiet as it was | `amend_plan` with `set_playback` and `keep_level: true` on that selection |
 | 「背景很吵，人聲不清楚」 with a narration on its own track / the voice is buried | `preview_sound` first. The footage should already sit under the narration; if the narration is not on the voice side, it was not recognised as one — `set_track_audio` with `voice: true` |
 | 「有雜音」「背景很吵」「嘶嘶聲」 / clean up a voice | `set_clip_audio` with `cleanup`: `rumble` for the low roar, `hiss` for the background, `sibilance` for harsh S sounds |
 | 「每一段換不同的音樂」「訪談那段不要音樂」 / change the music between parts | One music cue per part, each with the `beat_id` it comes in on; a cue with no `asset_id` is silence |

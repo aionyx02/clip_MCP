@@ -83,10 +83,15 @@ class Talking:
             brings its songs to the level of the talking, so that a clip's
             volume says how far under the voices it sits. A track left out is
             played at its own level.
+        clip_gains: For each clip on the sequence, by clip ID, the gain in dB
+            that brings its talking to the level of the rest, or keeps the
+            place it was shot in under that talking. A clip left out plays at
+            the level it was recorded.
     """
 
     spans: Tuple[Tuple[float, float], ...] = ()
     music_gains: Mapping[str, float] = field(default_factory=dict)
+    clip_gains: Mapping[str, float] = field(default_factory=dict)
 
 @dataclass(frozen=True)
 class Segment:
@@ -574,7 +579,7 @@ def _silence_filter(samples: int, output_label: str) -> str:
     """
     return f"anullsrc=r={AUDIO_SAMPLE_RATE}:cl=stereo,atrim=end_sample={samples}{output_label}"
 
-def _clip_audio_filter(input_label: str, clip: Clip, samples: int, output_label: str) -> str:
+def _clip_audio_filter(input_label: str, clip: Clip, samples: int, output_label: str, gain_db: float = 0.0) -> str:
     """Build the filter chain that turns a clip's source audio into its output audio.
 
     The audio is resampled to 48 kHz stereo, padded or trimmed to exactly
@@ -585,6 +590,8 @@ def _clip_audio_filter(input_label: str, clip: Clip, samples: int, output_label:
         clip: Clip providing volume and fade settings.
         samples: Exact number of output samples.
         output_label: Filtergraph label of the result.
+        gain_db: What the clip is turned by to sit where it belongs in the
+            mix, on top of its own volume.
 
     Returns:
         The filter chain.
@@ -602,8 +609,9 @@ def _clip_audio_filter(input_label: str, clip: Clip, samples: int, output_label:
         f"apad=whole_len={samples}",
         f"atrim=end_sample={samples}",
     ]
-    if clip.volume != 1.0:
-        chain.append(f"volume={clip.volume:g}")
+    level = clip.volume * 10 ** (gain_db / 20)
+    if level != 1.0:
+        chain.append(f"volume={level:.6g}")
     length = Fraction(samples, AUDIO_SAMPLE_RATE)
     if clip.audio_fade_in > 0:
         chain.append(f"afade=t=in:st=0:d={_format_seconds(min(Fraction(clip.audio_fade_in), length))}")
@@ -971,6 +979,7 @@ class FFmpegRenderer:
         sound_only = stems is not None
         speech = talking.spans if talking is not None and talking.spans else None
         music_gains = talking.music_gains if talking is not None else {}
+        clip_gains = talking.clip_gains if talking is not None else {}
         self.check_supported(project, assets)
         segments = self.plan_segments(project)
         if not segments:
@@ -1041,7 +1050,10 @@ class FFmpegRenderer:
                         audio_index = input_index
                     at = _frame_to_sample(segment.start_frame, fps) - lead
                     filters.append(
-                        _clip_audio_filter(f"[{audio_index}:a]", clip, samples + lead + lag, f"[araw{index}]")
+                        _clip_audio_filter(
+                            f"[{audio_index}:a]", clip, samples + lead + lag, f"[araw{index}]",
+                            clip_gains.get(clip.id, 0.0),
+                        )
                     )
                     placed = f"[a{index}]"
                     if at:

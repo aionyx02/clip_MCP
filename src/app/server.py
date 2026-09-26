@@ -40,7 +40,7 @@ from app.engine.plan import (
 )
 from app.engine.sections import build_sections, candidate_hash, check_sections, propose_candidates
 from app.engine.semantic import (
-    build_timeline, clean_cuts, content_scores, join_voices, timeline_input_hash, voice_levels,
+    build_timeline, clean_cuts, content_scores, join_voices, timeline_input_hash,
 )
 from app.engine.ffmpeg import graph_from_file, hidden_window_flags
 from app.engine.probe import picture_size, probe_file, speech_loudness, timecode_start
@@ -1479,7 +1479,7 @@ def _plan_context(plan: EditPlan) -> tuple:
 
     Returns:
         `(timeline, clips_by_id, children_by_parent, assets_by_id,
-        cuts_by_asset_id, levels_by_voice)`.
+        cuts_by_asset_id)`.
 
     Raises:
         ValueError: If the timeline the plan names is gone.
@@ -1500,17 +1500,12 @@ def _plan_context(plan: EditPlan) -> tuple:
     # falls. The compiler is handed these numbers rather than the transcripts and the
     # sound they come from: reading those is interpretation, and the compiler has to stay
     # a pure function of what it is given.
-    cuts, analyses = {}, {}
+    cuts = {}
     for asset_id in footage | songs:
         analysis = repo.get_analysis(asset_id)
         if analysis is not None:
             cuts[asset_id] = clean_cuts(analysis)
-            if asset_id in footage:
-                analyses[asset_id] = analysis
-    # How loudly each voice speaks, worked out over the same joined labels the timeline
-    # put on its clips — so a gain and the clip it applies to cannot mean different people.
-    levels = voice_levels(analyses, join_voices(analyses))
-    return timeline, {clip.id: clip for clip in clips}, children, repo.get_assets(footage | songs), cuts, levels
+    return timeline, {clip.id: clip for clip in clips}, children, repo.get_assets(footage | songs), cuts
 
 def _require_plan(plan_id: Optional[str]) -> EditPlan:
     """Fetch a plan, or the one saved most recently.
@@ -1871,8 +1866,8 @@ def validate_plan(plan_id: Optional[str] = None) -> dict:
         ValueError: If the plan or its timeline does not exist.
     """
     plan = _require_plan(plan_id)
-    timeline, clips, children, assets, cuts, levels = _plan_context(plan)
-    problems, notes = check_plan(plan, timeline, clips, children, assets, cuts, levels)
+    timeline, clips, children, assets, cuts = _plan_context(plan)
+    problems, notes = check_plan(plan, timeline, clips, children, assets, cuts)
     pieces = [] if problems else plan_pieces(plan, clips, children, assets, cuts)
     return {
         "ok": not problems,
@@ -1925,8 +1920,8 @@ def compile_plan(project_id: str, expected_version: int, plan_id: Optional[str] 
             not match. Nothing is compiled in part.
     """
     plan = _require_plan(plan_id)
-    timeline, clips, children, assets, cuts, levels = _plan_context(plan)
-    problems, notes = check_plan(plan, timeline, clips, children, assets, cuts, levels)
+    timeline, clips, children, assets, cuts = _plan_context(plan)
+    problems, notes = check_plan(plan, timeline, clips, children, assets, cuts)
     if problems:
         raise ValueError("this plan cannot be compiled yet:\n- " + "\n- ".join(problems))
 
@@ -1940,7 +1935,7 @@ def compile_plan(project_id: str, expected_version: int, plan_id: Optional[str] 
     if blocked:
         raise ValueError("compiling would undo work already on this project:\n- " + "\n- ".join(blocked))
 
-    built, provenance = compile_operations(plan, clips, children, assets, project, cuts, levels)
+    built, provenance = compile_operations(plan, clips, children, assets, project, cuts)
     operations = _OPERATIONS.validate_python(built)
 
     def record(edited: Project) -> None:
@@ -2120,8 +2115,8 @@ def preview_plan_diff(
     cuts = []
     for plan_id, version in ((before_plan_id, before_version), (after_plan_id, after_version)):
         plan = _plan_at(plan_id, version)
-        timeline, clips, children, assets, known, levels = _plan_context(plan)
-        problems, _ = check_plan(plan, timeline, clips, children, assets, known, levels)
+        timeline, clips, children, assets, known = _plan_context(plan)
+        problems, _ = check_plan(plan, timeline, clips, children, assets, known)
         if problems:
             raise ValueError(f"plan {plan_id} does not lay out yet:\n- " + "\n- ".join(problems))
         cuts.append((plan, plan_pieces(plan, clips, children, assets, known), assets))
@@ -2203,7 +2198,7 @@ def propose_broll(plan_id: Optional[str] = None) -> dict:
         ValueError: If the plan does not exist, or its timeline is gone.
     """
     plan = _require_plan(plan_id)
-    _, clips, children, assets, cuts, _ = _plan_context(plan)
+    _, clips, children, assets, cuts = _plan_context(plan)
     pieces = plan_pieces(plan, clips, children, assets, cuts)
     return {"plan_id": plan.id, "slots": broll_slots(plan, pieces, clips, cuts)}
 

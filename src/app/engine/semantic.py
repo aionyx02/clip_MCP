@@ -564,61 +564,6 @@ def join_voices(analyses: Mapping[str, MediaAnalysis]) -> Dict[Tuple[str, str], 
             joined[(asset_id, voice.speaker)] = nearest
     return joined
 
-def voice_levels(
-    analyses: Mapping[str, MediaAnalysis],
-    joined: Mapping[Tuple[str, str], str],
-) -> Dict[str, float]:
-    """Measure how loudly each voice speaks, across every file they are in.
-
-    Only the seconds that voice was actually holding the floor, so the room
-    tone between two people's turns is not counted against either of them.
-    Levels are combined as energy rather than as decibels, for the same reason
-    every other level in this module is.
-
-    Args:
-        analyses: The analyses to measure, keyed by asset ID.
-        joined: The joined label for each `(asset_id, per-file label)`, as
-            `join_voices` gives it.
-
-    Returns:
-        A level in decibels per joined voice. A voice whose files carry no
-        per-second sound measurements is absent: nobody measured it, which is
-        not the same as its being silent.
-    """
-    parts: Dict[str, List[Tuple[float, float]]] = {}
-    for asset_id, analysis in analyses.items():
-        for turn in analysis.speakers:
-            label = joined.get((asset_id, turn.speaker))
-            if label is None:
-                continue
-            for record in analysis.sound:
-                covered = min(turn.end, record.end) - max(turn.start, record.start)
-                if covered > 0:
-                    parts.setdefault(label, []).append((record.loudness, covered))
-    return {label: round(_decibel_mean(heard), 2) for label, heard in parts.items()}
-
-def voice_gains(levels: Mapping[str, float]) -> Dict[str, float]:
-    """Work out what to turn each voice by so they match each other.
-
-    Everybody is brought down to the quietest of them rather than up to the
-    loudest. Which one is the reference makes no difference to the result — the
-    render is normalized to one loudness afterwards, so a shift applied to
-    every voice alike is undone — but turning down can never clip, and turning
-    up would also bring up whatever hiss was under the quiet one.
-
-    Args:
-        levels: The level each voice speaks at, in decibels.
-
-    Returns:
-        A multiplier per voice, 1.0 for the quietest. Empty when fewer than
-        two voices were measured: one voice is already consistent with itself,
-        and this is not a loudness target.
-    """
-    if len(levels) < 2:
-        return {}
-    quietest = min(levels.values())
-    return {label: round(10 ** ((quietest - level) / 20), 4) for label, level in levels.items()}
-
 def timeline_input_hash(analyses: Mapping[str, MediaAnalysis]) -> str:
     """Fingerprint everything a build depends on.
 
