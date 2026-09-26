@@ -13,6 +13,12 @@ class Asset(BaseModel):
     duration: Optional[Decimal] = Field(default=None, description="Container duration (seconds), if known")
     has_video: bool
     has_audio: bool
+    width: Optional[int] = Field(
+        default=None, description="Picture width as it is shown, after any rotation the file asks for",
+    )
+    height: Optional[int] = Field(
+        default=None, description="Picture height as it is shown, after any rotation the file asks for",
+    )
 
 class Span(BaseModel):
     """A time span within a media file, in seconds."""

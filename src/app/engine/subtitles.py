@@ -2,6 +2,7 @@
 
 import os
 import unicodedata
+from dataclasses import dataclass
 from decimal import Decimal
 from typing import Dict, Iterator, List, Mapping, Optional, Sequence, Tuple
 
@@ -44,6 +45,10 @@ MILLISECOND = Decimal('0.001')
 SPEAKER_COLOURS = ("&H00FFFFFF", "&H0000FFFF", "&H00FFFF00", "&H00FF00FF")
 # What a word looks like before it is said, when the caption lights up word by word.
 UNSPOKEN_COLOUR = "&H00909090"
+# How tall a line of captions stands, as a multiple of the font size: the glyphs plus
+# the gap libass leaves between lines. An estimate of the renderer's own spacing rather
+# than a taste, used only to tell whether a block of lines fits in the frame.
+CAPTION_LINE_HEIGHT = 1.25
 
 def format_ass_time(seconds: float) -> str:
     """Format a time the way an ASS event line expects it.
@@ -286,6 +291,126 @@ def _wrapped(text: str, max_units: float) -> str:
     parts = [part for part in escape_ass_text(text).split("\\N") if part]
     return "\\N".join(line for part in parts for line in wrap_caption(part, max_units))
 
+@dataclass(frozen=True)
+class CaptionGeometry:
+    """How big captions are drawn in one frame, and how much room they have.
+
+    Attributes:
+        font_size: Font size in pixels.
+        margin_h: Space kept clear at each side, in pixels.
+        margin_v: Space kept clear below the text, in pixels.
+        outline: Outline width in pixels.
+        max_units: How wide a line may run, as a multiple of the font size.
+    """
+
+    font_size: int
+    margin_h: int
+    margin_v: int
+    outline: int
+    max_units: float
+
+def caption_geometry(width: int, height: int, style: CaptionStyle) -> CaptionGeometry:
+    """Work out the size and margins captions get in a frame.
+
+    One place for this, because two things need the same answer: the file
+    that draws the captions, and the check that they fit.
+
+    Args:
+        width: Frame width in pixels.
+        height: Frame height in pixels.
+        style: How the captions are drawn.
+
+    Returns:
+        The geometry.
+    """
+    font_size = max(12, round(min(width, height) * style.size_fraction))
+    bottom = style.bottom_fraction
+    if bottom is None:
+        bottom = PORTRAIT_BOTTOM_FRACTION if height > width else LANDSCAPE_BOTTOM_FRACTION
+    margin_h = round(width * style.side_fraction)
+    return CaptionGeometry(
+        font_size=font_size,
+        margin_h=margin_h,
+        margin_v=round(height * bottom),
+        outline=max(1, round(font_size * style.outline_fraction)),
+        # libass measures in the ASS resolution, so the usable width is the frame minus both margins.
+        max_units=max(4.0, (width - 2 * margin_h) / font_size),
+    )
+
+def caption_text(cue: PlacedCue, geometry: CaptionGeometry, style: CaptionStyle) -> Tuple[str, int, int]:
+    """Write one caption the way it is drawn, and count its lines.
+
+    A speaker's name goes in front of the words, so it is measured before the
+    words are broken into lines rather than stuck on afterwards: Chinese has
+    no spaces for libass to break at, and a first line made longer by a name
+    it was not measured with runs off the side of the picture.
+
+    Args:
+        cue: The placed caption.
+        geometry: The frame's caption geometry.
+        style: How captions are drawn.
+
+    Returns:
+        `(text, lines, secondary_lines)` — the event text, empty when there
+        is nothing to show, and how many lines of each size it takes.
+    """
+    named = style.speaker_mark in (SpeakerMark.NAME, SpeakerMark.BOTH)
+    prefix = ""
+    if named and cue.speaker:
+        # The label when there is no name for it: a caption reading `S2` is still
+        # better than one putting the words in the wrong person's mouth.
+        prefix = f"{escape_ass_inline(style.speaker_names.get(cue.speaker, cue.speaker))}："
+    room = max(4.0, geometry.max_units - sum(_display_width(character) for character in prefix))
+    if style.karaoke and cue.words:
+        text = _karaoke_text(cue, room)
+    else:
+        text = _wrapped(cue.text, room)
+    if not text:
+        return "", 0, 0
+    lines = text.count("\\N") + 1
+    text = prefix + text
+    below = 0
+    if cue.secondary:
+        # Measured against its own size: a smaller line fits more before it wraps.
+        second = _wrapped(cue.secondary, geometry.max_units / style.secondary_scale)
+        if second:
+            below = second.count("\\N") + 1
+            text = f"{text}\\N{{\\fs{max(8, round(geometry.font_size * style.secondary_scale))}}}{second}"
+    return text, lines, below
+
+def caption_overflow(
+    cues: Sequence[PlacedCue],
+    width: int,
+    height: int,
+    style: Optional[CaptionStyle] = None,
+) -> List[PlacedCue]:
+    """Find the captions too tall to fit in the frame.
+
+    Width is already taken care of — every line is broken to fit — so what can
+    still go wrong is height: a long line in a narrow frame breaks into so
+    many lines that the block climbs past the top of the picture. That happens
+    most when a cut made for landscape is rendered portrait.
+
+    Args:
+        cues: The placed captions.
+        width: Frame width in pixels.
+        height: Frame height in pixels.
+        style: How they are drawn; the plain style when not given.
+
+    Returns:
+        The captions that do not fit, in timeline order.
+    """
+    style = style or CaptionStyle()
+    geometry = caption_geometry(width, height, style)
+    line = geometry.font_size * CAPTION_LINE_HEIGHT
+    room = height - geometry.margin_v
+    over: List[PlacedCue] = []
+    for cue in cues:
+        _, lines, below = caption_text(cue, geometry, style)
+        if lines * line + below * line * style.secondary_scale > room:
+            over.append(cue)
+    return over
+
 def build_ass(
     cues: Sequence[PlacedCue],
     width: int,
@@ -310,19 +435,15 @@ def build_ass(
     """
     style = style or CaptionStyle()
     font = style.font or DEFAULT_FONT
-    font_size = max(12, round(min(width, height) * style.size_fraction))
-    bottom = style.bottom_fraction
-    if bottom is None:
-        bottom = PORTRAIT_BOTTOM_FRACTION if height > width else LANDSCAPE_BOTTOM_FRACTION
-    margin_v = round(height * bottom)
-    margin_h = round(width * style.side_fraction)
-    outline = max(1, round(font_size * style.outline_fraction))
+    geometry = caption_geometry(width, height, style)
+    font_size, margin_h, margin_v, outline = (
+        geometry.font_size, geometry.margin_h, geometry.margin_v, geometry.outline,
+    )
     # With karaoke the secondary colour is what a word looks like before it is said, so it
     # has to differ from the primary or nothing appears to happen. Without it the two are
     # the same, which is what a caption that simply sits there wants.
     waiting = UNSPOKEN_COLOUR if style.karaoke else "&H00FFFFFF"
     colours = _speaker_colours(cues) if style.speaker_mark in (SpeakerMark.COLOUR, SpeakerMark.BOTH) else {}
-    named = style.speaker_mark in (SpeakerMark.NAME, SpeakerMark.BOTH)
 
     lines: List[str] = [
         "[Script Info]",
@@ -342,25 +463,10 @@ def build_ass(
         "[Events]",
         "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text",
     ]
-    # libass measures in the ASS resolution, so the usable width is the frame minus both margins.
-    max_units = max(4.0, (width - 2 * margin_h) / font_size)
     for cue in cues:
-        if style.karaoke and cue.words:
-            text = _karaoke_text(cue, max_units)
-        else:
-            text = _wrapped(cue.text, max_units)
+        text, _, _ = caption_text(cue, geometry, style)
         if not text:
             continue
-        if named and cue.speaker:
-            # The label when there is no name for it: a caption reading `S2` is still
-            # better than one putting the words in the wrong person's mouth.
-            who = style.speaker_names.get(cue.speaker, cue.speaker)
-            text = f"{escape_ass_inline(who)}：{text}"
-        if cue.secondary:
-            # Measured against its own size: a smaller line fits more before it wraps.
-            second = _wrapped(cue.secondary, max_units / style.secondary_scale)
-            if second:
-                text = f"{text}\\N{{\\fs{max(8, round(font_size * style.secondary_scale))}}}{second}"
         colour = colours.get(cue.speaker or "")
         if colour:
             text = f"{{\\c{colour}}}{text}"

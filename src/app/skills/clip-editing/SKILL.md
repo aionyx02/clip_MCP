@@ -29,7 +29,11 @@ Supported:
   expect.
 - Mixed sources: different resolutions, orientations, and frame rates, and
   videos without sound. Every source is scaled to fill the output size and
-  center-cropped.
+  cropped — around the face the analysis found, or from the middle where
+  nobody was seen.
+- One cut in several shapes: landscape, portrait and square renders of the
+  same project, each shot reframed around the face in it (`render_project`
+  and `preview_project` with `frame`).
 - Fades from and to black, per clip, on the picture as well as the sound. Two
   clips can dip through black between them without changing any timing.
 - Colour per clip: brightness, contrast, saturation, and white balance in
@@ -64,6 +68,10 @@ Supported:
   running, as a second pass over a rough cut (`propose_broll`, `add_broll`).
 - Sound repair: taking the rumble, hiss or harsh S sounds out of one clip's
   voice, and bringing two people recorded at very different levels together.
+- Delivery: a check before rendering (`check_render`), chapters from the
+  parts of the cut (`get_chapters`), cover candidates and full-size covers
+  (`propose_covers`, `export_cover`), and the timeline written out for
+  Premiere, Resolve or Final Cut, with captions as SRT (`export_timeline`).
 
 Not supported yet: still images, free text and graphics other than captions,
 and filters beyond the colour controls above. When a request needs one of
@@ -216,13 +224,16 @@ is wrong before a render is wasted.
    tiles are in timeline order and cropped the way the render crops, so it
    shows the clip order, the framing, and whether a cut lands on a bad frame,
    for the cost of a few seconds. Fix what is wrong before spending a render.
-10. Call `render_project` with `is_preview: true` unless the user asked for the
+10. Call `check_render` (with `burn_subtitles: true` if captions will be
+    burned) and tell the user what it finds; a full render is refused until
+    they have heard. See [Delivering the cut](#delivering-the-cut).
+11. Call `render_project` with `is_preview: true` unless the user asked for the
     final file, and with `burn_subtitles: true` if captions were stored. It
     normalizes the mix to a consistent loudness on its own, so do not try to
     even out clip volumes by hand. Poll `get_job` every few seconds until the
     status is `completed`, `failed`, or `cancelled`. Report the output path
     and length.
-11. Render the full-quality version with `is_preview: false` once the user is
+12. Render the full-quality version with `is_preview: false` once the user is
     happy, or immediately if they asked for the final file.
 
 For later edits, call `get_project` first so your operations match the current
@@ -480,6 +491,51 @@ and any other track you added are untouched by a compile.
 Transcripts can misrecognize names and jargon. When a quote matters, check the
 surrounding segments, and ask the user if the meaning is unclear.
 
+## Delivering the cut
+
+**The check before a render.** `render_project` checks the cut first and
+refuses a full render while it finds anything; `check_render` runs the same
+check without rendering, so run it first. It finds four kinds of thing:
+`bad_picture` (black or frozen picture that reaches the screen), `clipping`
+(a recording squared off at the ceiling — turning it down does not undo it),
+`captions` (a caption too tall for the frame, most often in a portrait render
+of a landscape cut) and `length` (far from the length the plan asked for).
+Each is a fact, not a verdict — the black may be a deliberate pause, the user
+may prefer the longer cut — so tell them in plain words and let them decide.
+Fix what they want fixed. Only once they have said to go ahead anyway, render
+again with those kinds in `allow`; never fill `allow` in yourself. Previews
+are never refused.
+
+**Several platforms.** One cut, several shapes: `render_project` with `frame`
+set to `landscape`, `portrait` or `square`, once per shape. The project is not
+touched, and the short side stays the same. Where a shot is a different shape
+from the frame, the crop follows the face the analysis found; it holds still,
+and cuts to a new framing when the face has stayed near the edge for a while
+rather than panning after it. Look at `preview_project` with the same `frame`
+first — the tiles are cropped the way the render will be. Check captions
+again for a portrait version: lines that fit across a landscape frame can
+stack too tall in a narrow one.
+
+**Chapters.** `get_chapters` reads the parts of the cut back as chapters,
+with the description text ready to paste. The render carries the same
+chapters in the file. YouTube shows chapters only when the first is at 0:00,
+there are at least three, and each is at least ten seconds; `problems` says
+what breaks that. Fixing it means merging or renaming parts — a change to the
+plan, so ask.
+
+**Covers.** `propose_covers` offers one frame per shot — never black, each the
+moment with the biggest face or the sharpest picture — as a labeled sheet.
+Show it, let the user choose, and save the one they pick with `export_cover`
+at its time in the cut.
+
+**Handing over to an editing program.** `export_timeline` writes the cut
+pointed at the original files: `fcpxml` for Final Cut, Resolve and Premiere,
+`otio` for Resolve and OpenTimelineIO tools, `edl` for the sequence alone, and
+`srt` for the captions. The edit comes across; what this server draws itself
+does not — speed changes, transitions, colour, volume and fades, voice repair,
+where an inset sits. `left_behind` lists which of those this cut uses: say so
+when you hand over the file.
+
 ## When the user brings raw footage and no plan
 
 Someone who has never edited will hand you a folder and say 「幫我剪一下」.
@@ -617,6 +673,10 @@ times refer to the source file.
 | 「找出精華剪成 60 秒」 / a 60 s highlight reel | Choose segments by transcript and frames until about 60 s; confirm the list before rendering |
 | 「第 3 分鐘那個畫面是什麼」 / what is on screen at 3:00 | `view_frames` with one `asset_ids` entry, `start: 175`, `end: 185`, `count: 4` |
 | 「現在剪成什麼樣子」 / show me the cut so far | `preview_project`, then describe the order and the cut points |
+| 「同一支也出直式」「Reels 跟 YouTube 各一版」 / one cut for several platforms | `render_project` with `frame: "portrait"` (and again with `landscape` or `square`); `preview_project` with the same `frame` first |
+| 「幫我寫 YouTube 章節」 / YouTube chapters | `get_chapters`, paste its `description`; say what `problems` lists |
+| 「挑一張封面」「縮圖」 / pick a cover or thumbnail | `propose_covers`, let the user choose, then `export_cover` |
+| 「我要拿去 Premiere／達文西／Final Cut 修」 / finish it in another editor | `export_timeline` with `fcpxml` (or `otio`, `edl`), plus `srt` for the captions; read out `left_behind` |
 | 「這個資料夾的影片幫我剪一下」 / edit this folder for me | `import_folder`, then survey and propose; see [When the user brings raw footage and no plan](#when-the-user-brings-raw-footage-and-no-plan) |
 
 "The second clip" means the second video clip ordered by `timeline_in`. For a
@@ -695,6 +755,7 @@ message with options the user can pick from.
 | `is not drawn on top of anything` | A `layout` only works on a video track added above the base one; add that track first. |
 | `video fades ... are longer than the clip` | Shorten the fades to fit the clip. |
 | `... is not supported yet` | Explain the limit and offer the closest supported result. |
+| `the cut is not ready to render` | Tell the user each finding in plain words and ask. Fix what they want fixed; render with `allow` only for the kinds they chose to keep. |
 | Job `failed` | Summarize `error_message` for the user. Do not retry the same render unchanged. |
 
 ## Further reading

@@ -5,6 +5,7 @@ from fractions import Fraction
 from typing import List, Mapping, Optional, Tuple
 from app.engine import resources
 from app.engine.ffmpeg import escape_filter_path
+from app.engine.reframe import Framing, crop_filter
 from app.models.media import Asset
 from app.models.timeline import Clip, Dip, Project, TrackType, Transition, VoiceCleanup, Wipe
 
@@ -179,7 +180,7 @@ def _audio_input_args(clip: Clip, asset: Asset, fps: Fraction) -> List[str]:
         "-i", asset.path,
     ]
 
-def _overlay_box(clip: Clip, width: int, height: int) -> Tuple[int, int, int, int]:
+def overlay_box(clip: Clip, width: int, height: int) -> Tuple[int, int, int, int]:
     """Work out where a clip is drawn, in whole even pixels.
 
     Args:
@@ -491,13 +492,15 @@ class FFmpegRenderer:
         is_preview: bool = False,
         loudness_target: Optional[float] = DEFAULT_LOUDNESS_TARGET,
         subtitle_path: Optional[str] = None,
+        framing: Optional[Mapping[str, Framing]] = None,
+        chapters_path: Optional[str] = None,
     ) -> List[str]:
         """Build the FFmpeg arguments that render a project to a file.
 
         Every video clip is placed at its timeline position, and gaps are
         filled with black frames and silence. Each source is normalized to
         the project format: scaled to cover `width` x `height` and
-        center-cropped, converted to the project frame rate, and resampled to
+        cropped — from the middle, or where `framing` says, converted to the project frame rate, and resampled to
         48 kHz stereo; sources without audio contribute silence. Each audio
         track is laid out the same way, cut or padded to the video length,
         and mixed with the video's own audio at the clips' volumes and fades.
@@ -518,6 +521,11 @@ class FFmpegRenderer:
                 None leaves the levels exactly as mixed.
             subtitle_path: ASS subtitle file to burn into the picture, sized
                 for this project's output format; None burns nothing.
+            framing: Where each clip's crop sits, keyed by clip ID, from
+                `reframe.frame_project`. A clip without one is cropped from
+                the middle.
+            chapters_path: An FFmpeg metadata file of chapters to carry in the
+                output, from `delivery.chapter_metadata`; None carries none.
 
         Returns:
             The command as an argument list.
@@ -534,6 +542,7 @@ class FFmpegRenderer:
         fps = Fraction(project.fps_num, project.fps_den)
         rate = f"{project.fps_num}/{project.fps_den}"
         size = f"{project.width}x{project.height}"
+        framed = framing or {}
         total_frames = segments[-1].end_frame
         total_samples = _frame_to_sample(total_frames, fps)
 
@@ -574,7 +583,8 @@ class FFmpegRenderer:
                 filters.append(
                     f"[{input_index}:v]setpts=PTS-STARTPTS{_speed_video_filter(segment.clip)},fps={rate},"
                     f"scale={project.width}:{project.height}:force_original_aspect_ratio=increase,"
-                    f"crop={project.width}:{project.height},setsar=1,format=yuv420p,"
+                    f"{crop_filter(project.width, project.height, framed.get(segment.clip.id))},"
+                    f"setsar=1,format=yuv420p,"
                     f"tpad=stop_mode=clone:stop_duration=1,trim=end_frame={picture_frames},setpts=PTS-STARTPTS"
                     f"{_clip_video_filter(segment.clip, picture_frames, fps)}[v{index}]"
                 )
@@ -694,12 +704,12 @@ class FFmpegRenderer:
                 asset = assets[clip.asset_id]
                 input_index = len(inputs)
                 inputs.append(_input_args(clip, asset, frames, fps))
-                box_x, box_y, box_width, box_height = _overlay_box(clip, project.width, project.height)
+                box_x, box_y, box_width, box_height = overlay_box(clip, project.width, project.height)
                 over = f"[ov{track_index}_{segment_index}]"
                 filters.append(
                     f"[{input_index}:v]setpts=PTS-STARTPTS,fps={rate},"
                     f"scale={box_width}:{box_height}:force_original_aspect_ratio=increase,"
-                    f"crop={box_width}:{box_height},setsar=1,format=yuv420p,"
+                    f"{crop_filter(box_width, box_height, framed.get(clip.id))},setsar=1,format=yuv420p,"
                     f"tpad=stop_mode=clone:stop_duration=1,trim=end_frame={frames},setpts=PTS-STARTPTS"
                     f"{_clip_video_filter(clip, frames, fps)},"
                     # Hold the overlay back to its place on the timeline, then stop drawing when it runs out.
@@ -806,7 +816,12 @@ class FFmpegRenderer:
             if threads:
                 cmd.extend(["-threads", str(threads)])
             cmd.extend(input_args)
+        if chapters_path is not None:
+            # Read last, after every media input, so it takes no part in the graph.
+            cmd.extend(["-f", "ffmetadata", "-i", chapters_path])
         cmd.extend(["-filter_complex", ";".join(filters), "-map", "[outv]", "-map", "[outa]"])
+        if chapters_path is not None:
+            cmd.extend(["-map_chapters", str(len(inputs))])
 
         if is_preview:
             cmd.extend([

@@ -66,28 +66,59 @@ def extract_frame(path: str, seconds: float, max_size: int = TILE_SIZE, ffmpeg_b
         raise RuntimeError(f"could not read a frame at {seconds:.3f}s: {result.stderr.decode('utf-8', errors='replace').strip()[-300:]}")
     return Image.open(io.BytesIO(result.stdout)).convert("RGB")
 
-def _crop_to_aspect(frame: Image.Image, aspect: float) -> Image.Image:
-    """Center-crop a frame to a width-to-height ratio.
+def _crop_to_aspect(frame: Image.Image, aspect: float, centre: Optional[float] = None) -> Image.Image:
+    """Crop a frame to a width-to-height ratio.
 
     This matches how the renderer fits a source into the output format: the
-    picture is scaled to cover the frame and the overflow is cropped away
-    evenly on both sides.
+    picture is scaled to cover the frame and the overflow is cropped away —
+    evenly on both sides, or around where the render's framing puts it.
 
     Args:
         frame: Frame to crop.
         aspect: Target width divided by target height.
+        centre: Where along the cropped axis the crop is centred, as a
+            fraction of the picture; None for the middle.
 
     Returns:
-        The largest centered crop of `frame` with that ratio.
+        The largest crop of `frame` with that ratio, held inside the picture.
     """
     width, height = frame.size
+    where = 0.5 if centre is None else centre
     if width > height * aspect:
         kept = max(1, round(height * aspect))
-        left = (width - kept) // 2
+        left = min(max(0, round(where * width - kept / 2)), width - kept)
         return frame.crop((left, 0, left + kept, height))
     kept = max(1, round(width / aspect))
-    top = (height - kept) // 2
+    top = min(max(0, round(where * height - kept / 2)), height - kept)
     return frame.crop((0, top, width, top + kept))
+
+def still(
+    path: str,
+    seconds: float,
+    width: int,
+    height: int,
+    centre: Optional[float] = None,
+    ffmpeg_bin: str = "ffmpeg",
+) -> Image.Image:
+    """Take one frame at full size, framed the way the render frames it.
+
+    Args:
+        path: Video file.
+        seconds: Time of the frame in the file.
+        width: Width to deliver it at.
+        height: Height to deliver it at.
+        centre: Where the crop is centred along the axis it crops, as a
+            fraction of the picture; None for the middle.
+        ffmpeg_bin: Path to, or name of, the FFmpeg executable.
+
+    Returns:
+        The frame, cropped to the delivery shape and scaled to its size.
+
+    Raises:
+        RuntimeError: If the frame cannot be decoded.
+    """
+    frame = extract_frame(path, seconds, max_size=max(width, height) * 2, ffmpeg_bin=ffmpeg_bin)
+    return _crop_to_aspect(frame, width / height, centre).resize((width, height), Image.LANCZOS)
 
 def _compose_sheet(frames: Sequence[Image.Image], labels: Sequence[str], columns: int) -> bytes:
     """Lay decoded frames out as one labeled grid image.
@@ -129,7 +160,7 @@ def _compose_sheet(frames: Sequence[Image.Image], labels: Sequence[str], columns
     return output.getvalue()
 
 def storyboard_sheet(
-    shots: Sequence[Tuple[str, float, str]],
+    shots: Sequence[Tuple],
     aspect: Optional[float] = None,
     columns: int = 4,
     ffmpeg_bin: str = "ffmpeg",
@@ -141,10 +172,12 @@ def storyboard_sheet(
     separate files being looked over.
 
     Args:
-        shots: One `(path, seconds, label)` per tile, in the order to show them.
+        shots: One `(path, seconds, label)` per tile, in the order to show
+            them, optionally with a fourth item: where the render's crop is
+            centred for that tile, as `reframe.centre_at` says.
         aspect: Output width divided by height. When given, every tile is
-            center-cropped to it, so the sheet shows the framing the render
-            will have rather than the framing of the source files.
+            cropped to it, so the sheet shows the framing the render will have
+            rather than the framing of the source files.
         columns: Maximum number of tiles per row.
         ffmpeg_bin: Path to, or name of, the FFmpeg executable.
 
@@ -159,5 +192,8 @@ def storyboard_sheet(
     if aspect is not None:
         # One size for every tile, so sources of different shapes line up in the grid.
         size = (TILE_SIZE, max(1, round(TILE_SIZE / aspect))) if aspect >= 1 else (max(1, round(TILE_SIZE * aspect)), TILE_SIZE)
-        frames = [_crop_to_aspect(frame, aspect).resize(size, Image.LANCZOS) for frame in frames]
+        frames = [
+            _crop_to_aspect(frame, aspect, shot[3] if len(shot) > 3 else None).resize(size, Image.LANCZOS)
+            for frame, shot in zip(frames, shots)
+        ]
     return _compose_sheet(frames, [shot[2] for shot in shots], columns)

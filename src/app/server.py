@@ -2,6 +2,7 @@ import os
 import re
 import uuid
 from decimal import Decimal
+from fractions import Fraction
 from pathlib import Path
 from typing import Annotated, Callable, Dict, List, Literal, Mapping, Optional, Sequence, Tuple
 
@@ -38,9 +39,12 @@ from app.engine.sections import build_sections, candidate_hash, check_sections, 
 from app.engine.semantic import (
     build_timeline, clean_cuts, content_scores, join_voices, timeline_input_hash, voice_levels,
 )
-from app.engine.probe import probe_file
+from app.engine.probe import picture_size, probe_file
+from app.engine.reframe import Framing, centre_at, frame_project
 from app.engine.builder import DEFAULT_LOUDNESS_TARGET, FFmpegRenderer
-from app.engine.frames import format_timestamp, storyboard_sheet
+from app.engine.delivery import CHECKS, chapter_metadata, chapters, check_delivery, clock, cover_candidates
+from app.engine.frames import format_timestamp, still, storyboard_sheet
+from app.engine.interchange import write_edl, write_fcpxml, write_otio, write_srt
 from app.engine.subtitles import (
     DEFAULT_MAX_CHARACTERS,
     DEFAULT_MAX_SECONDS,
@@ -91,7 +95,10 @@ mcp = FastMCP(
         "what to ask when a request is incomplete, how music ducks under "
         "speech and how every render is normalized to one consistent "
         "loudness, how to caption an edit with generate_subtitles and "
-        "burn_subtitles, and the current limits: no overlapping picture on a "
+        "burn_subtitles, how a render is checked first and refused until the "
+        "user has heard what the check found, how one cut is delivered in "
+        "several shapes and handed to other editing programs, "
+        "and the current limits: no overlapping picture on a "
         "track, no still images, and no graphics beyond captions. "
         "Transitions end on the cut rather than straddling it, so adding one "
         "never changes how long the video runs. The person using this server is "
@@ -233,8 +240,39 @@ def _register_asset(filepath: str) -> Asset:
         ),
         has_audio=any(stream.get("codec_type") == "audio" for stream in streams),
     )
+    size = picture_size(info)
+    if size is not None:
+        asset.width, asset.height = size
     repo.save_asset(asset)
     return asset
+
+def _sized(assets: Mapping[str, Asset]) -> Dict[str, Asset]:
+    """Make sure every asset with a picture knows how big it is.
+
+    Assets imported before the size was kept do not. Reframing needs it, so it
+    is read off the file the first time it is asked for and saved, rather than
+    making anybody import everything again.
+
+    Args:
+        assets: The assets, keyed by ID.
+
+    Returns:
+        The same assets, sized where the file could still be read. One whose
+        file has gone is returned as it was; the render reports the missing
+        file in its own words.
+    """
+    sized: Dict[str, Asset] = {}
+    for asset_id, asset in assets.items():
+        if asset.has_video and asset.width is None:
+            try:
+                size = picture_size(probe_file(asset.path))
+            except (FileNotFoundError, RuntimeError):
+                size = None
+            if size is not None:
+                asset = asset.model_copy(update={"width": size[0], "height": size[1]})
+                repo.save_asset(asset)
+        sized[asset_id] = asset
+    return sized
 
 @mcp.tool()
 def import_asset(filepath: str) -> dict:
@@ -1774,6 +1812,8 @@ def propose_broll(plan_id: Optional[str] = None) -> dict:
 def preview_project(
     project_id: str,
     count: Annotated[int, Field(ge=1, le=MAX_STORYBOARD_TILES)] = 12,
+    frame: Optional[Literal["landscape", "portrait", "square"]] = None,
+    follow_faces: bool = True,
 ) -> ToolResult:
     """Look at the edited sequence as one labeled storyboard image.
 
@@ -1796,6 +1836,10 @@ def preview_project(
         project_id: ID of the project to look at.
         count: Number of frames to sample. Raised to one per clip when the
             project has more clips than this.
+        frame: Show the cut in another shape, the way `render_project` with
+            the same `frame` would render it; omit for the project's own.
+        follow_faces: Crop around the face the way the render does; the
+            same setting as `render_project`'s.
 
     Returns:
         A text block describing the output format, every tile, the black gaps,
@@ -1809,6 +1853,7 @@ def preview_project(
     project = repo.get_project(project_id)
     if not project:
         raise ValueError(f"project {project_id} not found")
+    project = _reshaped(project, frame)
 
     # Tiles come from the base track, which is the sequence; tracks above it are insets, noted in the text.
     base = project.base_video_track
@@ -1826,6 +1871,9 @@ def preview_project(
                 f"clip {clip.id}: asset {asset.id} has no video stream; "
                 "put audio-only assets on an audio track"
             )
+
+    framing = _framing(project, assets) if follow_faces else {}
+    fps = Fraction(project.fps_num, project.fps_den)
 
     # Where the picture really goes black, found over the whole sequence rather than over
     # the tiles chosen below. A clip left out of the storyboard is not a hole in the edit,
@@ -1867,7 +1915,7 @@ def preview_project(
         longest = max(range(len(clips)), key=lambda index: float(clips[index].timeline_duration) / per_clip[index])
         per_clip[longest] += 1
 
-    shots: List[tuple[str, float, str]] = []
+    shots: List[tuple] = []
     listing: List[str] = []
     for position, (clip, frames) in enumerate(zip(clips, per_clip)):
         if skipped[position]:
@@ -1885,7 +1933,11 @@ def preview_project(
             at = float(clip.timeline_in) + (seconds - start) / clip.speed
             number = len(shots) + 1
             label = clip.id if len(clip.id) <= 10 else f"{clip.id[:9]}~"
-            shots.append((asset.path, seconds, f"#{number}  {format_timestamp(at)}  {label}"))
+            framed = framing.get(clip.id)
+            shots.append((
+                asset.path, seconds, f"#{number}  {format_timestamp(at)}  {label}",
+                centre_at(framed, clip, seconds, fps) if framed else None,
+            ))
             listing.append(
                 f"#{number}: clip {clip.id} | edit {format_timestamp(at)} | "
                 f"source {seconds:.3f}s ({format_timestamp(seconds)})"
@@ -2154,14 +2206,69 @@ def _output_name(project: Project, kind: str) -> str:
     stem = " ".join(stem.split())[:MAX_OUTPUT_NAME].strip(" .")
     return f"{stem or project.id}_{kind}.mp4"
 
+# The shapes a cut is delivered in, as width to height.
+FRAME_SHAPES = {"landscape": (16, 9), "portrait": (9, 16), "square": (1, 1)}
+
+def _reshaped(project: Project, frame: Optional[str]) -> Project:
+    """Give a project another shape for one render, leaving the stored one alone.
+
+    The short side is kept, because that is the side a platform's resolution
+    is quoted by: 1080p is 1080 across the short side whichever way up it is.
+
+    Args:
+        project: The project.
+        frame: `landscape`, `portrait`, `square`, or None for as it is.
+
+    Returns:
+        A copy at the new size, or the project itself when no shape was asked for.
+    """
+    if frame is None:
+        return project
+    across, down = FRAME_SHAPES[frame]
+    short = min(project.width, project.height)
+    even = lambda value: max(2, int(round(value / 2)) * 2)
+    if across >= down:
+        width, height = even(short * across / down), short
+    else:
+        width, height = short, even(short * down / across)
+    return project.model_copy(update={"width": width, "height": height})
+
+def _framing(project: Project, assets: Mapping[str, Asset]) -> Dict[str, Framing]:
+    """Work out where each clip's crop sits, following the faces in it.
+
+    Args:
+        project: The project, at the size it is being rendered at.
+        assets: Its files.
+
+    Returns:
+        A framing per clip that has a face to follow, keyed by clip ID.
+    """
+    faces = {}
+    for asset_id in assets:
+        analysis = repo.get_analysis(asset_id)
+        if analysis is not None and analysis.faces:
+            faces[asset_id] = analysis.faces
+    return frame_project(project, _sized(assets), faces) if faces else {}
+
 @mcp.tool()
 def render_project(
     project_id: str,
     is_preview: bool = False,
     loudness_target: Annotated[Optional[float], Field(ge=-40, le=-5)] = DEFAULT_LOUDNESS_TARGET,
     burn_subtitles: bool = False,
+    frame: Optional[Literal["landscape", "portrait", "square"]] = None,
+    follow_faces: bool = True,
+    allow: Optional[List[Literal["bad_picture", "clipping", "captions", "length"]]] = None,
 ) -> dict:
     """Start rendering a project to an MP4 file in the background.
+
+    Before anything is rendered the cut is checked the way `check_render`
+    checks it, and a full render is refused while it finds anything: black
+    or frozen picture on screen, a voice recorded clipping, a caption too
+    tall for the frame, or a length far from what the plan asked for. Fix
+    the cut, or name the kinds of finding the user has decided to live with
+    in `allow`. Previews are never refused — they are how you look — but
+    say what they found.
 
     Returns immediately. Poll `get_job` with the returned `job_id` until the
     job reaches a terminal status, or stop it with `cancel_job`. Rendering
@@ -2180,6 +2287,20 @@ def render_project(
         burn_subtitles: If true, burn the project's stored captions into the
             picture. Store them first with a `set_subtitles` operation;
             `generate_subtitles` proposes them from the transcripts.
+        frame: Render the same cut in another shape — `landscape` (16:9),
+            `portrait` (9:16) or `square` — without touching the project.
+            The short side stays the project's, so a 1920x1080 project comes
+            out at 1080x1920 portrait and 1080x1080 square. Call once per
+            shape to deliver one cut to several platforms. Omit it for the
+            project's own size.
+        follow_faces: Where a shot is wider (or taller) than the frame it is
+            shown in, crop it around the face the analysis found rather than
+            from the middle. The crop holds still while the face stays inside
+            it and cuts to a new framing once the face has sat near the edge
+            for a couple of seconds — it never pans. Shots with no face seen
+            are cropped from the middle either way.
+        allow: Kinds of finding to render in spite of, after the user has
+            heard about them and said so. Never fill this in on your own.
 
     Returns:
         A dictionary with the `job_id`, the initial `status`, `stage`, and the
@@ -2189,17 +2310,28 @@ def render_project(
         Renders and analyses run one or two at a time, so that several of them
         cannot exhaust the machine's memory between them; `stage` says what a
         job that has not started yet is waiting for, and is null when it
-        started immediately.
+        started immediately. `findings` lists what the check found that this
+        render went ahead in spite of. The parts of the video, where it has
+        markers, are carried in the file as chapters.
 
     Raises:
-        ValueError: If the project does not exist, contains no clips, or uses
-            an unsupported feature.
+        ValueError: If the project does not exist, contains no clips, uses an
+            unsupported feature, or the check found something not allowed.
     """
     project = repo.get_project(project_id)
     if not project:
         raise ValueError(f"project {project_id} not found")
 
-    kind = "preview" if is_preview else "output"
+    project = _reshaped(project, frame)
+    findings = _findings(project, burn_subtitles)
+    blocking = [finding for finding in findings if finding.check not in (allow or [])]
+    if blocking and not is_preview:
+        raise ValueError(
+            "the cut is not ready to render:\n- " + "\n- ".join(finding.message for finding in blocking)
+            + "\nFix these, or once the user has said to go ahead anyway, render again with allow="
+            + str(sorted({finding.check for finding in blocking}))
+        )
+    kind = ("preview" if is_preview else "output") + (f"-{frame}" if frame else "")
     job = Job(kind=JobKind.RENDER, project_id=project_id)
     job.work_dir = os.path.join(WORKSPACE_DIR, "outputs", job.job_id)
     job.output_path = os.path.join(job.work_dir, _output_name(project, kind))
@@ -2222,15 +2354,302 @@ def render_project(
         with open(subtitle_path, "w", encoding="utf-8") as handle:
             handle.write(build_ass(placed, project.width, project.height, project.caption_style))
 
+    chapters_path = None
+    listed, _ = chapters(project)
+    if listed:
+        os.makedirs(job.work_dir, exist_ok=True)
+        chapters_path = os.path.join(job.work_dir, "chapters.txt")
+        with open(chapters_path, "w", encoding="utf-8") as handle:
+            handle.write(chapter_metadata(listed))
+
+    assets = _referenced_assets(project)
     command = renderer.build_command(
-        project, _referenced_assets(project), job.output_path,
+        project, assets, job.output_path,
         is_preview=is_preview, loudness_target=loudness_target, subtitle_path=subtitle_path,
+        framing=_framing(project, assets) if follow_faces else None,
+        chapters_path=chapters_path,
     )
     # One input per clip, all opened at once, is what a render's memory use is made of.
     job.memory_estimate = resources.render_memory_bytes(command.count("-i"))
     job = job_manager.start_job(job, {"command": command, "duration_seconds": float(renderer.output_duration(project))})
 
-    return {"job_id": job.job_id, "status": job.status.value, "stage": job.stage, "output_path": job.output_path}
+    return {
+        "job_id": job.job_id, "status": job.status.value, "stage": job.stage, "output_path": job.output_path,
+        "findings": [{"check": finding.check, "message": finding.message} for finding in findings],
+    }
+
+def _analyses(project: Project) -> Dict[str, MediaAnalysis]:
+    """Read the analysis of every file a project plays.
+
+    Args:
+        project: The project.
+
+    Returns:
+        The analyses that exist, keyed by asset ID.
+    """
+    found: Dict[str, MediaAnalysis] = {}
+    for asset_id in {clip.asset_id for track in project.tracks for clip in track.clips}:
+        analysis = repo.get_analysis(asset_id)
+        if analysis is not None:
+            found[asset_id] = analysis
+    return found
+
+def _plan_target(project: Project) -> Optional[float]:
+    """Find how long the plan a project was compiled from asked it to run.
+
+    Args:
+        project: The project.
+
+    Returns:
+        The plan's target length, or None when the sequence did not all come
+        from one plan or that plan named no length.
+    """
+    base = project.base_video_track
+    compiled_from = {clip.from_plan_id for clip in base.clips} if base else set()
+    if len(compiled_from) != 1 or None in compiled_from:
+        return None
+    plan = repo.get_plan(next(iter(compiled_from)))
+    return plan.target.seconds if plan is not None else None
+
+def _findings(project: Project, burn_subtitles: bool) -> list:
+    """Check a cut before it is rendered.
+
+    Args:
+        project: The project, at the size it will be rendered at.
+        burn_subtitles: Whether its captions will be burned in.
+
+    Returns:
+        What `delivery.check_delivery` finds.
+    """
+    placed = place_cues(project, project.subtitles) if burn_subtitles and project.subtitles else None
+    return check_delivery(project, _analyses(project), _plan_target(project), placed, project.caption_style)
+
+@mcp.tool()
+def check_render(
+    project_id: str,
+    frame: Optional[Literal["landscape", "portrait", "square"]] = None,
+    burn_subtitles: bool = False,
+) -> dict:
+    """Check a cut for what would be noticed in the finished file, without rendering it.
+
+    The same check `render_project` runs first and refuses a render over. It
+    looks for four things: `bad_picture`, black or frozen source picture that
+    reaches the screen; `clipping`, a recording squared off at the ceiling,
+    which no amount of turning down undoes; `captions`, a caption too tall for
+    the frame — most likely when a landscape cut is rendered portrait; and
+    `length`, a cut far from the length its plan asked for. Each is a fact
+    about the cut, not a verdict on it: black may be meant, and the user may
+    prefer the longer cut. Tell them, and let them decide.
+
+    Args:
+        project_id: ID of the project to check.
+        frame: Check it in another shape, as `render_project` would render it.
+        burn_subtitles: Check the captions as they would be burned in.
+
+    Returns:
+        A dictionary with `ok` and `findings`, each with its `check` and a
+        `message` saying what and where.
+
+    Raises:
+        ValueError: If the project does not exist.
+    """
+    project = repo.get_project(project_id)
+    if not project:
+        raise ValueError(f"project {project_id} not found")
+    findings = _findings(_reshaped(project, frame), burn_subtitles)
+    return {
+        "ok": not findings,
+        "findings": [{"check": finding.check, "message": finding.message} for finding in findings],
+    }
+
+@mcp.tool()
+def get_chapters(project_id: str) -> dict:
+    """Read the parts of a cut back as chapters, ready for a video description.
+
+    The parts are the project's markers — compiling a plan writes one per
+    beat — so a chapter is a part and runs to the next. Rendering carries the
+    same chapters inside the file. YouTube only shows chapters that start at
+    0:00, number at least three and run at least ten seconds each; anything
+    that breaks those is reported rather than changed, because merging or
+    renaming parts changes the video.
+
+    Args:
+        project_id: ID of the project.
+
+    Returns:
+        A dictionary with `chapters` (`start`, `end`, `name`), the
+        `description` text to paste — one `m:ss name` line each — and the
+        `problems` that would stop YouTube showing them.
+
+    Raises:
+        ValueError: If the project does not exist.
+    """
+    project = repo.get_project(project_id)
+    if not project:
+        raise ValueError(f"project {project_id} not found")
+    listed, problems = chapters(project)
+    return {
+        "chapters": [{"start": round(start, 3), "end": round(end, 3), "name": name} for start, end, name in listed],
+        "description": "\n".join(f"{clock(start)} {name}" for start, _, name in listed),
+        "problems": problems,
+    }
+
+@mcp.tool()
+def propose_covers(
+    project_id: str,
+    frame: Optional[Literal["landscape", "portrait", "square"]] = None,
+    follow_faces: bool = True,
+) -> ToolResult:
+    """Offer frames of the cut as cover or thumbnail candidates, one per shot.
+
+    Which frame makes the cover is a judgement, so this only narrows the
+    field: a frame per shot, never one of black or frozen picture, each the
+    moment its shot's measurements favour — the largest face, or where nobody
+    is seen, the sharpest stretch. Look at the sheet, pick with the user, and
+    save the one they choose with `export_cover`.
+
+    Args:
+        project_id: ID of the project.
+        frame: Crop the candidates to another shape, as it would be rendered.
+        follow_faces: Crop around the face, as the render does.
+
+    Returns:
+        A listing — each candidate's number, time in the cut and clip — and
+        the candidates as one labeled image.
+
+    Raises:
+        ValueError: If the project does not exist or has nothing to offer.
+    """
+    project = repo.get_project(project_id)
+    if not project:
+        raise ValueError(f"project {project_id} not found")
+    project = _reshaped(project, frame)
+    offered = cover_candidates(project, _analyses(project))[:MAX_STORYBOARD_TILES]
+    if not offered:
+        raise ValueError(f"project {project_id} has no picture to take a cover from")
+    assets = _referenced_assets(project)
+    framing = _framing(project, assets) if follow_faces else {}
+    fps = Fraction(project.fps_num, project.fps_den)
+    shots, listing = [], []
+    for number, (clip, seconds) in enumerate(offered, start=1):
+        at = float(clip.timeline_in) + (seconds - float(clip.source_range.start)) / clip.speed
+        framed = framing.get(clip.id)
+        shots.append((assets[clip.asset_id].path, seconds, f"#{number}  {format_timestamp(at)}",
+                      centre_at(framed, clip, seconds, fps) if framed else None))
+        listing.append(f"#{number}: edit {at:.3f}s ({format_timestamp(at)}) | clip {clip.id}")
+    header = f"{len(offered)} cover candidate(s) for project {project_id}, {project.width}x{project.height}:"
+    return ToolResult(content=[
+        "\n".join([header, *listing]),
+        Image(data=storyboard_sheet(shots, aspect=project.width / project.height), format="jpeg"),
+    ])
+
+@mcp.tool()
+def export_cover(
+    project_id: str,
+    seconds: Annotated[float, Field(ge=0)],
+    frame: Optional[Literal["landscape", "portrait", "square"]] = None,
+    follow_faces: bool = True,
+) -> dict:
+    """Save one frame of the cut as a full-size JPEG, for a cover or thumbnail.
+
+    The frame is the one the viewer sees at that moment — covering picture
+    where there is some — at the size the cut is rendered at and cropped the
+    way the render crops it.
+
+    Args:
+        project_id: ID of the project.
+        seconds: The moment in the cut, as `propose_covers` lists it.
+        frame: Save it in another shape.
+        follow_faces: Crop around the face, as the render does.
+
+    Returns:
+        A dictionary with the `output_path` of the JPEG and its `width` and
+        `height`.
+
+    Raises:
+        ValueError: If the project does not exist or nothing is on screen then.
+    """
+    project = repo.get_project(project_id)
+    if not project:
+        raise ValueError(f"project {project_id} not found")
+    project = _reshaped(project, frame)
+    on_screen = [
+        clip for track in project.video_tracks for clip in track.clips
+        if (track is project.base_video_track or clip.layout is None)
+        and float(clip.timeline_in) <= seconds < float(clip.timeline_out)
+    ]
+    if not on_screen:
+        raise ValueError(f"nothing is on screen at {seconds:g}s of project {project_id}")
+    # The topmost full-frame picture is what the viewer sees.
+    clip = on_screen[-1]
+    assets = _referenced_assets(project)
+    source = float(clip.source_range.start) + (seconds - float(clip.timeline_in)) * clip.speed
+    framed = (_framing(project, assets) if follow_faces else {}).get(clip.id)
+    fps = Fraction(project.fps_num, project.fps_den)
+    picture = still(assets[clip.asset_id].path, source, project.width, project.height,
+                    centre_at(framed, clip, source, fps) if framed else None)
+    folder = os.path.join(WORKSPACE_DIR, "outputs", f"cover-{uuid.uuid4()}")
+    os.makedirs(folder, exist_ok=True)
+    path = os.path.join(folder, _output_name(project, "cover" + (f"-{frame}" if frame else "")).replace(".mp4", ".jpg"))
+    picture.save(path, "JPEG", quality=92)
+    return {"output_path": path, "width": project.width, "height": project.height}
+
+@mcp.tool()
+def export_timeline(
+    project_id: str,
+    format: Literal["edl", "otio", "fcpxml", "srt"],
+) -> dict:
+    """Write the cut out for a professional editing program, pointed at the original files.
+
+    For a user who wants to finish the edit in Premiere, DaVinci Resolve or
+    Final Cut rather than start again from the rendered file. `fcpxml` is
+    the fullest and opens in all three; `otio` is OpenTimelineIO, for Resolve
+    and anything built on it; `edl` is the oldest and plainest — the sequence
+    alone, one picture track with its sound. `srt` writes the stored captions
+    as they fall in the cut, which every one of those programs imports.
+
+    The edit comes across — every clip's in and out, its place and track, and
+    the parts of the video as markers — but not what this server draws
+    itself: speed changes, transitions, colour, volume and fades, voice
+    repair, where an inset sits. `left_behind` says which of those this cut
+    uses; tell the user, so they are not surprised in the other program.
+
+    Args:
+        project_id: ID of the project.
+        format: `fcpxml`, `otio`, `edl`, or `srt`.
+
+    Returns:
+        A dictionary with the `output_path` of the file and `left_behind`,
+        one line per kind of thing the export could not carry.
+
+    Raises:
+        ValueError: If the project does not exist, has nothing on its
+            sequence, or has no captions to write as SRT.
+    """
+    project = repo.get_project(project_id)
+    if not project:
+        raise ValueError(f"project {project_id} not found")
+    if format == "srt":
+        placed = place_cues(project, project.subtitles) if project.subtitles else []
+        if not placed:
+            raise ValueError(
+                f"project {project_id} has no captions in the cut; propose them with generate_subtitles "
+                "and store them with a set_subtitles operation"
+            )
+        text, behind = write_srt(placed), []
+    else:
+        if project.base_video_track is None or not project.base_video_track.clips:
+            raise ValueError(f"project {project_id} has nothing on its sequence to export")
+        writer = {"edl": write_edl, "otio": write_otio, "fcpxml": write_fcpxml}[format]
+        text, behind = writer(project, _referenced_assets(project))
+    folder = os.path.join(WORKSPACE_DIR, "outputs", f"export-{uuid.uuid4()}")
+    os.makedirs(folder, exist_ok=True)
+    path = os.path.join(folder, _output_name(project, "timeline").replace(".mp4", f".{format}"))
+    # UTF-8 with a byte-order mark only for the EDL: the programs that read EDLs guess the
+    # encoding, and a Chinese file name in a FROM CLIP NAME comes out garbled without it.
+    with open(path, "w", encoding="utf-8-sig" if format == "edl" else "utf-8", newline="\n") as handle:
+        handle.write(text)
+    return {"output_path": path, "left_behind": behind}
 
 @mcp.tool()
 def get_job(job_id: str) -> dict:
