@@ -22,7 +22,7 @@ from difflib import SequenceMatcher
 from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 
 from app.models.media import Asset
-from app.models.plan import EditPlan, MusicCue, Selection, TrimKind
+from app.models.plan import Beat, BeatRole, EditPlan, MusicCue, Selection, TrimKind
 from app.engine.semantic import EDGE_TOLERANCE_SECONDS, CleanCuts, voice_gains
 from app.models.semantic import ClipKind, SemanticClip, SemanticTimeline
 from app.models.timeline import Clip, Project
@@ -1550,6 +1550,46 @@ def _cue_problems(plan: EditPlan, pieces: Sequence[Piece]) -> List[str]:
         previous = max(previous, at)
     return problems
 
+def _story_problems(beats: Sequence[Beat]) -> List[str]:
+    """Find what stops a plan's parts from telling a story.
+
+    Asked of any plan with more than one part or more than one file. One
+    part cut from one recording is a trim — the best thirty seconds of an
+    interview — and a story is not what was asked for; several files strung
+    together as one part is exactly the list of moments this is here to stop.
+
+    Args:
+        beats: The plan's parts, in the order they play.
+
+    Returns:
+        What is missing or out of place: a part with no role, no turn, no
+        payoff, a payoff that is not the last part, or a hook that is not the
+        first. Empty for a plan that begins, turns and ends.
+    """
+    if not beats:
+        return []
+    problems: List[str] = []
+    unsaid = [beat.id for beat in beats if beat.role is None]
+    if unsaid:
+        problems.append(
+            f"story: these beats do not say what they do in the story: {', '.join(unsaid)}. Give every beat a "
+            "`role` — hook, setup, turn or payoff"
+        )
+        return problems
+    roles = [beat.role for beat in beats]
+    if BeatRole.TURN not in roles:
+        problems.append(
+            "story: no beat is a turn — nothing changes, so the parts are a list rather than a story. Find where "
+            "something goes wrong, surprises, or is decided, and build a beat around it"
+        )
+    if BeatRole.PAYOFF not in roles:
+        problems.append("story: no beat is a payoff — say what it all came to, and end on it")
+    elif roles[-1] != BeatRole.PAYOFF:
+        problems.append(f"story: the video ends on {beats[-1].id}, a {roles[-1].value}; end on the payoff")
+    if BeatRole.HOOK in roles and roles[0] != BeatRole.HOOK:
+        problems.append("story: the hook is not the first beat; open on it")
+    return problems
+
 def check_plan(
     plan: EditPlan,
     timeline: SemanticTimeline,
@@ -1594,6 +1634,9 @@ def check_plan(
     beats = {beat.id for beat in plan.beats}
     if len(beats) != len(plan.beats):
         problems.append("two beats share an id")
+    files = {clips[selection.clip_id].asset_id for selection in plan.selections if selection.clip_id in clips}
+    if len(plan.beats) > 1 or len(files) > 1:
+        problems.extend(_story_problems(plan.beats))
 
     for position, selection in enumerate(plan.selections, start=1):
         where = f"selection {position} ({selection.clip_id})"

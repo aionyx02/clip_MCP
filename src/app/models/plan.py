@@ -52,11 +52,32 @@ class Trim(BaseModel):
         description="For `head` and `tail`: how many seconds to take",
     )
 
+class BeatRole(str, Enum):
+    """What a part does in the story the video tells: 起承轉合.
+
+    A video that is only a run of moments, however good each one is, leaves
+    nothing behind. These four are the least a story is made of, and saying
+    which each part is makes a plan with no turn or no ending visible before
+    anything is cut.
+    """
+
+    HOOK = "hook"
+    SETUP = "setup"
+    TURN = "turn"
+    PAYOFF = "payoff"
+
 class Beat(BaseModel):
     """One part of the finished video, and what it is there to do."""
 
     id: str = Field(..., min_length=1)
     name: str = Field(..., min_length=1, description="What this part is, such as 開場 or 結尾")
+    role: Optional[BeatRole] = Field(
+        default=None,
+        description="What this part does in the story (起承轉合): `hook` opens on the strongest moment or the "
+                    "question the video answers; `setup` gives what the viewer needs to follow; `turn` is where "
+                    "something changes — a problem, a surprise, a decision; `payoff` is what it came to. Every "
+                    "part says one; a plan needs a turn and ends on its payoff",
+    )
     intent: str = Field(default="", description="What it has to achieve for the video to work")
     target_seconds: Optional[float] = Field(default=None, gt=0, description="Roughly how long it should run")
 

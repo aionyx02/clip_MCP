@@ -148,10 +148,11 @@ user corrects what is wrong before a render is wasted.
    `import_folder` when the user points at a folder, with `recursive: true`
    when the footage sits in sub-folders. Use the returned `duration` instead
    of guessing lengths; `inspect_media` gives resolution and frame rate.
-3. When the edit depends on what is said or shown, read the footage first,
-   and for anything longer than a handful of clips write a plan and compile
-   it (`save_plan`, `validate_plan`, `compile_plan`) rather than placing clips
-   by hand.
+3. When the edit depends on what is said or shown, read the footage first.
+   Whenever it uses more than one file or has more than one part, write a
+   plan that tells a story — hook, setup, turn, payoff — and compile it
+   (`save_plan`, `validate_plan`, `compile_plan`) rather than placing clips
+   by hand; the check before a render finds a hand-built sequence.
 4. By hand: `create_project` with the output settings and a `name` the user
    would recognise, such as `EP1 台北`; see [Defaults](#defaults). Then
    `apply_edits` with an `add_track` operation,

@@ -10,12 +10,13 @@ built to stay out of.
 from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import pytest
 from pydantic import TypeAdapter
 
 from app.engine.plan import (
+    _story_problems,
     plan_markers,
     BREATH_SECONDS,
     broll_covers,
@@ -43,6 +44,7 @@ from app.models.media import (
     TranscriptWord, Voice,
 )
 from app.models.plan import (
+    BeatRole,
     AddBrollOp, Beat, BrollShot, DropBrollOp, DropSelectionOp, EditPlan, MusicCue, MusicPlan, PlanAmendment,
     PlanTarget, Rejection, Selection, Trim, TrimKind, apply_amendment,
 )
@@ -1725,7 +1727,8 @@ def parts() -> tuple:
     talk = speech_of(clips)
     plan = EditPlan(
         timeline_id="tl_test", timeline_input_hash="hash",
-        beats=[Beat(id="b1", name="開場"), Beat(id="b2", name="中段"), Beat(id="b3", name="結尾")],
+        beats=[Beat(id="b1", name="開場", role=BeatRole.HOOK), Beat(id="b2", name="中段", role=BeatRole.TURN),
+               Beat(id="b3", name="結尾", role=BeatRole.PAYOFF)],
         selections=[Selection(clip_id=talk[0].id, beat_id="b1"), Selection(clip_id=talk[2].id, beat_id="b2"),
                     Selection(clip_id=talk[3].id, beat_id="b3")],
     )
@@ -1793,7 +1796,7 @@ def test_the_cues_become_clips_on_the_music_track() -> None:
 def test_music_cues_that_do_not_hold_up_are_refused(cues, beats, heard, expected) -> None:
     plan, by_id, assets = parts()
     plan = plan.model_copy(update={
-        "beats": [*plan.beats, Beat(id="b4", name="空的")],
+        "beats": [*plan.beats, Beat(id="b4", name="空的", role=BeatRole.PAYOFF)],
         "music": MusicPlan(cues=cues),
     })
     cuts = {SONG: song_of(beats, 60.0)[1]} if heard else {}
@@ -1846,7 +1849,7 @@ def test_the_music_changes_where_the_part_of_the_video_does(planned: dict, tmp_p
     stored = EditPlan.model_validate(get_plan(planned["plan_id"])["plan"])
     first, last = planned["clips"][0]["clip_id"], planned["clips"][2]["clip_id"]
     saved = save_plan(stored.model_copy(update={
-        "beats": [Beat(id="b1", name="開場"), Beat(id="b2", name="結尾")],
+        "beats": [Beat(id="b1", name="開場", role=BeatRole.TURN), Beat(id="b2", name="結尾", role=BeatRole.PAYOFF)],
         "selections": [Selection(clip_id=first, beat_id="b1"), Selection(clip_id=last, beat_id="b2")],
         "music": MusicPlan(duck_under_speech=False, cues=[
             MusicCue(asset_id=low, volume=1.0, fade_in=0, fade_out=0, cut_on_beat=True),
@@ -1996,7 +1999,7 @@ def test_both_songs_are_heard_where_they_cross_fade(planned: dict, tmp_path: Pat
     stored = EditPlan.model_validate(get_plan(planned["plan_id"])["plan"])
     first, last = planned["clips"][0]["clip_id"], planned["clips"][2]["clip_id"]
     saved = save_plan(stored.model_copy(update={
-        "beats": [Beat(id="b1", name="開場"), Beat(id="b2", name="結尾")],
+        "beats": [Beat(id="b1", name="開場", role=BeatRole.TURN), Beat(id="b2", name="結尾", role=BeatRole.PAYOFF)],
         "selections": [Selection(clip_id=first, beat_id="b1"), Selection(clip_id=last, beat_id="b2")],
         "music": MusicPlan(duck_under_speech=False, crossfade_seconds=1.0, cues=[
             MusicCue(asset_id=low, volume=1.0, fade_in=0, fade_out=0),
@@ -2063,3 +2066,65 @@ def test_a_sped_up_cut_compiles_to_the_length_the_plan_says(planned: dict) -> No
     project = create_project(width=640, height=360)["id"]
     compile_plan(project_id=project, expected_version=1, plan_id=saved["plan_id"])
     assert float(get_project(project)["duration"]) == pytest.approx(expected, abs=0.01)
+
+# --- story -------------------------------------------------------------------------------
+
+def story(*roles: Optional[BeatRole]) -> List[Beat]:
+    """Build parts with the roles given, in order.
+
+    Args:
+        *roles: One role per part, or nothing for a part that says none.
+
+    Returns:
+        The parts.
+    """
+    return [Beat(id=f"b{index}", name=f"第{index}段", role=role) for index, role in enumerate(roles, start=1)]
+
+@pytest.mark.parametrize(("roles", "complaint"), [
+    ((BeatRole.HOOK, None, BeatRole.PAYOFF), "do not say what they do"),
+    ((BeatRole.HOOK, BeatRole.SETUP, BeatRole.PAYOFF), "no beat is a turn"),
+    ((BeatRole.HOOK, BeatRole.TURN), "no beat is a payoff"),
+    ((BeatRole.TURN, BeatRole.PAYOFF, BeatRole.SETUP), "end on the payoff"),
+    ((BeatRole.SETUP, BeatRole.HOOK, BeatRole.TURN, BeatRole.PAYOFF), "open on it"),
+])
+def test_a_plan_that_does_not_tell_a_story_is_refused(roles: tuple, complaint: str) -> None:
+    assert any(complaint in problem for problem in _story_problems(story(*roles)))
+
+@pytest.mark.parametrize("roles", [
+    (BeatRole.HOOK, BeatRole.SETUP, BeatRole.TURN, BeatRole.PAYOFF),
+    (BeatRole.TURN, BeatRole.PAYOFF),
+    (BeatRole.SETUP, BeatRole.TURN, BeatRole.TURN, BeatRole.PAYOFF),
+])
+def test_a_plan_that_begins_turns_and_ends_is_accepted(roles: tuple) -> None:
+    assert _story_problems(story(*roles)) == []
+
+def story_checked(selections: List[Selection], beats: List[Beat]) -> List[str]:
+    """Check a plan over the talk footage, with its timeline filled in.
+
+    Args:
+        selections: The chosen footage.
+        beats: The parts.
+
+    Returns:
+        The problems found.
+    """
+    made = analysis(**FOOTAGE)
+    assets = {ASSET_ID: sourced()}
+    timeline, clips = build_timeline(assets, {ASSET_ID: made})
+    plan = beats_plan(selections(clips) if callable(selections) else selections, beats).model_copy(
+        update={"timeline_id": timeline.id, "timeline_input_hash": timeline.input_hash},
+    )
+    problems, _ = check_plan(plan, timeline, {clip.id: clip for clip in clips}, {}, assets, None)
+    return problems
+
+def test_one_part_cut_from_one_recording_is_a_trim_and_needs_no_story() -> None:
+    problems = story_checked(lambda clips: [Selection(clip_id=speech_of(clips)[0].id, beat_id="b1")], story(None))
+    assert not any(problem.startswith("story") for problem in problems)
+
+def test_two_parts_are_a_story_and_have_to_say_so() -> None:
+    problems = story_checked(
+        lambda clips: [Selection(clip_id=speech_of(clips)[0].id, beat_id="b1"),
+                       Selection(clip_id=speech_of(clips)[1].id, beat_id="b2")],
+        story(None, None),
+    )
+    assert any(problem.startswith("story") for problem in problems)

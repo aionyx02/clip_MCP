@@ -2592,7 +2592,9 @@ def render_project(
     burn_subtitles: bool = False,
     frame: Optional[Literal["landscape", "portrait", "square"]] = None,
     follow_faces: bool = True,
-    allow: Optional[List[Literal["bad_picture", "clipping", "captions", "length"]]] = None,
+    allow: Optional[List[Literal[
+        "bad_picture", "clipping", "mid_speech", "repeated", "unplanned", "captions", "length",
+    ]]] = None,
 ) -> dict:
     """Start rendering a project to an MP4 file in the background.
 
@@ -2813,9 +2815,14 @@ def check_render(
     """Check a cut for what would be noticed in the finished file, without rendering it.
 
     The same check `render_project` runs first and refuses a render over. It
-    looks for four things: `bad_picture`, black or frozen source picture that
+    looks for seven things: `bad_picture`, black or frozen source picture that
     reaches the screen; `clipping`, a recording squared off at the ceiling,
-    which no amount of turning down undoes; `captions`, a caption too tall for
+    which no amount of turning down undoes; `mid_speech`, a cut that lands
+    inside a word or between two words of one phrase, with the nearest pause
+    to move it to; `repeated`, the same stretch of a file shown twice;
+    `unplanned`, a sequence of three or more clips put together by hand
+    rather than compiled from a plan, so nothing says how it opens, turns
+    and ends; `captions`, a caption too tall for
     the frame — most likely when a landscape cut is rendered portrait; and
     `length`, a cut far from the length its plan asked for. Each is a fact
     about the cut, not a verdict on it: black may be meant, and the user may

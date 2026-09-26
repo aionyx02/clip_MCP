@@ -138,6 +138,9 @@ xfade 原生有 58 種，這裡只開三種（dissolve、wipe、dip），因為�
 EP2 要 86 秒（22%），那是在改變成片長度，
 所以由 `check_plan` 回報「總共還差幾秒、最長的是哪一段」，交給定長度的人決定。
 編譯器動過的剪點也會回報——移動雖然是算術，仍然是改了別人的剪接。
+2026-09-26 實際跑十支之後補了一次：那十支全是手排、用整數秒切，片段沒有起承轉合。
+plan 的每一段現在要標 hook／setup／turn／payoff，沒有轉折或收尾的多段 plan 直接退回；
+出片前檢查多了切在句子中間、同一段素材用兩次、手排三顆以上三項，擋在正式 render 前。
 
 四個清理階段（去氣口、去重拍、首尾修整、避開壞幀）已經做完，細節寫在
 `architecture.md`。這裡只留下做的時候發現、之後還會咬人的兩件事：
@@ -547,6 +550,9 @@ L2 是重點：它跑得快、可以每次 commit 都跑，而且因為 plan 是
 | `plan.BROLL_LONG_SHOT_SECONDS` | 8.0 | 一顆鏡頭停多久才提議蓋它 |
 | `plan.VOICE_SPREAD_DB` | 3.0 | 兩個人差多少 dB 才提醒可以 `level_voices` |
 | `delivery.CLIPPED_PEAK_DB` / `CLIPPED_FLATNESS` | -0.5 / 5.0 | 峰值多貼頂、波形多平才算爆音（合成的爆音在 10 以上，乾淨的是 0） |
+| `delivery.CLEAN_GAP_SECONDS` / `CLEAN_SEARCH_SECONDS` | 0.2 / 3.0 | 兩個詞隔多遠算停頓（剪在更短的空隙算切在詞組中間）、往兩邊找多遠的停頓來建議 |
+| `delivery.REPEAT_SECONDS` | 1.0 | 同一個檔案重疊多少秒算同一顆鏡頭放兩次 |
+| `delivery.UNPLANNED_CLIPS` | 3 | 手排幾顆以上算「剪輯」而要求 plan；更少的是修剪 |
 | `listen.SPEAKING_BELOW_PEAK_DB` / `SPEAKING_MIN_SECONDS` | 20 / 0.5 | 聲音預覽裡「有人在講話」的判準 |
 | `sections.py` 的權重 | 停頓 0.45 / 語彙 0.30 / 話語標記 0.15 / 換場 0.10 | 候選段落邊界怎麼產生，連同停頓飽和點、語彙窗口、每分鐘候選數；調了會產生新的 `candidate_hash`，舊的段落不受影響 |
 

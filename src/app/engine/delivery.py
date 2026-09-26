@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from typing import List, Mapping, Optional, Sequence, Tuple
 
 from app.engine.plan import LENGTH_TOLERANCE
+from app.engine.semantic import share_covered, was_audible
 from app.engine.subtitles import caption_overflow, captioned_clips
 from app.models.media import MediaAnalysis
 from app.models.timeline import CaptionStyle, Clip, PlacedCue, Project
@@ -31,7 +32,19 @@ YOUTUBE_MIN_CHAPTER_SECONDS = 10.0
 CLIPPED_PEAK_DB = -0.5
 CLIPPED_FLATNESS = 5.0
 # The kinds of finding a render can be told to go ahead in spite of.
-CHECKS = ("bad_picture", "clipping", "captions", "length")
+CHECKS = ("bad_picture", "clipping", "mid_speech", "repeated", "unplanned", "captions", "length")
+# A cut is clean where the speaker stopped: between two words at least this far apart.
+# Shorter gaps are the spaces inside a phrase, and a cut there sounds like a word bitten
+# off. Provisional.
+CLEAN_GAP_SECONDS = 0.2
+# How far either side of a cut to look for a clean one to offer instead. Provisional.
+CLEAN_SEARCH_SECONDS = 3.0
+# How much of the same stretch of a file has to come back before it is the same shot shown
+# twice rather than two neighbouring moments. Provisional.
+REPEAT_SECONDS = 1.0
+# A sequence of this many clips is an edit, and an edit with no plan has nothing that says
+# how it begins, turns and ends. Fewer is a trim. Provisional.
+UNPLANNED_CLIPS = 3
 
 @dataclass(frozen=True)
 class Finding:
@@ -229,6 +242,15 @@ def check_delivery(
                 f"second(s), first at {clock(clipped[0][0])}. Turning it down does not undo it"
             )))
 
+    findings.extend(_speech_cuts(base.clips if base else [], analyses))
+    findings.extend(_repeats(base.clips if base else []))
+    if base and len(base.clips) >= UNPLANNED_CLIPS and any(clip.from_plan_id is None for clip in base.clips):
+        findings.append(Finding("unplanned", (
+            f"these {len(base.clips)} clips were put together by hand, not compiled from a plan, so nothing "
+            "says what the video is for or how it opens, turns and ends. Write a plan whose parts are a hook, "
+            "a setup, a turn and a payoff, and compile it"
+        )))
+
     if captions:
         for cue in caption_overflow(captions, project.width, project.height, style):
             findings.append(Finding("captions", (
@@ -242,6 +264,131 @@ def check_delivery(
         )))
     order = {check: index for index, check in enumerate(CHECKS)}
     return sorted(findings, key=lambda finding: order[finding.check])
+
+def _said(analysis: MediaAnalysis) -> list:
+    """List the sentences of a file that were really said.
+
+    Args:
+        analysis: The file's analysis.
+
+    Returns:
+        Its transcribed sentences, less any the recogniser wrote over a
+        stretch measured as silent — the same rule that keeps them out of the
+        captions, so a cut is not said to split a line nobody spoke.
+    """
+    segments = analysis.transcript.segments if analysis.transcript else []
+    if not analysis.silences:
+        return list(segments)
+    return [
+        segment for segment in segments
+        if was_audible(share_covered(segment.start, segment.end, analysis.silences), True)
+    ]
+
+def _clean_points(analysis: MediaAnalysis) -> List[float]:
+    """List where a file's speech can be cut without biting into it.
+
+    Args:
+        analysis: The file's analysis.
+
+    Returns:
+        The middle of every gap between words long enough to be a pause, and
+        the start and end of every sentence, in source seconds.
+    """
+    points: List[float] = []
+    for segment in _said(analysis):
+        points += [segment.start, segment.end]
+        for before, after in zip(segment.words, segment.words[1:]):
+            if after.start - before.end >= CLEAN_GAP_SECONDS:
+                points.append((before.end + after.start) / 2)
+    return sorted(points)
+
+def _inside_speech(analysis: MediaAnalysis, at: float) -> bool:
+    """Tell whether a cut at one moment of a file lands in the middle of somebody talking.
+
+    Args:
+        analysis: The file's analysis.
+        at: The moment, in source seconds.
+
+    Returns:
+        True inside a word, or between two words of one sentence closer
+        together than a pause.
+    """
+    for segment in _said(analysis):
+        if not segment.start < at < segment.end:
+            continue
+        words = segment.words
+        if not words:
+            # Nothing finer is known than the sentence, and the cut is inside it.
+            return True
+        for before, after in zip(words, words[1:]):
+            if before.end <= at <= after.start:
+                return after.start - before.end < CLEAN_GAP_SECONDS
+        return any(word.start < at < word.end for word in words)
+    return False
+
+def _speech_cuts(clips: Sequence[Clip], analyses: Mapping[str, MediaAnalysis]) -> List[Finding]:
+    """Find cuts on the sequence that land in the middle of somebody talking.
+
+    Only cuts somebody made: the start and end of a recording are where the
+    camera started and stopped, not a decision. And the cut is where the
+    sound is cut, which a J or an L cut moves away from the picture's.
+
+    Args:
+        clips: The sequence's clips.
+        analyses: Analyses by asset ID.
+
+    Returns:
+        One finding per cut, naming the nearest clean place instead when there
+        is one close by.
+    """
+    found: List[Finding] = []
+    for clip in sorted(clips, key=lambda item: item.timeline_in):
+        analysis = analyses.get(clip.asset_id)
+        if clip.volume == 0 or analysis is None or analysis.transcript is None:
+            continue
+        ends = (
+            ("starts", float(clip.audio_source_start), float(clip.audio_timeline_in)),
+            ("ends", float(clip.audio_source_end), float(clip.audio_timeline_out)),
+        )
+        for side, at, landed in ends:
+            if at <= 0 or at >= analysis.duration or not _inside_speech(analysis, at):
+                continue
+            near = [point for point in _clean_points(analysis) if abs(point - at) <= CLEAN_SEARCH_SECONDS]
+            advice = (
+                f"; the nearest pause is at {min(near, key=lambda point: abs(point - at)):.2f}s of the file"
+                if near else ""
+            )
+            found.append(Finding("mid_speech", (
+                f"clip {clip.id} {side} in the middle of somebody talking, at {clock(landed)} "
+                f"({at:.2f}s of the file){advice}"
+            )))
+    return found
+
+def _repeats(clips: Sequence[Clip]) -> List[Finding]:
+    """Find the same stretch of a file shown twice on the sequence.
+
+    Args:
+        clips: The sequence's clips.
+
+    Returns:
+        One finding per pair. Sometimes that is the point — a callback, a
+        replay — which is why it is a finding and not a refusal.
+    """
+    found: List[Finding] = []
+    ordered = sorted(clips, key=lambda item: item.timeline_in)
+    for index, first in enumerate(ordered):
+        for second in ordered[index + 1:]:
+            if first.asset_id != second.asset_id:
+                continue
+            overlap = min(first.source_range.end, second.source_range.end) - max(
+                first.source_range.start, second.source_range.start,
+            )
+            if float(overlap) >= REPEAT_SECONDS:
+                found.append(Finding("repeated", (
+                    f"clips {first.id} (at {clock(float(first.timeline_in))}) and {second.id} "
+                    f"(at {clock(float(second.timeline_in))}) show the same {float(overlap):.1f}s of the same file"
+                )))
+    return found
 
 def cover_candidates(
     project: Project,

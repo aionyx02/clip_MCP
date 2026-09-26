@@ -6,6 +6,11 @@ on, or how fast to cut. It is referenced from SKILL.md.
 These are defaults for when the user has no opinion of their own. Drop any of
 them the moment they say otherwise.
 
+**The parts are a story.** Hook, setup, turn, payoff — what each is for is in
+`skill://clip-editing/editing-intelligence.md`. Pacing serves that: the setup
+can breathe, the turn is where the cutting tightens, and the payoff gets a
+beat of silence after it rather than the next thing.
+
 **Open on the strongest moment.** The first two or three seconds decide
 whether the rest gets watched, so do not open on a title card, a slow pan, or
 someone settling into frame. Find the liveliest moment and put it first with

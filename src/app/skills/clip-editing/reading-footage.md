@@ -60,8 +60,11 @@ saying what to make of it. It is referenced from SKILL.md.
    these are stored as facts about the footage and later choices are made from
    them. What wrote each one is stored alongside it, so a label you read off a
    thumbnail is never mistaken later for something a detector measured.
-7. Turn clips into edits. For anything longer than a handful of clips, write
-   a plan instead — `skill://clip-editing/editing-intelligence.md`. By hand:
+7. Turn clips into edits. Whenever the edit uses more than one file or has
+   more than one part, write a plan instead —
+   `skill://clip-editing/editing-intelligence.md` — because a plan is where
+   the story is decided, and a sequence placed by hand has none: the check
+   before a render says so. By hand, for a trim of one recording:
    - A clip's `start` and `end` are the `source_range`. To leave a little air
      around it, extend by up to `safe_in` before and `safe_out` after. Those
      are measured from the silence around the clip, so anything within them
@@ -70,6 +73,9 @@ saying what to make of it. It is referenced from SKILL.md.
    - Merge kept parts that are less than 0.3 s apart into one clip, so the
      result is not choppy.
    - Build the sequence with `insert_clip` in source order.
+   - Never cut on round seconds picked by eye (5 to 25, 10 to 30). A cut goes
+     where a sentence ends or a pause falls, and the only way to know where
+     that is, is to read the clips.
    - Leave out clips whose `kind` is `unusable`, and say so if the user asks
      for a stretch that is mostly those.
 8. For subjective selections such as highlights, list the chosen parts with
@@ -129,13 +135,15 @@ Never transcribe a whole folder up front. Twenty ten-minute files take hours,
 and most of it gets thrown away.
 
 A proposal says what is in the footage, how long each option runs, and what it
-leaves out. Read `skill://clip-editing/pacing-and-structure.md` before naming
+leaves out. Each option is a story, not a list of places: say what it opens
+on, where it turns, and what it comes to. 「每個地點各留一點」 is not an
+option; it is the fragmented cut nobody wants to watch. Read `skill://clip-editing/pacing-and-structure.md` before naming
 those lengths. Label the options so the user can answer with one letter:
 
 「這 8 支我都看過了，共 42 分鐘。裡面有三條線：海邊 4 分鐘、晚餐聊天有講到之後的行程 6 分鐘，
 另外 2 支畫面晃得很厲害，建議不要用。
-A：一天的流水帳，約 90 秒，每個地點各留一點。
-B：只留晚餐那段對話，約 2 分鐘，比較完整。
+A：「計畫被打亂的一天」，約 90 秒。開在海邊的好天氣，轉在突然下雨躲進餐廳，收在晚餐聊到的下一趟行程。
+B：只留晚餐那段對話，約 2 分鐘，比較完整：從「下次去哪」開始，吵了一輪，最後決定的地方收尾。
 你想要哪一種？」
 
 When the user answers 「你決定」, take the first option, say in one line which

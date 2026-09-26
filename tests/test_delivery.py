@@ -402,3 +402,82 @@ def test_a_files_own_timecode_is_read(tmp_path: Path, written, rate: str, expect
     subprocess.run(command + (["-timecode", written] if written else []) + [str(path)], check=True)
     found = timecode_start(probe_file(str(path)))
     assert found == (None if expected is None else pytest.approx(expected, abs=1e-6))
+
+# --- cuts that ignore what is said -----------------------------------------------------
+
+def talking(asset_id: str = "x") -> MediaAnalysis:
+    """Analyze a ten-second file of two sentences, with a real pause inside the first.
+
+    The first runs 1–5s: 今天 天氣 (a half-second pause) 很好. The second runs 6–9s.
+
+    Args:
+        asset_id: The file.
+
+    Returns:
+        The analysis.
+    """
+    from app.models.media import Transcript, TranscriptSegment, TranscriptWord
+
+    def said(*words):
+        return [TranscriptWord(text=text, start=start, end=end) for text, start, end in words]
+
+    return MediaAnalysis(asset_id=asset_id, duration=10.0, transcript=Transcript(language="zh", model="t", segments=[
+        TranscriptSegment(start=1.0, end=5.0, text="今天天氣很好",
+                          words=said(("今天", 1.0, 2.0), ("天氣", 2.05, 3.0), ("很好", 3.5, 5.0))),
+        TranscriptSegment(start=6.0, end=9.0, text="我們出發", words=said(("我們", 6.0, 7.0), ("出發", 7.05, 9.0))),
+    ]))
+
+def checks(project: Project, analyses: dict) -> list:
+    """Run the check before a render and keep only what it found.
+
+    Args:
+        project: The cut.
+        analyses: Its analyses.
+
+    Returns:
+        `(check, message)` per finding.
+    """
+    return [(finding.check, finding.message) for finding in check_delivery(project, analyses)]
+
+@pytest.mark.parametrize("out_point", [1.5, 2.02, 7.02])
+def test_a_cut_in_the_middle_of_somebody_talking_is_found(out_point: float) -> None:
+    found = checks(project_of(clip("a", "x", 0, out_point, 0)), {"x": talking()})
+    assert [check for check, _ in found] == ["mid_speech"]
+    assert "ends in the middle" in found[0][1]
+
+@pytest.mark.parametrize("out_point", [3.25, 5.5, 9.5])
+def test_a_cut_in_a_pause_or_between_sentences_is_clean(out_point: float) -> None:
+    assert checks(project_of(clip("a", "x", 0, out_point, 0)), {"x": talking()}) == []
+
+def test_the_nearest_pause_is_offered_instead() -> None:
+    found = checks(project_of(clip("a", "x", 0, 2.5, 0)), {"x": talking()})
+    assert "nearest pause is at 3.25s" in found[0][1]
+
+def test_where_the_camera_started_is_not_a_cut_anybody_made() -> None:
+    analysis = talking()
+    analysis.transcript.segments[0].start = 0.0
+    analysis.transcript.segments[0].words[0].start = 0.0
+    assert checks(project_of(clip("a", "x", 0, 5.5, 0)), {"x": analysis}) == []
+
+def test_a_muted_clip_is_not_cut_in_the_middle_of_anything() -> None:
+    assert checks(project_of(clip("a", "x", 0, 1.5, 0, volume=0.0)), {"x": talking()}) == []
+
+def test_the_same_shot_shown_twice_is_found() -> None:
+    project = project_of(clip("a", "y", 0, 36, 0), clip("b", "y", 2, 16, 36))
+    found = checks(project, {})
+    assert [check for check, _ in found] == ["repeated"]
+    assert "14.0s of the same file" in found[0][1]
+
+def test_neighbouring_moments_of_one_file_are_not_a_repeat() -> None:
+    assert checks(project_of(clip("a", "y", 0, 10, 0), clip("b", "y", 10.5, 20, 10)), {}) == []
+
+def test_an_edit_put_together_by_hand_is_found() -> None:
+    hand = project_of(clip("a", "y", 0, 5, 0), clip("b", "z", 0, 5, 5), clip("c", "w", 0, 5, 10))
+    assert [check for check, _ in checks(hand, {})] == ["unplanned"]
+    planned = project_of(*(item.model_copy(update={"from_plan_id": "plan"}) for item in hand.base_video_track.clips))
+    assert checks(planned, {}) == []
+
+def test_a_line_the_recogniser_wrote_over_silence_is_not_cut_into() -> None:
+    analysis = talking()
+    analysis.silences = [Span(start=0.5, end=5.5)]
+    assert checks(project_of(clip("a", "x", 0, 1.5, 0)), {"x": analysis}) == []

@@ -17,7 +17,7 @@ off words and bad frames. That is what lets the user change their mind later
 without the whole thing being redone from memory.
 
 1. `save_plan` with a `goal`, a `target` length, the `beats` the video is made
-   of, and a `selection` per piece of footage naming the beat it belongs to
+   of — each with its `role` in the story, below — and a `selection` per piece of footage naming the beat it belongs to
    and the `rationale` for it being there. Put what you considered and passed
    over into `rejected` with the reason. That field earns its keep the moment
    the user asks 「那段講到 X 的怎麼沒放」.
@@ -56,6 +56,33 @@ compile rebuilds it. Do not unpin their work without asking.
 The plan owns the sequence track, the covering picture and the music bed and
 rebuilds all three. Insets and any other track you added are untouched by a
 compile.
+
+## The story
+
+A video is a story, not a run of moments. Before choosing footage, decide
+what the video is about in one sentence — something that changes, not a
+place or a day — and give every beat one of four roles, in this order:
+
+- `hook` — the first seconds: the strongest moment, or the question the rest
+  answers. Optional in a very short cut, and always first when there is one.
+- `setup` — what the viewer needs to follow: who, where, what was meant to
+  happen.
+- `turn` — where something changes: it goes wrong, surprises, gets decided.
+  Every story has one. If the footage seems to have none, look for the
+  failure, the wait, the change of plan; ask the user what happened that day
+  rather than inventing it.
+- `payoff` — what it came to. The video ends here, not on whatever was shot
+  last.
+
+`validate_plan` refuses a plan with more than one beat or more than one file
+that has a beat with no role, no turn, no payoff, or does not end on the
+payoff. A single part cut from one recording is a trim and needs none.
+
+Choose each selection for what it does in its beat, and say so in its
+`rationale`: a shot that is only pretty, or only there because it was shot,
+goes in `rejected`. Within a beat, keep what somebody says whole — a
+sentence cut in half is worse than a sentence left out — and let a beat run
+as long as its point needs rather than giving every file an equal share.
 
 ## Covering picture (B-roll)
 
