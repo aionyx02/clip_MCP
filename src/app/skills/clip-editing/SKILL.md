@@ -277,8 +277,9 @@ screen, where the pauses or mistakes are, or which parts are best.
    level, noise floor and clipping. They are measurements, not verdicts:
    there is no number above which a shot is too dark or too wobbly, so read
    a few and set the bound from what this footage actually looks like. On a
-   conversation each clip also carries a `speaker` label, which is that
-   file's own: `S1` in one recording is not `S1` in another. Then call
+   conversation each clip also carries a `speaker` label, joined across the
+   files of the timeline: `V1` is the same person in every file they appear
+   in, even where each recording called them something different. Then call
    `get_semantic_clip` on the few worth a closer look, which gives the full
    text, every score, and with `include_words` every word's timing.
    `get_analysis` is still there for checking what a detector actually found,
@@ -397,6 +398,26 @@ Softening the sound across a transition is not automatic, and deliberately so:
 how long and which side are judgements. Use `audio_fade_out` on the outgoing
 clip and `audio_fade_in` on the incoming one when the user asks for it.
 
+### Music in a plan
+
+A plan's `music` is a list of `cues`. Each one names the `beat_id` it comes in
+on — the first may leave it out to start with the video — and plays until the
+next cue takes over: 「開場輕快、訪談段不要音樂、結尾換一首」 is three cues, the
+middle one with no `asset_id`. `start` is where in the song to come in; a song
+shorter than its part loops back to there. The fades are per cue, so two songs
+meet with one fading out as the other fades up.
+
+`cut_on_beat` on a cue moves every picture cut under it onto the song's beat.
+It is a style, not a fix: right for a montage or a fast short, wrong for an
+interview, so ask rather than turning it on. It needs the song analyzed —
+`analyze_asset` on the music file finds its beat — and it only ever moves a
+cut through silence, a fraction of a second at most, so it never cuts into a
+word. `validate_plan` says how many cuts moved and how many could not reach a
+beat; a cut that could not stays where it was. Footage that was never
+transcribed is never moved, because nothing says where its words are. A song
+with no steady pulse, such as an ambient pad, has no beat to cut on, and the
+plan is refused with that reason.
+
 ### Caption style
 
 `set_caption_style` decides how burned-in captions are drawn. Start from the
@@ -416,13 +437,13 @@ without the word-by-word lighting.
   under the first line. Nothing here translates anything — the words are yours.
 - **Who is talking** (`speaker_mark`): `name` puts the speaker in front of the
   line, `colour` gives each one their own, `both` does both, `off` says
-  nothing. The labels come from the speaker split as `S1`, `S2`; map them to
-  real names with `speaker_names`, for example `{"S1": "阿明"}`. A label with
-  no name keeps the label, because `S2` is better than crediting the wrong
-  person. Ask the user who is who rather than guessing from the transcript.
-  The same person in two different files gets two different labels — the
-  server cannot yet tell they are the same — so say so rather than mapping
-  both to one name and hoping.
+  nothing. The labels are joined across files, `V1`, `V2`, so one person is
+  one label however many cameras recorded them; map them to real names with
+  `speaker_names`, for example `{"V1": "阿明"}`. A label with no name keeps the
+  label, because `V2` is better than crediting the wrong person. Ask the user
+  who is who rather than guessing from the transcript. A file analyzed before
+  voices were kept still shows its own `S1`, `S2`, which mean nothing outside
+  that file: `analyze_asset` it again rather than mapping its labels to names.
 
 ### Covering picture (B-roll)
 
@@ -562,6 +583,8 @@ times refer to the source file.
 | 「標一下開場到哪裡」 / mark where a part begins | `set_markers`; `compile_plan` already writes one per beat |
 | 「音樂淡出」 / fade the music out | `fit_track` with `fade_out: 2`; it trims the music to the video and puts the fade on whichever clip ends up last |
 | 「拿掉背景音樂」 / remove the music | `delete_clip` every clip on the audio track |
+| 「每一段換不同的音樂」「訪談那段不要音樂」 / change the music between parts | In a plan: one music cue per part, each with the `beat_id` it comes in on; a cue with no `asset_id` is silence. See [Music in a plan](#music-in-a-plan) |
+| 「剪接跟著音樂節拍」 / cut to the beat | In a plan: `cut_on_beat` on that music cue, after `analyze_asset` on the song. Ask first — it suits a montage, not an interview |
 | 「人聲出現時音樂小聲一點」 / duck the music under the talking | `set_track_audio` on the music track with `duck_under_speech: true` |
 | 「每段音量差很多」 / the volume jumps between clips | Nothing: `render_project` normalizes the finished mix to -14 LUFS |
 | 「這支叫 EP1 台北」 / name this project | `rename_project` with the new `name` |

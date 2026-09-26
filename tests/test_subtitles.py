@@ -15,7 +15,7 @@ from app.engine.subtitles import (
     wrap_caption,
 )
 from app.models.media import (
-    MediaAnalysis, Span, SpeakerTurn, Transcript, TranscriptSegment, TranscriptWord,
+    MediaAnalysis, Span, SpeakerTurn, Transcript, TranscriptSegment, TranscriptWord, Voice,
 )
 from app.models.timeline import (
     CAPTION_PRESETS, CaptionStyle, CueWord, EditSubtitleOp, PlacedCue, Project, SetCaptionStyleOp,
@@ -562,6 +562,29 @@ def test_generated_captions_carry_the_words_and_who_said_them(media: Path) -> No
     cue = generate_subtitles(project)["cues"][0]
     assert cue["speaker"] == "S1"
     assert [word["text"] for word in cue["words"]] == ["一", "二"]
+
+def test_one_person_is_one_speaker_across_two_files(media: Path) -> None:
+    """Two cameras on one conversation: each file calls the other person S1, and the
+    captions still have to call each of them one thing."""
+    wide, tall = import_asset(str(media / "wide.mp4"))["id"], import_asset(str(media / "tall.mp4"))["id"]
+    for asset, (first, second) in ((wide, ([1.0, 0.0], [0.0, 1.0])), (tall, ([0.0, 1.0], [1.0, 0.0]))):
+        repo.save_analysis(MediaAnalysis(
+            asset_id=asset, duration=6.0,
+            speakers=[SpeakerTurn(start=0.0, end=3.0, speaker="S1"), SpeakerTurn(start=3.0, end=6.0, speaker="S2")],
+            voices=[Voice(speaker="S1", embedding=first, seconds=3.0),
+                    Voice(speaker="S2", embedding=second, seconds=3.0)],
+            transcript=Transcript(language="zh", model="test", segments=[
+                TranscriptSegment(start=1.0, end=2.0, text="先講", words=words(("先講", 1.0, 2.0))),
+                TranscriptSegment(start=4.0, end=5.0, text="後講", words=words(("後講", 4.0, 5.0))),
+            ]),
+        ))
+    project = build_project([video_track(), insert("a", wide, 0, 6), insert("b", tall, 0, 6)], width=640, height=360)
+    said = {(cue["asset_id"], cue["text"]): cue["speaker"] for cue in generate_subtitles(project)["cues"]}
+    assert said[(wide, "先講")] == said[(tall, "後講")]
+    assert said[(wide, "後講")] == said[(tall, "先講")]
+    assert said[(wide, "先講")] != said[(wide, "後講")]
+    # The joined labels, not either file's own, so nobody reads one for the other.
+    assert set(said.values()) == {"V1", "V2"}
 
 def test_correcting_a_caption_drops_word_timings_that_no_longer_describe_it() -> None:
     project = Project(id="p", width=640, height=360, subtitles=[SubtitleCue(

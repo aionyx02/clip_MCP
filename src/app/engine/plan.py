@@ -15,13 +15,15 @@ back with the reasons, because a compiler that quietly fixed things would be
 making the decisions it was built to stay out of.
 """
 
+import bisect
+import math
 from dataclasses import dataclass
 from difflib import SequenceMatcher
 from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 
 from app.models.media import Asset
-from app.models.plan import EditPlan, Selection, TrimKind
-from app.engine.semantic import CleanCuts, voice_gains
+from app.models.plan import EditPlan, MusicCue, Selection, TrimKind
+from app.engine.semantic import EDGE_TOLERANCE_SECONDS, CleanCuts, voice_gains
 from app.models.semantic import ClipKind, SemanticClip, SemanticTimeline
 from app.models.timeline import Clip, Project
 
@@ -68,6 +70,13 @@ BROLL_LONG_SHOT_SECONDS = 8.0
 # decibels is about where a difference stops being something you have to listen for.
 # Provisional.
 VOICE_SPREAD_DB = 3.0
+# How far a cut may move to land on the beat of the music. At 120 beats a minute no cut
+# is ever more than a quarter of a second from one, so this reaches every beat of most
+# music and leaves the slow ones alone rather than let the song rewrite the pacing.
+# Provisional until there is a corpus to tune it against.
+BEAT_SNAP_SECONDS = 0.3
+# A cut this close to a beat is already on it — well inside one frame at 60fps, about 17ms.
+ON_BEAT_SECONDS = 0.005
 # How far the compiled length may sit from what the plan asked for before it is worth saying.
 LENGTH_TOLERANCE = 0.1
 
@@ -630,6 +639,256 @@ def _off_bad_frames(
         )
     return out, notes
 
+def _beginnings(pieces: Sequence[Piece]) -> Dict[str, int]:
+    """Say which window each beat of the plan begins with.
+
+    The same rule `plan_markers` follows, because a cue comes in where the
+    marker is: a beat begins at the first window carrying it, and a beat whose
+    first window was merged into the one before it has no window of its own
+    and so does not begin anywhere.
+
+    Args:
+        pieces: The windows, in order.
+
+    Returns:
+        The index of each beat's first window, keyed by beat ID.
+    """
+    first: Dict[str, int] = {}
+    for index, piece in enumerate(pieces):
+        if piece.beat_id and piece.beat_id not in first:
+            first[piece.beat_id] = index
+    return first
+
+def _cue_entries(plan: EditPlan, pieces: Sequence[Piece]) -> Dict[int, MusicCue]:
+    """Say which window each music cue comes in on.
+
+    Args:
+        plan: The plan.
+        pieces: Its windows, in order.
+
+    Returns:
+        The cue coming in at each window that has one, keyed by the window's
+        index. A cue whose beat never begins is left out; `check_plan` refuses
+        a plan with one.
+    """
+    if plan.music is None:
+        return {}
+    first = _beginnings(pieces)
+    entries: Dict[int, MusicCue] = {}
+    for cue in plan.music.cues:
+        at = 0 if cue.beat_id is None else first.get(cue.beat_id)
+        if at is not None:
+            entries[at] = cue
+    return entries
+
+def _song_length(source: Optional[Asset]) -> Optional[float]:
+    """Say how long a song runs, to the millisecond the timeline keeps.
+
+    Rounded down, so a clip cut to it never runs past the file. The beat grid
+    and the music laid on the track both loop on this one number: a loop a
+    millisecond out would be thirty milliseconds out after thirty of them.
+
+    Args:
+        source: The song's file.
+
+    Returns:
+        The length in seconds, or None when it is not known.
+    """
+    if source is None or source.duration is None:
+        return None
+    return math.floor(float(source.duration) * 1000) / 1000
+
+def song_entry(cue: MusicCue, song: Optional[CleanCuts]) -> float:
+    """Work out where in its song a cue comes in.
+
+    Where it was asked to — unless the cue cuts on the beat, in which case the
+    song comes in on the first beat at or after that point. A cut is only on
+    the beat if the beat is counted from somewhere that is one, and the cut
+    the song comes in on is the first of them.
+
+    Args:
+        cue: The cue.
+        song: What is known about its song, if anything.
+
+    Returns:
+        The second of the song it starts playing from, to the millisecond.
+    """
+    if cue.cut_on_beat and song is not None and song.beats:
+        at = bisect.bisect_left(song.beats, cue.start - ON_BEAT_SECONDS)
+        if at < len(song.beats):
+            return round(song.beats[at], 3)
+    return round(cue.start, 3)
+
+def _beats_near(
+    beats: Sequence[float],
+    entry: float,
+    length: Optional[float],
+    entered_at: float,
+    seconds: float,
+) -> List[float]:
+    """Find the beats of a playing song either side of a moment of the timeline.
+
+    The song plays from `entry` and loops back there when it runs out, the way
+    `music_beds` lays it, so the beats repeat with the length of one pass.
+
+    Args:
+        beats: The song's beats, in song seconds.
+        entry: Where in the song it came in.
+        length: How long the song is, or None when that is not known and it is
+            taken never to loop.
+        entered_at: Where on the timeline it came in.
+        seconds: The moment of the timeline to look near.
+
+    Returns:
+        The beat just before and the beat just after, on the timeline, nearer
+        one first — both, because the nearer one may be out of reach where the
+        other is not. Empty when the song has no beat after where it came in.
+    """
+    heard = [beat - entry for beat in beats if beat >= entry and (length is None or beat < length)]
+    if not heard:
+        return []
+    period = length - entry if length is not None and length > entry else None
+    since = seconds - entered_at
+    passes = [0] if period is None else [
+        n for n in range(math.floor(since / period) - 1, math.floor(since / period) + 2) if n >= 0
+    ]
+    around: List[float] = []
+    for n in passes:
+        began = n * period if period is not None else 0.0
+        at = bisect.bisect_left(heard, since - began)
+        around += [entered_at + began + heard[index] for index in (at - 1, at) if 0 <= index < len(heard)]
+    before = [beat for beat in around if beat <= seconds]
+    after = [beat for beat in around if beat > seconds]
+    near = ([max(before)] if before else []) + ([min(after)] if after else [])
+    return sorted(near, key=lambda beat: abs(beat - seconds))
+
+def _may_close_at(
+    piece: Piece,
+    following: Piece,
+    end: float,
+    known: CleanCuts,
+    asset: Optional[Asset],
+) -> bool:
+    """Say whether a window may end somewhere else to put its cut on the beat.
+
+    Moving a cut for the music is a matter of taste, so it gets none of the
+    leeway moving one off a word does: it may only move through silence. It
+    may not end before the last word has had its breath, may not reach into
+    the next word, may not show a bad frame, and may not run into the window
+    that follows when that plays on from the same file.
+
+    Args:
+        piece: The window.
+        following: The window after it.
+        end: Where it would end instead, in source seconds.
+        known: What is known about its file, which has to have been
+            transcribed: otherwise nobody knows the move is through silence.
+        asset: The file.
+
+    Returns:
+        True when the window may end there.
+    """
+    if end <= piece.start or not known.is_clean(end, opens=False):
+        return False
+    if asset is not None and asset.duration is not None and end > float(asset.duration):
+        return False
+    if end < piece.end:
+        last = known.last_word_in(piece.start, piece.end)
+        return last is None or end >= min(piece.end, last + BREATH_SECONDS)
+    if any(piece.end - EDGE_TOLERANCE_SECONDS < opened < end + BREATH_SECONDS for opened, _ in known.words):
+        return False
+    if any(start < end and stop > piece.end for start, stop in known.bad_picture):
+        return False
+    if following.asset_id == piece.asset_id and following.start >= piece.start:
+        return end <= following.start - MERGE_GAP_SECONDS
+    return True
+
+def _on_the_beat(
+    plan: EditPlan,
+    pieces: Sequence[Piece],
+    assets: Mapping[str, Asset],
+    cuts: Optional[Mapping[str, CleanCuts]],
+) -> Tuple[List[Piece], List[str]]:
+    """Move each picture cut onto the beat of the music playing under it, where it can go.
+
+    Only under a cue that asked for it: cutting on the beat is a style, right
+    for a montage and wrong for an interview, so it is the plan's call. A cut
+    moves by ending the window before it somewhere else, which shifts every
+    cut after it by the same amount — so they are settled in order, each one
+    against where the ones before it finally landed.
+
+    The cut a new cue comes in on is settled against the song going out, not
+    the one coming in: the new song starts on that cut, and starts on a beat
+    of its own, so it is on both.
+
+    Args:
+        plan: The plan.
+        pieces: The windows, in order, merged.
+        assets: The files they play from, keyed by asset ID.
+        cuts: What is known about each file, songs included, keyed by asset ID.
+
+    Returns:
+        `(pieces, notes)`.
+    """
+    entries = _cue_entries(plan, pieces)
+    if not cuts or not any(cue.cut_on_beat for cue in entries.values()):
+        return list(pieces), []
+    out = list(pieces)
+    moved: List[float] = []
+    stuck, unknown = 0, 0
+    playing: Optional[MusicCue] = None
+    song: Optional[CleanCuts] = None
+    length: Optional[float] = None
+    entry, entered_at, position = 0.0, 0.0, 0.0
+    for index in range(len(out)):
+        if index in entries:
+            playing = entries[index]
+            song = cuts.get(playing.asset_id) if playing.asset_id else None
+            length = _song_length(assets.get(playing.asset_id)) if playing.asset_id else None
+            entry, entered_at = song_entry(playing, song), position
+        piece = out[index]
+        on_beat = playing is not None and playing.cut_on_beat and song is not None and song.beats
+        if index + 1 < len(out) and on_beat:
+            closing_at = position + piece.duration
+            shifts = [
+                round(beat - closing_at, 3)
+                for beat in _beats_near(song.beats, entry, length, entered_at, closing_at)
+            ]
+            known = cuts.get(piece.asset_id)
+            if not shifts or abs(shifts[0]) <= ON_BEAT_SECONDS:
+                pass
+            elif known is None or not known.transcribed:
+                unknown += 1
+            else:
+                reachable = [
+                    shift for shift in shifts
+                    if abs(shift) <= BEAT_SNAP_SECONDS and _may_close_at(
+                        piece, out[index + 1], round(piece.end + shift, 3), known, assets.get(piece.asset_id),
+                    )
+                ]
+                if reachable:
+                    end = round(piece.end + reachable[0], 3)
+                    out[index] = Piece(piece.asset_id, piece.start, end, piece.from_clip_ids, piece.beat_id)
+                    moved.append(abs(reachable[0]))
+                else:
+                    stuck += 1
+        position += out[index].duration
+
+    notes: List[str] = []
+    if moved:
+        notes.append(f"{len(moved)} cut(s) moved onto the beat of the music, {max(moved):.2f}s at most")
+    if stuck:
+        notes.append(
+            f"{stuck} cut(s) are off the beat: reaching it would cut into a word, show a bad frame, or move "
+            f"further than {BEAT_SNAP_SECONDS:g}s, so they were left where they were"
+        )
+    if unknown:
+        notes.append(
+            f"{unknown} cut(s) are off the beat because their footage was never transcribed, so there is no "
+            "knowing whether moving them would cut into a word"
+        )
+    return out, notes
+
 def compile_pieces(
     plan: EditPlan,
     clips: Mapping[str, SemanticClip],
@@ -642,8 +901,10 @@ def compile_pieces(
     The cleaning runs in this order for a reason. Retakes go first: there is
     no sense taking the pauses out of a take about to be dropped. Pauses next,
     which is the stage that splits a window in two. Then the ends, which want
-    the first and last window as they will finally be. Bad frames last of all,
-    so they have the final say over every edge the others made.
+    the first and last window as they will finally be. Bad frames after that,
+    so they have the final say over every edge the others made. The beat comes
+    after the merge, because it moves cuts, and a cut is only a cut once two
+    windows have been left apart.
 
     All of it depends on `cuts`. Without them the compiler knows nothing about
     the footage, and a stage that cleaned anyway would be guessing.
@@ -666,7 +927,8 @@ def compile_pieces(
     for stage in (_without_retakes, _without_pauses, _trimmed_ends, _off_bad_frames):
         pieces, said = stage(pieces, cuts)
         notes.extend(said)
-    return _merge(pieces), notes
+    pieces, said = _on_the_beat(plan, _merge(pieces), assets, cuts)
+    return pieces, notes + said
 
 def plan_pieces(
     plan: EditPlan,
@@ -1166,6 +1428,43 @@ def _cut_notes(
         )
     return said
 
+def _cue_problems(plan: EditPlan, pieces: Sequence[Piece]) -> List[str]:
+    """Check that every music cue has somewhere to come in, in the order given.
+
+    Only answerable once the cut is laid out: a beat can be in the plan and
+    still never begin, when its first shot was merged into the one before it.
+
+    Args:
+        plan: The plan.
+        pieces: Its windows, in order, as `compile_pieces` settled them.
+
+    Returns:
+        One message per problem.
+    """
+    if plan.music is None:
+        return []
+    first = _beginnings(pieces)
+    problems: List[str] = []
+    previous = -1
+    for position, cue in enumerate(plan.music.cues, start=1):
+        if cue.beat_id is None:
+            at = 0
+        elif cue.beat_id in first:
+            at = first[cue.beat_id]
+        else:
+            problems.append(
+                f"music cue {position}: beat {cue.beat_id} never begins in the cut — it has no footage, or its "
+                "first shot runs on from the one before it — so there is no cut for the music to come in on"
+            )
+            continue
+        if at <= previous:
+            problems.append(
+                f"music cue {position}: comes in on beat {cue.beat_id}, which begins before the cue listed "
+                "ahead of it; list the cues in the order their beats come in"
+            )
+        previous = max(previous, at)
+    return problems
+
 def check_plan(
     plan: EditPlan,
     timeline: SemanticTimeline,
@@ -1257,12 +1556,41 @@ def check_plan(
         if rejection.clip_id not in clips:
             notes.append(f"the rejected clip {rejection.clip_id} is not in this timeline")
 
-    if plan.music is not None:
-        music = assets.get(plan.music.asset_id)
-        if music is None:
-            problems.append(f"the music asset {plan.music.asset_id} is not registered")
-        elif not music.has_audio:
-            problems.append(f"the music asset {plan.music.asset_id} has no sound")
+    cues = plan.music.cues if plan.music is not None else []
+    placed_cues: set = set()
+    for position, cue in enumerate(cues, start=1):
+        where = f"music cue {position}"
+        if cue.beat_id is None and position > 1:
+            problems.append(f"{where}: only the first cue may leave out `beat_id`; say which beat this one comes in on")
+        elif cue.beat_id is not None and cue.beat_id not in beats:
+            problems.append(f"{where}: comes in on beat {cue.beat_id}, which the plan does not have")
+        if cue.beat_id is not None and cue.beat_id in placed_cues:
+            problems.append(f"{where}: another cue already comes in on beat {cue.beat_id}")
+        placed_cues.add(cue.beat_id)
+        if cue.asset_id is not None:
+            song = assets.get(cue.asset_id)
+            if song is None:
+                problems.append(f"{where}: the music asset {cue.asset_id} is not registered")
+            elif not song.has_audio:
+                problems.append(f"{where}: the music asset {cue.asset_id} has no sound")
+            elif song.duration is not None and cue.start >= float(song.duration):
+                problems.append(
+                    f"{where}: comes in at {cue.start:g}s of {cue.asset_id}, which runs {float(song.duration):.1f}s"
+                )
+        if cue.cut_on_beat:
+            known = (cuts or {}).get(cue.asset_id) if cue.asset_id is not None else None
+            if cue.asset_id is None:
+                problems.append(f"{where}: is silence, so there is no beat to cut on")
+            elif known is None or known.beats is None:
+                problems.append(
+                    f"{where}: cutting on the beat needs the beat of {cue.asset_id} measured; analyze it "
+                    "with analyze_asset first, or again if it was analyzed before beats were measured"
+                )
+            elif not known.beats:
+                problems.append(
+                    f"{where}: {cue.asset_id} has no steady beat to cut on — it was measured, and nothing "
+                    "in it pulses regularly enough to call one"
+                )
 
     if not problems:
         pieces, cleaned = compile_pieces(plan, clips, children, assets, cuts)
@@ -1274,6 +1602,14 @@ def check_plan(
             cuts, duration,
         ))
         notes.extend(cleaned)
+        problems.extend(_cue_problems(plan, pieces))
+        for position, cue in enumerate(cues, start=1):
+            entry = song_entry(cue, (cuts or {}).get(cue.asset_id) if cue.asset_id is not None else None)
+            if entry != cue.start:
+                notes.append(
+                    f"music cue {position} comes in at {entry:g}s of {cue.asset_id}, the first beat after "
+                    f"the {cue.start:g}s asked for, so the cuts it sets the beat for are counted from a beat"
+                )
         _, covering, said = broll_covers(plan, pieces, clips, assets, cuts)
         problems.extend(covering)
         notes.extend(said)
@@ -1409,6 +1745,102 @@ def plan_markers(plan: EditPlan, pieces: Sequence[Piece]) -> List[dict]:
             })
         position += piece.duration
     return markers
+
+@dataclass(frozen=True)
+class Bed:
+    """One stretch of music worked out onto the compiled timeline.
+
+    Attributes:
+        asset_id: The song.
+        start: Where it starts in the song, in seconds.
+        end: Where it ends, in seconds.
+        timeline_in: Where it lands on the timeline, in seconds.
+        volume: Its gain.
+        fade_in: Seconds of fade at its start.
+        fade_out: Seconds of fade at its end.
+    """
+
+    asset_id: str
+    start: float
+    end: float
+    timeline_in: float
+    volume: float
+    fade_in: float
+    fade_out: float
+
+def music_beds(
+    plan: EditPlan,
+    pieces: Sequence[Piece],
+    assets: Mapping[str, Asset],
+    cuts: Optional[Mapping[str, CleanCuts]] = None,
+) -> List[Bed]:
+    """Lay the plan's music out under its compiled cut.
+
+    Each cue runs from where its beat begins to where the next cue's does, or
+    to the end of the cut. A song shorter than its stretch loops back to where
+    the cue came in, not to the top of the song: the cue chose that point, and
+    the intro it skipped is no more welcome the second time round. A cue that
+    cuts on the beat comes in on a beat, and loops back to the same one.
+
+    The fades belong to the cue rather than to each loop: in at its start, out
+    where the next cue takes over. Two cues meet end to end, the one going out
+    fading as the one coming in fades up — a track holds one clip at a time,
+    so the two never overlap.
+
+    Args:
+        plan: The plan.
+        pieces: Its windows, in order, as `compile_pieces` settled them.
+        assets: The files, songs included, keyed by asset ID.
+        cuts: What is known about each file, keyed by asset ID; a song's beat
+            is in here.
+
+    Returns:
+        The stretches of music, in timeline order. Empty when the plan has
+        none, or none that plays.
+    """
+    if plan.music is None or not pieces:
+        return []
+    starts: List[float] = []
+    position = 0.0
+    for piece in pieces:
+        starts.append(round(position, 3))
+        position += piece.duration
+    total = round(position, 3)
+    entries = sorted(_cue_entries(plan, pieces).items())
+    beds: List[Bed] = []
+    for order, (index, cue) in enumerate(entries):
+        at = starts[index]
+        until = starts[entries[order + 1][0]] if order + 1 < len(entries) else total
+        if cue.asset_id is None or until <= at:
+            continue
+        entry = song_entry(cue, cuts.get(cue.asset_id) if cuts else None)
+        # Everything settled to the millisecond the timeline keeps before it is added up,
+        # so a loop can neither run a hair past the file nor overlap the next one.
+        last = _song_length(assets.get(cue.asset_id))
+        parts: List[Tuple[float, float, float]] = []
+        cursor = at
+        while until - cursor > 0.001:
+            end = round(until - cursor + entry, 3) if last is None else min(round(until - cursor + entry, 3), last)
+            if end - entry <= 0.001:
+                break
+            parts.append((entry, end, round(cursor, 3)))
+            cursor = round(cursor + end - entry, 3)
+        if not parts:
+            continue
+        lengths = [end - start for start, end, _ in parts]
+        fade_in, fade_out = min(cue.fade_in, lengths[0]), min(cue.fade_out, lengths[-1])
+        if len(parts) == 1 and fade_in + fade_out > lengths[0]:
+            # One short stretch with both fades on it: shrink them in proportion rather
+            # than let one swallow the other.
+            scale = lengths[0] / (fade_in + fade_out)
+            fade_in, fade_out = fade_in * scale, fade_out * scale
+        for number, (start, end, timeline_in) in enumerate(parts):
+            beds.append(Bed(
+                asset_id=cue.asset_id, start=start, end=end, timeline_in=timeline_in, volume=cue.volume,
+                fade_in=round(fade_in, 3) if number == 0 else 0.0,
+                fade_out=round(fade_out, 3) if number == len(parts) - 1 else 0.0,
+            ))
+    return beds
 
 def _as_made(pinned: Clip) -> dict:
     """Describe a hand-adjusted clip so it can be put back exactly as it is.
@@ -1576,31 +2008,29 @@ def compile_operations(
     if markers or by_hand:
         operations.append({"action": "set_markers", "markers": [*markers, *by_hand]})
 
-    if plan.music is not None and pieces:
-        music = plan.music
+    # Laid at absolute positions, like the B-roll, because a cue begins where its beat
+    # does and a part with no music is a gap on the track rather than a clip of silence.
+    beds = music_beds(plan, pieces, assets, cuts)
+    if beds:
         if MUSIC_TRACK_ID not in present:
             operations.append({
                 "action": "add_track", "track_id": MUSIC_TRACK_ID, "track_type": "audio",
-                "duck_under_speech": music.duck_under_speech,
+                "duck_under_speech": plan.music.duck_under_speech,
             })
         else:
             operations.append({
                 "action": "set_track_audio", "track_id": MUSIC_TRACK_ID,
-                "duck_under_speech": music.duck_under_speech,
+                "duck_under_speech": plan.music.duck_under_speech,
             })
-        source = assets.get(music.asset_id)
-        length = float(source.duration) if source is not None and source.duration is not None else compiled_duration(pieces)
-        operations.append({
-            "action": "insert_clip", "track_id": MUSIC_TRACK_ID, "clip_id": "music",
-            "asset_id": music.asset_id, "source_range": {"start": 0, "end": length},
-            "volume": music.volume,
-        })
-        # fit_track trims, extends or loops the bed to the length of the picture.
-        operations.append({
-            "action": "fit_track", "track_id": MUSIC_TRACK_ID,
-            "fade_in": music.fade_in, "fade_out": music.fade_out,
-        })
-        provenance["music"] = {"from_plan_id": plan.id, "from_clip_ids": [], "pinned": False}
+        for position, bed in enumerate(beds, start=1):
+            clip_id = f"m{position:03d}"
+            operations.append({
+                "action": "add_clip", "track_id": MUSIC_TRACK_ID, "clip_id": clip_id,
+                "asset_id": bed.asset_id, "source_range": {"start": bed.start, "end": bed.end},
+                "timeline_in": bed.timeline_in, "volume": bed.volume,
+                "audio_fade_in": bed.fade_in, "audio_fade_out": bed.fade_out,
+            })
+            provenance[clip_id] = {"from_plan_id": plan.id, "from_clip_ids": [], "pinned": False}
     return operations, provenance
 
 def diff_plans(before: EditPlan, after: EditPlan) -> Dict[str, List[str]]:
@@ -1673,9 +2103,44 @@ def diff_plans(before: EditPlan, after: EditPlan) -> Dict[str, List[str]]:
     if broll:
         changes["broll"] = sorted(broll)
 
-    if before.music != after.music:
-        changes["music"] = [
-            f"music: {before.music.asset_id if before.music else 'none'} → "
-            f"{after.music.asset_id if after.music else 'none'}"
-        ]
+    def cues(plan: EditPlan) -> Dict[Optional[str], MusicCue]:
+        """Key a plan's music cues by the beat each comes in on.
+
+        Args:
+            plan: The plan.
+
+        Returns:
+            The cues, keyed by beat ID, None for one that starts with the video.
+        """
+        return {cue.beat_id: cue for cue in plan.music.cues} if plan.music is not None else {}
+
+    def named(beat_id: Optional[str]) -> str:
+        """Name where a cue comes in, for a line of the diff.
+
+        Args:
+            beat_id: The beat, or None for the start.
+
+        Returns:
+            The phrase.
+        """
+        return f"beat {beat_id}" if beat_id is not None else "the start"
+
+    heard_before, heard_after = cues(before), cues(after)
+    music = [
+        f"music from {named(beat_id)}: {heard_after[beat_id].asset_id or 'silence'}"
+        for beat_id in heard_after.keys() - heard_before.keys()
+    ]
+    music += [f"no longer a music cue at {named(beat_id)}" for beat_id in heard_before.keys() - heard_after.keys()]
+    music += [
+        f"music from {named(beat_id)}: {heard_before[beat_id].asset_id or 'silence'} → "
+        f"{heard_after[beat_id].asset_id or 'silence'}"
+        + ("" if heard_before[beat_id].cut_on_beat == heard_after[beat_id].cut_on_beat else
+           f", {'now' if heard_after[beat_id].cut_on_beat else 'no longer'} cutting on the beat")
+        for beat_id in heard_before.keys() & heard_after.keys() if heard_before[beat_id] != heard_after[beat_id]
+    ]
+    if (before.music is not None and after.music is not None
+            and before.music.duck_under_speech != after.music.duck_under_speech):
+        music.append(f"{'now' if after.music.duck_under_speech else 'no longer'} ducking under speech")
+    if music:
+        changes["music"] = sorted(music, key=str)
     return changes

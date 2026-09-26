@@ -736,6 +736,15 @@ class CleanCuts:
             has the same objection to either. Soft focus is not in here — it
             would need a threshold on the blur measurement, and that is one of
             the numbers the roadmap refuses to pick without a corpus.
+        transcribed: Whether anybody transcribed the file at all. This is
+            what tells an empty `words` apart: a transcribed file with no
+            words in it has nobody talking, and a cut can move anywhere in it
+            without splitting one; an untranscribed file has words nobody
+            knows about.
+        beats: Where the beat falls, for music. The one field where empty and
+            unknown are kept apart, because the answers differ: None is a song
+            nobody measured, and an empty tuple is one measured and found to
+            have no steady pulse.
     """
 
     words: Tuple[Tuple[float, float], ...] = ()
@@ -743,6 +752,8 @@ class CleanCuts:
     said: Tuple[str, ...] = ()
     pauses: Tuple[Tuple[float, float], ...] = ()
     bad_picture: Tuple[Tuple[float, float], ...] = ()
+    transcribed: bool = False
+    beats: Optional[Tuple[float, ...]] = None
 
     def splits_a_word(self, seconds: float) -> bool:
         """Say whether a cut here would land inside a word.
@@ -992,4 +1003,6 @@ def clean_cuts(analysis: MediaAnalysis) -> CleanCuts:
         said=tuple(segment.text for segment in segments),
         pauses=tuple((span.start, span.end) for span in analysis.silences),
         bad_picture=_joined([*analysis.black_frames, *analysis.frozen_frames]),
+        transcribed=transcript is not None,
+        beats=None if analysis.rhythm is None else tuple(analysis.rhythm.beats),
     )

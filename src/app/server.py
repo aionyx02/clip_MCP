@@ -3,7 +3,7 @@ import re
 import uuid
 from decimal import Decimal
 from pathlib import Path
-from typing import Annotated, Callable, List, Literal, Optional, Sequence
+from typing import Annotated, Callable, Dict, List, Literal, Mapping, Optional, Sequence, Tuple
 
 from fastmcp import FastMCP
 from fastmcp.server.providers.skills import SkillsDirectoryProvider
@@ -28,6 +28,7 @@ from app.models.job import Job, JobKind, JobStatus
 from app.engine import resources
 from app.engine.analysis import current_recipe, sound_note, whisper_model_name
 from app.engine.diarize import speaker_model_name
+from app.engine.rhythm import rhythm_model_name
 from app.engine.faces import framing_note
 from app.engine.plan import (
     BROLL_TRACK_ID, MUSIC_TRACK_ID, VIDEO_TRACK_ID, broll_covers, broll_slots, check_plan, check_recompile,
@@ -343,7 +344,9 @@ def _is_stale(analysis: MediaAnalysis) -> bool:
         it just answers a slightly different question from a fresh one, which
         matters most when two assets are being compared with each other.
     """
-    return analysis.recipe.differs_from(current_recipe(whisper_model_name(), speaker_model=speaker_model_name()))
+    return analysis.recipe.differs_from(current_recipe(
+        whisper_model_name(), speaker_model=speaker_model_name(), rhythm_model=rhythm_model_name(),
+    ))
 
 @mcp.tool()
 def analyze_asset(
@@ -471,7 +474,11 @@ def get_analysis(
         where the largest face sat across the frame and how far it moved,
         which is what a vertical reframe needs. `speakers` lists the stretches
         each voice held; the labels are this file's own and mean nothing
-        outside it.
+        outside it. `rhythm` is for music — files with sound and no picture —
+        and gives the `tempo` in beats per minute and the `beats` in the
+        range; its `tempo` is null when the music has no steady pulse, and
+        the whole of it is null for footage, or for music analyzed before
+        beats were measured.
 
         All of these are measurements and none of them is a verdict: whether a
         shot is too dark or too wobbly depends on what it is for.
@@ -517,6 +524,10 @@ def get_analysis(
         "sound": sound_note(_covering(analysis.sound, start, end)),
         "faces": framing_note(_covering(analysis.faces, start, end)),
         "speakers": _overlapping(analysis.speakers, start, end),
+        "rhythm": None if analysis.rhythm is None else {
+            "tempo": analysis.rhythm.tempo,
+            "beats": [beat for beat in analysis.rhythm.beats if start <= beat < end],
+        },
         "transcript": transcript,
     }
 
@@ -678,9 +689,9 @@ def query_clips(
     rather than across two.
 
     A clip from a file whose voices were told apart also carries `speaker`,
-    a label like `S1`. The labels are that file's own — `S1` in one recording
-    is not `S1` in another — and a sentence that straddles a handover carries
-    none at all rather than a guess.
+    a label like `V1`, joined across the timeline's files so that `V1` is the
+    same person in every file they appear in. A sentence that straddles a
+    handover carries none at all rather than a guess.
 
     Each clip carries more than a result shows — how well it was shot, who was
     on screen, and what the sound was like — and `min_scores` and `max_scores`
@@ -1413,20 +1424,23 @@ def _plan_context(plan: EditPlan) -> tuple:
             children.setdefault(clip.parent_id, []).append(clip)
     for inside in children.values():
         inside.sort(key=lambda clip: clip.source_range.start)
-    wanted = {clip.asset_id for clip in clips} | ({plan.music.asset_id} if plan.music else set())
-    # Where each file may be cut without splitting a word. The compiler is handed these
-    # numbers rather than the transcripts they come from: reading a transcript is
-    # interpretation, and the compiler has to stay a pure function of what it is given.
+    footage = {clip.asset_id for clip in clips}
+    songs = {cue.asset_id for cue in plan.music.cues if cue.asset_id} if plan.music else set()
+    # Where each file may be cut without splitting a word, and where each song's beat
+    # falls. The compiler is handed these numbers rather than the transcripts and the
+    # sound they come from: reading those is interpretation, and the compiler has to stay
+    # a pure function of what it is given.
     cuts, analyses = {}, {}
-    for asset_id in {clip.asset_id for clip in clips}:
+    for asset_id in footage | songs:
         analysis = repo.get_analysis(asset_id)
         if analysis is not None:
             cuts[asset_id] = clean_cuts(analysis)
-            analyses[asset_id] = analysis
+            if asset_id in footage:
+                analyses[asset_id] = analysis
     # How loudly each voice speaks, worked out over the same joined labels the timeline
     # put on its clips — so a gain and the clip it applies to cannot mean different people.
     levels = voice_levels(analyses, join_voices(analyses))
-    return timeline, {clip.id: clip for clip in clips}, children, repo.get_assets(wanted), cuts, levels
+    return timeline, {clip.id: clip for clip in clips}, children, repo.get_assets(footage | songs), cuts, levels
 
 def _require_plan(plan_id: Optional[str]) -> EditPlan:
     """Fetch a plan, or the one saved most recently.
@@ -1614,8 +1628,11 @@ def compile_plan(project_id: str, expected_version: int, plan_id: Optional[str] 
     Every second is worked out here, the same way every time: each selection
     becomes the piece its trim asks for, widened into the measured silence
     around it so no line starts abruptly, and pieces that nearly touch become
-    one clip. Music, if the plan has any, goes underneath and is fitted to the
-    picture.
+    one clip. Music, if the plan has any, goes underneath: each cue from where
+    its beat begins to where the next one takes over, looped if the song runs
+    short. Under a cue that cuts on the beat, each picture cut is moved onto
+    the nearest beat where it can get there through silence, and the notes say
+    how many moved and how many could not.
 
     Compiling the same plan again after it has been changed rebuilds the cut,
     which is how a round of feedback lands: change the plan, compile again.
@@ -1922,6 +1939,40 @@ def preview_project(
         Image(data=storyboard_sheet(shots, aspect=project.width / project.height), format="jpeg"),
     ])
 
+def _joined_people(project: Project, heard: Mapping[str, Sequence[SpeakerTurn]]) -> Dict[Tuple[str, str], str]:
+    """Work out which person each file's speaker label is, across the files of a project.
+
+    Joined over the same files the clips' own labels were joined over, so a
+    caption and the clip it sits on cannot call one person by two names: the
+    joined labels are numbered in the order the files are walked, and joining
+    a different set of files can number the same person differently. For a
+    cut compiled from a plan, that set is the plan's timeline; for one put
+    together by hand, it is the files being captioned.
+
+    Args:
+        project: The project being captioned.
+        heard: The speaker turns of each file being captioned, keyed by asset
+            ID.
+
+    Returns:
+        The joined label, `V1` and so on, for each `(asset_id, label)`. A file
+        outside that set, or one analyzed before voices were kept, is absent,
+        and its captions keep the file's own labels.
+    """
+    compiled_from = {clip.from_plan_id for track in project.tracks for clip in track.clips if clip.from_plan_id}
+    files: set = set()
+    for plan_id in sorted(compiled_from):
+        plan = repo.get_plan(plan_id)
+        timeline = repo.get_semantic_timeline(plan.timeline_id) if plan is not None else None
+        if timeline is not None:
+            files |= set(timeline.asset_ids)
+    analyses = {
+        asset_id: analysis
+        for asset_id in (files or set(heard))
+        if (analysis := repo.get_analysis(asset_id)) is not None
+    }
+    return join_voices(analyses)
+
 @mcp.tool()
 def generate_subtitles(
     project_id: str,
@@ -1951,7 +2002,9 @@ def generate_subtitles(
         A dictionary with `cues`, each holding its `id`, the `asset_id` the
         words were spoken in, `source_start` and `source_end` in seconds
         within that file, its `text`, the `speaker` the speaker split credits
-        it to where one voice clearly holds it, and the `words` inside it with
+        it to where one voice clearly holds it — `V1`, `V2`, joined across
+        files the same way the clips it sits on are, so one person is one
+        label whichever camera recorded them — and the `words` inside it with
         their own timings, which is what lets a caption light up as it is
         said; `assets_without_transcript`, the
         video sources that still need `analyze_asset` before they can be
@@ -2001,6 +2054,14 @@ def generate_subtitles(
             f"project {project_id} has no transcribed clips to caption; "
             "call analyze_asset on its sources first"
         )
+    people = _joined_people(project, speakers)
+    speakers = {
+        asset_id: [
+            turn.model_copy(update={"speaker": people.get((asset_id, turn.speaker), turn.speaker)})
+            for turn in turns
+        ]
+        for asset_id, turns in speakers.items()
+    }
     cues = timeline_cues(
         project, transcripts, max_characters=max_characters, max_seconds=max_seconds,
         silences=silences, speakers=speakers,

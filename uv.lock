@@ -205,6 +205,7 @@ source = { editable = "." }
 dependencies = [
     { name = "faster-whisper" },
     { name = "fastmcp" },
+    { name = "numpy" },
     { name = "opencc" },
     { name = "opencv-python-headless" },
     { name = "pillow" },
@@ -222,6 +223,7 @@ dev = [
 requires-dist = [
     { name = "faster-whisper", specifier = ">=1.2.1" },
     { name = "fastmcp", specifier = ">=4.0.4" },
+    { name = "numpy", specifier = ">=2.5.3" },
     { name = "opencc", specifier = ">=1.4.2" },
     { name = "opencv-python-headless", specifier = ">=4.10" },
     { name = "pillow", specifier = ">=12" },

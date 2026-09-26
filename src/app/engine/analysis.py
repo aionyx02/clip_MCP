@@ -19,11 +19,13 @@ from app.engine.diarize import (
     speaker_model_name,
 )
 from app.engine.ffmpeg import OperationCancelled, escape_filter_path, hidden_window_flags, run_ffmpeg
+from app.engine.rhythm import measure_rhythm, rhythm_model_name
 from app.models.media import (
     AnalysisRecipe,
     Asset,
     FaceMeasurement,
     MediaAnalysis,
+    Rhythm,
     ShotMeasurement,
     SILENCE_DB,
     SoundMeasurement,
@@ -200,6 +202,7 @@ def current_recipe(
     speech_model: Optional[str],
     ffmpeg_bin: str = "ffmpeg",
     speaker_model: Optional[str] = None,
+    rhythm_model: Optional[str] = None,
 ) -> AnalysisRecipe:
     """Describe the way this pass measures things right now.
 
@@ -213,6 +216,8 @@ def current_recipe(
         ffmpeg_bin: Path to, or name of, the FFmpeg executable.
         speaker_model: Models the speaker turns were found with, or `None`
             when voices were not told apart.
+        rhythm_model: How the beat was found, or `None` when it was not
+            looked for.
 
     Returns:
         The recipe.
@@ -246,6 +251,7 @@ def current_recipe(
         detectors=fingerprint.hexdigest()[:16],
         speech_model=speech_model,
         speaker_model=speaker_model,
+        rhythm_model=rhythm_model,
     )
 
 def _scan_graph(asset: Asset, work_dir: str, with_shake: bool) -> Tuple[str, List[List[str]]]:
@@ -901,7 +907,9 @@ def discard_scratch(work_dir: str) -> None:
         except OSError:
             pass
 
-def _shares(with_faces: bool, with_speech: bool, with_speakers: bool) -> Dict[str, Tuple[float, float]]:
+def _shares(
+    with_faces: bool, with_speech: bool, with_speakers: bool, with_rhythm: bool = False,
+) -> Dict[str, Tuple[float, float]]:
     """Divide one progress bar among the stages this analysis will actually run.
 
     The weights are roughly what each stage costs against the others, measured
@@ -912,6 +920,7 @@ def _shares(with_faces: bool, with_speech: bool, with_speakers: bool) -> Dict[st
         with_faces: Whether faces will be looked for.
         with_speech: Whether speech will be transcribed.
         with_speakers: Whether voices will be told apart.
+        with_rhythm: Whether the beat will be looked for.
 
     Returns:
         `(start, span)` of the bar for each stage that will run, keyed by
@@ -924,6 +933,8 @@ def _shares(with_faces: bool, with_speech: bool, with_speakers: bool) -> Dict[st
         weights.append(("speech", 20.0))
     if with_speakers:
         weights.append(("speakers", 4.0))
+    if with_rhythm:
+        weights.append(("rhythm", 1.0))
     total = sum(weight for _, weight in weights)
     shares: Dict[str, Tuple[float, float]] = {}
     cursor = 0.0
@@ -995,8 +1006,9 @@ def analyze_media(
     Returns:
         The analysis: scenes, black and frozen frames, silences, how each shot
         was shot, what the sound was like second by second, who was on screen,
-        the transcript and the speaker turns if they were asked for, and the
-        recipe all of it was measured with.
+        the transcript and the speaker turns if they were asked for, where
+        the beat falls if the file is music, and the recipe all of it was
+        measured with.
 
     Raises:
         OperationCancelled: If cancellation was requested.
@@ -1007,7 +1019,10 @@ def analyze_media(
     with_speech = transcribe and asset.has_audio
     with_speakers = with_speech and diarize
     with_faces = asset.has_video
-    shares = _shares(with_faces, with_speech, with_speakers)
+    # Music is a file with sound and no picture. The beat is looked for there and nowhere
+    # else: a beat tracker run over somebody talking finds one in their syllables.
+    with_rhythm = asset.has_audio and not asset.has_video
+    shares = _shares(with_faces, with_speech, with_speakers, with_rhythm)
 
     needed: List[models.Model] = []
     if with_faces:
@@ -1065,6 +1080,9 @@ def analyze_media(
         turns, voices = find_speakers(
             asset.path, report("speakers", "telling the voices apart"), is_cancelled, speakers, ffmpeg_bin
         )
+    rhythm: Optional[Rhythm] = None
+    if with_rhythm:
+        rhythm = measure_rhythm(asset.path, report("rhythm", "finding the beat"), is_cancelled, ffmpeg_bin)
     return MediaAnalysis(
         asset_id=asset.id,
         duration=duration,
@@ -1077,10 +1095,12 @@ def analyze_media(
         faces=on_screen,
         speakers=turns,
         voices=voices,
+        rhythm=rhythm,
         transcript=transcript,
         recipe=current_recipe(
             transcript.model if transcript is not None else None,
             ffmpeg_bin,
             speaker_model_name() if with_speakers else None,
+            rhythm_model_name() if with_rhythm else None,
         ),
     )

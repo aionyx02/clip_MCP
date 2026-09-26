@@ -7,6 +7,7 @@ repaired, because a compiler that fixes things is making decisions it was
 built to stay out of.
 """
 
+from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
 from typing import Dict, List
@@ -25,21 +26,23 @@ from app.engine.plan import (
     PAUSE_SECONDS,
     SNAP_SECONDS,
     TAIL_TRIM_SECONDS,
+    BEAT_SNAP_SECONDS,
     check_plan,
     compile_operations,
     compile_pieces,
     compiled_duration,
     diff_plans,
+    music_beds,
     plan_pieces,
 )
 from app.engine.sections import build_sections
 from app.engine.semantic import build_timeline, clean_cuts, join_voices, voice_gains, voice_levels
 from app.models.media import (
-    Asset, MediaAnalysis, SoundMeasurement, Span, SpeakerTurn, Transcript, TranscriptSegment,
+    Asset, MediaAnalysis, Rhythm, SoundMeasurement, Span, SpeakerTurn, Transcript, TranscriptSegment,
     TranscriptWord, Voice,
 )
 from app.models.plan import (
-    AddBrollOp, Beat, BrollShot, DropBrollOp, DropSelectionOp, EditPlan, MusicPlan, PlanAmendment,
+    AddBrollOp, Beat, BrollShot, DropBrollOp, DropSelectionOp, EditPlan, MusicCue, MusicPlan, PlanAmendment,
     PlanTarget, Rejection, Selection, Trim, TrimKind, apply_amendment,
 )
 from app.models.semantic import SectionChoice, SemanticClip, SemanticTimeline
@@ -124,6 +127,21 @@ def plan_for(selections: List[Selection], **fields) -> EditPlan:
         selections=selections,
         **fields,
     )
+
+def plan_duration(plan: EditPlan, by_id: dict, children: dict, assets: dict, cuts=None) -> float:
+    """Measure how long a plan compiles to.
+
+    Args:
+        plan: The plan.
+        by_id: The clips.
+        children: Section members.
+        assets: The assets.
+        cuts: What is known about each file, if anything.
+
+    Returns:
+        The compiled length in seconds.
+    """
+    return compiled_duration(plan_pieces(plan, by_id, children, assets, cuts))
 
 def speech_of(clips: List[SemanticClip]) -> List[SemanticClip]:
     """Pick out the clips where someone is talking.
@@ -688,7 +706,7 @@ def test_music_without_sound_is_refused() -> None:
     by_id, children, assets, clips = footage()
     assets = {**assets, "silent-song": asset("silent-song", has_audio=False)}
     plan = plan_for([Selection(clip_id=speech_of(clips)[0].id, beat_id="b1")],
-                    music=MusicPlan(asset_id="silent-song"))
+                    music=MusicPlan(cues=[MusicCue(asset_id="silent-song")]))
     problems, _ = context_for(plan, by_id, children, assets)
     assert any("has no sound" in problem for problem in problems)
 
@@ -715,9 +733,13 @@ def test_music_is_laid_under_the_picture_and_fitted_to_it() -> None:
     by_id, children, assets, clips = footage()
     assets = {**assets, "song": sourced("song", seconds=60.0).model_copy(update={"has_video": False})}
     plan = plan_for([Selection(clip_id=speech_of(clips)[0].id, beat_id="b1")],
-                    music=MusicPlan(asset_id="song", volume=0.4))
-    actions = [operation["action"] for operation in compile_operations(plan, by_id, children, assets)[0]]
-    assert actions[-3:] == ["add_track", "insert_clip", "fit_track"]
+                    music=MusicPlan(cues=[MusicCue(asset_id="song", volume=0.4)]))
+    operations, provenance = compile_operations(plan, by_id, children, assets)
+    assert [operation["action"] for operation in operations[-2:]] == ["add_track", "add_clip"]
+    laid = operations[-1]
+    assert laid["track_id"] == "music" and laid["volume"] == 0.4 and laid["timeline_in"] == 0.0
+    assert laid["source_range"]["end"] == pytest.approx(plan_duration(plan, by_id, children, assets))
+    assert provenance[laid["clip_id"]]["from_plan_id"] == plan.id
 
 def test_the_same_plan_always_compiles_to_the_same_cut() -> None:
     by_id, children, assets, clips = footage()
@@ -1536,3 +1558,336 @@ def test_a_window_that_holds_two_people_is_left_alone() -> None:
 
 def test_one_voice_on_its_own_is_already_consistent_with_itself() -> None:
     assert voice_gains({"V1": -20.0}) == {}
+
+# Music that changes with the parts of the video, and cuts put on its beat. Where the
+# beat is comes from the analysis; everything here is arithmetic on those times.
+
+SONG = "song"
+
+def song_of(beats, seconds: float = 30.0) -> tuple:
+    """A music file with its beat already measured.
+
+    Args:
+        beats: Where the beats are, in song seconds; None for a song whose
+            beat was never measured.
+        seconds: How long it runs.
+
+    Returns:
+        `(asset, cuts)` for the song.
+    """
+    song = sourced(SONG, seconds=seconds).model_copy(update={"has_video": False})
+    rhythm = None if beats is None else Rhythm(tempo=120.0 if beats else None, beats=list(beats))
+    return song, clean_cuts(MediaAnalysis(asset_id=SONG, duration=seconds, rhythm=rhythm))
+
+def every(period: float, first: float = 0.0, seconds: float = 30.0) -> List[float]:
+    """A steady beat.
+
+    Args:
+        period: Seconds between beats.
+        first: Where the first one is.
+        seconds: How far it runs.
+
+    Returns:
+        The beats.
+    """
+    return [round(first + period * index, 3) for index in range(int((seconds - first) / period) + 1)]
+
+def on_beat(*cues: MusicCue, beats=None, song_seconds: float = 30.0, footage_made=None) -> tuple:
+    """Shots of talk in one beat, with music under them.
+
+    Args:
+        *cues: The music.
+        beats: The song's beats.
+        song_seconds: How long the song runs.
+        footage_made: The footage's analysis, if not the usual one.
+
+    Returns:
+        `(plan, clips_by_id, assets, cuts)`. With the usual footage the plan
+        uses its first, third and fourth lines, which sit in silence with room
+        either side.
+    """
+    made = footage_made or analysis(**FOOTAGE)
+    _, clips = build_timeline({ASSET_ID: sourced()}, {ASSET_ID: made})
+    talk = speech_of(clips)
+    song, heard = song_of(beats, song_seconds)
+    chosen = [talk[0], talk[-2], talk[-1]] if len(talk) > 3 else talk
+    plan = plan_for([Selection(clip_id=clip.id, beat_id="b1") for clip in chosen],
+                    music=MusicPlan(cues=list(cues)))
+    return (plan, {clip.id: clip for clip in clips}, {ASSET_ID: sourced(), SONG: song},
+            {ASSET_ID: clean_cuts(made), SONG: heard})
+
+def cut_points(pieces: List[Piece]) -> List[float]:
+    """Where each picture cut lands on the timeline.
+
+    Args:
+        pieces: The compiled windows.
+
+    Returns:
+        The seconds between one window and the next.
+    """
+    points, position = [], 0.0
+    for piece in pieces[:-1]:
+        position += piece.duration
+        points.append(round(position, 3))
+    return points
+
+def checked(plan: EditPlan, by_id: dict, assets: dict, cuts=None) -> tuple:
+    """Check a plan with everything known about its files.
+
+    Args:
+        plan: The plan.
+        by_id: The clips.
+        assets: The assets.
+        cuts: What is known about each file.
+
+    Returns:
+        `(problems, notes)`.
+    """
+    timeline = SemanticTimeline(
+        id=plan.timeline_id, asset_ids=[ASSET_ID], input_hash=plan.timeline_input_hash, derivation_version=1,
+    )
+    return check_plan(plan, timeline, by_id, {}, assets, cuts)
+
+def test_a_cut_moves_through_silence_onto_the_beat() -> None:
+    plan, by_id, assets, cuts = on_beat(MusicCue(asset_id=SONG, cut_on_beat=True), beats=every(0.5))
+    pieces, notes = compile_pieces(plan, by_id, {}, assets, cuts)
+    assert cut_points(pieces) == [2.5, 5.0]
+    # The first shot's cut was 0.2s past a beat and 0.3s short of the next. Going back to
+    # the nearer one would have cut the breath after its last word, so it went forward.
+    assert pieces[0].end == 3.4
+    assert any("moved onto the beat" in note for note in notes)
+
+def test_a_cue_that_does_not_ask_leaves_the_cuts_alone() -> None:
+    plan, by_id, assets, cuts = on_beat(MusicCue(asset_id=SONG), beats=every(0.5))
+    without = plan.model_copy(update={"music": None})
+    assert compile_pieces(plan, by_id, {}, assets, cuts) == compile_pieces(without, by_id, {}, assets, cuts)
+
+def test_a_cut_never_reaches_into_the_next_word() -> None:
+    """A beat 0.15s on would cost nothing — except that the next line starts 0.2s on,
+    and the cut would take its first breath in with it."""
+    tight = analysis(
+        duration=20.0,
+        segments=[(1.0, 3.0, "第一句話"), (3.3, 5.0, "第二句話"), (8.0, 10.0, "第三句話")],
+        silences=[(0.0, 1.0), (3.0, 3.3), (5.0, 8.0), (10.0, 20.0)],
+    )
+    plan, by_id, assets, cuts = on_beat(
+        MusicCue(asset_id=SONG, cut_on_beat=True), beats=[0.0, 2.0, 2.35, 10.0], footage_made=tight,
+    )
+    plan = plan.model_copy(update={"selections": [plan.selections[0], plan.selections[-1]]})
+    moved, notes = compile_pieces(plan, by_id, {}, assets, cuts)
+    still = compile_pieces(plan.model_copy(update={"music": None}), by_id, {}, assets, cuts)[0]
+    assert moved == still
+    assert any("off the beat" in note for note in notes)
+
+def test_a_cut_further_from_the_beat_than_it_may_move_stays_and_is_said() -> None:
+    plan, by_id, assets, cuts = on_beat(
+        MusicCue(asset_id=SONG, cut_on_beat=True), beats=[0.0, 2.2 + BEAT_SNAP_SECONDS + 0.2, 10.0],
+    )
+    moved, notes = compile_pieces(plan, by_id, {}, assets, cuts)
+    assert cut_points(moved)[0] == 2.2
+    assert any(f"further than {BEAT_SNAP_SECONDS:g}s" in note for note in notes)
+
+def test_footage_nobody_transcribed_keeps_its_cuts() -> None:
+    """Nobody knows where the words are, so nobody knows the move is through silence."""
+    plan, by_id, assets, cuts = on_beat(MusicCue(asset_id=SONG, cut_on_beat=True), beats=every(0.5))
+    cuts = {**cuts, ASSET_ID: replace(cuts[ASSET_ID], words=(), sentences=(), said=(), transcribed=False)}
+    moved, notes = compile_pieces(plan, by_id, {}, assets, cuts)
+    assert moved == compile_pieces(plan.model_copy(update={"music": None}), by_id, {}, assets, cuts)[0]
+    assert any("never transcribed" in note for note in notes)
+
+def test_the_song_comes_in_on_a_beat_and_counts_from_it() -> None:
+    plan, by_id, assets, cuts = on_beat(
+        MusicCue(asset_id=SONG, start=0.2, cut_on_beat=True), beats=every(0.5, first=0.45),
+    )
+    pieces, _ = compile_pieces(plan, by_id, {}, assets, cuts)
+    assert music_beds(plan, pieces, assets, cuts)[0].start == 0.45
+    # Counted from where the song came in, the beats land on the same half-seconds.
+    assert cut_points(pieces) == [2.5, 5.0]
+    _, notes = checked(plan, by_id, assets, cuts)
+    assert any("comes in at 0.45s" in note for note in notes)
+
+def test_the_beat_carries_on_when_the_song_loops() -> None:
+    """A 1.8s loop with beats every 0.6s: after the loop they fall at 1.8, 2.4, 3.0."""
+    plan, by_id, assets, cuts = on_beat(
+        MusicCue(asset_id=SONG, cut_on_beat=True), beats=[0.0, 0.6, 1.2], song_seconds=1.8,
+    )
+    pieces, _ = compile_pieces(plan, by_id, {}, assets, cuts)
+    assert cut_points(pieces)[0] == 2.4
+
+def parts() -> tuple:
+    """Three shots in three beats, each one a part of the video with its own music.
+
+    Returns:
+        `(plan, clips_by_id, assets)`, the plan having no music yet.
+    """
+    by_id, _, assets, clips = footage()
+    talk = speech_of(clips)
+    plan = EditPlan(
+        timeline_id="tl_test", timeline_input_hash="hash",
+        beats=[Beat(id="b1", name="開場"), Beat(id="b2", name="中段"), Beat(id="b3", name="結尾")],
+        selections=[Selection(clip_id=talk[0].id, beat_id="b1"), Selection(clip_id=talk[2].id, beat_id="b2"),
+                    Selection(clip_id=talk[3].id, beat_id="b3")],
+    )
+    other = sourced("other", seconds=60.0).model_copy(update={"has_video": False})
+    return plan, by_id, {**assets, SONG: song_of(every(0.5), 60.0)[0], "other": other}
+
+def test_each_cue_plays_from_where_its_beat_begins_until_the_next() -> None:
+    plan, by_id, assets = parts()
+    plan = plan.model_copy(update={"music": MusicPlan(cues=[
+        MusicCue(asset_id=SONG, fade_in=0.5, fade_out=0.5),
+        MusicCue(beat_id="b2"),
+        MusicCue(beat_id="b3", asset_id="other", start=10.0),
+    ])})
+    pieces = plan_pieces(plan, by_id, {}, assets)
+    starts = [0.0, *cut_points(pieces)]
+    beds = music_beds(plan, pieces, assets)
+    # The middle part is silence: a gap on the track, not a clip of nothing.
+    assert [(bed.asset_id, bed.timeline_in) for bed in beds] == [(SONG, starts[0]), ("other", starts[2])]
+    assert beds[0].end - beds[0].start == pytest.approx(starts[1])
+    assert beds[1].start == 10.0
+    assert beds[1].timeline_in + beds[1].end - beds[1].start == pytest.approx(compiled_duration(pieces))
+    assert (beds[0].fade_in, beds[0].fade_out) == (0.5, 0.5)
+
+def test_a_song_shorter_than_its_part_loops_back_to_where_it_came_in() -> None:
+    plan, by_id, assets = parts()
+    assets = {**assets, "jingle": sourced("jingle", seconds=1.0).model_copy(update={"has_video": False})}
+    plan = plan.model_copy(update={"music": MusicPlan(cues=[MusicCue(asset_id="jingle", start=0.2)])})
+    pieces = plan_pieces(plan, by_id, {}, assets)
+    beds = music_beds(plan, pieces, assets)
+    assert len(beds) > 2
+    assert all(bed.start == 0.2 for bed in beds)
+    assert all(earlier.timeline_in + earlier.end - earlier.start == pytest.approx(later.timeline_in)
+               for earlier, later in zip(beds, beds[1:]))
+    assert beds[-1].timeline_in + beds[-1].end - beds[-1].start == pytest.approx(compiled_duration(pieces))
+    # The fades are the cue's, not each loop's.
+    assert beds[0].fade_in > 0 and all(bed.fade_in == 0 for bed in beds[1:])
+    assert beds[-1].fade_out > 0 and all(bed.fade_out == 0 for bed in beds[:-1])
+
+def test_the_cues_become_clips_on_the_music_track() -> None:
+    plan, by_id, assets = parts()
+    plan = plan.model_copy(update={"music": MusicPlan(duck_under_speech=False, cues=[
+        MusicCue(asset_id=SONG, volume=0.3), MusicCue(beat_id="b3", asset_id="other", volume=0.5),
+    ])})
+    operations, provenance = compile_operations(plan, by_id, {}, assets)
+    track = next(op for op in operations if op["action"] == "add_track" and op["track_id"] == "music")
+    assert track["duck_under_speech"] is False
+    laid = [op for op in operations if op.get("track_id") == "music" and op["action"] == "add_clip"]
+    assert [(op["asset_id"], op["volume"]) for op in laid] == [(SONG, 0.3), ("other", 0.5)]
+    assert all(provenance[op["clip_id"]]["from_plan_id"] == plan.id for op in laid)
+
+@pytest.mark.parametrize("cues, beats, heard, expected", [
+    ([MusicCue(beat_id="b9", asset_id=SONG)], None, False, "which the plan does not have"),
+    ([MusicCue(asset_id=SONG), MusicCue(asset_id="other")], None, False, "only the first cue"),
+    ([MusicCue(asset_id=SONG), MusicCue(beat_id="b2", asset_id=SONG), MusicCue(beat_id="b2")], None, False,
+     "already comes in on beat b2"),
+    ([MusicCue(asset_id=SONG), MusicCue(beat_id="b3", asset_id=SONG), MusicCue(beat_id="b2")], None, False,
+     "list the cues in the order"),
+    ([MusicCue(asset_id=SONG, start=90.0)], None, False, "which runs 60.0s"),
+    ([MusicCue(cut_on_beat=True)], None, False, "no beat to cut on"),
+    ([MusicCue(asset_id=SONG, cut_on_beat=True)], None, False, "analyze it"),
+    ([MusicCue(asset_id=SONG, cut_on_beat=True)], [], True, "no steady beat"),
+    ([MusicCue(asset_id=SONG), MusicCue(beat_id="b4", asset_id=SONG)], None, False, "never begins"),
+], ids=["unknown beat", "second without beat", "two on one beat", "out of order", "past the end",
+        "silence on the beat", "never measured", "no pulse", "beat without footage"])
+def test_music_cues_that_do_not_hold_up_are_refused(cues, beats, heard, expected) -> None:
+    plan, by_id, assets = parts()
+    plan = plan.model_copy(update={
+        "beats": [*plan.beats, Beat(id="b4", name="空的")],
+        "music": MusicPlan(cues=cues),
+    })
+    cuts = {SONG: song_of(beats, 60.0)[1]} if heard else {}
+    problems, _ = checked(plan, by_id, assets, cuts)
+    assert any(expected in problem for problem in problems), problems
+
+def test_a_diff_names_the_music_that_changed() -> None:
+    plan, _, _ = parts()
+    before = plan.model_copy(update={"music": MusicPlan(cues=[MusicCue(asset_id=SONG)])})
+    after = plan.model_copy(update={"music": MusicPlan(cues=[
+        MusicCue(asset_id=SONG, cut_on_beat=True), MusicCue(beat_id="b3", asset_id="other"),
+    ])})
+    lines = diff_plans(before, after)["music"]
+    assert "music from beat b3: other" in lines
+    assert "music from the start: song → song, now cutting on the beat" in lines
+
+def tone(folder: Path, name: str, frequency: int, seconds: int = 20) -> str:
+    """Write a steady tone to stand in for a song, and register it.
+
+    Args:
+        folder: Directory to write it to.
+        name: File name.
+        frequency: Pitch, so two songs can be told apart in the mix.
+        seconds: Length.
+
+    Returns:
+        The asset ID.
+    """
+    import subprocess
+
+    path = folder / name
+    subprocess.run(
+        ["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi", "-i", f"sine=frequency={frequency}:duration={seconds}",
+         "-c:a", "libmp3lame", str(path)],
+        check=True, capture_output=True,
+    )
+    return import_asset(str(path))["id"]
+
+def test_the_music_changes_where_the_part_of_the_video_does(planned: dict, tmp_path: Path) -> None:
+    """End to end: the first part plays one song, cut on its beat; the second part the other."""
+    from helpers import level, render
+
+    # Neither at 440Hz, which is what the footage itself sounds like.
+    low, high = tone(tmp_path, "low.mp3", 700), tone(tmp_path, "high.mp3", 1500)
+    # The beat is stamped on rather than measured: a steady tone has none, and the point
+    # here is where the music goes, not how its beat is found.
+    server_repo.save_analysis(MediaAnalysis(
+        asset_id=low, duration=20.0, rhythm=Rhythm(tempo=120.0, beats=every(0.5, seconds=20.0)),
+    ))
+    stored = EditPlan.model_validate(get_plan(planned["plan_id"])["plan"])
+    first, last = planned["clips"][0]["clip_id"], planned["clips"][2]["clip_id"]
+    saved = save_plan(stored.model_copy(update={
+        "beats": [Beat(id="b1", name="開場"), Beat(id="b2", name="結尾")],
+        "selections": [Selection(clip_id=first, beat_id="b1"), Selection(clip_id=last, beat_id="b2")],
+        "music": MusicPlan(duck_under_speech=False, cues=[
+            MusicCue(asset_id=low, volume=1.0, fade_in=0, fade_out=0, cut_on_beat=True),
+            MusicCue(beat_id="b2", asset_id=high, volume=1.0, fade_in=0, fade_out=0),
+        ]),
+    }))
+    assert saved["problems"] == [], saved["problems"]
+    assert any("moved onto the beat" in note for note in saved["notes"])
+
+    project = create_project(width=640, height=360)["id"]
+    compile_plan(project_id=project, expected_version=1, plan_id=saved["plan_id"])
+    state = get_project(project)
+    tracks = {track["id"]: track for track in state["tracks"]}
+    cut = float(tracks["main"]["clips"][1]["timeline_in"])
+    # On a beat of the song playing under it, and the second song comes in right there.
+    assert cut % 0.5 == pytest.approx(0.0, abs=0.002)
+    music = sorted(tracks["music"]["clips"], key=lambda clip: float(clip["timeline_in"]))
+    assert [(clip["asset_id"], float(clip["timeline_in"])) for clip in music] == [(low, 0.0), (high, cut)]
+    assert {marker["id"]: float(marker["timeline_in"]) for marker in state["markers"]}["b2"] == cut
+
+    out = tmp_path / "out.mp4"
+    render(project, out)
+    heard_first, heard_last = (0.3, cut - 0.6), (cut + 0.3, 1.0)
+    assert level(out, *heard_first, freq=700) > level(out, *heard_first, freq=1500) + 20
+    assert level(out, *heard_last, freq=1500) > level(out, *heard_last, freq=700) + 20
+
+def test_a_looped_song_goes_onto_the_track_without_a_hair_of_overlap() -> None:
+    """A song whose length is not a whole number of milliseconds: rounded the wrong way,
+    one loop runs past the end of the file, or into the next one, and the track refuses it."""
+    from app.models.timeline import EditOperation, apply_operation, validate_project
+
+    plan, by_id, assets = parts()
+    assets = {**assets, "jingle": sourced("jingle", seconds=1.3337).model_copy(update={"has_video": False})}
+    plan = plan.model_copy(update={"music": MusicPlan(cues=[
+        MusicCue(asset_id="jingle", start=0.333), MusicCue(beat_id="b3", asset_id="jingle", start=0.333),
+    ])})
+    operations, _ = compile_operations(plan, by_id, {}, assets)
+    project = Project(id="looped", width=640, height=360)
+    for operation in TypeAdapter(List[EditOperation]).validate_python(operations):
+        apply_operation(project, operation, assets)
+    validate_project(project, assets)
+    music = next(track for track in project.tracks if track.id == "music").clips
+    assert len(music) > 4
+    assert all(clip.source_range.end <= Decimal("1.3337") for clip in music)
+    assert max(clip.timeline_out for clip in music) == project.duration

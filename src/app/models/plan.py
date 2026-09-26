@@ -114,14 +114,47 @@ class BrollShot(BaseModel):
     seconds: float = Field(..., gt=0, description="How long the covering picture runs")
     rationale: str = Field(default="", description="What this picture is doing here")
 
-class MusicPlan(BaseModel):
-    """A music bed under the whole cut."""
+class MusicCue(BaseModel):
+    """One piece of music, from where one part of the video begins until the next cue takes over.
 
-    asset_id: str
+    A cue names the beat it comes in on rather than a second of the timeline,
+    for the same reason B-roll names a clip: the timeline moves every time the
+    plan is compiled, and a beat begins wherever its first shot ends up. So a
+    change of song follows the part of the video it belongs to.
+    """
+
+    beat_id: Optional[str] = Field(
+        default=None,
+        description="The beat of the plan this comes in on, at the moment that beat begins in the cut. Leave it "
+                    "out only on the first cue, to start the music with the video",
+    )
+    asset_id: Optional[str] = Field(
+        default=None,
+        description="The music. Null is silence from here until the next cue, for a part that should have none",
+    )
+    start: float = Field(
+        default=0.0,
+        ge=0,
+        description="Where in the song to come in, in seconds; it loops back to here if the part outlasts it",
+    )
     volume: float = Field(default=0.35, ge=0, le=4)
-    duck_under_speech: bool = Field(default=True, description="Drop the music while someone is talking")
     fade_in: float = Field(default=1.0, ge=0)
-    fade_out: float = Field(default=2.0, ge=0)
+    fade_out: float = Field(default=2.0, ge=0, description="Fade at the end of this cue, where the next one takes over")
+    cut_on_beat: bool = Field(
+        default=False,
+        description="Move each picture cut while this plays onto the nearest beat of it. A cut only moves inside "
+                    "the silence around it, never into a word, and never further than a fraction of a second; "
+                    "one that cannot reach a beat stays where it was and is reported. The song also comes in on "
+                    "a beat. Needs the song analyzed, since that is where the beat is found",
+    )
+
+class MusicPlan(BaseModel):
+    """The music under the cut: one cue, or a run of them that changes with the parts of the video."""
+
+    cues: List[MusicCue] = Field(
+        ..., min_length=1, description="In the order they play; each runs until the next one comes in",
+    )
+    duck_under_speech: bool = Field(default=True, description="Drop the music while someone is talking")
 
 class PlanTarget(BaseModel):
     """What the finished video has to be."""

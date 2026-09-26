@@ -75,7 +75,8 @@ class SubtitleCue(BaseModel):
     )
     speaker: Optional[str] = Field(
         default=None,
-        description="Who said it, as the speaker split labelled them (`S1`, `S2`). The caption style decides "
+        description="Who said it, joined across files (`V1`, `V2`), or the file's own label (`S1`) for footage "
+                    "analyzed before voices were kept. The caption style decides "
                     "whether that reaches the screen as a name, a colour, or not at all",
     )
     words: List[CueWord] = Field(
@@ -206,7 +207,7 @@ class CaptionStyle(BaseModel):
     )
     speaker_names: Dict[str, str] = Field(
         default_factory=dict,
-        description="Real names for the speaker split's labels, such as {'S1': '阿明'}. A label with no name "
+        description="Real names for the speaker labels, such as {'V1': '阿明'}. A label with no name "
                     "keeps the label, because a caption reading 'S2' is still better than one crediting the "
                     "wrong person",
     )

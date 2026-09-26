@@ -160,6 +160,22 @@ class Voice(BaseModel):
     embedding: List[float] = Field(..., min_length=1, description="Where this voice sits in the embedding model's space")
     seconds: float = Field(..., gt=0, description="How much talking it was measured over; a longer look is a surer one")
 
+class Rhythm(BaseModel):
+    """Where the beat falls in a piece of music.
+
+    Measured once at analysis time, so that a cut can be put on the beat
+    without anything downstream having to listen to the song.
+    """
+
+    tempo: Optional[float] = Field(
+        default=None,
+        description="Beats per minute. Null when the music has no steady pulse to find, such as an ambient pad",
+    )
+    beats: List[float] = Field(
+        default_factory=list,
+        description="Every beat, in seconds from the start of the file; empty when there is no pulse",
+    )
+
 class AnalysisRecipe(BaseModel):
     """What produced an analysis, so that an out-of-date one can be recognised.
 
@@ -174,6 +190,7 @@ class AnalysisRecipe(BaseModel):
     detectors: str = Field(default="", description="Covers every detection threshold and sampling rate")
     speech_model: Optional[str] = Field(default=None, description="Speech model used, when speech was transcribed")
     speaker_model: Optional[str] = Field(default=None, description="Speaker model used, when voices were told apart")
+    rhythm_model: Optional[str] = Field(default=None, description="Beat tracker used, when the beat was measured")
 
     def differs_from(self, current: "AnalysisRecipe") -> bool:
         """Say whether an analysis taken this way is out of date.
@@ -183,14 +200,18 @@ class AnalysisRecipe(BaseModel):
 
         Returns:
             True when the pass or its thresholds have changed, or when a
-            transcript or a set of speaker turns was made with a model that is
-            no longer the one in use. An analysis that never ran a model is not
-            made stale by a change to it: there is nothing in it that model
-            wrote.
+            transcript, a set of speaker turns or a beat was measured with a
+            model that is no longer the one in use. An analysis that never
+            ran a model is not made stale by a change to it: there is nothing
+            in it that model wrote.
         """
         if (self.version, self.detectors) != (current.version, current.detectors):
             return True
-        for used, now in ((self.speech_model, current.speech_model), (self.speaker_model, current.speaker_model)):
+        for used, now in (
+            (self.speech_model, current.speech_model),
+            (self.speaker_model, current.speaker_model),
+            (self.rhythm_model, current.rhythm_model),
+        ):
             if used is not None and used != now:
                 return True
         return False
@@ -212,6 +233,11 @@ class MediaAnalysis(BaseModel):
         default_factory=list,
         description="What each of those voices sounds like, one per label, so the same person can be "
                     "recognised in another file",
+    )
+    rhythm: Optional[Rhythm] = Field(
+        default=None,
+        description="Where the beat falls, for music: files with sound and no picture. Null when it was not "
+                    "measured, which is different from measured and found to have no beat",
     )
     transcript: Optional[Transcript] = None
     recipe: AnalysisRecipe = Field(default_factory=AnalysisRecipe, description="What produced this analysis")
