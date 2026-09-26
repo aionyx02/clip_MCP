@@ -192,7 +192,7 @@ def test_a_timeline_too_long_for_a_command_line_still_renders(media: Path, tmp_p
     ]
     project = repo.get_project(build_project(operations))
     output = tmp_path / "long.mp4"
-    command = FFmpegRenderer().build_command(project, _referenced_assets(project), str(output))
+    command = FFmpegRenderer().build_command(project, _referenced_assets(project), str(output), loudness_target=None)
     assert len(command[command.index("-filter_complex") + 1]) > 32767
     run_ffmpeg(command, str(tmp_path / "ffmpeg.log"), 18.0, lambda fraction: None, lambda: False)
     assert output.stat().st_size > 0

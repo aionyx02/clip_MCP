@@ -32,7 +32,9 @@ question comes up, not before; `list_resources` shows everything published.
   sound — scaled to fill the frame and cropped around the face in them. One
   cut rendered in several shapes.
 - Music on audio tracks, ducking under speech, changing with the parts of
-  the video, and cuts put on its beat. Every render normalized to -14 LUFS.
+  the video, and cuts put on its beat. Where the footage is transcribed, the
+  music drops wherever somebody is talking, however quietly. Every render
+  normalized to -14 LUFS.
 - Fades, transitions (dissolve, wipe, dip through a colour), colour per clip,
   speed changes, J and L cuts, picture in picture, covering picture (B-roll).
 - Voice repair and matching two people's levels.
@@ -291,7 +293,7 @@ Use these without asking, and mention the ones you chose in one short line.
 | Output size | 1080x1920 for 直式, 短影音, Reels, Shorts, 抖音, or TikTok; 1080x1080 for 方形 or IG 貼文; 1920x1080 otherwise, or 1080x1920 if most sources are vertical |
 | Frame rate | 30 (`fps_num: 30, fps_den: 1`). Use 25, 60, or 29.97 (`30000/1001`) only if asked |
 | Clip order | The order the user listed files in; otherwise file-name order |
-| Music volume | 0.5 with `duck_under_speech: true` if any video clip has sound; 0.8 and no ducking if none has |
+| Music volume | 0.5 with `duck_under_speech: true` if any video clip has sound; 0.8 and no ducking if none has. Where the footage is transcribed, a music clip's volume is measured from the talking, not from how loud the song was mastered: 0.5 sits 6 dB under the voices between sentences and 16 dB under while somebody talks |
 | Music fades | 1 s fade-in on the first music clip, 2 s fade-out ending at the video end |
 | Output loudness | -14 LUFS; only pass `loudness_target: null` if the user asks for the raw levels |
 | Colour | As shot, unless asked, or a clip is clearly too dark next to the others |

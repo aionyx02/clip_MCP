@@ -12,9 +12,11 @@ compiler, so it can be asked before anything is rendered and gives the same
 answer every time.
 """
 
+import math
 from dataclasses import dataclass
 from typing import List, Mapping, Optional, Sequence, Tuple
 
+from app.engine.builder import DUCK_DEPTH_DB, Talking
 from app.engine.plan import LENGTH_TOLERANCE
 from app.engine.semantic import share_covered, was_audible
 from app.engine.subtitles import caption_overflow, captioned_clips
@@ -32,7 +34,11 @@ YOUTUBE_MIN_CHAPTER_SECONDS = 10.0
 CLIPPED_PEAK_DB = -0.5
 CLIPPED_FLATNESS = 5.0
 # The kinds of finding a render can be told to go ahead in spite of.
-CHECKS = ("bad_picture", "clipping", "mid_speech", "repeated", "unplanned", "captions", "length")
+CHECKS = ("bad_picture", "clipping", "music", "mid_speech", "repeated", "unplanned", "captions", "length")
+# How far under the talking music has to sit while somebody speaks, in dB. Under that it
+# competes with the words: the first edits made with the server had music two decibels
+# under the voice, and it was the first thing anybody listening mentioned. Provisional.
+MUSIC_UNDER_TALKING_DB = 12.0
 # A cut is clean where the speaker stopped: between two words at least this far apart.
 # Shorter gaps are the spaces inside a phrase, and a cut there sounds like a word bitten
 # off. Provisional.
@@ -180,6 +186,7 @@ def check_delivery(
     target_seconds: Optional[float] = None,
     captions: Optional[Sequence[PlacedCue]] = None,
     style: Optional[CaptionStyle] = None,
+    talking: Optional[Talking] = None,
 ) -> List[Finding]:
     """Find what would be noticed in the finished file, before it is rendered.
 
@@ -191,6 +198,9 @@ def check_delivery(
             run, if it came from one that said.
         captions: The captions being burned in, placed; None when none are.
         style: How those captions are drawn.
+        talking: Where the talking is and what brings each music track to
+            it, from `levels.talking_in`. Without it, how the music sits
+            under the voices is not known and not checked.
 
     Returns:
         The findings, grouped by check in the order of `CHECKS`.
@@ -242,6 +252,7 @@ def check_delivery(
                 f"second(s), first at {clock(clipped[0][0])}. Turning it down does not undo it"
             )))
 
+    findings.extend(_music_over_talking(project, talking))
     findings.extend(_speech_cuts(base.clips if base else [], analyses))
     findings.extend(_repeats(base.clips if base else []))
     if base and len(base.clips) >= UNPLANNED_CLIPS and any(clip.from_plan_id is None for clip in base.clips):
@@ -264,6 +275,39 @@ def check_delivery(
         )))
     order = {check: index for index, check in enumerate(CHECKS)}
     return sorted(findings, key=lambda finding: order[finding.check])
+
+def _music_over_talking(project: Project, talking: Optional[Talking]) -> List[Finding]:
+    """Find music that plays too close to the level of somebody talking over it.
+
+    Only music brought to the level of the talking can be judged against it;
+    a track that was not, or a cut nothing says the talking of, is left out.
+
+    Args:
+        project: The project.
+        talking: Where the talking is, and which music tracks were brought
+            to it.
+
+    Returns:
+        One finding per music clip heard too close under the talking.
+    """
+    if talking is None or not talking.spans:
+        return []
+    findings = []
+    for track in project.tracks:
+        if track.id not in talking.music_gains:
+            continue
+        for clip in track.clips:
+            opened, closed = float(clip.timeline_in), float(clip.timeline_out)
+            if clip.volume == 0 or not any(start < closed and end > opened for start, end in talking.spans):
+                continue
+            under = -20 * math.log10(clip.volume) + (DUCK_DEPTH_DB if track.duck_under_speech else 0.0)
+            if under < MUSIC_UNDER_TALKING_DB:
+                findings.append(Finding("music", (
+                    f"the music on track {track.id} from {clock(opened)} plays {under:.0f} dB under the talking "
+                    f"over it, where {MUSIC_UNDER_TALKING_DB:g} dB is about what keeps the words clear; "
+                    "turn it down, or let it duck under speech"
+                )))
+    return findings
 
 def _said(analysis: MediaAnalysis) -> list:
     """List the sentences of a file that were really said.

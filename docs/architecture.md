@@ -28,6 +28,8 @@ clip_MCP/
 │   │   │   ├── builder.py         # 時間軸轉譯為 FFmpeg filtergraph（堆疊畫中畫、調色、淡入淡出、響度與 ducking）
 │   │   │   │                      #   畫面 concat、聲音逐段定位再混音，J/L cut 的重疊才表達得出來
 │   │   │   ├── ffmpeg.py          # FFmpeg 子程序執行（進度回報、取消）與 filtergraph 路徑逸出
+│   │   │   ├── loudness.py        # 響度：先量混音、補足 loudnorm 留下的差距，再寫進 render
+│   │   │   ├── levels.py          # 逐字稿上的講話區間與人聲電平，配樂對著它定音量、讓路
 │   │   │   ├── resources.py       # 實體記憶體量測、各項上限與記憶體估算
 │   │   │   ├── models.py          # 模型權重的存放與取得（釘 SHA-256，放在工作區內）
 │   │   │   ├── analysis.py        # 素材分析：單一解碼 pass 跑完換場／黑畫面／靜止／靜音偵測、
@@ -81,6 +83,7 @@ clip_MCP/
 │   ├── test_preview_project.py    # storyboard：每段保底、空隙、音軌、封頂、錯誤
 │   ├── test_edit_operations.py    # 切開與重排（含倒敍）
 │   ├── test_render_audio.py       # 實際 render 後量測響度與 ducking
+│   ├── test_levels.py             # 講話區間、配樂對人聲的增益、講話時配樂太大聲的檢查
 │   ├── test_render_look.py        # 實際 render 後量測調色、淡入淡出、三種轉場與變速音高
 │   ├── test_subtitles.py          # 字幕對應、斷行、燒錄位置、樣式預設集與逐字動態
 │   ├── test_picture_in_picture.py # 疊加時機、邊界、聲音混入
@@ -468,6 +471,22 @@ clip_MCP/
   那支開場配音量出 135.7 BPM；看的是逐字稿蓋了多少（它是九成，一首有歌詞的歌有前奏、間奏、尾奏）。
   相機原音**是壓低不是拿掉**，那是現場。聲音預覽裡旁白算在人聲那一側，現場算另一側，
   所以「現場有沒有讓開」看得到。匯出給別的軟體時 `left_behind` 會列出這一項。
+- **配樂讓人聲靠逐字稿，不靠電平**：原本配樂的 ducking 是 sidechain 聽相機原音、過固定門檻才壓——
+  讓不讓人聲變成看人聲剛好多大聲。實剪時兩頭都壞：`level_voices` 把人聲拉低後掉到門檻下，
+  配樂反而比人聲大十分貝；旁白之後本人對鏡頭小聲講話從沒過門檻。現在 `levels.talking_in`
+  從逐字稿把「誰在講話」的句子放到時間軸上（主序列與旁白軌），配樂在那些區間用 `volume`
+  表達式降 `DUCK_DEPTH_DB`（提早 0.15 秒、句子間隔短於 0.8 秒視為同一段不回升）。
+  沒分析逐字稿的 clip（空鏡、縮時）算沒人講話；整支都沒有逐字稿才退回舊的電平 ducking。
+  **配樂的音量對著人聲定**：同一個函式量出講話時實際聽到的電平（逐秒電平在句子內的能量平均，
+  含 clip 音量與旁白增益），配樂軌先補到那個電平（`volumedetect` 量歌，最多聽 60 秒），
+  所以 clip 的 volume 意思是「低於人聲多少」：0.35 在句子之間低約 9 dB、講話時再降 10 dB。
+  出片前檢查多一項 `music`：講話時配樂離人聲不到 `MUSIC_UNDER_TALKING_DB` 就提出來。
+- **響度：loudnorm 之後再量一次補足**：單次 loudnorm 碰到比講話大二十分貝的瞬間聲（杯子、笑聲、門）
+  就放棄響度保峰值，實剪十一支全部落在 -15.5 到 -16.7 LUFS、真峰值到 +0.3。現在 render 前先把
+  不含畫面的混音單獨算出來（`build_mix`，32-bit float WAV），在它上面反覆量「loudnorm → 增益 →
+  四倍取樣限幅」這條鏈，把 loudnorm 留下的差距補上、再補回限幅吃掉的，直到落在 ±0.3 LU；
+  render 的濾鏡圖先放 `GAIN_TOKEN`，worker 量完再寫進去。鏈只寫在 `loudness.chain` 一處，
+  量的和 render 的不會分岔。loudnorm 保留是因為它把錄音大小差很多的 clip 拉平，vlog 需要這個。
 - **轉場底下的聲音沒有自動柔化**，控制項本來就在：出場的 clip 給 `audio_fade_out`、
   進場的給 `audio_fade_in`。缺的是「多長、哪一邊」這個判斷，而那沒有語料訂不出來。
 - **變速是一條貫通的鏈路**：`Clip.speed` 一改，`timeline_duration` 就變，

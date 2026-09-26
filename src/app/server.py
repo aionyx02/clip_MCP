@@ -29,7 +29,7 @@ from app.models.timeline import (
     validate_project,
 )
 from app.models.job import Job, JobKind, JobStatus
-from app.engine import resources
+from app.engine import loudness, resources
 from app.engine.analysis import current_recipe, sound_note, whisper_model_name
 from app.engine.diarize import speaker_model_name
 from app.engine.rhythm import rhythm_model_name
@@ -45,7 +45,8 @@ from app.engine.semantic import (
 from app.engine.ffmpeg import graph_from_file, hidden_window_flags
 from app.engine.probe import picture_size, probe_file, speech_loudness, timecode_start
 from app.engine.reframe import Framing, centre_at, frame_project
-from app.engine.builder import DEFAULT_LOUDNESS_TARGET, FFmpegRenderer, voice_keys
+from app.engine.builder import DEFAULT_LOUDNESS_TARGET, FFmpegRenderer, Talking, voice_keys
+from app.engine.levels import song_level, talking_in
 from app.engine.delivery import CHECKS, chapter_metadata, chapters, check_delivery, clock, cover_candidates
 from app.engine.frames import format_timestamp, still, storyboard_sheet
 from app.engine.interchange import write_edl, write_fcpxml, write_otio, write_srt
@@ -2051,11 +2052,22 @@ def preview_sound(
     os.makedirs(folder, exist_ok=True)
     mix = os.path.join(folder, _output_name(project, "sound").replace(".mp4", ".m4a"))
     voice, music = os.path.join(folder, "voice.wav"), os.path.join(folder, "music.wav")
+    assets, voices = _referenced_assets(project), _voices(project)
+    talking = _talking(project, voices)
     command = renderer.build_sound(
-        project, _referenced_assets(project), mix, voice, music, loudness_target,
-        voices=_voices(project),
+        project, assets, mix, voice, music, loudness_target, voices=voices, talking=talking,
     )
     graph = os.path.join(folder, "graph.txt")
+    if loudness_target is not None:
+        raw = os.path.join(folder, "raw.wav")
+        measured = subprocess.run(
+            graph_from_file(renderer.build_mix(project, assets, raw, voices=voices, talking=talking), graph),
+            capture_output=True, creationflags=hidden_window_flags(),
+        )
+        if measured.returncode != 0:
+            raise RuntimeError(measured.stderr.decode("utf-8", errors="replace").strip()[-500:] or "ffmpeg failed")
+        command = loudness.with_gain(command, loudness.settle_gain(raw, loudness_target))
+        os.remove(raw)
     command = graph_from_file(command, graph)
     result = subprocess.run(command, capture_output=True, creationflags=hidden_window_flags())
     if result.returncode != 0:
@@ -2694,7 +2706,7 @@ def render_project(
     frame: Optional[Literal["landscape", "portrait", "square"]] = None,
     follow_faces: bool = True,
     allow: Optional[List[Literal[
-        "bad_picture", "clipping", "mid_speech", "repeated", "unplanned", "captions", "length",
+        "bad_picture", "clipping", "music", "mid_speech", "repeated", "unplanned", "captions", "length",
     ]]] = None,
 ) -> dict:
     """Start rendering a project to an MP4 file in the background.
@@ -2808,13 +2820,14 @@ def render_project(
     assets = _referenced_assets(project)
     framing = _framing(project, assets) if follow_faces else None
     voices = _voices(project)
+    talking = _talking(project, voices)
     pieces: list = []
     if is_preview:
         cache = _picture_cache()
         command, pieces = renderer.build_incremental(
             project, assets, job.output_path, cache,
             loudness_target=loudness_target, subtitle_path=subtitle_path, framing=framing,
-            chapters_path=chapters_path, voices=voices,
+            chapters_path=chapters_path, voices=voices, talking=talking,
         )
         # What this preview reads from the cache counts as used, so it is kept.
         for argument in command:
@@ -2823,13 +2836,18 @@ def render_project(
     else:
         command = renderer.build_command(
             project, assets, job.output_path, loudness_target=loudness_target, subtitle_path=subtitle_path,
-            framing=framing, chapters_path=chapters_path, voices=voices,
+            framing=framing, chapters_path=chapters_path, voices=voices, talking=talking,
         )
     # One input per clip, all opened at once, is what a render's memory use is made of.
     job.memory_estimate = resources.render_memory_bytes(command.count("-i"))
-    job = job_manager.start_job(job, {
-        "command": command, "duration_seconds": float(renderer.output_duration(project)), "pieces": pieces,
-    })
+    spec = {"command": command, "duration_seconds": float(renderer.output_duration(project)), "pieces": pieces}
+    if loudness_target is not None:
+        mix_path = os.path.join(job.work_dir, "mix.wav")
+        spec["loudness"] = {
+            "mix_command": renderer.build_mix(project, assets, mix_path, voices=voices, talking=talking),
+            "mix_path": mix_path, "target": loudness_target,
+        }
+    job = job_manager.start_job(job, spec)
     # Every clip on a picture track is one picture, the sequence's and the ones drawn over it.
     pictures = sum(len(track.clips) for track in project.video_tracks)
 
@@ -2840,6 +2858,25 @@ def render_project(
     if is_preview:
         result["pictures"] = {"rendered": len(pieces), "reused": pictures - len(pieces)}
     return result
+
+def _talking(project: Project, voices: Mapping[str, float]) -> Optional[Talking]:
+    """Work out from the transcripts where a cut has somebody talking, and how loud.
+
+    Args:
+        project: The project about to be rendered.
+        voices: Its narration tracks, from `_voices`, with the gain each is
+            heard at.
+
+    Returns:
+        Where somebody is heard talking, and the gain that brings each music
+        track's songs to that talking, as `levels.talking` works them out.
+        None when any clip whose words are heard was never transcribed: then
+        nobody knows where all the talking is, and the music ducks by level.
+    """
+    assets = _referenced_assets(project)
+    return talking_in(
+        project, assets, _analyses(project), voices, lambda clip: song_level(assets[clip.asset_id].path, clip),
+    )
 
 def _voices(project: Project) -> Dict[str, float]:
     """Find the tracks a render treats as a voice recorded apart from the picture.
@@ -2905,7 +2942,10 @@ def _findings(project: Project, burn_subtitles: bool) -> list:
         What `delivery.check_delivery` finds.
     """
     placed = place_cues(project, project.subtitles) if burn_subtitles and project.subtitles else None
-    return check_delivery(project, _analyses(project), _plan_target(project), placed, project.caption_style)
+    return check_delivery(
+        project, _analyses(project), _plan_target(project), placed, project.caption_style,
+        _talking(project, _voices(project)),
+    )
 
 @mcp.tool()
 def check_render(
@@ -2916,9 +2956,10 @@ def check_render(
     """Check a cut for what would be noticed in the finished file, without rendering it.
 
     The same check `render_project` runs first and refuses a render over. It
-    looks for seven things: `bad_picture`, black or frozen source picture that
+    looks for eight things: `bad_picture`, black or frozen source picture that
     reaches the screen; `clipping`, a recording squared off at the ceiling,
-    which no amount of turning down undoes; `mid_speech`, a cut that lands
+    which no amount of turning down undoes; `music`, music heard too close
+    under somebody talking; `mid_speech`, a cut that lands
     inside a word or between two words of one phrase, with the nearest pause
     to move it to; `repeated`, the same stretch of a file shown twice;
     `unplanned`, a sequence of three or more clips put together by hand

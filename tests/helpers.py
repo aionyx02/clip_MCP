@@ -7,7 +7,8 @@ from typing import List, Optional, Sequence
 
 from pydantic import TypeAdapter
 
-from app.engine.builder import FFmpegRenderer
+from app.engine import loudness as levelling
+from app.engine.builder import DEFAULT_LOUDNESS_TARGET, FFmpegRenderer
 from app.models.timeline import Clip, EditOperation
 from app.server import _referenced_assets, apply_edits, create_project, get_project, repo
 
@@ -121,7 +122,19 @@ def render(project_id: str, path: Path, **options) -> None:
         AssertionError: If FFmpeg rejects the filter graph or fails.
     """
     project = repo.get_project(project_id)
-    command = FFmpegRenderer().build_command(project, _referenced_assets(project), str(path), **options)
+    renderer, assets = FFmpegRenderer(), _referenced_assets(project)
+    command = renderer.build_command(project, assets, str(path), **options)
+    target = options.get("loudness_target", DEFAULT_LOUDNESS_TARGET)
+    if target is not None:
+        # What the render worker does: measure the mix on its own, then write in its gain.
+        mix = path.with_name(path.stem + "-mix.wav")
+        measured = subprocess.run(
+            renderer.build_mix(project, assets, str(mix), voices=options.get("voices"), talking=options.get("talking")),
+            capture_output=True,
+        )
+        assert measured.returncode == 0, measured.stderr.decode("utf-8", errors="replace")[-800:]
+        command = levelling.with_gain(command, levelling.settle_gain(str(mix), target))
+        mix.unlink()
     result = subprocess.run(command, capture_output=True)
     assert result.returncode == 0, result.stderr.decode("utf-8", errors="replace")[-800:]
 
@@ -153,6 +166,17 @@ def loudness(path: Path) -> float:
         Integrated loudness in LUFS.
     """
     return _measure(path, "ebur128=framelog=quiet", r"I:\s+(-?[\d.]+) LUFS")
+
+def true_peak(path: Path) -> float:
+    """Measure the true peak.
+
+    Args:
+        path: File to measure.
+
+    Returns:
+        The true peak in dBFS.
+    """
+    return _measure(path, "ebur128=framelog=quiet:peak=true", r"Peak:\s+(-?[\d.]+) dBFS")
 
 def level(path: Path, start: float, duration: float, freq: Optional[float] = None) -> float:
     """Measure the mean level of a stretch of a file, optionally in one band.

@@ -110,7 +110,7 @@ def test_ducking_shows_as_the_music_dropping_under_the_voice(talk_over_music: st
     project = repo.get_project(talk_over_music)
     voice, music = tmp_path / "voice.wav", tmp_path / "music.wav"
     command = FFmpegRenderer().build_sound(project, _referenced_assets(project), str(tmp_path / "mix.m4a"),
-                                           str(voice), str(music))
+                                           str(voice), str(music), loudness_target=None)
     assert subprocess.run(command, capture_output=True).returncode == 0
     parts = parts_of(project, levels(str(voice)), levels(str(music)))
     quiet, spoken = parts

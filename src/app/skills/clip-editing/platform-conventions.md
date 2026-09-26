@@ -57,9 +57,10 @@ without the word-by-word lighting.
 
 `render_project` checks the cut first and refuses a full render while it finds
 anything; `check_render` runs the same check without rendering, so run it
-first. It finds seven kinds of thing: `bad_picture` (black or frozen picture
+first. It finds eight kinds of thing: `bad_picture` (black or frozen picture
 that reaches the screen), `clipping` (a recording squared off at the ceiling —
-turning it down does not undo it), `mid_speech` (a cut inside a word or a
+turning it down does not undo it), `music` (music too close under somebody
+talking — `set_music_level` down, or let it duck), `mid_speech` (a cut inside a word or a
 phrase; it names the nearest pause — move the cut there), `repeated` (the same
 stretch of a file shown twice), `unplanned` (three or more clips put together
 by hand, with no plan saying how the video opens, turns and ends — write one

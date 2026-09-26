@@ -7,7 +7,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, Optional
 
-from app.engine import resources
+from app.engine import loudness, resources
 from app.engine.analysis import analyze_media
 from app.engine.ffmpeg import OperationCancelled, run_ffmpeg
 from app.models.job import Job, JobKind, JobStatus
@@ -333,7 +333,10 @@ def _run_render(job: Job, spec: Dict[str, Any], context: JobContext) -> None:
         spec: Job specification with `command` and `duration_seconds`, and
             for a cached preview `pieces`: pictures to render into the cache
             first, each with its own `command`, `part`, `path` and
-            `duration_seconds`.
+            `duration_seconds`. With `loudness` — its `mix_command`, the
+            `mix_path` it writes, and the `target` — the mix is rendered and
+            measured first, and the gain it settles on is written into
+            `command`.
         context: Progress and cancellation for the job.
 
     Raises:
@@ -365,10 +368,21 @@ def _run_render(job: Job, spec: Dict[str, Any], context: JobContext) -> None:
         # picture meanwhile; either copy is the same picture.
         os.replace(piece["part"], piece["path"])
         done += weights[number - 1]
+    command = spec["command"]
+    level = spec.get("loudness")
+    if level is not None:
+        context.report(done / total, "measuring loudness")
+        try:
+            run_ffmpeg(level["mix_command"], log, 0.0, lambda fraction: None, context.is_cancelled)
+            gain = loudness.settle_gain(level["mix_path"], float(level["target"]))
+        finally:
+            if os.path.exists(level["mix_path"]):
+                os.remove(level["mix_path"])
+        command = loudness.with_gain(command, gain)
     start, share = done / total, weights[-1] / total
     context.report(start, "rendering")
     run_ffmpeg(
-        spec["command"],
+        command,
         log,
         float(spec["duration_seconds"]),
         lambda fraction: context.report(start + fraction * share),

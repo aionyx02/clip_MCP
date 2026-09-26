@@ -142,7 +142,7 @@ def test_the_sound_preview_puts_the_narration_on_the_voice_side(
     voice, rest = tmp_path / "voice.wav", tmp_path / "rest.wav"
     command = FFmpegRenderer().build_sound(
         stored, _referenced_assets(stored), str(tmp_path / "mix.m4a"), str(voice), str(rest),
-        voices=_voices(stored),
+        loudness_target=None, voices=_voices(stored),
     )
     subprocess.run(command, check=True, capture_output=True)
     # Nothing on the voice side before the narration starts; the street is on the other.

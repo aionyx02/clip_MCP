@@ -3,12 +3,12 @@ import json
 import math
 import os
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from decimal import Decimal
 from fractions import Fraction
 from statistics import median
-from typing import Callable, Dict, List, Mapping, Optional, Tuple
-from app.engine import resources
+from typing import Callable, Dict, List, Mapping, Optional, Sequence, Tuple
+from app.engine import loudness, resources
 from app.engine.ffmpeg import escape_filter_path
 from app.engine.reframe import Framing, crop_filter
 from app.models.media import Asset, MediaAnalysis
@@ -17,9 +17,15 @@ from app.models.timeline import Clip, Dip, Project, TrackType, Transition, Voice
 AUDIO_SAMPLE_RATE = 48000
 # Streaming platforms normalize to about -14 LUFS, so delivering at that level avoids being turned down.
 DEFAULT_LOUDNESS_TARGET = -14.0
-LOUDNESS_TRUE_PEAK = -1.5
-LOUDNESS_RANGE = 11.0
-# Ducking: hold the music well under speech, and come back slowly so it does not pump between words.
+# Ducking where the transcripts say who is talking: the music drops this many decibels,
+# starting a little before the first word and coming back slowly after the last; talking
+# with less than DUCK_HOLD_SECONDS between is held as one stretch. Provisional.
+DUCK_DEPTH_DB = 10.0
+DUCK_ATTACK_SECONDS = 0.15
+DUCK_RELEASE_SECONDS = 0.6
+DUCK_HOLD_SECONDS = 0.8
+# Ducking by level, for footage nobody transcribed: hold the music well under speech, and
+# come back slowly so it does not pump between words.
 DUCK_THRESHOLD = 0.03
 DUCK_RATIO = 10
 DUCK_ATTACK_MS = 20
@@ -41,10 +47,10 @@ VOICE_DUCK_RELEASE_MS = 800
 # narration is sentences with breaths between (the first one measured 90%); a song with
 # words has an intro, instrumental breaks and an outro. Provisional.
 VOICE_SPEECH_SHARE = 0.5
-# loudnorm derives its gain from the measured loudness of what it is given. A mix that
-# is silent all the way through measures as -inf LUFS, so that gain comes out infinite
-# and fills the stream with NaN; the AAC encoder then refuses the frame and the whole
-# render fails. That happens whenever nothing on the timeline has sound — footage shot
+# A gain derived from the measured loudness of a mix that is silent all the way through
+# comes out infinite and fills the stream with NaN; the AAC encoder then refuses the frame
+# and the whole render fails. `loudness.settle_gain` answers zero for silence, and this
+# stays as the guard behind it. That happens whenever nothing on the timeline has sound — footage shot
 # on a muted microphone, or a cut with no audio track at all. Replacing NaN with zero
 # hands the encoder the silence it was actually given, and leaves every real mix
 # untouched. Clamping the samples or converting them to integers instead is not an
@@ -65,6 +71,22 @@ SIBILANCE_INTENSITY = 0.4
 PICTURE_CACHE_VERSION = 1
 # The rate the stems of a sound preview are written at: they are measured, not listened to.
 STEM_SAMPLE_RATE = 8000
+
+@dataclass(frozen=True)
+class Talking:
+    """What the transcripts say about the talking in a cut, for placing the music under it.
+
+    Attributes:
+        spans: Where somebody is heard talking, as `(start, end)` in timeline
+            seconds — the footage's own sound and any narration.
+        music_gains: For each music track, by track ID, the gain in dB that
+            brings its songs to the level of the talking, so that a clip's
+            volume says how far under the voices it sits. A track left out is
+            played at its own level.
+    """
+
+    spans: Tuple[Tuple[float, float], ...] = ()
+    music_gains: Mapping[str, float] = field(default_factory=dict)
 
 @dataclass(frozen=True)
 class Segment:
@@ -153,6 +175,40 @@ def voice_keys(
         ]
         keys[track.id] = VOICE_KEY_DB - median(levels) if levels else 0.0
     return keys
+
+def _duck_volume(speech: Sequence[Tuple[float, float]]) -> str:
+    """Write the volume filter that lowers music wherever somebody is talking.
+
+    Stretches of talking closer together than `DUCK_HOLD_SECONDS` are held as
+    one, so the music does not swell back up between two sentences. The drop
+    starts `DUCK_ATTACK_SECONDS` before the first word, so the music is
+    already down when the voice arrives, and comes back over
+    `DUCK_RELEASE_SECONDS`. Held stretches never overlap once ramped, so each
+    contributes its own ramp and they add up to at most one.
+
+    Args:
+        speech: Where somebody is talking, as `(start, end)` in timeline
+            seconds.
+
+    Returns:
+        A `volume` filter evaluated once per frame of sound; a plain pass
+        through when there is no talking.
+    """
+    held: List[List[float]] = []
+    for start, end in sorted(speech):
+        if held and start - held[-1][1] < DUCK_HOLD_SECONDS:
+            held[-1][1] = max(held[-1][1], end)
+        else:
+            held.append([start, end])
+    if not held:
+        return "anull"
+    attack, release = DUCK_ATTACK_SECONDS, DUCK_RELEASE_SECONDS
+    ramps = "+".join(
+        f"clip((t-{start - attack:.3f})/{attack:g},0,1)*clip(({end + release:.3f}-t)/{release:g},0,1)"
+        for start, end in held
+    )
+    drop = 1 - 10 ** (-DUCK_DEPTH_DB / 20)
+    return f"volume='1-{drop:.4f}*({ramps})':eval=frame"
 
 def _round_half_up(value: Fraction) -> int:
     """Round a fraction to the nearest integer, rounding halves up.
@@ -704,6 +760,7 @@ class FFmpegRenderer:
         framing: Optional[Mapping[str, Framing]] = None,
         chapters_path: Optional[str] = None,
         voices: Optional[Mapping[str, float]] = None,
+        talking: Optional[Talking] = None,
     ) -> Tuple[List[str], List[Dict[str, object]]]:
         """Build a preview render that only renders the pictures it has not rendered before.
 
@@ -724,6 +781,7 @@ class FFmpegRenderer:
             framing: As for `build_command`.
             chapters_path: As for `build_command`.
             voices: As for `build_command`.
+            talking: As for `build_command`.
 
         Returns:
             `(command, pieces)` — the render, and the pictures to render into
@@ -733,7 +791,7 @@ class FFmpegRenderer:
         """
         return self._build(
             project, assets, output_path, True, loudness_target, subtitle_path, framing, chapters_path, cache_dir,
-            voices=voices,
+            voices=voices, talking=talking,
         )
 
     def build_sound(
@@ -745,6 +803,7 @@ class FFmpegRenderer:
         music_path: str,
         loudness_target: Optional[float] = DEFAULT_LOUDNESS_TARGET,
         voices: Optional[Mapping[str, float]] = None,
+        talking: Optional[Talking] = None,
     ) -> List[str]:
         """Build a render of the sound alone, with its two halves beside it.
 
@@ -768,8 +827,33 @@ class FFmpegRenderer:
         """
         return self._build(
             project, assets, mix_path, False, loudness_target, None, None, None, None, (voice_path, music_path),
-            voices,
+            voices, talking,
         )[0]
+
+    def build_mix(
+        self,
+        project: Project,
+        assets: Mapping[str, Asset],
+        mix_path: str,
+        voices: Optional[Mapping[str, float]] = None,
+        talking: Optional[Talking] = None,
+    ) -> List[str]:
+        """Build a render of the mix alone, before its loudness is set.
+
+        What `loudness.settle_gain` measures to find the gain a render's
+        graph is waiting for: the same placement and ducking, no picture.
+
+        Args:
+            project: Project whose sound is rendered.
+            assets: Registered assets, keyed by asset ID.
+            mix_path: Where the mix goes, as 32-bit float WAV.
+            voices: As for `build_command`.
+            talking: As for `build_command`.
+
+        Returns:
+            The command.
+        """
+        return self._build(project, assets, mix_path, False, None, None, None, None, None, (), voices, talking)[0]
 
     def build_command(
         self,
@@ -782,6 +866,7 @@ class FFmpegRenderer:
         framing: Optional[Mapping[str, Framing]] = None,
         chapters_path: Optional[str] = None,
         voices: Optional[Mapping[str, float]] = None,
+        talking: Optional[Talking] = None,
     ) -> List[str]:
         """Build the FFmpeg arguments that render a project to a file.
 
@@ -807,7 +892,10 @@ class FFmpegRenderer:
             assets: Registered assets, keyed by asset ID.
             output_path: Destination path of the rendered file.
             is_preview: Whether to render a fast, low-resolution preview.
-            loudness_target: Integrated loudness of the finished mix in LUFS;
+            loudness_target: Integrated loudness of the finished mix in LUFS.
+                The graph then carries `loudness.GAIN_TOKEN` in place of the
+                gain, which `loudness.settle_gain` finds on the `build_mix`
+                render and `loudness.with_gain` writes in;
                 None leaves the levels exactly as mixed.
             subtitle_path: ASS subtitle file to burn into the picture, sized
                 for this project's output format; None burns nothing.
@@ -822,6 +910,11 @@ class FFmpegRenderer:
                 While one speaks, the footage's own sound drops, and so does
                 any track marked `duck_under_speech`. None treats no track as
                 a voice.
+            talking: Where the transcripts say somebody is talking, and the
+                gain that brings each music track to the level of it. Given
+                it, music marked `duck_under_speech` drops `DUCK_DEPTH_DB`
+                wherever somebody is talking, however loud they are; without
+                it, music ducks under the level of the footage's own sound.
 
         Returns:
             The command as an argument list.
@@ -832,7 +925,7 @@ class FFmpegRenderer:
         """
         return self._build(
             project, assets, output_path, is_preview, loudness_target, subtitle_path, framing, chapters_path, None,
-            voices=voices,
+            voices=voices, talking=talking,
         )[0]
 
     def _build(
@@ -848,6 +941,7 @@ class FFmpegRenderer:
         cache_dir: Optional[str],
         stems: Optional[Tuple[str, str]] = None,
         voices: Optional[Mapping[str, float]] = None,
+        talking: Optional[Talking] = None,
     ) -> Tuple[List[str], List[Dict[str, object]]]:
         """Build a render, reading pictures from their sources or from a cache.
 
@@ -869,11 +963,14 @@ class FFmpegRenderer:
             voices: The audio tracks that are a voice recorded apart from
                 the picture, from `voice_keys`: the footage's sound and the
                 music duck under them.
+            talking: As for `build_command`.
 
         Returns:
             `(command, pieces)`; `pieces` is always empty without a cache.
         """
         sound_only = stems is not None
+        speech = talking.spans if talking is not None and talking.spans else None
+        music_gains = talking.music_gains if talking is not None else {}
         self.check_supported(project, assets)
         segments = self.plan_segments(project)
         if not segments:
@@ -1123,17 +1220,26 @@ class FFmpegRenderer:
                     f"{''.join(track_labels)}concat=n={len(track_labels)}:v=0:a=1,"
                     f"apad=whole_len={total_samples},atrim=end_sample={total_samples}{track_label}"
                 )
-                mix_labels.append(track_label)
                 if voices and track.id in voices:
                     narration.append((track_label, voices[track.id]))
-                elif track.duck_under_speech:
-                    ducking.append(track_label)
+                else:
+                    anchor = music_gains.get(track.id)
+                    if anchor is not None:
+                        # Brought to where the talking is, so a clip's volume says how far under
+                        # the voices it sits rather than how far under its own mastering.
+                        anchored = f"[t{track_index}at]"
+                        filters.append(f"{track_label}volume={anchor:.2f}dB{anchored}")
+                        track_label = anchored
+                    if track.duck_under_speech:
+                        ducking.append(track_label)
+                mix_labels.append(track_label)
 
         # The footage's own sound, and anything laid over the picture, come first in the mix;
         # they are what a narration is spoken over.
         footage = 1 + len(overlay_audio)
-        # What music ducks under: the footage's own sound, joined by any narration.
-        speech = "[mainaudio]"
+        # What music ducks under when nothing says where the talking is: the footage's own
+        # sound, joined by any narration.
+        heard = "[mainaudio]"
         spoken = set(range(footage))
         if narration:
             # Every narration is brought to the same level first, which is what it is heard
@@ -1146,10 +1252,10 @@ class FFmpegRenderer:
                 mix_labels[mix_labels.index(label)] = kept
                 keys.append(key)
             spoken = {mix_labels.index(f"[narr{index}]") for index in range(len(narration))}
-            copies = [f"[vkey{index}]" for index in range(footage + (1 if ducking else 0))]
+            copies = [f"[vkey{index}]" for index in range(footage + (1 if ducking and speech is None else 0))]
             joined = keys[0] if len(keys) == 1 else f"{''.join(keys)}amix=inputs={len(keys)}:duration=first:normalize=0,"
             filters.append(f"{joined}asplit={len(copies)}{''.join(copies)}")
-            if ducking:
+            if ducking and speech is None:
                 # The footage's own speech still ducks the music, so a copy is kept before it is lowered.
                 filters.append("[mainaudio]asplit=2[mainkeep][mainspeech]")
                 mix_labels[0] = "[mainkeep]"
@@ -1161,19 +1267,28 @@ class FFmpegRenderer:
                     f"attack={VOICE_DUCK_ATTACK_MS}:release={VOICE_DUCK_RELEASE_MS}{lowered}"
                 )
                 mix_labels[index] = lowered
-            if ducking:
+            if ducking and speech is None:
                 filters.append(f"[mainspeech]{copies[-1]}amix=inputs=2:duration=first:normalize=0[allspeech]")
-                speech = "[allspeech]"
+                heard = "[allspeech]"
 
-        if ducking:
+        if ducking and speech is not None:
+            # Where the transcripts say somebody is talking, the music drops by a set amount,
+            # however loud they were recorded or were turned: nothing about the level of the
+            # voice decides whether the music gets out of its way.
+            envelope = _duck_volume(speech)
+            for label in ducking:
+                ducked_label = f"[{label.strip('[]')}duck]"
+                filters.append(f"{label}{envelope}{ducked_label}")
+                mix_labels[mix_labels.index(label)] = ducked_label
+        elif ducking:
             # sidechaincompress consumes its sidechain, so the speech needs one copy per ducked
             # track, and one more to mix when it is the footage's sound and nothing else took it.
             copies = [f"[speech{index}]" for index in range(len(ducking))]
-            if speech == "[mainaudio]":
+            if heard == "[mainaudio]":
                 filters.append(f"[mainaudio]asplit={len(copies) + 1}[speechmix]{''.join(copies)}")
                 mix_labels[0] = "[speechmix]"
             else:
-                filters.append(f"{speech}asplit={len(copies)}{''.join(copies)}")
+                filters.append(f"{heard}asplit={len(copies)}{''.join(copies)}")
             for label, copy in zip(ducking, copies):
                 ducked_label = f"[{label.strip('[]')}duck]"
                 filters.append(
@@ -1183,7 +1298,7 @@ class FFmpegRenderer:
                 )
                 mix_labels[mix_labels.index(label)] = ducked_label
 
-        if sound_only:
+        if sound_only and stems:
             # Every lane is split, one copy to the mix and one to its stem: who is talking on
             # one side — the footage's own sound, or the narration when there is one — and
             # everything else as ducked on the other, which with a narration includes the
@@ -1210,12 +1325,12 @@ class FFmpegRenderer:
         if loudness_target is None:
             filters.append("[mixa]anull[outa]")
         else:
-            # loudnorm resamples to 192 kHz internally, so come back to the project rate and to
-            # the exact length. The guard sits after that, where there are a quarter as many
-            # samples to look at, and before the format is settled for the encoder.
+            # The gain is not known yet: the mix is measured on its own first, and the gain
+            # that reaches the target is written in over the token (see `loudness`). The
+            # limiter oversamples, so come back to the exact length afterwards; the guard
+            # sits before the format is settled for the encoder.
             filters.append(
-                f"[mixa]loudnorm=I={loudness_target:g}:TP={LOUDNESS_TRUE_PEAK:g}:LRA={LOUDNESS_RANGE:g},"
-                f"aresample={AUDIO_SAMPLE_RATE},{SILENCE_GUARD},"
+                f"[mixa]{loudness.chain(loudness_target, loudness.GAIN_TOKEN)},{SILENCE_GUARD},"
                 f"aformat=sample_fmts=fltp:channel_layouts=stereo,"
                 f"apad=whole_len={total_samples},atrim=end_sample={total_samples}[outa]"
             )
@@ -1237,8 +1352,9 @@ class FFmpegRenderer:
         if sound_only:
             # The mix to listen to, and the two stems to measure: mono and at a low rate,
             # since nothing listens to them.
-            cmd.extend(["-filter_complex", ";".join(filters), "-map", "[outa]", "-c:a", "aac", "-b:a", "128k",
-                        output_path])
+            # A mix to be measured is kept exact, peaks over full scale and all.
+            codec = ["-c:a", "aac", "-b:a", "128k"] if stems else ["-c:a", "pcm_f32le"]
+            cmd.extend(["-filter_complex", ";".join(filters), "-map", "[outa]", *codec, output_path])
             for lane, path in zip(("voice", "music"), stems):
                 cmd.extend(["-map", f"[{lane}]", "-ac", "1", "-ar", str(STEM_SAMPLE_RATE), "-c:a", "pcm_s16le", path])
             return cmd, pieces

@@ -211,7 +211,8 @@ def test_the_chapters_are_carried_inside_the_rendered_file(media: Path, tmp_path
     listing = tmp_path / "chapters.txt"
     listing.write_text(chapter_metadata(chapters(project)[0]), encoding="utf-8")
     out = tmp_path / "out.mp4"
-    command = FFmpegRenderer().build_command(project, _referenced_assets(project), str(out), chapters_path=str(listing))
+    command = FFmpegRenderer().build_command(project, _referenced_assets(project), str(out), chapters_path=str(listing),
+                                            loudness_target=None)
     result = subprocess.run(command, capture_output=True)
     assert result.returncode == 0, result.stderr.decode("utf-8", errors="replace")[-600:]
     probed = json.loads(subprocess.run(

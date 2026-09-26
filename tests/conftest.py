@@ -128,7 +128,8 @@ def audio_media(tmp_path_factory: pytest.TempPathFactory) -> Path:
     Returns:
         A folder holding `quiet.mp4` (a faint tone), `loud.mp4` (a strong
         tone), `talk.mp4` (silent for three seconds, then a strong tone, which
-        stands in for someone starting to speak), and `music.mp3` (a steady
+        stands in for someone starting to speak), `knocks.mov` (a faint tone
+        with a full-scale knock every second), and `music.mp3` (a steady
         200 Hz bed that is easy to measure on its own).
     """
     folder = tmp_path_factory.mktemp("audio")
@@ -144,6 +145,13 @@ def audio_media(tmp_path_factory: pytest.TempPathFactory) -> Path:
         "-f", "lavfi", "-i", r"aevalsrc=if(gte(t\,3)\,0.7*sin(2*PI*1000*t)\,0):d=6",
         "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
         "-c:a", "aac", "-shortest", str(folder / "talk.mp4"),
+    ])
+    # Quiet talking with a knock at full scale every second: what a cup set down does to a vlog.
+    _run_ffmpeg([
+        "-f", "lavfi", "-i", "testsrc=size=320x240:rate=30:duration=8",
+        "-f", "lavfi", "-i", r"aevalsrc=0.03*sin(2*PI*300*t)+if(lt(mod(t\,1)\,0.004)\,0.98\,0):d=8",
+        "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+        "-c:a", "pcm_s16le", "-shortest", str(folder / "knocks.mov"),
     ])
     _run_ffmpeg(["-f", "lavfi", "-i", "sine=frequency=200:duration=20", "-c:a", "libmp3lame", str(folder / "music.mp3")])
     return folder

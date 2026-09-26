@@ -9,9 +9,10 @@ from pathlib import Path
 
 import pytest
 
+from app.engine.builder import DUCK_DEPTH_DB, Talking, _duck_volume
 from app.server import import_asset
 from app.server import repo
-from helpers import build_project, edit, insert, level, loudness, render, video_track
+from helpers import build_project, edit, insert, level, loudness, render, true_peak, video_track
 
 @pytest.fixture
 def quiet_project(audio_media: Path) -> str:
@@ -296,3 +297,50 @@ def test_a_clip_that_dissolves_in_is_heard_from_its_own_in_point(audio_media: Pa
     out = tmp_path / "dissolve.mp4"
     render(project, out, loudness_target=None)
     assert level(out, 3.1, 0.3, freq=1000) > -30
+
+def test_a_quiet_mix_with_loud_knocks_still_reaches_the_target(audio_media: Path, tmp_path: Path) -> None:
+    # loudnorm alone stops short here: lifting the tone to -14 would put the knocks over its
+    # peak ceiling, so it gave up about two decibels early on every real edit.
+    knocks = import_asset(str(audio_media / "knocks.mov"))["id"]
+    project = build_project([video_track(), insert("k", knocks, 0, 8)], width=320, height=240)
+    render(project, tmp_path / "out.mp4")
+    assert loudness(tmp_path / "out.mp4") == pytest.approx(-14.0, abs=0.5)
+    assert true_peak(tmp_path / "out.mp4") < -0.5
+
+def test_music_drops_where_the_transcript_has_somebody_talking_however_quiet_they_are(
+    audio_media: Path, tmp_path: Path,
+) -> None:
+    # Turned down this far, the voice never reaches the level that ducking by level listens
+    # for, and the music used to stay up over it.
+    talk = import_asset(str(audio_media / "talk.mp4"))["id"]
+    music = import_asset(str(audio_media / "music.mp3"))["id"]
+    project = build_project([
+        video_track(),
+        insert("t", talk, 0, 6, volume=0.02),
+        {"action": "add_track", "track_id": "music", "track_type": "audio", "duck_under_speech": True},
+        insert("m", music, 0, 6, track_id="music", volume=0.5),
+    ], width=320, height=240)
+    render(project, tmp_path / "out.mp4", loudness_target=None, talking=Talking(spans=((3.0, 6.0),)))
+    dropped = level(tmp_path / "out.mp4", 0.5, 2.0, freq=200) - level(tmp_path / "out.mp4", 3.5, 2.0, freq=200)
+    assert dropped == pytest.approx(DUCK_DEPTH_DB, abs=1.5)
+
+def test_music_is_brought_to_the_level_of_the_talking(audio_media: Path, tmp_path: Path) -> None:
+    talk = import_asset(str(audio_media / "talk.mp4"))["id"]
+    music = import_asset(str(audio_media / "music.mp3"))["id"]
+    project = build_project([
+        video_track(),
+        insert("t", talk, 0, 6),
+        {"action": "add_track", "track_id": "music", "track_type": "audio"},
+        insert("m", music, 0, 6, track_id="music"),
+    ], width=320, height=240)
+    render(project, tmp_path / "plain.mp4", loudness_target=None)
+    render(project, tmp_path / "anchored.mp4", loudness_target=None,
+           talking=Talking(spans=((3.0, 6.0),), music_gains={"music": -12.0}))
+    plain = level(tmp_path / "plain.mp4", 0.5, 2.0, freq=200)
+    assert plain - level(tmp_path / "anchored.mp4", 0.5, 2.0, freq=200) == pytest.approx(12.0, abs=1.0)
+
+def test_the_duck_is_held_between_sentences_close_together() -> None:
+    envelope = _duck_volume([(1.0, 2.0), (2.5, 3.0), (6.0, 7.0)])
+    # The first two are half a second apart and held as one; the third is its own.
+    assert envelope.count("clip((t-") == 2
+    assert _duck_volume([]) == "anull"
