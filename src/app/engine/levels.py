@@ -156,7 +156,7 @@ def talking_in(
     `_clip_gains`), and then its level is the per-second loudness measured
     under those sentences, after each clip's gain and volume and each
     narration's gain: what the viewer hears, not what was recorded. Each music
-    track is brought to that level.
+    clip's song is brought to that level.
 
     Args:
         project: The project.
@@ -169,8 +169,8 @@ def talking_in(
     Returns:
         The talking, or None when nothing heard was transcribed, so where the
         talking is cannot be known. Among transcribed footage, a clip whose
-        words were never asked for counts as nobody talking. A music track
-        whose songs cannot be measured, or any track when nothing is said,
+        words were never asked for counts as nobody talking. A music clip
+        whose song cannot be measured, or any clip when nothing is said,
         gets no gain.
     """
     base = project.base_video_track
@@ -206,15 +206,16 @@ def talking_in(
     if not transcribed:
         return None
     talking_level = _power_mean(spoken)
-    gains = {}
+    gains: Dict[str, Dict[str, float]] = {}
     if talking_level is not None:
         for track in project.tracks:
             if track.track_type != TrackType.AUDIO or track.id in voices:
                 continue
-            levels = [level for clip in track.clips if (level := song(clip)) is not None]
-            played = _power_mean(levels)
-            if played is not None:
-                gains[track.id] = round(talking_level - played, 2)
+            placed = {
+                clip.id: round(talking_level - level, 2) for clip in track.clips if (level := song(clip)) is not None
+            }
+            if placed:
+                gains[track.id] = placed
     return Talking(spans=tuple(sorted(spans)), music_gains=gains, clip_gains=clip_gains)
 
 @functools.lru_cache(maxsize=256)

@@ -335,7 +335,7 @@ def test_music_is_brought_to_the_level_of_the_talking(audio_media: Path, tmp_pat
     ], width=320, height=240)
     render(project, tmp_path / "plain.mp4", loudness_target=None)
     render(project, tmp_path / "anchored.mp4", loudness_target=None,
-           talking=Talking(spans=((3.0, 6.0),), music_gains={"music": -12.0}))
+           talking=Talking(spans=((3.0, 6.0),), music_gains={"music": {"m": -12.0}}))
     plain = level(tmp_path / "plain.mp4", 0.5, 2.0, freq=200)
     assert plain - level(tmp_path / "anchored.mp4", 0.5, 2.0, freq=200) == pytest.approx(12.0, abs=1.0)
 

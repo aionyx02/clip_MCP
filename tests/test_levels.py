@@ -49,7 +49,7 @@ def test_the_talking_is_placed_on_the_timeline_and_the_music_brought_to_it() -> 
     # The talking is brought from -30 dB to TALK_DB, then turned down by half (-6 dB); the
     # song goes to that level.
     assert talking.clip_gains == {"c": pytest.approx(TALK_DB + 30.0)}
-    assert talking.music_gains["music"] == pytest.approx(TALK_DB - 6.02 + 12.0, abs=0.01)
+    assert talking.music_gains["music"]["m"] == pytest.approx(TALK_DB - 6.02 + 12.0, abs=0.01)
 
 def test_footage_nobody_transcribed_leaves_the_talking_unknown() -> None:
     analyses = {"cam": MediaAnalysis(asset_id="cam", duration=10, sound=sound(-30))}
@@ -69,7 +69,7 @@ def test_a_cutaway_analyzed_without_its_words_counts_as_nobody_talking() -> None
     assert talking.spans == ((1.0, 3.0),)
     # The loud street is not part of the level the music is set against, and it is turned
     # down under the talking — as far as it may be turned.
-    assert talking.music_gains["music"] == pytest.approx(TALK_DB + 12.0, abs=0.01)
+    assert talking.music_gains["music"]["m"] == pytest.approx(TALK_DB + 12.0, abs=0.01)
     assert talking.clip_gains["b"] == -LEVEL_RANGE_DB
 
 def test_a_song_that_cannot_be_measured_is_left_at_its_own_level() -> None:
@@ -80,7 +80,7 @@ def test_music_close_under_the_talking_is_found_before_the_render() -> None:
     loud = project()
     loud.tracks[1].clips[0].volume = 1.0
     loud.tracks[1].duck_under_speech = False
-    talking = Talking(spans=((0.5, 1.5),), music_gains={"music": -18.0})
+    talking = Talking(spans=((0.5, 1.5),), music_gains={"music": {"m": -18.0}})
     found = [finding for finding in check_delivery(loud, {}, talking=talking) if finding.check == "music"]
     assert len(found) == 1 and "0 dB under the talking" in found[0].message
     # Ducked, and at the volume a plan gives music, it is well under.
@@ -143,3 +143,13 @@ def test_a_quiet_place_is_not_brought_up_and_a_kept_clip_moves_with_the_rest() -
     assert -50 < TALK_DB - AMBIENCE_UNDER_TALK_DB
     # Kept at its recorded level against the others: moved as the typical clip was.
     assert gains["c"] == gains["a"] or gains["c"] == gains["b"]
+
+def test_two_songs_mastered_apart_are_each_brought_to_the_talking() -> None:
+    both = project()
+    both.tracks[1].clips.append(Clip(
+        id="m2", asset_id="song", timeline_in=Decimal(4), source_range={"start": 4, "end": 8},
+    ))
+    analyses = {"cam": MediaAnalysis(asset_id="cam", duration=10, transcript=said((3, 5)), sound=sound(-30))}
+    mastered = {"m": -10.0, "m2": -20.0}
+    gains = talking_in(both, ASSETS, analyses, {}, lambda clip: mastered[clip.id]).music_gains["music"]
+    assert gains["m2"] - gains["m"] == pytest.approx(10.0)

@@ -79,10 +79,12 @@ class Talking:
     Attributes:
         spans: Where somebody is heard talking, as `(start, end)` in timeline
             seconds — the footage's own sound and any narration.
-        music_gains: For each music track, by track ID, the gain in dB that
-            brings its songs to the level of the talking, so that a clip's
-            volume says how far under the voices it sits. A track left out is
-            played at its own level.
+        music_gains: For each music track, by track ID, and each clip on it,
+            by clip ID, the gain in dB that brings that clip's song to the
+            level of the talking, so that a clip's volume says how far under
+            the voices it sits. Per clip, because two songs on one track can
+            be mastered ten decibels apart. A clip left out is played at its
+            own level.
         clip_gains: For each clip on the sequence, by clip ID, the gain in dB
             that brings its talking to the level of the rest, or keeps the
             place it was shot in under that talking. A clip left out plays at
@@ -90,7 +92,7 @@ class Talking:
     """
 
     spans: Tuple[Tuple[float, float], ...] = ()
-    music_gains: Mapping[str, float] = field(default_factory=dict)
+    music_gains: Mapping[str, Mapping[str, float]] = field(default_factory=dict)
     clip_gains: Mapping[str, float] = field(default_factory=dict)
 
 @dataclass(frozen=True)
@@ -1224,7 +1226,12 @@ class FFmpegRenderer:
                     input_index = len(inputs)
                     frames = segment.end_frame - segment.start_frame
                     inputs.append(_input_args(segment.clip, assets[segment.clip.asset_id], frames, fps))
-                    filters.append(_clip_audio_filter(f"[{input_index}:a]", segment.clip, samples, label))
+                    filters.append(_clip_audio_filter(
+                        f"[{input_index}:a]", segment.clip, samples, label,
+                        # Brought to where the talking is, so a clip's volume says how far under
+                        # the voices it sits rather than how far under its own mastering.
+                        music_gains.get(track.id, {}).get(segment.clip.id, 0.0),
+                    ))
                 track_labels.append(label)
             if track_labels:
                 track_label = f"[t{track_index}]"
@@ -1234,16 +1241,8 @@ class FFmpegRenderer:
                 )
                 if voices and track.id in voices:
                     narration.append((track_label, voices[track.id]))
-                else:
-                    anchor = music_gains.get(track.id)
-                    if anchor is not None:
-                        # Brought to where the talking is, so a clip's volume says how far under
-                        # the voices it sits rather than how far under its own mastering.
-                        anchored = f"[t{track_index}at]"
-                        filters.append(f"{track_label}volume={anchor:.2f}dB{anchored}")
-                        track_label = anchored
-                    if track.duck_under_speech:
-                        ducking.append(track_label)
+                elif track.duck_under_speech:
+                    ducking.append(track_label)
                 mix_labels.append(track_label)
 
         # The footage's own sound, and anything laid over the picture, come first in the mix;
@@ -1384,7 +1383,10 @@ class FFmpegRenderer:
                 "-r", rate,
                 "-c:v", "libx264", "-preset", "medium", "-crf", "18",
                 "-pix_fmt", "yuv420p",
-                "-c:a", "aac", "-b:a", "192k"
+                # At 192k the encoder's own ringing put hard transients up to 2 dB over the
+                # limiter, depending only on where they fell in its frames; at 256k they held
+                # at 2.5 dB under full scale however they fell.
+                "-c:a", "aac", "-b:a", "256k"
             ])
 
         cmd.append(output_path)
