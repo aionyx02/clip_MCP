@@ -5,6 +5,12 @@ from pathlib import Path
 
 import pytest
 
+from app import server
+from app.engine.analysis import current_recipe, whisper_model_name
+from app.engine.diarize import speaker_model_name
+from app.engine.rhythm import rhythm_model_name
+from app.models.job import Job, JobKind, JobStatus
+from app.models.media import MediaAnalysis
 from app.server import _natural_key, import_asset, import_folder
 
 def names(result: dict) -> list:
@@ -66,3 +72,29 @@ def test_missing_folder_is_reported_clearly(tmp_path: Path) -> None:
 def test_empty_folder_imports_nothing(tmp_path: Path) -> None:
     result = import_folder(str(tmp_path))
     assert result["assets"] == [] and result["skipped"] == [] and float(result["total_duration"]) == 0
+
+def test_a_folder_is_analyzed_in_one_call_and_what_is_current_is_left_alone(footage_folder: Path, monkeypatch) -> None:
+    started = []
+    monkeypatch.setattr(server.job_manager, "start_job", lambda job, spec: started.append(job.asset_id) or job)
+    assets = [asset["id"] for asset in import_folder(str(footage_folder))["assets"]]
+    server.repo.save_analysis(MediaAnalysis(asset_id=assets[1], duration=1.0, recipe=current_recipe(
+        whisper_model_name(), speaker_model=speaker_model_name(), rhythm_model=rhythm_model_name(),
+    )))
+
+    result = server.analyze_asset(assets)
+    assert result["skipped"] == [assets[1]]
+    assert [job["asset_id"] for job in result["jobs"]] == started == [assets[0], *assets[2:]]
+
+    started.clear()
+    assert [job["asset_id"] for job in server.analyze_asset(assets, again=True)["jobs"]] == assets
+
+def test_a_batch_of_jobs_is_read_back_with_one_summary() -> None:
+    done = Job(kind=JobKind.ANALYZE, status=JobStatus.COMPLETED, progress=1.0)
+    broken = Job(kind=JobKind.ANALYZE, status=JobStatus.FAILED, error_message="no audio")
+    running = Job(kind=JobKind.RENDER, status=JobStatus.RUNNING, progress=0.5)
+    for job in (done, broken, running):
+        server.repo.add_job(job)
+    result = server.get_job([done.job_id, broken.job_id, running.job_id])
+    assert (result["finished"], result["failed"], result["total"]) == (2, 1, 3)
+    assert result["jobs"][1]["error_message"] == "no audio"
+    assert "error_message" not in result["jobs"][0]

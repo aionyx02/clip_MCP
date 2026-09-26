@@ -50,7 +50,8 @@ without the word-by-word lighting.
   label, because `V2` is better than crediting the wrong person. Ask the user
   who is who rather than guessing from the transcript. A file analyzed before
   voices were kept still shows its own `S1`, `S2`, which mean nothing outside
-  that file: `analyze_asset` it again rather than mapping its labels to names.
+  that file: `analyze_asset` it again (`again: true`) rather than mapping its
+  labels to names.
 
 ## The check before a render
 

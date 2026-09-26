@@ -75,6 +75,36 @@ class _ProgressReader(threading.Thread):
             if key == "out_time_us" and value.isdigit():
                 self.seconds = int(value) / 1_000_000
 
+def graph_from_file(command: List[str], graph_path: str) -> List[str]:
+    """Move a command's filter graph out of the command line and into a file.
+
+    A long timeline builds a graph of tens of thousands of characters, one
+    chain per clip, and Windows refuses to start a process whose command line
+    passes 32767 characters. FFmpeg reads an option's value from a file when
+    the option is written `-/name`, so the graph goes there instead and the
+    command line stays short however many clips there are.
+
+    Args:
+        command: FFmpeg arguments, starting with the executable.
+        graph_path: File to write the graph to; a second graph in the same
+            command, if there is one, goes next to it with a number added.
+
+    Returns:
+        The command with each `-filter_complex` value replaced by a file.
+    """
+    moved = list(command)
+    written = 0
+    for index in range(len(moved) - 1):
+        if moved[index] != "-filter_complex":
+            continue
+        root, extension = os.path.splitext(graph_path)
+        path = graph_path if written == 0 else f"{root}{written}{extension}"
+        with open(path, "w", encoding="utf-8") as handle:
+            handle.write(moved[index + 1])
+        moved[index], moved[index + 1] = "-/filter_complex", path
+        written += 1
+    return moved
+
 def run_ffmpeg(
     command: List[str],
     log_path: str,
@@ -85,7 +115,8 @@ def run_ffmpeg(
     """Run FFmpeg to completion while reporting progress and honoring cancellation.
 
     FFmpeg's standard error is written to `log_path`, so callers can parse
-    filter output from it afterwards.
+    filter output from it afterwards. A filter graph is read from a file
+    written next to the log, so no timeline is too long to start.
 
     Args:
         command: FFmpeg arguments, starting with the executable. Progress
@@ -104,6 +135,24 @@ def run_ffmpeg(
         RuntimeError: If FFmpeg exits with an error. The message holds the end
             of its log.
     """
+    command = graph_from_file(command, f"{os.path.splitext(log_path)[0]}.graph.txt")
+    graphs = [command[index + 1] for index in range(len(command) - 1) if command[index] == "-/filter_complex"]
+    try:
+        _run(command, log_path, duration_seconds, on_progress, is_cancelled)
+    finally:
+        # Written for this one run; the folder it sits in may be one that has to end up empty.
+        for graph in graphs:
+            if os.path.exists(graph):
+                os.remove(graph)
+
+def _run(
+    command: List[str],
+    log_path: str,
+    duration_seconds: float,
+    on_progress: Callable[[float], None],
+    is_cancelled: Callable[[], bool],
+) -> None:
+    """Run FFmpeg as `run_ffmpeg` describes, with its graph already in a file."""
     command = [command[0], "-progress", "pipe:1", *command[1:]]
     with open(log_path, "wb") as log_file:
         process = subprocess.Popen(

@@ -96,7 +96,7 @@ def test_a_whole_job_from_a_folder_to_a_finished_file(footage: Path, tmp_path: P
     job = render_project(project, is_preview=True, burn_subtitles=True)
     deadline = time.monotonic() + 180
     while time.monotonic() < deadline:
-        state = get_job(job["job_id"])
+        state = get_job([job["job_id"]])["jobs"][0]
         if state["status"] in {"completed", "failed", "cancelled"}:
             break
         time.sleep(0.5)

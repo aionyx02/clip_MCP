@@ -194,8 +194,9 @@ restart, so a conversation can be continued days later.
 - When the user refers to work you have no ID for — 「上次那支影片」 — call
   `list_projects` and `list_assets` and ask which one they mean. Do not start
   a new project just because this conversation has not seen one.
-- Every `render_project` and `analyze_asset` returns a `job_id`. Hold on to it
-  until the job reaches `completed`, `failed`, or `cancelled`.
+- Every `render_project` and `analyze_asset` returns job IDs. Hold on to them
+  until each reaches `completed`, `failed`, or `cancelled`; `get_job` takes
+  them all at once.
 - Jobs queue: only one or two run at a time. A job at `queued` with a `stage`
   such as `waiting for 1 running job(s) to finish` is working as intended —
   keep polling `get_job`, and tell the user how many are in line rather than

@@ -42,7 +42,7 @@ from app.engine.sections import build_sections, candidate_hash, check_sections, 
 from app.engine.semantic import (
     build_timeline, clean_cuts, content_scores, join_voices, timeline_input_hash, voice_levels,
 )
-from app.engine.ffmpeg import hidden_window_flags
+from app.engine.ffmpeg import graph_from_file, hidden_window_flags
 from app.engine.probe import picture_size, probe_file, speech_loudness, timecode_start
 from app.engine.reframe import Framing, centre_at, frame_project
 from app.engine.builder import DEFAULT_LOUDNESS_TARGET, FFmpegRenderer, voice_keys
@@ -395,15 +395,21 @@ def _is_stale(analysis: MediaAnalysis) -> bool:
 
 @mcp.tool()
 def analyze_asset(
-    asset_id: str,
+    asset_ids: List[str],
     transcribe: bool = True,
     language: Optional[str] = None,
     prompt: Optional[str] = None,
     chinese_variant: Optional[Literal["zh-TW", "zh-HK", "zh-Hant", "zh-Hans"]] = None,
     diarize: bool = True,
     speakers: Annotated[Optional[int], Field(ge=1, le=20)] = None,
+    again: bool = False,
 ) -> dict:
-    """Start analyzing what an asset contains, in the background.
+    """Start analyzing what assets contain, in the background.
+
+    Takes every file to analyze in one call — a whole imported folder at
+    once — and starts one job per file. A file that already has a current
+    analysis is left alone unless `again` is true, so the same call can be
+    repeated over a folder after a few files are added.
 
     One decoding pass detects scene changes, black and frozen picture, and
     silences, and alongside them measures each shot — exposure, contrast,
@@ -415,9 +421,9 @@ def analyze_asset(
     on long recordings, which is the slow part by far, and the voices are told
     apart so that each clip knows who was speaking.
 
-    Returns immediately: poll `get_job` until the job completes, then read the
-    results with `get_analysis`, or search them through `query_clips` once a
-    semantic timeline is built. Analyzing again replaces earlier results.
+    Returns immediately: poll `get_job` with all the job IDs at once until
+    they are done, then read the results with `get_analysis`, or search them
+    through `query_clips` once a semantic timeline is built.
 
     Everything runs on this machine. The models are downloaded the first time
     they are needed — the speech model is the large one, the rest are tens of
@@ -426,7 +432,9 @@ def analyze_asset(
     waiting on.
 
     Args:
-        asset_id: ID of the asset to analyze.
+        asset_ids: IDs of the assets to analyze. The same settings apply to
+            all of them; analyze files that need different ones in separate
+            calls.
         transcribe: Whether to transcribe speech.
         language: Spoken language code, such as "zh" or "en"; omit to detect it.
         prompt: Text that guides transcription, such as names and terms that
@@ -446,41 +454,54 @@ def analyze_asset(
             Kong), "zh-Hant" (Traditional, no vocabulary changes), or "zh-Hans"
             (Simplified). Omit to keep the speech model's output, which may mix
             scripts.
+        again: Analyze files that already have a current analysis too,
+            replacing it — for example with a `prompt` or `speakers` the first
+            run did not have.
 
     Returns:
-        A dictionary with the `job_id`, the initial `status`, and `stage`.
-        Analyses run one or two at a time, so that several of them cannot
-        exhaust the machine's memory between them; `stage` says what a job
-        that has not started yet is waiting for, and is null when it started
-        immediately. Waiting costs nothing and needs no action: keep polling
-        `get_job` as usual.
+        A dictionary with `jobs`, one `asset_id`, `job_id`, `status` and
+        `stage` per job started, and `skipped`, the assets left alone because
+        their analysis is current. Analyses run one or two at a time, so that
+        several of them cannot exhaust the machine's memory between them;
+        `stage` says what a job that has not started yet is waiting for.
+        Waiting costs nothing and needs no action: keep polling `get_job`.
 
     Raises:
-        ValueError: If the asset does not exist or has no known duration.
+        ValueError: If an asset does not exist or has no known duration;
+            nothing is started then.
     """
-    asset = _get_asset(asset_id)
-    if asset.duration is None:
-        raise ValueError(f"asset {asset_id} has no known duration and cannot be analyzed")
+    assets = [_get_asset(asset_id) for asset_id in dict.fromkeys(asset_ids)]
+    for asset in assets:
+        if asset.duration is None:
+            raise ValueError(f"asset {asset.id} has no known duration and cannot be analyzed")
 
-    job = Job(kind=JobKind.ANALYZE, asset_id=asset_id)
-    job.work_dir = os.path.join(WORKSPACE_DIR, "jobs", job.job_id)
-    with_speech = transcribe and asset.has_audio
-    job.memory_estimate = resources.analysis_memory_bytes(
-        with_speech,
-        whisper_model_name(),
-        duration=float(asset.duration),
-        diarize=with_speech and diarize,
-        detect_faces=asset.has_video,
-    )
-    job = job_manager.start_job(job, {
-        "transcribe": transcribe,
-        "language": language,
-        "prompt": prompt,
-        "chinese_variant": chinese_variant,
-        "diarize": diarize,
-        "speakers": speakers,
-    })
-    return {"job_id": job.job_id, "status": job.status.value, "stage": job.stage}
+    started: List[dict] = []
+    skipped: List[str] = []
+    for asset in assets:
+        existing = repo.get_analysis(asset.id)
+        if not again and existing is not None and not _is_stale(existing):
+            skipped.append(asset.id)
+            continue
+        job = Job(kind=JobKind.ANALYZE, asset_id=asset.id)
+        job.work_dir = os.path.join(WORKSPACE_DIR, "jobs", job.job_id)
+        with_speech = transcribe and asset.has_audio
+        job.memory_estimate = resources.analysis_memory_bytes(
+            with_speech,
+            whisper_model_name(),
+            duration=float(asset.duration),
+            diarize=with_speech and diarize,
+            detect_faces=asset.has_video,
+        )
+        job = job_manager.start_job(job, {
+            "transcribe": transcribe,
+            "language": language,
+            "prompt": prompt,
+            "chinese_variant": chinese_variant,
+            "diarize": diarize,
+            "speakers": speakers,
+        })
+        started.append({"asset_id": asset.id, "job_id": job.job_id, "status": job.status.value, "stage": job.stage})
+    return {"jobs": started, "skipped": skipped}
 
 @mcp.tool()
 def get_analysis(
@@ -1957,12 +1978,14 @@ def preview_sound(
         project, _referenced_assets(project), mix, voice, music, loudness_target,
         voices=_voices(project),
     )
+    graph = os.path.join(folder, "graph.txt")
+    command = graph_from_file(command, graph)
     result = subprocess.run(command, capture_output=True, creationflags=hidden_window_flags())
     if result.returncode != 0:
         raise RuntimeError(result.stderr.decode("utf-8", errors="replace").strip()[-500:] or "ffmpeg failed")
     heard, played = levels(voice), levels(music)
-    for stem in (voice, music):
-        os.remove(stem)
+    for leftover in (voice, music, graph):
+        os.remove(leftover)
     lines = [f"The mix is at {mix}.", *describe(parts_of(project, heard, played))]
     return ToolResult(content=["\n".join(lines), Image(data=chart(project, heard, played), format="png")])
 
@@ -3068,25 +3091,51 @@ def export_timeline(
     return {"output_path": path, "left_behind": behind}
 
 @mcp.tool()
-def get_job(job_id: str) -> dict:
-    """Return the current state of a background job.
+def get_job(job_ids: List[str]) -> dict:
+    """Return the current state of background jobs.
+
+    Pass every job of a batch at once — all the analyses of a folder, or a
+    render — rather than polling them one by one.
 
     Args:
-        job_id: ID of the job, as returned by `render_project` or
+        job_ids: IDs of the jobs, as returned by `render_project` or
             `analyze_asset`.
 
     Returns:
-        The job serialized as a dictionary, including `kind`, `status`,
-        `progress` (0.0 to 1.0), the current `stage`, `output_path` for
-        renders, and, for failed jobs, `error_message`.
+        A dictionary with `jobs`, each with its `job_id`, `kind`, `status`,
+        `progress` (0.0 to 1.0), the current `stage`, the `asset_id` of an
+        analysis or the `output_path` of a render, and for a failed job its
+        `error_message`; and a summary over all of them: `finished` and
+        `total` counts, `failed` counting those that failed or were
+        cancelled, and `progress`, the average.
 
     Raises:
-        ValueError: If no job with `job_id` exists.
+        ValueError: If a job does not exist.
     """
-    job = job_manager.get_job(job_id)
-    if not job:
-        raise ValueError(f"job {job_id} not found")
-    return job.model_dump()
+    listed: List[dict] = []
+    for job_id in dict.fromkeys(job_ids):
+        job = job_manager.get_job(job_id)
+        if not job:
+            raise ValueError(f"job {job_id} not found")
+        entry = {
+            "job_id": job.job_id, "kind": job.kind.value, "status": job.status.value,
+            "progress": round(job.progress, 3), "stage": job.stage,
+        }
+        if job.asset_id:
+            entry["asset_id"] = job.asset_id
+        if job.output_path:
+            entry["output_path"] = job.output_path
+        if job.error_message:
+            entry["error_message"] = job.error_message
+        listed.append(entry)
+    ended = {JobStatus.COMPLETED.value, JobStatus.FAILED.value, JobStatus.CANCELLED.value}
+    return {
+        "jobs": listed,
+        "finished": sum(entry["status"] in ended for entry in listed),
+        "failed": sum(entry["status"] in ended - {JobStatus.COMPLETED.value} for entry in listed),
+        "total": len(listed),
+        "progress": round(sum(entry["progress"] for entry in listed) / len(listed), 3) if listed else 1.0,
+    }
 
 @mcp.tool()
 def cancel_job(job_id: str) -> dict:

@@ -14,6 +14,7 @@ import pytest
 
 from app.engine import renderer, resources
 from app.engine.builder import FFmpegRenderer
+from app.engine.ffmpeg import graph_from_file, run_ffmpeg
 from app.engine.renderer import WARMUP, JobManager
 from app.models.job import Job, JobKind, JobStatus
 from app.server import _referenced_assets, import_asset, repo
@@ -181,3 +182,18 @@ def test_a_limit_falls_back_to_its_default_when_the_setting_is_not_a_number(
 ) -> None:
     monkeypatch.setenv("CLIP_MCP_MAX_DECODERS", value)
     assert resources.max_decoders() == expected
+
+def test_a_timeline_too_long_for_a_command_line_still_renders(media: Path, tmp_path: Path) -> None:
+    # Each clip adds a few hundred characters of graph, so ninety of them pass the 32767
+    # characters Windows allows a whole command line.
+    asset = import_asset(str(media / "wide.mp4"))
+    operations = [video_track()] + [
+        insert(f"c{index}", asset["id"], (index % 45) * 0.2, (index % 45) * 0.2 + 0.2) for index in range(90)
+    ]
+    project = repo.get_project(build_project(operations))
+    output = tmp_path / "long.mp4"
+    command = FFmpegRenderer().build_command(project, _referenced_assets(project), str(output))
+    assert len(command[command.index("-filter_complex") + 1]) > 32767
+    run_ffmpeg(command, str(tmp_path / "ffmpeg.log"), 18.0, lambda fraction: None, lambda: False)
+    assert output.stat().st_size > 0
+    assert len(" ".join(graph_from_file(command, str(tmp_path / "graph.txt")))) < 32767

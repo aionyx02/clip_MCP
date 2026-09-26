@@ -7,7 +7,9 @@ saying what to make of it. It is referenced from SKILL.md.
 
 ## Understanding footage
 
-1. Call `analyze_asset` for each source. Set `language` when you know it.
+1. Call `analyze_asset` once with every source — a whole folder in one call.
+   Files already analyzed are skipped, so repeating it is harmless. Set
+   `language` when you know it.
    Set `speakers` when you know how many people are talking — told the
    number, the server cannot split one person into two. For Chinese speech,
    set `chinese_variant` to match how the user writes: `zh-TW` for
@@ -15,8 +17,9 @@ saying what to make of it. It is referenced from SKILL.md.
    Traditional Chinese), `zh-HK` for Hong Kong, `zh-Hant` for Traditional
    without regional wording, or `zh-Hans` for Simplified. Put names or terms
    the speaker uses into `prompt`. The first run downloads the speech model.
-   Poll `get_job`; for long files, tell the user the current `stage` and
-   `progress`. A music file — sound with no picture — also gets its beat
+   Poll `get_job` with all the job IDs at once; it sums them up as
+   `finished` of `total`, which is what to tell the user, with the `stage`
+   of a long file. A music file — sound with no picture — also gets its beat
    measured, which cutting on the beat needs.
 2. Call `build_semantic_timeline` once over the analyzed sources. It turns
    the transcripts and detections into clips you can search — one per

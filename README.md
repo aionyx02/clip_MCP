@@ -105,7 +105,7 @@
 
 - Python 3.14+
 - [uv](https://docs.astral.sh/uv/)
-- FFmpeg 與 ffprobe，且在 `PATH` 上
+- FFmpeg 與 ffprobe 7.0 以上，且在 `PATH` 上（長時間軸的濾鏡圖從檔案讀入，要 7.0 的 `-/選項` 寫法）
 
 ## 安裝
 
@@ -153,7 +153,7 @@ ChatGPT（網頁與 App）只接受透過 HTTPS 連線的遠端 MCP 伺服器，
 | `inspect_media` | 讀取檔案的解析度、長度、幀率等技術資訊 |
 | `import_asset` / `import_folder` | 把檔案或整個資料夾註冊成素材（可遞迴、自然排序） |
 | `list_assets` | 列出已匯入的素材，並標明哪些分析過、哪些已過期 |
-| `analyze_asset` | 背景分析：一次解碼跑完換場、黑畫面、靜止、靜音、逐鏡頭畫質、逐秒音訊品質與人臉，之後接逐字稿與說話者切分 |
+| `analyze_asset` | 一次送一批檔案（已分析過的跳過）背景分析：一次解碼跑完換場、黑畫面、靜止、靜音、逐鏡頭畫質、逐秒音訊品質與人臉，之後接逐字稿與說話者切分 |
 | `get_analysis` | 依時間區間讀取分析結果，含逐鏡頭量測、該區間的音訊與人臉摘要、說話者段落 |
 | `view_frames` | 抽幀拼成標時間的縮圖總覽，一次可吃多支素材 |
 | `list_resources` / `read_resource` | 讀內建的使用指南（給不支援 MCP resource 的客戶端） |
@@ -195,7 +195,7 @@ ChatGPT（網頁與 App）只接受透過 HTTPS 連線的遠端 MCP 伺服器，
 | `get_chapters` | 從段落產生 YouTube 章節 |
 | `propose_covers` / `export_cover` | 封面候選與全尺寸封面 |
 | `export_timeline` | 匯出 FCPXML／OTIO／EDL（含變速與素材 timecode），或把字幕匯出成 SRT |
-| `get_job` / `cancel_job` | 查詢進度與取消背景工作 |
+| `get_job` / `cancel_job` | 一次查一批工作的進度（含完成數與平均進度）、取消背景工作 |
 
 `apply_edits` 接受的操作：`add_track`、`add_clip`、`insert_clip`、`trim_clip`、
 `delete_clip`、`move_clip`、`split_clip`、`reorder_clip`、`fit_track`、
