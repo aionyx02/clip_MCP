@@ -330,19 +330,48 @@ def _run_render(job: Job, spec: Dict[str, Any], context: JobContext) -> None:
 
     Args:
         job: Render job being run.
-        spec: Job specification with `command` and `duration_seconds`.
+        spec: Job specification with `command` and `duration_seconds`, and
+            for a cached preview `pieces`: pictures to render into the cache
+            first, each with its own `command`, `part`, `path` and
+            `duration_seconds`.
         context: Progress and cancellation for the job.
 
     Raises:
         OperationCancelled: If cancellation was requested.
         RuntimeError: If FFmpeg fails.
     """
-    context.report(0.0, "rendering")
+    log = os.path.join(job.work_dir, FFMPEG_LOG_FILE_NAME)
+    pieces = spec.get("pieces", [])
+    # The bar is shared out by seconds of picture: the pieces are rendered at full cost,
+    # the final pass only puts them together, so it is weighted at a third of its length.
+    weights = [float(piece["duration_seconds"]) for piece in pieces] + [float(spec["duration_seconds"]) / 3]
+    total = sum(weights) or 1.0
+    done = 0.0
+    for number, piece in enumerate(pieces, start=1):
+        start, share = done / total, weights[number - 1] / total
+        context.report(start, f"rendering picture {number} of {len(pieces)}")
+        try:
+            run_ffmpeg(
+                piece["command"], log, float(piece["duration_seconds"]),
+                lambda fraction, start=start, share=share: context.report(start + fraction * share),
+                context.is_cancelled,
+            )
+        except BaseException:
+            # A half-written picture must never be found by the next render.
+            if os.path.exists(piece["part"]):
+                os.remove(piece["part"])
+            raise
+        # Moved into place only once whole. Another render may have finished the same
+        # picture meanwhile; either copy is the same picture.
+        os.replace(piece["part"], piece["path"])
+        done += weights[number - 1]
+    start, share = done / total, weights[-1] / total
+    context.report(start, "rendering")
     run_ffmpeg(
         spec["command"],
-        os.path.join(job.work_dir, FFMPEG_LOG_FILE_NAME),
+        log,
         float(spec["duration_seconds"]),
-        context.report,
+        lambda fraction: context.report(start + fraction * share),
         context.is_cancelled,
     )
 

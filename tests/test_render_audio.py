@@ -279,3 +279,20 @@ def test_asking_for_one_repair_does_not_put_another_back(rumbling: str) -> None:
                     "cleanup": {"hiss": True}}])
     cleanup = repo.get_project(project).tracks[0].clips[0].cleanup
     assert cleanup.rumble and cleanup.hiss and not cleanup.sibilance
+
+def test_a_clip_that_dissolves_in_is_heard_from_its_own_in_point(audio_media: Path, tmp_path: Path) -> None:
+    """The dissolve reads picture from before the in point; the sound must not come with it.
+
+    `talk.mp4` is silent until three seconds in. The second clip opens right there,
+    so its tone belongs at the cut — read from where its picture's input starts, a
+    second early, it used to arrive a second late.
+    """
+    quiet = import_asset(str(audio_media / "quiet.mp4"))["id"]
+    talk = import_asset(str(audio_media / "talk.mp4"))["id"]
+    project = build_project([
+        video_track(), insert("a", quiet, 0, 3, volume=0.0),
+        insert("b", talk, 3, 6, transition_in={"kind": "dissolve", "seconds": 1}),
+    ], width=320, height=240)
+    out = tmp_path / "dissolve.mp4"
+    render(project, out, loudness_target=None)
+    assert level(out, 3.1, 0.3, freq=1000) > -30

@@ -1,8 +1,12 @@
+import hashlib
+import json
 import math
+import os
+import uuid
 from dataclasses import dataclass
 from decimal import Decimal
 from fractions import Fraction
-from typing import List, Mapping, Optional, Tuple
+from typing import Dict, List, Mapping, Optional, Tuple
 from app.engine import resources
 from app.engine.ffmpeg import escape_filter_path
 from app.engine.reframe import Framing, crop_filter
@@ -38,6 +42,11 @@ RUMBLE_HZ = 100
 HISS_REDUCTION_DB = 12
 HISS_FLOOR_DB = -40
 SIBILANCE_INTENSITY = 0.4
+# Raised whenever the picture chain changes in a way its text does not show, so a
+# cached picture made by the old chain is never mistaken for one made by the new.
+PICTURE_CACHE_VERSION = 1
+# The rate the stems of a sound preview are written at: they are measured, not listened to.
+STEM_SAMPLE_RATE = 8000
 
 @dataclass(frozen=True)
 class Segment:
@@ -325,6 +334,40 @@ def _speed_audio_filters(clip: Clip) -> List[str]:
     # and they measure it correctly. The other branch ends in one already.
     return [f"atempo={float(step):.6f}" for step in steps] + [f"aresample={AUDIO_SAMPLE_RATE}"]
 
+def _picture_chain(
+    clip: Clip,
+    frames: int,
+    width: int,
+    height: int,
+    fps: Fraction,
+    framing: Optional[Framing],
+) -> str:
+    """Build everything that turns a clip's decoded source into its picture.
+
+    The same chain for the sequence and for everything drawn over it, so a
+    clip on an upper track plays at its speed and wears its look exactly the
+    way one on the sequence does.
+
+    Args:
+        clip: The clip.
+        frames: Frames of picture to produce, run-up included.
+        width: Width of the box it fills.
+        height: Height of the box it fills.
+        fps: Output frame rate.
+        framing: Where its crop sits, or None for the middle.
+
+    Returns:
+        The filters, without input or output labels.
+    """
+    rate = f"{fps.numerator}/{fps.denominator}"
+    return (
+        f"setpts=PTS-STARTPTS{_speed_video_filter(clip)},fps={rate},"
+        f"scale={width}:{height}:force_original_aspect_ratio=increase,"
+        f"{crop_filter(width, height, framing)},setsar=1,format=yuv420p,"
+        f"tpad=stop_mode=clone:stop_duration=1,trim=end_frame={frames},setpts=PTS-STARTPTS"
+        f"{_clip_video_filter(clip, frames, fps)}"
+    )
+
 def _clip_video_filter(clip: Clip, frames: int, fps: Fraction) -> str:
     """Build the look part of a clip's video chain: its colour and its fades.
 
@@ -464,6 +507,80 @@ class FFmpegRenderer:
                     raise ValueError(f"clip {clip.id}: asset {asset.id} has no known duration; still images are not supported yet")
             _layout(track.clips, fps)
 
+    def _picture(
+        self,
+        inputs: List[List[str]],
+        pieces: List[Dict[str, object]],
+        clip: Clip,
+        asset: Asset,
+        frames: int,
+        fps: Fraction,
+        box: Tuple[int, int],
+        framing: Optional[Framing],
+        cache_dir: Optional[str],
+    ) -> Tuple[str, int, bool]:
+        """Add a clip's picture to a render, from its source or from the cache.
+
+        With a cache, a clip's picture is rendered once, on its own, into a
+        file named after exactly what went into it — the input options, every
+        filter, and the source file's size and modification time — and every
+        later render that asks for the same picture reads that file instead.
+        Named by content rather than by which clip it is, so a clip trimmed
+        by hand, or recoloured, or reframed, is a new picture without anybody
+        having to say so, and two projects using the same shot the same way
+        share it.
+
+        Args:
+            inputs: The render's inputs so far; one is added.
+            pieces: Pictures still to be rendered into the cache; one is added
+                when this picture is not there yet.
+            clip: The clip.
+            asset: Its file.
+            frames: Frames of picture, run-up included.
+            fps: Output frame rate.
+            box: `(width, height)` it fills.
+            framing: Where its crop sits.
+            cache_dir: Where cached pictures live, or None to read the source.
+
+        Returns:
+            `(filters, input_index, cached)` — the chain reading its input,
+            without an output label, the input it reads, and whether that
+            input is a cached picture rather than the source, which has no
+            sound in it.
+        """
+        args = _input_args(clip, asset, frames, fps)
+        chain = _picture_chain(clip, frames, box[0], box[1], fps, framing)
+        index = len(inputs)
+        if cache_dir is None:
+            inputs.append(args)
+            return f"[{index}:v]{chain}", index, False
+        stat = os.stat(asset.path)
+        recipe = json.dumps([PICTURE_CACHE_VERSION, args, chain, stat.st_size, stat.st_mtime_ns])
+        path = os.path.join(cache_dir, hashlib.sha256(recipe.encode("utf-8")).hexdigest()[:32] + ".mp4")
+        if not os.path.exists(path) and not any(piece["path"] == path for piece in pieces):
+            # Written under a name of its own and moved into place only once it is whole,
+            # so a render stopped halfway never leaves a truncated picture to be reused.
+            part = f"{path[:-4]}.{uuid.uuid4().hex[:8]}.part.mp4"
+            rate = f"{fps.numerator}/{fps.denominator}"
+            pieces.append({
+                "command": [
+                    self.ffmpeg_bin, "-y", "-loglevel", "error", "-nostats", *args,
+                    "-filter_complex", f"[0:v]{chain}[v]", "-map", "[v]", "-an", "-r", rate,
+                    "-c:v", "libx264", "-preset", "ultrafast", "-crf", "23", "-pix_fmt", "yuv420p", part,
+                ],
+                "part": part,
+                "path": path,
+                "duration_seconds": float(Fraction(frames) / fps),
+            })
+        inputs.append(["-i", path])
+        rate = f"{fps.numerator}/{fps.denominator}"
+        return (
+            f"[{index}:v]setpts=PTS-STARTPTS,fps={rate},"
+            f"tpad=stop_mode=clone:stop_duration=1,trim=end_frame={frames},setpts=PTS-STARTPTS",
+            index,
+            True,
+        )
+
     def plan_segments(self, project: Project) -> List[Segment]:
         """Lay out the video track as consecutive clip and gap segments.
 
@@ -483,6 +600,79 @@ class FFmpegRenderer:
         """
         track = project.base_video_track
         return _layout(track.clips, Fraction(project.fps_num, project.fps_den)) if track else []
+
+    def build_incremental(
+        self,
+        project: Project,
+        assets: Mapping[str, Asset],
+        output_path: str,
+        cache_dir: str,
+        loudness_target: Optional[float] = DEFAULT_LOUDNESS_TARGET,
+        subtitle_path: Optional[str] = None,
+        framing: Optional[Mapping[str, Framing]] = None,
+        chapters_path: Optional[str] = None,
+    ) -> Tuple[List[str], List[Dict[str, object]]]:
+        """Build a preview render that only renders the pictures it has not rendered before.
+
+        Every clip's picture is taken from the cache when it is there and
+        rendered into it when it is not; the render itself then only puts the
+        cached pictures together, lays anything over them, and mixes the
+        sound — which is always mixed afresh, because it is cheap and because
+        ducking and loudness depend on everything at once. Changing one cut
+        re-renders the one or two pictures it touched.
+
+        Args:
+            project: Project to render, at the size the preview is wanted at.
+            assets: Registered assets, keyed by asset ID.
+            output_path: Destination path of the rendered file.
+            cache_dir: Where cached pictures live.
+            loudness_target: As for `build_command`.
+            subtitle_path: As for `build_command`.
+            framing: As for `build_command`.
+            chapters_path: As for `build_command`.
+
+        Returns:
+            `(command, pieces)` — the render, and the pictures to render into
+            the cache first, each a dictionary with its `command`, the `part`
+            file it writes, the `path` to move that to once it is finished,
+            and its `duration_seconds`. Empty when everything was cached.
+        """
+        return self._build(
+            project, assets, output_path, True, loudness_target, subtitle_path, framing, chapters_path, cache_dir,
+        )
+
+    def build_sound(
+        self,
+        project: Project,
+        assets: Mapping[str, Asset],
+        mix_path: str,
+        voice_path: str,
+        music_path: str,
+        loudness_target: Optional[float] = DEFAULT_LOUDNESS_TARGET,
+    ) -> List[str]:
+        """Build a render of the sound alone, with its two halves beside it.
+
+        The mix is exactly the one a full render would carry — the same
+        placement, ducking and loudness — so listening to it is hearing the
+        cut. The two stems are what that mix is made of, kept apart so they
+        can be measured against each other: the footage's own sound, and the
+        audio tracks after ducking. No picture is decoded, so this takes a
+        small part of what a render does.
+
+        Args:
+            project: Project whose sound is rendered.
+            assets: Registered assets, keyed by asset ID.
+            mix_path: Where the mix goes, as AAC.
+            voice_path: Where the footage's sound goes, as mono WAV.
+            music_path: Where the audio tracks go, as mono WAV.
+            loudness_target: As for `build_command`.
+
+        Returns:
+            The command.
+        """
+        return self._build(
+            project, assets, mix_path, False, loudness_target, None, None, None, None, (voice_path, music_path),
+        )[0]
 
     def build_command(
         self,
@@ -534,6 +724,45 @@ class FFmpegRenderer:
             ValueError: If the project uses an unsupported feature, has no
                 video clips, or has overlapping or sub-frame clips.
         """
+        return self._build(
+            project, assets, output_path, is_preview, loudness_target, subtitle_path, framing, chapters_path, None,
+        )[0]
+
+    def _build(
+        self,
+        project: Project,
+        assets: Mapping[str, Asset],
+        output_path: str,
+        is_preview: bool,
+        loudness_target: Optional[float],
+        subtitle_path: Optional[str],
+        framing: Optional[Mapping[str, Framing]],
+        chapters_path: Optional[str],
+        cache_dir: Optional[str],
+        stems: Optional[Tuple[str, str]] = None,
+    ) -> Tuple[List[str], List[Dict[str, object]]]:
+        """Build a render, reading pictures from their sources or from a cache.
+
+        Args:
+            project: Project whose timeline is rendered.
+            assets: Registered assets, keyed by asset ID.
+            output_path: Destination path of the rendered file.
+            is_preview: Whether to encode for speed.
+            loudness_target: Integrated loudness of the finished mix in LUFS.
+            subtitle_path: ASS subtitle file to burn in, or None.
+            framing: Where each clip's crop sits, keyed by clip ID.
+            chapters_path: FFmpeg metadata file of chapters, or None.
+            cache_dir: Where cached pictures live, or None to read every
+                picture from its source.
+            stems: `(voice_path, music_path)` to render the sound alone: the
+                mix to `output_path`, and beside it what the footage says and
+                what the audio tracks play after ducking, each as its own
+                file. No picture is decoded at all.
+
+        Returns:
+            `(command, pieces)`; `pieces` is always empty without a cache.
+        """
+        sound_only = stems is not None
         self.check_supported(project, assets)
         segments = self.plan_segments(project)
         if not segments:
@@ -547,6 +776,7 @@ class FFmpegRenderer:
         total_samples = _frame_to_sample(total_frames, fps)
 
         inputs: List[List[str]] = []
+        pieces: List[Dict[str, object]] = []
         filters: List[str] = []
         video_labels: List[str] = []
         audio_labels: List[str] = []
@@ -574,24 +804,29 @@ class FFmpegRenderer:
                 runs[-1].append(index)
 
             if segment.clip is None:
-                filters.append(f"color=c=black:s={size}:r={rate},format=yuv420p,trim=end_frame={frames}[v{index}]")
+                if not sound_only:
+                    filters.append(f"color=c=black:s={size}:r={rate},format=yuv420p,trim=end_frame={frames}[v{index}]")
             else:
                 asset = assets[segment.clip.asset_id]
-                input_index = len(inputs)
                 picture_frames = frames + run_up
-                inputs.append(_input_args(segment.clip, asset, picture_frames, fps))
-                filters.append(
-                    f"[{input_index}:v]setpts=PTS-STARTPTS{_speed_video_filter(segment.clip)},fps={rate},"
-                    f"scale={project.width}:{project.height}:force_original_aspect_ratio=increase,"
-                    f"{crop_filter(project.width, project.height, framed.get(segment.clip.id))},"
-                    f"setsar=1,format=yuv420p,"
-                    f"tpad=stop_mode=clone:stop_duration=1,trim=end_frame={picture_frames},setpts=PTS-STARTPTS"
-                    f"{_clip_video_filter(segment.clip, picture_frames, fps)}[v{index}]"
-                )
+                if sound_only:
+                    # With no picture there is nothing to share an input with.
+                    input_index, cached = -1, True
+                else:
+                    picture, input_index, cached = self._picture(
+                        inputs, pieces, segment.clip, asset, picture_frames, fps,
+                        (project.width, project.height), framed.get(segment.clip.id), cache_dir,
+                    )
+                    filters.append(f"{picture}[v{index}]")
                 if asset.has_audio:
                     clip = segment.clip
                     lead, lag = _seconds_to_samples(clip.audio_lead), _seconds_to_samples(clip.audio_lag)
-                    if lead or lag:
+                    # The picture's input starts early by any run-up a transition needs, and
+                    # the sound must not: read from there it would run late by exactly the
+                    # length of the transition. So a clip with a run-up reads its sound on
+                    # its own, from its own in point — as does one whose picture is cached,
+                    # since a cached picture has no sound in it.
+                    if lead or lag or run_up or cached:
                         audio_index = len(inputs)
                         inputs.append(_audio_input_args(clip, asset, fps))
                     else:
@@ -615,7 +850,7 @@ class FFmpegRenderer:
         # instead, so nothing accumulates across a long timeline either.
         joined = "[joinedv]"
         run_labels: List[str] = []
-        for run_index, run in enumerate(runs):
+        for run_index, run in enumerate(runs if not sound_only else []):
             labels = [video_labels[index] for index in run]
             if len(labels) == 1:
                 run_labels.append(labels[0])
@@ -628,6 +863,8 @@ class FFmpegRenderer:
         # eats the run-up leaves the timeline exactly as long as it was. The transition ends
         # on the cut rather than straddling it, which is what keeps every clip where it is.
         timebase = f"settb={project.fps_den}/{project.fps_num}"
+        if sound_only:
+            run_labels = []
         if len(run_labels) > 1:
             # xfade refuses two inputs whose timebases differ, and they do: a run of one
             # segment carries the frame rate's, a concatenated run carries the muxer's.
@@ -637,7 +874,7 @@ class FFmpegRenderer:
                 filters.append(f"{run_label}{timebase}{settled}")
                 run_labels[run_index] = settled
 
-        carried = run_labels[0]
+        carried = run_labels[0] if run_labels else ""
         covered = sum(segments[index].end_frame - segments[index].start_frame for index in runs[0])
         for run_index in range(1, len(run_labels)):
             transition, run_up = transitions[run_index - 1]
@@ -702,24 +939,25 @@ class FFmpegRenderer:
 
                 clip = segment.clip
                 asset = assets[clip.asset_id]
-                input_index = len(inputs)
-                inputs.append(_input_args(clip, asset, frames, fps))
-                box_x, box_y, box_width, box_height = overlay_box(clip, project.width, project.height)
-                over = f"[ov{track_index}_{segment_index}]"
-                filters.append(
-                    f"[{input_index}:v]setpts=PTS-STARTPTS,fps={rate},"
-                    f"scale={box_width}:{box_height}:force_original_aspect_ratio=increase,"
-                    f"{crop_filter(box_width, box_height, framed.get(clip.id))},setsar=1,format=yuv420p,"
-                    f"tpad=stop_mode=clone:stop_duration=1,trim=end_frame={frames},setpts=PTS-STARTPTS"
-                    f"{_clip_video_filter(clip, frames, fps)},"
+                if sound_only:
+                    input_index, cached = -1, True
+                else:
+                    box_x, box_y, box_width, box_height = overlay_box(clip, project.width, project.height)
+                    over = f"[ov{track_index}_{segment_index}]"
+                    picture, input_index, cached = self._picture(
+                        inputs, pieces, clip, asset, frames, fps, (box_width, box_height), framed.get(clip.id),
+                        cache_dir,
+                    )
                     # Hold the overlay back to its place on the timeline, then stop drawing when it runs out.
-                    f"setpts=PTS+{segment.start_frame}/({rate})/TB{over}"
-                )
-                composited = f"[ovr{track_index}_{segment_index}]"
-                filters.append(
-                    f"{joined}{over}overlay=x={box_x}:y={box_y}:eof_action=pass:repeatlast=0{composited}"
-                )
-                joined = composited
+                    filters.append(f"{picture},setpts=PTS+{segment.start_frame}/({rate})/TB{over}")
+                    composited = f"[ovr{track_index}_{segment_index}]"
+                    filters.append(
+                        f"{joined}{over}overlay=x={box_x}:y={box_y}:eof_action=pass:repeatlast=0{composited}"
+                    )
+                    joined = composited
+                if cached and asset.has_audio:
+                    input_index = len(inputs)
+                    inputs.append(_input_args(clip, asset, frames, fps))
 
                 if asset.has_audio:
                     filters.append(_clip_audio_filter(f"[{input_index}:a]", clip, samples, audio_label))
@@ -735,11 +973,16 @@ class FFmpegRenderer:
                 )
                 overlay_audio.append(track_label)
 
-        if subtitle_path is not None:
+        if sound_only:
+            pass
+        elif subtitle_path is not None:
             # Burn before any preview downscale, so the ASS file's own resolution matches the picture.
             filters.append(f"{joined}subtitles=filename='{escape_filter_path(subtitle_path)}'[subbedv]")
             joined = "[subbedv]"
-        if is_preview:
+        if sound_only:
+            pass
+        elif is_preview and cache_dir is None:
+            # A cached preview is rendered at its own small size from the start.
             filters.append(f"{joined}scale=-2:480[outv]")
         else:
             filters.append(f"{joined}null[outv]")
@@ -786,6 +1029,24 @@ class FFmpegRenderer:
                 )
                 mix_labels[mix_labels.index(label)] = ducked_label
 
+        if sound_only:
+            # Every lane is split, one copy to the mix and one to its stem: the footage's own
+            # sound and anything laid over the picture on one side, the audio tracks as
+            # ducked on the other.
+            spoken = 1 + len(overlay_audio)
+            lanes = {"voice": [], "music": []}
+            for index, label in enumerate(mix_labels):
+                kept, stem = f"[mixed{index}]", f"[stem{index}]"
+                filters.append(f"{label}asplit=2{kept}{stem}")
+                mix_labels[index] = kept
+                lanes["voice" if index < spoken else "music"].append(stem)
+            for lane, labels in lanes.items():
+                if not labels:
+                    filters.append(_silence_filter(total_samples, f"[{lane}]"))
+                elif len(labels) == 1:
+                    filters.append(f"{labels[0]}anull[{lane}]")
+                else:
+                    filters.append(f"{''.join(labels)}amix=inputs={len(labels)}:duration=first:normalize=0[{lane}]")
         if len(mix_labels) == 1:
             filters.append(f"{mix_labels[0]}anull[mixa]")
         else:
@@ -819,6 +1080,14 @@ class FFmpegRenderer:
         if chapters_path is not None:
             # Read last, after every media input, so it takes no part in the graph.
             cmd.extend(["-f", "ffmetadata", "-i", chapters_path])
+        if sound_only:
+            # The mix to listen to, and the two stems to measure: mono and at a low rate,
+            # since nothing listens to them.
+            cmd.extend(["-filter_complex", ";".join(filters), "-map", "[outa]", "-c:a", "aac", "-b:a", "128k",
+                        output_path])
+            for lane, path in zip(("voice", "music"), stems):
+                cmd.extend(["-map", f"[{lane}]", "-ac", "1", "-ar", str(STEM_SAMPLE_RATE), "-c:a", "pcm_s16le", path])
+            return cmd, pieces
         cmd.extend(["-filter_complex", ";".join(filters), "-map", "[outv]", "-map", "[outa]"])
         if chapters_path is not None:
             cmd.extend(["-map_chapters", str(len(inputs))])
@@ -837,7 +1106,7 @@ class FFmpegRenderer:
             ])
 
         cmd.append(output_path)
-        return cmd
+        return cmd, pieces
 
     def output_duration(self, project: Project) -> Fraction:
         """Compute the exact duration of the rendered output.

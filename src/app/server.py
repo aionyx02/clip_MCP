@@ -1,5 +1,7 @@
 import os
 import re
+import subprocess
+import time
 import uuid
 from decimal import Decimal
 from fractions import Fraction
@@ -33,18 +35,20 @@ from app.engine.rhythm import rhythm_model_name
 from app.engine.faces import framing_note
 from app.engine.plan import (
     BROLL_TRACK_ID, MUSIC_TRACK_ID, VIDEO_TRACK_ID, broll_covers, broll_slots, check_plan, check_recompile,
-    compile_operations, compiled_duration, diff_plans, plan_pieces,
+    compile_operations, compiled_duration, diff_plans, piece_changes, plan_pieces,
 )
 from app.engine.sections import build_sections, candidate_hash, check_sections, propose_candidates
 from app.engine.semantic import (
     build_timeline, clean_cuts, content_scores, join_voices, timeline_input_hash, voice_levels,
 )
+from app.engine.ffmpeg import hidden_window_flags
 from app.engine.probe import picture_size, probe_file
 from app.engine.reframe import Framing, centre_at, frame_project
 from app.engine.builder import DEFAULT_LOUDNESS_TARGET, FFmpegRenderer
 from app.engine.delivery import CHECKS, chapter_metadata, chapters, check_delivery, clock, cover_candidates
 from app.engine.frames import format_timestamp, still, storyboard_sheet
 from app.engine.interchange import write_edl, write_fcpxml, write_otio, write_srt
+from app.engine.listen import chart, describe, levels, parts_of
 from app.engine.subtitles import (
     DEFAULT_MAX_CHARACTERS,
     DEFAULT_MAX_SECONDS,
@@ -1766,6 +1770,146 @@ def diff_plan(before_plan_id: str, after_plan_id: str) -> dict:
         "changes": diff_plans(_require_plan(before_plan_id), _require_plan(after_plan_id)),
     }
 
+# How each kind of change is framed on the sheet: the colours people already read these
+# in — green for new, yellow for changed, blue for moved, red for gone.
+CHANGE_COLOURS = {
+    "added": (60, 200, 90), "retrimmed": (240, 200, 40), "moved": (70, 140, 240), "dropped": (230, 60, 60),
+}
+
+@mcp.tool()
+def preview_sound(
+    project_id: str,
+    loudness_target: Annotated[Optional[float], Field(ge=-40, le=-5)] = DEFAULT_LOUDNESS_TARGET,
+) -> ToolResult:
+    """Hear the cut without rendering it: the mix as a file, and a picture of it for you.
+
+    A storyboard shows the rhythm and none of the sound, and you cannot
+    listen at all — so this renders the sound alone, exactly as the full
+    render will mix it, and measures it. The chart draws the voice (green)
+    and the music after ducking (orange) along the cut, with the cuts and the
+    parts marked; the text gives, part by part, how loud the voice is, how
+    far under it the music sits while somebody talks, and how far the music
+    rises in the gaps. Use it to check that music ducks where it should,
+    changes where the part changes, and does not drown anybody. The levels
+    are measured before the render's loudness normalization, so read them
+    against each other rather than as what the viewer hears.
+
+    It takes a fraction of a render, because no picture is decoded. The mix
+    is saved as an audio file the user can play.
+
+    Args:
+        project_id: ID of the project.
+        loudness_target: The loudness the mix file is normalized to, as for
+            `render_project`.
+
+    Returns:
+        The sound part by part and the `output_path` of the mix, followed by
+        the chart.
+
+    Raises:
+        ValueError: If the project does not exist or has nothing on its
+            sequence.
+        RuntimeError: If FFmpeg cannot render the sound.
+    """
+    project = repo.get_project(project_id)
+    if not project:
+        raise ValueError(f"project {project_id} not found")
+    if project.base_video_track is None or not project.base_video_track.clips:
+        raise ValueError(f"project {project_id} has nothing on its sequence to listen to")
+    folder = os.path.join(WORKSPACE_DIR, "outputs", f"sound-{uuid.uuid4()}")
+    os.makedirs(folder, exist_ok=True)
+    mix = os.path.join(folder, _output_name(project, "sound").replace(".mp4", ".m4a"))
+    voice, music = os.path.join(folder, "voice.wav"), os.path.join(folder, "music.wav")
+    command = renderer.build_sound(project, _referenced_assets(project), mix, voice, music, loudness_target)
+    result = subprocess.run(command, capture_output=True, creationflags=hidden_window_flags())
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.decode("utf-8", errors="replace").strip()[-500:] or "ffmpeg failed")
+    heard, played = levels(voice), levels(music)
+    for stem in (voice, music):
+        os.remove(stem)
+    lines = [f"The mix is at {mix}.", *describe(parts_of(project, heard, played))]
+    return ToolResult(content=["\n".join(lines), Image(data=chart(project, heard, played), format="png")])
+
+@mcp.tool()
+def preview_plan_diff(
+    before_plan_id: str,
+    after_plan_id: str,
+    aspect: Optional[Literal["landscape", "portrait", "square"]] = None,
+) -> ToolResult:
+    """Show what changed between two versions of a cut, on one storyboard.
+
+    Use it after a round of feedback, before anything is rendered: instead of
+    two storyboards to compare by eye, one sheet of the new cut with every
+    shot marked — green for added, yellow for retrimmed (the same footage,
+    cut at different points), blue for moved, unmarked for untouched — and
+    the shots that were taken out at the end in red. The text says how the
+    length changed, part by part, and lists every change with its time.
+
+    Nothing is compiled onto a project; both plans are laid out the way
+    `compile_plan` would lay them out, so this is safe to call as often as
+    you like.
+
+    Args:
+        before_plan_id: The earlier plan.
+        after_plan_id: The later one.
+        aspect: Crop the tiles to the shape the cut will be delivered in;
+            omit to show the footage uncropped.
+
+    Returns:
+        A listing of the changes and lengths, followed by the sheet.
+
+    Raises:
+        ValueError: If either plan, or its timeline, does not exist, or
+            either does not check out well enough to lay out.
+    """
+    cuts = []
+    for plan_id in (before_plan_id, after_plan_id):
+        plan = _require_plan(plan_id)
+        timeline, clips, children, assets, known, levels = _plan_context(plan)
+        problems, _ = check_plan(plan, timeline, clips, children, assets, known, levels)
+        if problems:
+            raise ValueError(f"plan {plan_id} does not lay out yet:\n- " + "\n- ".join(problems))
+        cuts.append((plan, plan_pieces(plan, clips, children, assets, known), assets))
+    (before, old, _), (after, new, assets) = cuts
+    assets = {**cuts[0][2], **assets}
+    changes = piece_changes(old, new)
+
+    old_length, new_length = compiled_duration(old), compiled_duration(new)
+    counts = {status: sum(1 for change in changes if change.status == status)
+              for status in ("added", "retrimmed", "moved", "dropped", "kept")}
+    lines = [
+        f"The new cut runs {new_length:.1f}s against {old_length:.1f}s before ({new_length - old_length:+.1f}s): "
+        + ", ".join(f"{count} {status}" for status, count in counts.items() if count) + "."
+    ]
+    names = {beat.id: beat.name for beat in [*before.beats, *after.beats]}
+    for beat_id in dict.fromkeys([piece.beat_id for piece in [*old, *new] if piece.beat_id]):
+        was = sum(piece.duration for piece in old if piece.beat_id == beat_id)
+        now = sum(piece.duration for piece in new if piece.beat_id == beat_id)
+        if round(was, 1) != round(now, 1):
+            lines.append(f"part {names.get(beat_id, beat_id)}: {was:.1f}s -> {now:.1f}s")
+
+    shots, borders = [], []
+    for number, change in enumerate(changes, start=1):
+        piece = change.piece
+        middle = round((piece.start + piece.end) / 2, 3)
+        tag = change.status.upper() if change.status != "kept" else ""
+        where = f"was {format_timestamp(change.at)}" if change.status == "dropped" else format_timestamp(change.at)
+        shots.append((assets[piece.asset_id].path, middle, f"#{number} {where} {tag}".strip()))
+        borders.append(CHANGE_COLOURS.get(change.status))
+        length = f"{piece.duration:.1f}s"
+        if change.status == "retrimmed" and change.was is not None:
+            length = f"{change.was.duration:.1f}s -> {piece.duration:.1f}s"
+        if change.status != "kept":
+            lines.append(f"#{number}: {change.status} | {where} | {length} | {', '.join(piece.from_clip_ids)}")
+    if len(shots) > MAX_STORYBOARD_TILES:
+        lines.append(f"the sheet shows the first {MAX_STORYBOARD_TILES} of {len(shots)} shots")
+    shape = FRAME_SHAPES.get(aspect) if aspect else None
+    image = storyboard_sheet(
+        shots[:MAX_STORYBOARD_TILES], aspect=shape[0] / shape[1] if shape else None,
+        borders=borders[:MAX_STORYBOARD_TILES],
+    )
+    return ToolResult(content=["\n".join(lines), Image(data=image, format="jpeg")])
+
 @mcp.tool()
 def propose_broll(plan_id: Optional[str] = None) -> dict:
     """List the places in a cut where covering picture would help.
@@ -2206,6 +2350,49 @@ def _output_name(project: Project, kind: str) -> str:
     stem = " ".join(stem.split())[:MAX_OUTPUT_NAME].strip(" .")
     return f"{stem or project.id}_{kind}.mp4"
 
+# A preview is rendered with its short side this long, from pictures cached at that size.
+PREVIEW_SHORT_SIDE = 480
+# Cached preview pictures nobody has used for this long are thrown away. Housekeeping,
+# not a judgement: a picture is re-rendered in seconds if it is wanted again.
+PICTURE_CACHE_DAYS = 14
+
+def _preview_sized(project: Project) -> Project:
+    """Shrink a project to the size its preview is rendered at.
+
+    Args:
+        project: The project.
+
+    Returns:
+        A copy with its short side `PREVIEW_SHORT_SIDE` long, or the project
+        itself when it is already that small.
+    """
+    short = min(project.width, project.height)
+    if short <= PREVIEW_SHORT_SIDE:
+        return project
+    scale = PREVIEW_SHORT_SIDE / short
+    even = lambda value: max(2, int(round(value * scale / 2)) * 2)
+    return project.model_copy(update={"width": even(project.width), "height": even(project.height)})
+
+def _picture_cache() -> str:
+    """Find the cache of preview pictures, clearing out what has not been used lately.
+
+    Returns:
+        The cache directory.
+    """
+    folder = os.path.join(WORKSPACE_DIR, "cache", "pictures")
+    os.makedirs(folder, exist_ok=True)
+    stale = time.time() - PICTURE_CACHE_DAYS * 86400
+    for entry in os.scandir(folder):
+        try:
+            # A part file is a picture some render never finished; a day is long enough
+            # for any render still writing one to be done with it.
+            limit = time.time() - 86400 if entry.name.endswith(".part.mp4") else stale
+            if entry.stat().st_mtime < limit:
+                os.remove(entry.path)
+        except OSError:
+            pass
+    return folder
+
 # The shapes a cut is delivered in, as width to height.
 FRAME_SHAPES = {"landscape": (16, 9), "portrait": (9, 16), "square": (1, 1)}
 
@@ -2277,8 +2464,11 @@ def render_project(
 
     Args:
         project_id: ID of the project to render.
-        is_preview: If true, render a fast 480p preview instead of the
-            full-quality output.
+        is_preview: If true, render a fast preview, 480 pixels on its short
+            side, instead of the full-quality output. A preview renders each
+            clip's picture once and keeps it: after a change, only the clips
+            the change touched are rendered again, so a second preview of a
+            long cut takes a fraction of the first.
         loudness_target: Loudness of the finished file in LUFS. The default,
             -14, is what streaming platforms normalize to, so clips recorded
             on different devices come out at one consistent level instead of
@@ -2312,7 +2502,8 @@ def render_project(
         job that has not started yet is waiting for, and is null when it
         started immediately. `findings` lists what the check found that this
         render went ahead in spite of. The parts of the video, where it has
-        markers, are carried in the file as chapters.
+        markers, are carried in the file as chapters. A preview also says how
+        many clip `pictures` it `rendered` and how many it `reused`.
 
     Raises:
         ValueError: If the project does not exist, contains no clips, uses an
@@ -2324,6 +2515,8 @@ def render_project(
 
     project = _reshaped(project, frame)
     findings = _findings(project, burn_subtitles)
+    if is_preview:
+        project = _preview_sized(project)
     blocking = [finding for finding in findings if finding.check not in (allow or [])]
     if blocking and not is_preview:
         raise ValueError(
@@ -2363,20 +2556,39 @@ def render_project(
             handle.write(chapter_metadata(listed))
 
     assets = _referenced_assets(project)
-    command = renderer.build_command(
-        project, assets, job.output_path,
-        is_preview=is_preview, loudness_target=loudness_target, subtitle_path=subtitle_path,
-        framing=_framing(project, assets) if follow_faces else None,
-        chapters_path=chapters_path,
-    )
+    framing = _framing(project, assets) if follow_faces else None
+    pieces: list = []
+    if is_preview:
+        cache = _picture_cache()
+        command, pieces = renderer.build_incremental(
+            project, assets, job.output_path, cache,
+            loudness_target=loudness_target, subtitle_path=subtitle_path, framing=framing,
+            chapters_path=chapters_path,
+        )
+        # What this preview reads from the cache counts as used, so it is kept.
+        for argument in command:
+            if argument.startswith(cache) and os.path.exists(argument):
+                os.utime(argument)
+    else:
+        command = renderer.build_command(
+            project, assets, job.output_path, loudness_target=loudness_target, subtitle_path=subtitle_path,
+            framing=framing, chapters_path=chapters_path,
+        )
     # One input per clip, all opened at once, is what a render's memory use is made of.
     job.memory_estimate = resources.render_memory_bytes(command.count("-i"))
-    job = job_manager.start_job(job, {"command": command, "duration_seconds": float(renderer.output_duration(project))})
+    job = job_manager.start_job(job, {
+        "command": command, "duration_seconds": float(renderer.output_duration(project)), "pieces": pieces,
+    })
+    # Every clip on a picture track is one picture, the sequence's and the ones drawn over it.
+    pictures = sum(len(track.clips) for track in project.video_tracks)
 
-    return {
+    result = {
         "job_id": job.job_id, "status": job.status.value, "stage": job.stage, "output_path": job.output_path,
         "findings": [{"check": finding.check, "message": finding.message} for finding in findings],
     }
+    if is_preview:
+        result["pictures"] = {"rendered": len(pieces), "reused": pictures - len(pieces)}
+    return result
 
 def _analyses(project: Project) -> Dict[str, MediaAnalysis]:
     """Read the analysis of every file a project plays.

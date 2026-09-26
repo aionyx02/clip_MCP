@@ -2033,6 +2033,89 @@ def compile_operations(
             provenance[clip_id] = {"from_plan_id": plan.id, "from_clip_ids": [], "pinned": False}
     return operations, provenance
 
+@dataclass(frozen=True)
+class PieceChange:
+    """What happened to one window of the cut between two versions of a plan.
+
+    Attributes:
+        status: `kept`, `retrimmed` (the same footage, cut at different
+            points), `moved` (the same footage, somewhere else in the order),
+            `added`, or `dropped`.
+        piece: The window as it is now; for a dropped one, as it was.
+        was: The window as it was, when there was one.
+        at: Where it starts in its cut, in seconds: the new cut, or for a
+            dropped window the old one.
+    """
+
+    status: str
+    piece: Piece
+    was: Optional[Piece]
+    at: float
+
+def piece_changes(before: Sequence[Piece], after: Sequence[Piece]) -> List[PieceChange]:
+    """Line up two compiled cuts and say what happened to each window.
+
+    Windows are matched on what they were made of, the same identity a
+    recompile matches hand-adjusted clips on. A window taken apart by a pause
+    carries its clips twice, so the matches are made in order. Among the
+    windows in both cuts, the longest run still in its old order counts as
+    staying put, and anything outside it has moved — which is how a person
+    would describe a reorder: one clip moved, not everything after it.
+
+    Args:
+        before: The old cut's windows, in order.
+        after: The new cut's windows, in order.
+
+    Returns:
+        One change per window of the new cut, in its order, followed by one
+        per window that was dropped, in the old cut's order.
+    """
+    waiting: Dict[Tuple[str, ...], List[int]] = {}
+    for index, piece in enumerate(before):
+        waiting.setdefault(piece.from_clip_ids, []).append(index)
+    matched: List[Optional[int]] = [
+        waiting[piece.from_clip_ids].pop(0) if waiting.get(piece.from_clip_ids) else None for piece in after
+    ]
+    # The longest run of matched windows still in their old order stays put.
+    pairs = [(position, index) for position, index in enumerate(matched) if index is not None]
+    chains: List[List[int]] = []
+    for k, (position, index) in enumerate(pairs):
+        prior = [chains[j] for j in range(k) if pairs[j][1] < index]
+        chains.append(max(prior, key=len, default=[]) + [position])
+    staying = set(max(chains, key=len, default=[]))
+
+    changes: List[PieceChange] = []
+    for (position, piece), index, at in zip(enumerate(after), matched, _starts(after)):
+        if index is None:
+            changes.append(PieceChange("added", piece, None, at))
+            continue
+        was = before[index]
+        status = "moved" if position not in staying else (
+            "kept" if (was.asset_id, was.start, was.end) == (piece.asset_id, piece.start, piece.end) else "retrimmed"
+        )
+        changes.append(PieceChange(status, piece, was, at))
+    used = {index for index in matched if index is not None}
+    changes += [
+        PieceChange("dropped", piece, piece, at)
+        for index, (piece, at) in enumerate(zip(before, _starts(before))) if index not in used
+    ]
+    return changes
+
+def _starts(pieces: Sequence[Piece]) -> List[float]:
+    """Say where each window starts in its cut.
+
+    Args:
+        pieces: The windows, in order.
+
+    Returns:
+        Their start times, in seconds.
+    """
+    starts, position = [], 0.0
+    for piece in pieces:
+        starts.append(round(position, 3))
+        position += piece.duration
+    return starts
+
 def diff_plans(before: EditPlan, after: EditPlan) -> Dict[str, List[str]]:
     """Say what changed between two plans.
 

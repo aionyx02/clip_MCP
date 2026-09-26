@@ -149,3 +149,27 @@ def test_a_layout_on_the_base_track_is_refused(sources: dict) -> None:
 def test_splitting_an_inset_keeps_the_box_on_both_halves(inset: str) -> None:
     edit(inset, [{"action": "split_clip", "track_id": "top", "clip_id": "pip", "new_clip_id": "pip2", "at": 3}])
     assert [clip["layout"]["x"] for clip in clips_of(inset, "top")] == [0.6, 0.6]
+
+def test_a_clip_drawn_over_the_sequence_plays_at_its_speed(media: Path, tmp_path: Path) -> None:
+    """It used to be read at its speed and played at normal speed, showing half of what it read."""
+    import subprocess
+
+    changing = tmp_path / "red_then_green.mp4"
+    subprocess.run([
+        "ffmpeg", "-y", "-loglevel", "error",
+        "-f", "lavfi", "-i", "color=c=red:s=320x240:r=30:d=1", "-f", "lavfi", "-i", "color=c=green:s=320x240:r=30:d=1",
+        "-filter_complex", "[0:v][1:v]concat=n=2:v=1[v]", "-map", "[v]",
+        "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", str(changing),
+    ], check=True, capture_output=True)
+    over = import_asset(str(changing))["id"]
+    base = import_asset(str(media / "wide.mp4"))["id"]
+    project = build_project([
+        video_track(), insert("a", base, 0, 2),
+        video_track("broll"), {"action": "add_clip", "track_id": "broll", "clip_id": "b", "asset_id": over,
+                               "source_range": {"start": 0, "end": 2}, "timeline_in": 0, "speed": 2.0},
+    ], width=320, height=240)
+    out = tmp_path / "fast_over.mp4"
+    render(project, out, loudness_target=None)
+    # Three quarters of a second in at double speed is a second and a half into the source.
+    red, green, _ = extract_frame(str(out), 0.75).resize((1, 1)).getpixel((0, 0))
+    assert green > red

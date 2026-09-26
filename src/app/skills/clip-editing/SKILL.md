@@ -45,8 +45,12 @@ Supported:
   phone draws over a vertical video (`generate_subtitles`, then a
   `set_subtitles` operation, then `render_project` with `burn_subtitles`).
 - Storyboards of the edited sequence in seconds (`preview_project`), plus
-  fast 480p previews and full-quality renders in the background, with
-  progress.
+  fast previews and full-quality renders in the background, with progress. A
+  preview keeps every clip's picture it rendered, so after a change only the
+  clips it touched are rendered again.
+- Seeing a change and hearing a cut: one storyboard marking what a round of
+  feedback changed (`preview_plan_diff`), and the sound rendered on its own —
+  a file to play and a chart of voice against music (`preview_sound`).
 - Understanding footage: scene changes, black and frozen picture, silences,
   and a transcript with accurate word timings (`analyze_asset`,
   `get_analysis`), turned into searchable clips — one per sentence, shot or
@@ -224,6 +228,9 @@ is wrong before a render is wasted.
    tiles are in timeline order and cropped the way the render crops, so it
    shows the clip order, the framing, and whether a cut lands on a bad frame,
    for the cost of a few seconds. Fix what is wrong before spending a render.
+   If there is music, call `preview_sound` as well: the storyboard cannot show
+   whether the music gets out of the way of the talking, and you cannot hear
+   it. Read the chart and the numbers, and hand the user the mix file to play.
 10. Call `check_render` (with `burn_subtitles: true` if captions will be
     burned) and tell the user what it finds; a full render is refused until
     they have heard. See [Delivering the cut](#delivering-the-cut).
@@ -375,6 +382,12 @@ redone from memory.
 When the user asks for a change — 「第三段太長」, 「開頭無聊」 — change the plan
 and compile it again, rather than nudging clips on the timeline. The plan is
 where the reasons live; the timeline is only what fell out of them.
+
+To show them what the change did, save the changed plan under a new id and
+call `preview_plan_diff` with the old and the new: one sheet of the new cut
+with added shots framed green, retrimmed yellow, moved blue, and the ones
+taken out in red at the end, and a line on how the length changed, part by
+part. Describe it in a sentence or two rather than reading the list out.
 
 Change it with `amend_plan`, one amendment per thing that actually changed:
 `set_trim` to retrim a piece, `set_rationale` to rewrite why it is there or
@@ -673,6 +686,8 @@ times refer to the source file.
 | 「找出精華剪成 60 秒」 / a 60 s highlight reel | Choose segments by transcript and frames until about 60 s; confirm the list before rendering |
 | 「第 3 分鐘那個畫面是什麼」 / what is on screen at 3:00 | `view_frames` with one `asset_ids` entry, `start: 175`, `end: 185`, `count: 4` |
 | 「現在剪成什麼樣子」 / show me the cut so far | `preview_project`, then describe the order and the cut points |
+| 「改了哪裡？」「跟上一版差在哪」 / what changed since last time | `preview_plan_diff` with the two plans; describe it in a sentence or two |
+| 「音樂會不會蓋過講話」「先聽聽看」 / does the music drown the talking, let me hear it | `preview_sound`: read the chart and numbers, and give the user the mix file |
 | 「同一支也出直式」「Reels 跟 YouTube 各一版」 / one cut for several platforms | `render_project` with `frame: "portrait"` (and again with `landscape` or `square`); `preview_project` with the same `frame` first |
 | 「幫我寫 YouTube 章節」 / YouTube chapters | `get_chapters`, paste its `description`; say what `problems` lists |
 | 「挑一張封面」「縮圖」 / pick a cover or thumbnail | `propose_covers`, let the user choose, then `export_cover` |

@@ -120,7 +120,12 @@ def still(
     frame = extract_frame(path, seconds, max_size=max(width, height) * 2, ffmpeg_bin=ffmpeg_bin)
     return _crop_to_aspect(frame, width / height, centre).resize((width, height), Image.LANCZOS)
 
-def _compose_sheet(frames: Sequence[Image.Image], labels: Sequence[str], columns: int) -> bytes:
+def _compose_sheet(
+    frames: Sequence[Image.Image],
+    labels: Sequence[str],
+    columns: int,
+    borders: Optional[Sequence[Optional[Tuple[int, int, int]]]] = None,
+) -> bytes:
     """Lay decoded frames out as one labeled grid image.
 
     Frames are placed left to right, top to bottom, and each tile is labeled
@@ -130,6 +135,8 @@ def _compose_sheet(frames: Sequence[Image.Image], labels: Sequence[str], columns
         frames: Decoded frames, in the order to show them.
         labels: Caption for each frame, in the same order.
         columns: Maximum number of tiles per row.
+        borders: A colour to frame each tile in, or None for no frame, in the
+            same order; None for no frames at all.
 
     Returns:
         The grid encoded as JPEG.
@@ -151,6 +158,9 @@ def _compose_sheet(frames: Sequence[Image.Image], labels: Sequence[str], columns
         left = TILE_GAP + column * (tile_width + TILE_GAP)
         top = TILE_GAP + row * (tile_height + TILE_GAP)
         sheet.paste(frame, (left + (tile_width - frame.width) // 2, top + (tile_height - frame.height) // 2))
+        colour = borders[index] if borders else None
+        if colour:
+            draw.rectangle((left, top, left + tile_width - 1, top + tile_height - 1), outline=colour, width=5)
         box = draw.textbbox((left + 4, top + 4), label, font=font)
         draw.rectangle((box[0] - 4, box[1] - 3, box[2] + 4, box[3] + 3), fill=(0, 0, 0))
         draw.text((left + 4, top + 4), label, fill=(255, 230, 0), font=font)
@@ -164,6 +174,7 @@ def storyboard_sheet(
     aspect: Optional[float] = None,
     columns: int = 4,
     ffmpeg_bin: str = "ffmpeg",
+    borders: Optional[Sequence[Optional[Tuple[int, int, int]]]] = None,
 ) -> bytes:
     """Render frames drawn from several videos as one labeled grid image.
 
@@ -180,6 +191,7 @@ def storyboard_sheet(
             rather than the framing of the source files.
         columns: Maximum number of tiles per row.
         ffmpeg_bin: Path to, or name of, the FFmpeg executable.
+        borders: A colour to frame each tile in, or None, per tile.
 
     Returns:
         The grid encoded as JPEG.
@@ -196,4 +208,4 @@ def storyboard_sheet(
             _crop_to_aspect(frame, aspect, shot[3] if len(shot) > 3 else None).resize(size, Image.LANCZOS)
             for frame, shot in zip(frames, shots)
         ]
-    return _compose_sheet(frames, [shot[2] for shot in shots], columns)
+    return _compose_sheet(frames, [shot[2] for shot in shots], columns, borders)
