@@ -36,6 +36,7 @@ class TrimKind(str, Enum):
     KEEP = "keep"
     HEAD = "head"
     TAIL = "tail"
+    RANGE = "range"
     TIGHTEN = "tighten"
 
 class Trim(BaseModel):
@@ -50,6 +51,18 @@ class Trim(BaseModel):
         default=None,
         gt=0,
         description="For `head` and `tail`: how many seconds to take",
+    )
+    from_seconds: Optional[float] = Field(
+        default=None,
+        ge=0,
+        description="For `range`: where to start, in seconds from the clip's own start. With `to_seconds`, takes "
+                    "a stretch out of the middle — a few seconds of a long timelapse or a walk. Both edges move "
+                    "off a word if they land in one",
+    )
+    to_seconds: Optional[float] = Field(
+        default=None,
+        gt=0,
+        description="For `range`: where to stop, in seconds from the clip's own start",
     )
 
 class BeatRole(str, Enum):
@@ -80,6 +93,34 @@ class Beat(BaseModel):
     )
     intent: str = Field(default="", description="What it has to achieve for the video to work")
     target_seconds: Optional[float] = Field(default=None, gt=0, description="Roughly how long it should run")
+    transition_in: Optional["BeatTransition"] = Field(
+        default=None,
+        description="How the picture passes from the beat before into this one; null is a straight cut. Ignored "
+                    "on the first beat. Where the footage has less picture before this beat's first shot than the "
+                    "transition asks for, it is shortened to what there is, and the notes say so",
+    )
+    sound_lead: Optional[float] = Field(
+        default=None,
+        gt=0,
+        le=3,
+        description="Let this beat's sound start this many seconds before its picture does, under the end of the "
+                    "beat before (a J-cut): the next place is heard before it is seen. Shortened, with a note, "
+                    "where the footage has less sound before the shot",
+    )
+
+class BeatTransition(BaseModel):
+    """How one beat hands over to the next."""
+
+    kind: Literal["dissolve", "dip", "wipe"] = Field(
+        ..., description="`dissolve` mixes through, `dip` goes through a colour, `wipe` travels across the frame",
+    )
+    seconds: float = Field(default=0.5, gt=0, le=3, description="How long it runs, ending on the cut")
+    through: str = Field(
+        default="black",
+        pattern=r"^(#[0-9a-fA-F]{6}|black|white)$",
+        description="For `dip`: the colour it passes through",
+    )
+    direction: Literal["left", "right", "up", "down"] = Field(default="left", description="For `wipe`")
 
 class Selection(BaseModel):
     """One piece of footage, placed in a beat, with the reason it is there."""
@@ -89,6 +130,21 @@ class Selection(BaseModel):
     trim: Trim = Field(default_factory=Trim)
     rationale: str = Field(default="", description="Why this piece, here")
     role: Optional[str] = Field(default=None, description="What it does in the beat, such as 例子 or 結論")
+    speed: Optional[float] = Field(
+        default=None,
+        ge=0.25,
+        le=8,
+        description="Play this piece faster or slower than shot: 4 or 8 for a timelapse of a long walk or a "
+                    "street, 0.5 for slow motion. Everything laid over the cut — music, markers, covering "
+                    "picture — is placed at the new length. Null for as shot. Multiplied by the pacing speed",
+    )
+    volume: Optional[float] = Field(
+        default=None,
+        ge=0,
+        le=4,
+        description="How loud this piece's own sound plays: 0 mutes it (a shout, wind, a street under music), "
+                    "0.5 halves it. Null for as recorded",
+    )
     hold_picture: bool = Field(
         default=False,
         description="This shot is here for what it shows, not only for what is said over it, so B-roll may not "
@@ -337,10 +393,26 @@ class DropBeatOp(BaseModel):
     beat_id: str
     reason: str = Field(default="", description="Why it came out; kept with each of its selections under `rejected`")
 
+class SetPlaybackOp(BaseModel):
+    """Amendment that changes how fast and how loud one selection plays, for 「這段快轉」 or 「這段靜音」."""
+
+    action: Literal["set_playback"] = "set_playback"
+    clip_id: str = Field(..., description="Semantic clip whose selection plays differently")
+    speed: Optional[float] = Field(default=None, ge=0.25, le=8, description="As on a selection; null for as shot")
+    volume: Optional[float] = Field(default=None, ge=0, le=4, description="As on a selection; null for as recorded")
+
+class SetBeatJoinOp(BaseModel):
+    """Amendment that changes how the picture and the sound pass into a beat from the one before."""
+
+    action: Literal["set_beat_join"] = "set_beat_join"
+    beat_id: str
+    transition_in: Optional[BeatTransition] = Field(default=None, description="As on a beat; null for a straight cut")
+    sound_lead: Optional[float] = Field(default=None, gt=0, le=3, description="As on a beat; null for none")
+
 PlanAmendment = Annotated[
     Union[
         SetTrimOp, SetRationaleOp, AddSelectionOp, DropSelectionOp, AddBrollOp, DropBrollOp,
-        SetPacingOp, SetMusicLevelOp, SetTargetOp, DropBeatOp,
+        SetPacingOp, SetMusicLevelOp, SetTargetOp, DropBeatOp, SetPlaybackOp, SetBeatJoinOp,
     ],
     Field(discriminator="action"),
 ]
@@ -372,6 +444,11 @@ def describe_amendment(op: "PlanAmendment") -> str:
                 f"x{op.pacing.speed or 1:g}")
     if isinstance(op, SetMusicLevelOp):
         return f"music x{op.scale:g}" + (f" from {op.beat_id}" if op.beat_id else "")
+    if isinstance(op, SetPlaybackOp):
+        return f"{op.clip_id} plays at x{op.speed or 1:g}, volume {1 if op.volume is None else op.volume:g}"
+    if isinstance(op, SetBeatJoinOp):
+        joined = op.transition_in.kind if op.transition_in else "a straight cut"
+        return f"{op.beat_id} comes in on {joined}" + (f", sound {op.sound_lead:g}s early" if op.sound_lead else "")
     if isinstance(op, SetTargetOp):
         return f"target {op.target.seconds or 'none'}s" + (f" for {op.target.platform}" if op.target.platform else "")
     return f"dropped the part {op.beat_id}" + (f" ({op.reason})" if op.reason else "")
@@ -433,6 +510,19 @@ def apply_amendment(plan: EditPlan, op: PlanAmendment) -> None:
         plan.pacing = op.pacing
         return
 
+    if isinstance(op, SetPlaybackOp):
+        selection = plan.selections[_selection_index(plan, op.clip_id)]
+        selection.speed, selection.volume = op.speed, op.volume
+        return
+
+    if isinstance(op, SetBeatJoinOp):
+        beat = next((beat for beat in plan.beats if beat.id == op.beat_id), None)
+        if beat is None:
+            known = ", ".join(beat.id for beat in plan.beats) or "none"
+            raise ValueError(f"the plan has no beat {op.beat_id}; its beats are {known}")
+        beat.transition_in, beat.sound_lead = op.transition_in, op.sound_lead
+        return
+
     if isinstance(op, SetMusicLevelOp):
         if plan.music is None:
             raise ValueError("the plan has no music to turn up or down")
@@ -492,3 +582,5 @@ def apply_amendment(plan: EditPlan, op: PlanAmendment) -> None:
     # A cover that started over the shot just removed has nowhere left to start. Taking it
     # with the shot is arithmetic, not a judgement: the place it named is gone.
     plan.broll = [item for item in plan.broll if item.over_clip_id != dropped.clip_id]
+
+Beat.model_rebuild()

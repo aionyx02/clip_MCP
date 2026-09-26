@@ -25,7 +25,7 @@ from app.models.media import Asset
 from app.models.plan import Beat, BeatRole, EditPlan, MusicCue, Selection, TrimKind
 from app.engine.semantic import EDGE_TOLERANCE_SECONDS, CleanCuts, voice_gains
 from app.models.semantic import ClipKind, SemanticClip, SemanticTimeline
-from app.models.timeline import Clip, Project
+from app.models.timeline import MAX_SPEED, MIN_SPEED, Clip, Project
 
 # Air left around a cut, taken from the clip's measured headroom, so a line does not
 # begin the instant the picture does. Never more than the headroom allows. The default
@@ -85,6 +85,9 @@ BEAT_SNAP_SECONDS = 0.3
 ON_BEAT_SECONDS = 0.005
 # How far the compiled length may sit from what the plan asked for before it is worth saying.
 LENGTH_TOLERANCE = 0.1
+# A transition shortened below this is a few frames of flicker rather than a transition,
+# so it is left out instead. Three frames at 30fps, two at 24.
+MIN_TRANSITION_SECONDS = 0.1
 
 @dataclass(frozen=True)
 class Pace:
@@ -129,8 +132,15 @@ class Piece:
             the piece's identity rather than a note about it.
         beat_id: The part of the video it belongs to, which is what the
             timeline's markers are made from.
-        speed: How fast it plays: the plan's pacing speed, set once the
-            windows are settled.
+        speed: How fast it plays: its selection's own speed, multiplied by
+            the plan's pacing speed once the windows are settled.
+        gain: How loud its own sound plays, from its selection's volume.
+        transition: How it comes in over the window before, as `(kind,
+            seconds, through, direction)`, already shortened to the picture
+            the file has; None is a straight cut. Only the first window of a
+            beat has one.
+        sound_lead: Seconds its sound starts before its picture, already
+            shortened to the sound the file has.
     """
 
     asset_id: str
@@ -139,6 +149,9 @@ class Piece:
     from_clip_ids: Tuple[str, ...]
     beat_id: str = ""
     speed: float = 1.0
+    gain: float = 1.0
+    transition: Optional[Tuple[str, float, str, str]] = None
+    sound_lead: float = 0.0
 
     @property
     def duration(self) -> float:
@@ -304,6 +317,13 @@ def _selection_pieces(
             clip, asset, start=max(clip.source_range.end - trim.seconds, clip.source_range.start),
             pad_head=False, cuts=cuts, beat_id=beat, breath=breath,
         )]
+    if trim.kind == TrimKind.RANGE and trim.from_seconds is not None and trim.to_seconds is not None:
+        return [_piece(
+            clip, asset,
+            start=min(clip.source_range.start + trim.from_seconds, clip.source_range.end),
+            end=min(clip.source_range.start + trim.to_seconds, clip.source_range.end),
+            pad_head=False, pad_tail=False, cuts=cuts, beat_id=beat, breath=breath,
+        )]
     return [_piece(clip, asset, beat_id=beat, breath=breath)]
 
 def _merge(pieces: Sequence[Piece]) -> List[Piece]:
@@ -319,12 +339,15 @@ def _merge(pieces: Sequence[Piece]) -> List[Piece]:
     merged: List[Piece] = []
     for piece in pieces:
         last = merged[-1] if merged else None
-        if last is not None and last.asset_id == piece.asset_id and piece.start - last.end <= MERGE_GAP_SECONDS:
+        if (
+            last is not None and last.asset_id == piece.asset_id and piece.start - last.end <= MERGE_GAP_SECONDS
+            # A window sped up or turned down on purpose is its own clip, however close it sits.
+            and (last.speed, last.gain) == (piece.speed, piece.gain)
+        ):
             # The first piece's beat wins. Two pieces this close are one shot, and a
             # marker inside a shot would say a new part starts partway through it.
-            merged[-1] = Piece(
-                last.asset_id, last.start, max(last.end, piece.end),
-                (*last.from_clip_ids, *piece.from_clip_ids), last.beat_id,
+            merged[-1] = replace(
+                last, end=max(last.end, piece.end), from_clip_ids=(*last.from_clip_ids, *piece.from_clip_ids),
             )
         else:
             merged.append(piece)
@@ -377,10 +400,17 @@ def _selected(
         asset = assets.get(clip.asset_id) if clip is not None else None
         if clip is None or asset is None:
             continue
-        pieces.extend(_selection_pieces(
-            selection, clip, children.get(clip.id, []), asset,
-            None if cuts is None else cuts.get(clip.asset_id), pace_of(plan).breath,
-        ))
+        pieces.extend(
+            replace(
+                piece,
+                speed=1.0 if selection.speed is None else selection.speed,
+                gain=1.0 if selection.volume is None else selection.volume,
+            )
+            for piece in _selection_pieces(
+                selection, clip, children.get(clip.id, []), asset,
+                None if cuts is None else cuts.get(clip.asset_id), pace_of(plan).breath,
+            )
+        )
     return pieces
 
 def _bare(text: str) -> str:
@@ -559,10 +589,10 @@ def _without_pauses(
                 # disagreement is reported rather than papered over.
                 talked_through += 1
                 continue
-            out.append(Piece(piece.asset_id, opened, closing, piece.from_clip_ids, piece.beat_id))
+            out.append(replace(piece, start=opened, end=closing))
             taken.append(round(opening - closing, 3))
             opened = opening
-        out.append(Piece(piece.asset_id, opened, piece.end, piece.from_clip_ids, piece.beat_id))
+        out.append(replace(piece, start=opened))
 
     notes: List[str] = []
     if taken:
@@ -627,7 +657,7 @@ def _trimmed_ends(
         opening = round(min(wanted, head.start + HEAD_TRIM_SECONDS), 3)
         if opening > head.start:
             say("before the first word", opening - head.start, round(wanted - opening, 3), HEAD_TRIM_SECONDS)
-            out[0] = Piece(head.asset_id, opening, head.end, head.from_clip_ids, head.beat_id)
+            out[0] = replace(head, start=opening)
 
     tail = out[-1]
     known = cuts.get(tail.asset_id)
@@ -637,7 +667,7 @@ def _trimmed_ends(
         closing = round(max(wanted, tail.end - TAIL_TRIM_SECONDS), 3)
         if closing < tail.end:
             say("after the last word", tail.end - closing, round(closing - wanted, 3), TAIL_TRIM_SECONDS)
-            out[-1] = Piece(tail.asset_id, tail.start, closing, tail.from_clip_ids, tail.beat_id)
+            out[-1] = replace(tail, end=closing)
 
     return out, notes
 
@@ -687,7 +717,7 @@ def _off_bad_frames(
         shifted = sum(1 for now, before in zip(settled, (piece.start, piece.end)) if now != before)
         moved += shifted
         stuck += objected - shifted
-        out.append(Piece(piece.asset_id, opening, closing, piece.from_clip_ids, piece.beat_id))
+        out.append(replace(piece, start=opening, end=closing))
 
     notes: List[str] = []
     if moved:
@@ -995,9 +1025,86 @@ def compile_pieces(
     if pace.speed != 1.0:
         # Set once the windows are settled: every stage before this works in the file's own
         # seconds, and only where things land on the timeline cares how fast they play.
-        merged = [replace(piece, speed=pace.speed) for piece in merged]
+        merged = [replace(piece, speed=round(piece.speed * pace.speed, 4)) for piece in merged]
     pieces, said = _on_the_beat(plan, merged, assets, cuts)
+    notes += said
+    # Last, because the beat moves cuts, and how much a transition can reach back into
+    # depends on exactly where its window starts.
+    pieces, said = _joined_beats(plan, pieces, assets)
     return pieces, notes + said
+
+def _joined_beats(
+    plan: EditPlan,
+    pieces: Sequence[Piece],
+    assets: Mapping[str, Asset],
+) -> Tuple[List[Piece], List[str]]:
+    """Put each beat's transition and sound lead on the window it begins with.
+
+    Both are fed from before the window's start in its file, and a shot that
+    begins at the very start of its file has nothing there. Refusing the plan
+    for that would make every transition a guess about where each file starts,
+    so the transition is shortened to what the file has, and the notes say by
+    how much. Shortening is arithmetic on a number the plan gave, not a
+    judgement about the cut, which is why it is done rather than handed back.
+
+    Args:
+        plan: The plan.
+        pieces: Its windows, settled.
+        assets: The assets they play from, keyed by asset ID.
+
+    Returns:
+        `(pieces, notes)`.
+    """
+    first = _beginnings(pieces)
+    out = list(pieces)
+    notes: List[str] = []
+    for position, beat in enumerate(plan.beats):
+        if position == 0 or (beat.transition_in is None and beat.sound_lead is None):
+            continue
+        at = first.get(beat.id)
+        if at is None or at == 0:
+            notes.append(
+                f"beat {beat.id} has no shot of its own to begin with — its first one was joined to the shot "
+                "before it — so it comes in on a straight cut"
+            )
+            continue
+        piece, before = out[at], out[at - 1]
+        # Seconds of the timeline the file can supply before this window, at its speed.
+        room = piece.start / piece.speed
+        changes: Dict[str, object] = {}
+        wanted = beat.transition_in
+        if wanted is not None:
+            # A dip only reaches back for half its length: the colour covers the first half.
+            reach = 0.5 if wanted.kind == "dip" else 1.0
+            fits = math.floor(min(wanted.seconds, room / reach, before.played) * 1000) / 1000
+            if fits < MIN_TRANSITION_SECONDS:
+                notes.append(
+                    f"beat {beat.id}: its {wanted.kind} was left out — its first shot starts "
+                    f"{piece.start:.2f}s into its file, with no picture before it to run in from"
+                )
+            else:
+                if fits < wanted.seconds:
+                    notes.append(
+                        f"beat {beat.id}: its {wanted.kind} was shortened from {wanted.seconds:g}s to {fits:g}s, "
+                        "all the picture its file has before the shot"
+                    )
+                changes["transition"] = (wanted.kind, fits, wanted.through, wanted.direction)
+        if beat.sound_lead is not None:
+            asset = assets.get(piece.asset_id)
+            if asset is not None and not asset.has_audio:
+                notes.append(f"beat {beat.id}: its first shot has no sound to lead with, so it leads with none")
+            else:
+                fits = math.floor(min(beat.sound_lead, room, before.played) * 1000) / 1000
+                if fits < beat.sound_lead:
+                    notes.append(
+                        f"beat {beat.id}: its sound comes in {fits:g}s early rather than {beat.sound_lead:g}s, "
+                        "all the sound its file has before the shot"
+                    )
+                if fits > 0:
+                    changes["sound_lead"] = fits
+        if changes:
+            out[at] = replace(piece, **changes)
+    return out, notes
 
 def plan_pieces(
     plan: EditPlan,
@@ -1679,10 +1786,32 @@ def check_plan(
                 problems.append(
                     f"{where}: asks for {trim.seconds:g}s of a clip that runs {clip.duration:.3f}s"
                 )
+        if trim.kind == TrimKind.RANGE:
+            if trim.from_seconds is None or trim.to_seconds is None:
+                problems.append(f"{where}: `range` needs both `from_seconds` and `to_seconds`")
+            elif trim.to_seconds <= trim.from_seconds:
+                problems.append(f"{where}: `range` ends at {trim.to_seconds:g}s, before it starts")
+            elif trim.from_seconds >= clip.duration:
+                problems.append(
+                    f"{where}: `range` starts {trim.from_seconds:g}s in, but the clip runs {clip.duration:.3f}s"
+                )
+        # The timeline holds a clip to what the renderer can stretch sound to; the pacing
+        # speed multiplies on top of a selection's own.
+        speed = (selection.speed or 1.0) * (plan.pacing.speed or 1.0)
+        if not MIN_SPEED <= speed <= MAX_SPEED:
+            problems.append(
+                f"{where}: plays at x{speed:g} with the pacing speed on top, outside the x{MIN_SPEED:g} to "
+                f"x{MAX_SPEED:g} a clip can play at"
+            )
 
     for rejection in plan.rejected:
         if rejection.clip_id not in clips:
             notes.append(f"the rejected clip {rejection.clip_id} is not in this timeline")
+    both = sorted({rejection.clip_id for rejection in plan.rejected} & {item.clip_id for item in plan.selections})
+    if both:
+        problems.append(
+            f"{', '.join(both)} is both used and rejected; take it out of `rejected` if it belongs in the cut"
+        )
 
     pace = pace_of(plan)
     if pace.pause <= 2 * pace.breath + MERGE_GAP_SECONDS:
@@ -1795,6 +1924,62 @@ def _compiled_clips(project: Optional[Project]) -> List[Tuple[str, Clip]]:
         for track in project.tracks if track.id in COMPILED_TRACKS
         for clip in track.clips
     ]
+
+def as_left(pieces: Sequence[Piece], project: Optional[Project]) -> Tuple[List[Piece], List[str]]:
+    """Lay the plan's windows out the way the clips pinned by hand actually play.
+
+    A clip adjusted by hand comes back from a recompile with its own range
+    and speed, so everything placed against the cut — music, covering
+    picture, markers — has to be placed against those, or it lands where the
+    plan alone would have put things. And a clip lengthened by hand over the
+    footage of the window after it has taken that footage in: the window is
+    not put back, or the same moment plays twice.
+
+    The matching is the compiler's own: a pinned clip belongs to the first
+    window made of exactly the semantic clips it was made from.
+
+    Args:
+        pieces: The plan's windows, in order.
+        project: What is on the timeline now, or None.
+
+    Returns:
+        `(pieces, notes)` — the windows with each pinned one's range and speed,
+        less those a pinned clip has taken in, and a line naming what was
+        left out that way.
+    """
+    kept = {
+        tuple(clip.from_clip_ids): clip
+        for track_id, clip in _compiled_clips(project) if track_id == VIDEO_TRACK_ID and clip.pinned
+    }
+    laid: List[Piece] = []
+    hand: List[bool] = []
+    for piece in pieces:
+        pinned = kept.pop(piece.from_clip_ids, None)
+        if pinned is not None:
+            piece = replace(
+                piece, start=float(pinned.source_range.start), end=float(pinned.source_range.end),
+                speed=pinned.speed,
+            )
+        laid.append(piece)
+        hand.append(pinned is not None)
+
+    def taken_in(piece: Piece) -> bool:
+        """Say whether a pinned clip plays most of this window already."""
+        return any(
+            min(piece.end, other.end) - max(piece.start, other.start) > piece.duration / 2
+            for other, by_hand in zip(laid, hand)
+            if by_hand and other is not piece and other.asset_id == piece.asset_id
+        )
+
+    out = [piece for piece, by_hand in zip(laid, hand) if by_hand or not taken_in(piece)]
+    gone = [piece for piece, by_hand in zip(laid, hand) if not by_hand and taken_in(piece)]
+    notes = []
+    if gone:
+        notes.append(
+            f"{len(gone)} window(s) were left out because a clip lengthened by hand already plays them: "
+            f"{', '.join(piece.from_clip_ids[0] for piece in gone)}"
+        )
+    return out, notes
 
 def check_recompile(
     plan: EditPlan,
@@ -2102,7 +2287,7 @@ def compile_operations(
         operations are applied, so it never has to travel through the tool
         surface.
     """
-    pieces = plan_pieces(plan, clips, children, assets, cuts)
+    pieces, _ = as_left(plan_pieces(plan, clips, children, assets, cuts), project)
     # Only when the plan asked for it: matching two people's levels is a judgement about
     # a conversation, and on one speaker there is nothing to match.
     gains = voice_gains(levels) if plan.level_voices and levels else None
@@ -2140,11 +2325,20 @@ def compile_operations(
             "asset_id": piece.asset_id,
             "source_range": {"start": piece.start, "end": piece.end},
         }
-        level = piece_gain(piece, clips, gains)
+        level = round(piece_gain(piece, clips, gains) * piece.gain, 4)
         if level != 1.0:
             placed["volume"] = level
         if piece.speed != 1.0:
             placed["speed"] = piece.speed
+        if piece.transition is not None:
+            kind, seconds, through, direction = piece.transition
+            placed["transition_in"] = {"kind": kind, "seconds": seconds}
+            if kind == "dip":
+                placed["transition_in"]["through"] = through
+            elif kind == "wipe":
+                placed["transition_in"]["direction"] = direction
+        if piece.sound_lead:
+            placed["audio_lead"] = piece.sound_lead
         if pinned is not None:
             placed.update(_as_made(pinned))
         operations.append(placed)

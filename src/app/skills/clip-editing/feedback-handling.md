@@ -17,11 +17,14 @@ they are what makes the history readable later. Do not send the whole plan
 through `save_plan` again to move one edge: every other selection's reason is
 retyped to do it, and those reasons are the part that cannot be rebuilt.
 
-- One piece: `set_trim` to retrim it, `set_rationale` to rewrite why it is
+- One piece: `set_trim` to retrim it, `set_playback` to speed it up or turn
+  it down, `set_rationale` to rewrite why it is
   there or move it to another beat, `add_selection` to put something in,
   `drop_selection` to take something out, which files it under `rejected`
   with the reason. `add_broll` and `drop_broll` do the same for covering
   picture.
+- Between two parts: `set_beat_join` puts a transition or a J-cut on the
+  beat that comes in.
 - The whole video: `set_pacing` makes every cut tighter or looser at once —
   a lower `pause_seconds` takes out more dead air, a lower `breath_seconds`
   leaves less around every cut, and `speed` plays the whole sequence faster

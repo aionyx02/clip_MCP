@@ -17,6 +17,7 @@ from pydantic import TypeAdapter
 
 from app.engine.plan import (
     _story_problems,
+    as_left,
     plan_markers,
     BREATH_SECONDS,
     broll_covers,
@@ -45,11 +46,11 @@ from app.models.media import (
 )
 from app.models.plan import (
     BeatRole,
-    AddBrollOp, Beat, BrollShot, DropBrollOp, DropSelectionOp, EditPlan, MusicCue, MusicPlan, PlanAmendment,
-    PlanTarget, Rejection, Selection, Trim, TrimKind, apply_amendment,
+    AddBrollOp, Beat, BeatTransition, BrollShot, DropBrollOp, DropSelectionOp, EditPlan, MusicCue, MusicPlan, PlanAmendment,
+    Pacing, PlanTarget, Rejection, Selection, Trim, TrimKind, apply_amendment,
 )
 from app.models.semantic import SectionChoice, SemanticClip, SemanticTimeline
-from app.models.timeline import Marker, Project
+from app.models.timeline import Clip, Marker, Project, Track
 from app.server import (
     amend_plan,
     apply_edits,
@@ -1026,7 +1027,9 @@ def test_one_trim_can_be_changed_without_sending_the_plan_again(planned: dict) -
     ))
     assert result["version"] == 2 and result["problems"] == []
     stored = get_plan(planned["plan_id"])["plan"]
-    assert stored["selections"][0]["trim"] == {"kind": "head", "keep_clip_ids": [], "seconds": 1.0}
+    assert stored["selections"][0]["trim"] == {
+        "kind": "head", "keep_clip_ids": [], "seconds": 1.0, "from_seconds": None, "to_seconds": None,
+    }
     # Everything the plan was written to remember is still there.
     assert stored["selections"][0]["rationale"] == "開場最清楚"
     assert stored["rejected"][0]["reason"] == "重複了"
@@ -2128,3 +2131,150 @@ def test_two_parts_are_a_story_and_have_to_say_so() -> None:
         story(None, None),
     )
     assert any(problem.startswith("story") for problem in problems)
+
+def test_a_range_takes_a_stretch_out_of_the_middle_and_plays_it_at_its_own_speed() -> None:
+    by_id, children, assets, clips = covered()
+    walk = next(clip for clip in clips if clip.asset_id == BROLL_ASSET)
+    plan = plan_for([Selection(
+        clip_id=walk.id, beat_id="b1", speed=4.0, trim=Trim(kind=TrimKind.RANGE, from_seconds=5.0, to_seconds=9.0),
+    )])
+    pieces = plan_pieces(plan, by_id, children, assets)
+    assert [(piece.start, piece.end, piece.speed) for piece in pieces] == [(5.0, 9.0, 4.0)]
+    # Four seconds of walk at four times the speed is one second of the cut.
+    assert compiled_duration(pieces) == 1.0
+
+def test_a_range_without_both_ends_is_handed_back() -> None:
+    by_id, children, assets, clips = covered()
+    walk = next(clip for clip in clips if clip.asset_id == BROLL_ASSET)
+    plan = plan_for([Selection(clip_id=walk.id, beat_id="b1", trim=Trim(kind=TrimKind.RANGE, from_seconds=5.0))])
+    problems, _ = check_plan(plan, SemanticTimeline(id="tl_test", asset_ids=[], input_hash="hash", derivation_version=6),
+                             by_id, children, assets)
+    assert any("`range` needs both" in problem for problem in problems)
+
+def test_a_piece_turned_down_on_purpose_is_not_joined_to_its_neighbour() -> None:
+    by_id, children, assets, clips = footage()
+    first, second = speech_of(clips)[:2]
+    plan = plan_for([
+        Selection(clip_id=first.id, beat_id="b1"),
+        Selection(clip_id=second.id, beat_id="b1", volume=0.0),
+    ])
+    pieces = plan_pieces(plan, by_id, children, assets)
+    # They sit half a second apart and would otherwise be one shot, played at one level.
+    assert [piece.gain for piece in pieces] == [1.0, 0.0]
+
+def test_the_pacing_speed_multiplies_a_selection_s_own() -> None:
+    by_id, children, assets, clips = covered()
+    walk = next(clip for clip in clips if clip.asset_id == BROLL_ASSET)
+    plan = plan_for([Selection(clip_id=walk.id, beat_id="b1", speed=4.0)], pacing=Pacing(speed=1.5))
+    assert [piece.speed for piece in plan_pieces(plan, by_id, children, assets)] == [6.0]
+    plan.pacing.speed = 2.0
+    plan.selections[0].speed = 8.0
+    problems, _ = check_plan(plan, SemanticTimeline(id="tl_test", asset_ids=[], input_hash="hash", derivation_version=6),
+                             by_id, children, assets)
+    assert any("x16" in problem for problem in problems)
+
+def joined(transition: Optional[BeatTransition], lead: Optional[float], opening: float) -> tuple:
+    """Compile two beats, the second opening on silent picture at `opening` seconds into its file.
+
+    Returns:
+        `(pieces, notes)`.
+    """
+    by_id, children, assets, clips = covered()
+    talk = speech_of(clips)[0]
+    walk = next(clip for clip in clips if clip.asset_id == BROLL_ASSET)
+    plan = EditPlan(
+        timeline_id="tl_test", timeline_input_hash="hash",
+        beats=[Beat(id="b1", name="講"), Beat(id="b2", name="走", transition_in=transition, sound_lead=lead)],
+        selections=[
+            Selection(clip_id=talk.id, beat_id="b1"),
+            Selection(clip_id=walk.id, beat_id="b2",
+                      trim=Trim(kind=TrimKind.RANGE, from_seconds=opening, to_seconds=opening + 3.0)),
+        ],
+    )
+    return compile_pieces(plan, by_id, children, assets)
+
+def test_a_beat_comes_in_on_its_transition_and_its_sound_early() -> None:
+    pieces, notes = joined(BeatTransition(kind="dip", seconds=0.6, through="white"), 0.4, opening=5.0)
+    assert pieces[0].transition is None
+    assert pieces[1].transition == ("dip", 0.6, "white", "left")
+    assert pieces[1].sound_lead == 0.4
+    assert notes == []
+
+def test_a_transition_is_shortened_to_the_picture_its_file_has() -> None:
+    # A dissolve reaches back for its whole length, and this shot starts 0.3s into its file.
+    pieces, notes = joined(BeatTransition(kind="dissolve", seconds=1.0), 1.0, opening=0.3)
+    assert pieces[1].transition == ("dissolve", 0.3, "black", "left")
+    assert pieces[1].sound_lead == 0.3
+    assert any("shortened from 1s to 0.3s" in note for note in notes)
+    # At the very start of the file there is nothing to run in from, which is said rather than refused.
+    pieces, notes = joined(BeatTransition(kind="wipe", seconds=0.5), None, opening=0.0)
+    assert pieces[1].transition is None
+    assert any("was left out" in note for note in notes)
+
+def test_a_clip_lengthened_by_hand_over_the_next_one_is_not_played_twice(planned: dict) -> None:
+    project = compiled_project(planned)
+    first, second = main_clips(project)
+    apply_edits(project, get_project(project)["version"], ops(
+        {"action": "trim_clip", "track_id": "main", "clip_id": first["id"],
+         "new_source_range": {"start": float(first["source_range"]["start"]),
+                              "end": float(second["source_range"]["end"])}},
+        {"action": "delete_clip", "track_id": "main", "clip_id": second["id"]},
+    ))
+    result = compile_plan(project_id=project, expected_version=get_project(project)["version"],
+                          plan_id=planned["plan_id"])
+    assert len(main_clips(project)) == 1
+    assert any("already plays them" in note for note in result["notes"])
+
+def test_what_is_laid_over_the_cut_follows_a_clip_sped_up_by_hand() -> None:
+    by_id, children, assets, clips = footage()
+    first, second = speech_of(clips)[0], speech_of(clips)[2]
+    plan = EditPlan(
+        timeline_id="tl_test", timeline_input_hash="hash",
+        beats=[Beat(id="b1", name="一"), Beat(id="b2", name="二")],
+        selections=[Selection(clip_id=first.id, beat_id="b1"), Selection(clip_id=second.id, beat_id="b2")],
+    )
+    pieces = plan_pieces(plan, by_id, children, assets)
+    fast = Clip(id="p001", asset_id=ASSET_ID, timeline_in=Decimal(0), pinned=True, speed=2.0,
+                from_clip_ids=list(pieces[0].from_clip_ids),
+                source_range={"start": pieces[0].start, "end": pieces[0].end})
+    project = Project(id="x", tracks=[Track(id="main", track_type="video", clips=[fast])])
+    left, _ = as_left(pieces, project)
+    # The second part's marker lands where the sped-up first part now ends.
+    assert plan_markers(plan, left)[1]["timeline_in"] == pytest.approx(pieces[0].played / 2, abs=0.001)
+
+def test_how_a_beat_comes_in_and_how_a_piece_plays_reach_the_timeline(planned: dict) -> None:
+    stored = EditPlan.model_validate(get_plan(planned["plan_id"])["plan"])
+    save_plan(stored.model_copy(update={"beats": [
+        stored.beats[0].model_copy(update={"role": BeatRole.TURN}), Beat(id="b2", name="結尾", role=BeatRole.PAYOFF),
+    ]}))
+    second = planned["clips"][2]["clip_id"]
+    result = amend_plan(planned["plan_id"], 2, amendments(
+        {"action": "set_rationale", "clip_id": second, "beat_id": "b2"},
+        {"action": "set_beat_join", "beat_id": "b2", "transition_in": {"kind": "dissolve", "seconds": 0.4},
+         "sound_lead": 0.3},
+        {"action": "set_playback", "clip_id": second, "speed": 1.5, "volume": 0.5},
+    ))
+    assert result["problems"] == []
+    project = compiled_project(planned)
+    kept = server_repo.get_project(project).tracks[0].clips[1]
+    assert (kept.transition_in.kind, float(kept.transition_in.seconds)) == ("dissolve", 0.4)
+    assert float(kept.audio_lead) == pytest.approx(0.3)
+    assert (kept.speed, kept.volume) == (1.5, 0.5)
+
+def test_a_plan_is_copied_onto_a_timeline_built_over_more_files(planned: dict, media: Path) -> None:
+    from app.server import build_semantic_timeline, copy_plan, get_semantic_clip
+
+    quiet = import_asset(str(media / "silent.mp4"))["id"]
+    server_repo.save_analysis(analysis(duration=4.0, scenes=[(0.0, 4.0)], asset_id=quiet))
+    wider = build_semantic_timeline([planned["clips"][0]["asset_id"], quiet], rebuild=True)["timeline_id"]
+    assert wider != planned["timeline_id"]
+
+    copied = copy_plan(planned["plan_id"], timeline_id=wider, note="加上空景")
+    plan = EditPlan.model_validate(get_plan(copied["plan_id"])["plan"])
+    assert copied["plan_id"] != planned["plan_id"] and plan.timeline_id == wider
+    # Same moments of the same file, under the IDs the wider timeline gave them.
+    was = EditPlan.model_validate(get_plan(planned["plan_id"])["plan"])
+    for before, after in zip(was.selections, plan.selections):
+        assert after.clip_id.startswith(wider) and after.rationale == before.rationale
+        assert get_semantic_clip(after.clip_id)["source_range"] == get_semantic_clip(before.clip_id)["source_range"]
+    assert copied["problems"] == []

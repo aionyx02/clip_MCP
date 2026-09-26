@@ -35,8 +35,8 @@ from app.engine.diarize import speaker_model_name
 from app.engine.rhythm import rhythm_model_name
 from app.engine.faces import framing_note
 from app.engine.plan import (
-    BROLL_TRACK_ID, COMPILED_TRACKS, MUSIC_TRACK_ID, VIDEO_TRACK_ID, broll_covers, broll_slots, check_plan, check_recompile,
-    compile_operations, compiled_duration, diff_plans, music_beds, piece_changes, plan_pieces,
+    BROLL_TRACK_ID, COMPILED_TRACKS, MUSIC_TRACK_ID, VIDEO_TRACK_ID, as_left, broll_covers, broll_slots, check_plan,
+    check_recompile, compile_operations, compiled_duration, diff_plans, music_beds, piece_changes, plan_pieces,
 )
 from app.engine.sections import build_sections, candidate_hash, check_sections, propose_candidates
 from app.engine.semantic import (
@@ -1540,8 +1540,10 @@ def save_plan(plan: EditPlan, note: str = "") -> dict:
 
     Each selection carries a `trim` saying how much of its clip to use:
     `full`, `keep` with the clips inside a section to keep, `head` or `tail`
-    with a number of seconds, or `tighten` to drop the pauses and unusable
-    picture inside a section. There is no free-text trim on purpose: the
+    with a number of seconds, `range` for a stretch out of the middle, or
+    `tighten` to drop the pauses and unusable picture inside a section. A
+    selection's `speed` and `volume`, and a beat's `transition_in` and
+    `sound_lead`, say how it plays and how one part hands over to the next. There is no free-text trim on purpose: the
     compiler has to produce the same cut from the same plan every time, and it
     cannot do that if it has to interpret a sentence.
 
@@ -1584,6 +1586,80 @@ def save_plan(plan: EditPlan, note: str = "") -> dict:
         "problems": problems,
         "notes": notes,
     }
+
+@mcp.tool()
+def copy_plan(plan_id: str, timeline_id: Optional[str] = None, version: Optional[int] = None, note: str = "") -> dict:
+    """Store a copy of a plan under a new ID, optionally moved onto another timeline.
+
+    Use it to try a second way of cutting without touching the first, or to
+    carry a plan onto a timeline built over a different set of files — a
+    timeline over three days of footage and one over only the second day give
+    the same moment two different clip IDs, and this matches them up.
+
+    A clip is matched to the one in the other timeline that comes from the
+    same file, at the same level, over the same seconds; sections match only
+    if the same sections were set on both. Every reason, trim, cue and beat
+    is carried as it is.
+
+    Args:
+        plan_id: The plan to copy.
+        timeline_id: Timeline to move the copy onto; omit to keep the plan's
+            own.
+        version: Which version to copy; omit for the current one.
+        note: What the copy is for, kept in its history.
+
+    Returns:
+        As `save_plan`, for the new plan.
+
+    Raises:
+        ValueError: If the plan or the timeline does not exist, or a clip the
+            copy uses has no match in the other timeline — named, so it can be
+            taken out of the plan first. A rejected clip with no match is
+            simply not carried over, since there is nothing to reject.
+    """
+    plan = repo.get_plan(plan_id) if version is None else repo.get_plan_version(plan_id, version)
+    if plan is None:
+        raise ValueError(f"plan {plan_id} not found" + ("" if version is None else f" at version {version}"))
+    copy = plan.model_copy(deep=True, update={"id": str(uuid.uuid4()), "version": 1})
+    target = timeline_id or plan.timeline_id
+    if target != plan.timeline_id:
+        if repo.get_semantic_timeline(target) is None:
+            raise ValueError(f"semantic timeline {target} not found")
+        everything = 1_000_000
+
+        def place(clip: SemanticClip) -> tuple:
+            """Say which moment of which file a clip is, whatever timeline it sits in."""
+            return (clip.asset_id, clip.level, round(clip.source_range.start, 3), round(clip.source_range.end, 3))
+
+        there = {place(clip): clip.id for clip in repo.query_semantic_clips(target, limit=everything)}
+        mapping = {
+            clip.id: there.get(place(clip))
+            for clip in repo.query_semantic_clips(plan.timeline_id, limit=everything)
+        }
+        used = [
+            *(item.clip_id for item in copy.selections),
+            *(kept for item in copy.selections for kept in item.trim.keep_clip_ids),
+            *(clip for shot in copy.broll for clip in (shot.clip_id, shot.over_clip_id)),
+        ]
+        missing = sorted({clip for clip in used if mapping.get(clip) is None})
+        if missing:
+            raise ValueError(
+                f"timeline {target} has nothing matching {', '.join(missing)}: its file is not in that timeline, "
+                "or it is a section that timeline does not have. Take them out of the plan, or copy it onto a "
+                "timeline that has them"
+            )
+        for item in copy.selections:
+            item.clip_id = mapping[item.clip_id]
+            item.trim.keep_clip_ids = [mapping[kept] for kept in item.trim.keep_clip_ids]
+        for shot in copy.broll:
+            shot.clip_id, shot.over_clip_id = mapping[shot.clip_id], mapping[shot.over_clip_id]
+        copy.rejected = [
+            item.model_copy(update={"clip_id": mapping[item.clip_id]})
+            for item in copy.rejected if mapping.get(item.clip_id)
+        ]
+        copy.timeline_id = target
+    said = f"copied from {plan.id} v{plan.version}" + (f" onto {target}" if target != plan.timeline_id else "")
+    return save_plan(copy, f"{said}: {note}" if note else said)
 
 @mcp.tool()
 def amend_plan(plan_id: str, expected_version: int, amendments: list[PlanAmendment], note: str = "") -> dict:
@@ -1856,7 +1932,8 @@ def compile_plan(project_id: str, expected_version: int, plan_id: Optional[str] 
     project = repo.get_project(project_id)
     if not project:
         raise ValueError(f"project {project_id} not found")
-    pieces = plan_pieces(plan, clips, children, assets, cuts)
+    pieces, left_out = as_left(plan_pieces(plan, clips, children, assets, cuts), project)
+    notes = notes + left_out
     covers, _, _ = broll_covers(plan, pieces, clips, assets, cuts)
     blocked = check_recompile(plan, project, pieces, covers, music_beds(plan, pieces, assets, cuts))
     if blocked:

@@ -257,7 +257,7 @@ feedback are mapped in their own files.
 | 「這裡淡到黑再進來」「過白場」 / dip through a colour | `set_clip_look` with `transition_in: {kind: "dip", seconds: 1, through: "black"}`; `white` or a hex colour also work |
 | 「轉場拿掉，改回硬切」 / back to a straight cut | `set_clip_look` with `clear_transition: true` |
 | 「開頭淡入、結尾淡出」 / fade in and out | `set_clip_look` `video_fade_in` on the first clip, `video_fade_out` on the last |
-| 「這段快轉」「放慢一點」 / speed it up or slow it down | `set_clip_speed` with `speed`; 2.0 is twice as fast. Voices keep their pitch unless `preserve_pitch: false` |
+| 「這段快轉」「放慢一點」 / speed it up or slow it down | In a compiled cut, `amend_plan` with `set_playback`, so what is laid over it moves too. Otherwise `set_clip_speed` with `speed`; 2.0 is twice as fast. Voices keep their pitch unless `preserve_pitch: false` |
 | 「這段亮一點／色彩濃一點」 / brighter or more colourful | `set_clip_look` with `color` `brightness` or `saturation`; ones you leave out keep their value |
 | 「改成黑白」 / black and white | `set_clip_look` with `color` `{"saturation": 0}` |
 | 「色溫暖一點／冷一點」 / warmer or cooler | `set_clip_look` with `color` `temperature`, below 6500 for warmer |

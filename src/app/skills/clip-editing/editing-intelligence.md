@@ -23,10 +23,20 @@ without the whole thing being redone from memory.
    the user asks 「那段講到 X 的怎麼沒放」.
 2. Each selection's `trim` says how much of its clip to use: `full`, `keep`
    with the sentences inside a section to keep, `head` or `tail` with a number
-   of seconds, or `tighten` to drop the pauses out of a section. There is no
-   free-text trim. If none of these says what you mean, select `utterance`
+   of seconds, `range` with `from_seconds` and `to_seconds` for a stretch out
+   of the middle of a long shot, or `tighten` to drop the pauses out of a
+   section. There is no free-text trim. If none of these says what you mean, select `utterance`
    clips instead and name them one by one — the plan drops to the level it
    needs rather than leaving the decision to something downstream.
+   How a piece plays is part of the plan too: `speed` on a selection (4 or 8
+   for a timelapse of a walk, 0.5 for slow motion) and `volume` (0 mutes a
+   shout or the wind under music). How one part hands over to the next is on
+   the beat: `transition_in` (`dissolve`, `dip`, `wipe`) and `sound_lead` for
+   a J-cut, where the next place is heard before it is seen. Put them here
+   rather than on the timeline afterwards: music, markers and covering
+   picture are laid out against the plan's lengths, and a transition the
+   footage has too little picture for is shortened with a note instead of
+   failing.
 3. `validate_plan` before compiling. It costs nothing and catches a clip that
    is not there, a beat nothing belongs to, a trim longer than its clip, and
    footage marked `unusable` slipping in. `problems` stop the plan; `notes`
@@ -38,8 +48,11 @@ without the whole thing being redone from memory.
 5. `compile_plan` into an empty project builds the whole cut. Compiling the
    same plan again always gives the same cut, so an edit can be reproduced.
    A project that already has clips is refused: make a new one and keep both.
-6. When there are two ways to cut the same footage, save two plans and use
-   `diff_plan` to tell the user what actually differs. `get_plan` reads one
+6. When there are two ways to cut the same footage, `copy_plan` the first,
+   change the copy, and use `diff_plan` to tell the user what actually
+   differs. `copy_plan` with a `timeline_id` also carries a plan onto a
+   timeline built over a different set of files, where the same moments have
+   other clip IDs. `get_plan` reads one
    back, with the other plans listed for comparison.
 
 Compiling again is safe. A compiled clip remembers which plan and which
@@ -47,7 +60,11 @@ footage it came from, and any clip you adjust by hand — trimmed, moved,
 recoloured, split — is pinned by that edit alone. A pinned clip comes through
 the next compile with its adjustment intact, only in whatever place the new
 plan gives it. So do not redo a hand adjustment after recompiling: it is still
-there, and the result says how many clips were `kept` that way. If a
+there, and the result says how many clips were `kept` that way. Music,
+markers and covering picture are laid against the pinned clips as they now
+play, so after changing a clip's length or speed by hand, compile again to
+move them with it. A clip lengthened by hand over the footage of the one after
+it takes that footage in: the next compile does not put the other back. If a
 recompile is refused because a pinned clip's footage is no longer in the plan,
 that is a real choice to put to the user: either the clip goes back into the
 plan, or `set_clip_pinned` with `pinned: false` hands it back and the next
@@ -176,6 +193,9 @@ clip and `audio_fade_in` on the incoming one when the user asks for it.
 | 「剪接跟著音樂節拍」 / cut to the beat | `cut_on_beat` on that music cue, after `analyze_asset` on the song. Ask first — it suits a montage, not an interview |
 | 「這段我自己調的不要動」 / keep my version of this one | Already kept: editing it by hand pinned it. `set_clip_pinned` `pinned: true` says so for a clip nobody has touched |
 | 「這段照計畫重做就好」 / rebuild this one from the plan | `set_clip_pinned` with `pinned: false`, then compile again |
+| 「這段快轉」「這段靜音」 / speed up or mute one piece | `amend_plan` with `set_playback`: `speed` and `volume` for that selection |
+| 「章節之間溶接」「先聽到下一段」 / a transition or J-cut into a part | `amend_plan` with `set_beat_join` on the beat it comes into |
+| 「中間那段就好」 / only the middle of this shot | `set_trim` with `range` |
 
 Transcripts can misrecognize names and jargon. When a quote matters, check the
 surrounding segments, and ask the user if the meaning is unclear.
