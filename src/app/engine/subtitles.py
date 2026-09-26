@@ -195,7 +195,9 @@ def place_cues(project: Project, cues: Sequence[SubtitleCue]) -> List[PlacedCue]
     cut out is placed nowhere and simply does not appear; one whose words were
     split across two clips is placed twice, because they are said twice. Each
     placement is clipped to the window it lands in, so a line never runs past
-    the cut that ends it.
+    the cut that ends it. A clip turned all the way down shows only captions
+    written by hand for its picture, the ones with no word timings: nobody
+    hears what was said on it.
 
     Args:
         project: Project whose timeline the captions are placed on.
@@ -211,10 +213,19 @@ def place_cues(project: Project, cues: Sequence[SubtitleCue]) -> List[PlacedCue]
         by_asset.setdefault(cue.asset_id, []).append(cue)
 
     placed: List[PlacedCue] = []
-    for clip in captioned_clips(project):
+    heard = captioned_clips(project)
+    # A shot turned all the way down says nothing, but a caption written for its picture —
+    # one with no word timings, typed rather than transcribed — still belongs on it.
+    muted = [
+        clip for clip in (project.base_video_track.clips if project.base_video_track else [])
+        if clip.volume == 0
+    ]
+    for clip in sorted([*heard, *muted], key=lambda clip: clip.timeline_in):
         speed = Decimal(str(clip.speed))
         window_start, window_end = clip.source_range.start, clip.source_range.end
         for cue in by_asset.get(clip.asset_id, ()):
+            if clip.volume == 0 and cue.words:
+                continue
             first = max(cue.source_start, window_start)
             last = min(cue.source_end, window_end)
             if last - first <= MINIMUM_CUE:
@@ -358,7 +369,8 @@ def caption_geometry(width: int, height: int, style: CaptionStyle) -> CaptionGeo
         font_size=font_size,
         margin_h=margin_h,
         margin_v=round(height * bottom),
-        outline=max(1, round(font_size * style.outline_fraction)),
+        # At least a pixel when one is asked for at all; none when none is.
+        outline=max(1, round(font_size * style.outline_fraction)) if style.outline_fraction else 0,
         # libass measures in the ASS resolution, so the usable width is the frame minus both margins.
         max_units=max(4.0, (width - 2 * margin_h) / font_size),
     )
@@ -749,7 +761,8 @@ def build_ass(
         "Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, "
         "Shadow, Alignment, MarginL, MarginR, MarginV, Encoding",
         f"Style: Default,{font},{font_size},&H00FFFFFF,{waiting},&H00000000,&H80000000,"
-        f"-1,0,0,0,100,100,0,0,1,{outline},{max(1, outline // 2)},2,{margin_h},{margin_h},{margin_v},1",
+        # The shadow goes with the outline: a caption asked for with no outline is plain white text.
+        f"-1,0,0,0,100,100,0,0,1,{outline},{max(1, outline // 2) if outline else 0},2,{margin_h},{margin_h},{margin_v},1",
         "",
         "[Events]",
         "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text",

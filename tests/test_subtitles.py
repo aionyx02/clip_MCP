@@ -82,6 +82,11 @@ def test_build_ass_sizes_the_style_from_the_output_format() -> None:
     landscape_margin = int(landscape.split("Style: Default,")[1].splitlines()[0].split(",")[-2])
     assert portrait_margin > landscape_margin
 
+def test_a_caption_with_no_outline_has_no_shadow_either() -> None:
+    style = build_ass([], 1080, 1920, CaptionStyle(outline_fraction=0)).split("Style: Default,")[1].splitlines()[0]
+    # After the name come fifteen fields, then Outline and Shadow: plain white text, no dark edge at all.
+    assert style.split(",")[15:17] == ["0", "0"]
+
 def test_only_the_speech_that_survived_the_edit_is_captioned(spoken: str) -> None:
     project = build_project([video_track(), insert("a", spoken, 3.5, 6.5)])
     cues = generate_subtitles(project)["cues"]
@@ -731,3 +736,12 @@ def test_a_platform_preset_really_moves_the_text_in_the_rendered_picture(
 
     # TikTok's own buttons and caption take the bottom quarter, so the text stops higher.
     assert lowest_lit_row("tiktok") < lowest_lit_row("plain")
+
+def test_a_muted_shot_keeps_the_caption_written_for_its_picture_but_not_its_speech(spoken: str) -> None:
+    project = build_project([video_track(), insert("a", spoken, 0.0, 9.0, volume=0.0)])
+    stored = repo.get_project(project)
+    written = SubtitleCue(id="t", asset_id=spoken, source_start=Decimal("0.5"), source_end=Decimal("2.5"),
+                          text="原本的杯子區")
+    said = SubtitleCue(id="s", asset_id=spoken, source_start=Decimal("4.0"), source_end=Decimal("6.0"),
+                       text="第二句", words=[CueWord(start=Decimal("4.0"), end=Decimal("6.0"), text="第二句")])
+    assert [cue.cue_id for cue in place_cues(stored, [written, said])] == ["t"]
