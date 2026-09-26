@@ -451,6 +451,57 @@ def _same_line(first: Piece, second: Piece, cuts: Mapping[str, CleanCuts]) -> bo
         return False
     return SequenceMatcher(None, said, again).ratio() >= RETAKE_SIMILARITY
 
+def _on_the_sound(
+    pieces: Sequence[Piece],
+    cuts: Optional[Mapping[str, CleanCuts]],
+    pace: Pace = Pace(),
+) -> Tuple[List[Piece], List[str]]:
+    """Open and close each window where its sound does, not where the transcript says.
+
+    A window's edges come from word timings, and the transcriber now and then
+    places a first word late or a last one early. The measured silences say
+    where the sound actually rises and falls, so an edge with talking the
+    transcript missed right up against it moves out to the silence, and keeps
+    the breath the plan asks for inside that silence.
+
+    Args:
+        pieces: The windows, in order.
+        cuts: What is known about each file, keyed by asset ID.
+
+    Returns:
+        `(pieces, notes)`.
+    """
+    if not cuts:
+        return list(pieces), []
+    out: List[Piece] = []
+    moved = 0
+    for piece in pieces:
+        known = cuts.get(piece.asset_id)
+        if known is None:
+            out.append(piece)
+            continue
+        start, end = piece.start, piece.end
+        onset = known.sound_before(start)
+        if onset is not None:
+            quiet = max((q for q, loud in known.pauses if loud == onset), default=onset)
+            start = round(max(onset - pace.breath, quiet, 0.0), 3)
+        fall = known.sound_after(end)
+        if fall is not None:
+            loud = min((l for q, l in known.pauses if q == fall), default=fall)
+            end = round(min(fall + pace.breath, loud), 3)
+        if (start, end) != (piece.start, piece.end):
+            moved += (start != piece.start) + (end != piece.end)
+            out.append(replace(piece, start=start, end=end))
+        else:
+            out.append(piece)
+    notes = []
+    if moved:
+        notes.append(
+            f"{moved} cut(s) moved out to where the sound really starts or stops: the transcript placed a word "
+            "inside the talking, and cutting there would take the start or end of it off"
+        )
+    return out, notes
+
 def _without_retakes(
     pieces: Sequence[Piece],
     cuts: Optional[Mapping[str, CleanCuts]],
@@ -653,6 +704,8 @@ def _trimmed_ends(
     known = cuts.get(head.asset_id)
     first_word = known.first_word_in(head.start, head.end) if known is not None else None
     if first_word is not None:
+        # Where the talking really starts, when the transcript put its first word late.
+        first_word = known.sound_before(first_word) or first_word
         wanted = round(first_word - pace.breath, 3)
         opening = round(min(wanted, head.start + HEAD_TRIM_SECONDS), 3)
         if opening > head.start:
@@ -663,6 +716,7 @@ def _trimmed_ends(
     known = cuts.get(tail.asset_id)
     last_word = known.last_word_in(tail.start, tail.end) if known is not None else None
     if last_word is not None:
+        last_word = known.sound_after(last_word) or last_word
         wanted = round(last_word + pace.breath, 3)
         closing = round(max(wanted, tail.end - TAIL_TRIM_SECONDS), 3)
         if closing < tail.end:
@@ -991,7 +1045,9 @@ def compile_pieces(
 ) -> Tuple[List[Piece], List[str]]:
     """Work out every window the plan puts on the timeline, cleaned up, in order.
 
-    The cleaning runs in this order for a reason. Retakes go first: there is
+    The cleaning runs in this order for a reason. Edges the transcript placed
+    inside somebody's sound are put back on it first, since every later stage
+    trusts where a window starts and ends. Retakes go next: there is
     no sense taking the pauses out of a take about to be dropped. Pauses next,
     which is the stage that splits a window in two. Then the ends, which want
     the first and last window as they will finally be. Bad frames after that,
@@ -1018,7 +1074,7 @@ def compile_pieces(
     pieces = _selected(plan, clips, children, assets, cuts)
     notes: List[str] = []
     pace = pace_of(plan)
-    for stage in (_without_retakes, _without_pauses, _trimmed_ends, _off_bad_frames):
+    for stage in (_on_the_sound, _without_retakes, _without_pauses, _trimmed_ends, _off_bad_frames):
         pieces, said = stage(pieces, cuts, pace)
         notes.extend(said)
     merged = _merge(pieces)

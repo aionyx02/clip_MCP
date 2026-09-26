@@ -2200,3 +2200,19 @@ def test_a_plan_is_copied_onto_a_timeline_built_over_more_files(planned: dict, m
         assert after.clip_id.startswith(wider) and after.rationale == before.rationale
         assert get_semantic_clip(after.clip_id)["source_range"] == get_semantic_clip(before.clip_id)["source_range"]
     assert copied["problems"] == []
+
+def test_a_start_the_transcript_placed_late_is_moved_back_onto_the_sound() -> None:
+    # 「抽杯」: the sound rises out of silence at 6.35, the transcript's first word is at 6.74.
+    made = analysis(duration=12.0, segments=[(6.74, 9.0, "抽杯")], silences=[(0.0, 6.35), (9.0, 12.0)])
+    pieces, notes = compiled(made)
+    assert pieces[0].start == pytest.approx(6.35 - BREATH_SECONDS)
+    assert any("where the sound really starts" in note for note in notes)
+
+def test_a_word_stretched_across_a_silence_does_not_hide_the_sound_after_it() -> None:
+    # What the transcriber actually did with 「抽杯」: 「抽」 from 5.44 to 6.74, straight
+    # across a silence from 5.70 to 6.34, and 「杯」 from 6.74. The 「抽」 is heard at 6.34.
+    made = analysis(duration=12.0, segments=[(6.74, 9.0, "杯子")], silences=[(5.70, 6.34), (9.0, 12.0)])
+    made.transcript.segments.insert(0, TranscriptSegment(
+        start=5.44, end=6.74, text="抽", words=[TranscriptWord(start=5.44, end=6.74, text="抽")],
+    ))
+    assert clean_cuts(made).sound_before(6.74) == pytest.approx(6.34)

@@ -36,6 +36,13 @@ MIN_UTTERANCE_SECONDS = 0.4
 # Silence edges and transcript boundaries are both rounded to milliseconds, so a
 # boundary can land a hair outside the silence it was snapped to.
 EDGE_TOLERANCE_SECONDS = 0.02
+# The transcriber places a word's start late, or its end early, often enough to cut a
+# syllable off: the first edit made with the server lost the 「抽」 of 「抽杯」, which began
+# 0.39s before the next word the transcript knew of. Sound this long between a measured
+# silence and a cut, with no word over it, is somebody talking that the transcript
+# missed; this far is as far back as it is looked for. Provisional.
+UNHEARD_SECONDS = 0.15
+ONSET_REACH_SECONDS = 0.6
 MOSTLY = 0.5
 NEARLY_ALL = 0.9
 # How much of the talking in a stretch one voice has to hold before the stretch is called
@@ -850,6 +857,79 @@ class CleanCuts:
         return tuple(
             (quiet, loud) for quiet, loud in self.pauses
             if quiet > start and loud < end and loud - quiet > longer_than
+        )
+
+    def sound_before(self, seconds: float) -> Optional[float]:
+        """Find where talking the transcript missed really starts, just before a cut.
+
+        Args:
+            seconds: Where a window opens, in source seconds.
+
+        Returns:
+            The end of the measured silence the sound rises out of, when a cut
+            here would take the start of it off: sound runs up to the cut for
+            at least `UNHEARD_SECONDS` from a silence no more than
+            `ONSET_REACH_SECONDS` back, and the transcript has no word for it.
+            None otherwise, and for a file nobody transcribed or measured.
+        """
+        if not self.transcribed or not self.pauses or self._in_silence(seconds):
+            return None
+        ended = [loud for _, loud in self.pauses if seconds - ONSET_REACH_SECONDS <= loud < seconds]
+        if not ended:
+            return None
+        onset = max(ended)
+        quiet = max(start for start, loud in self.pauses if loud == onset)
+        if seconds - onset < UNHEARD_SECONDS or self._accounted(onset, seconds, (quiet, onset)):
+            return None
+        return onset
+
+    def sound_after(self, seconds: float) -> Optional[float]:
+        """Find where talking the transcript missed really stops, just after a cut.
+
+        Args:
+            seconds: Where a window closes, in source seconds.
+
+        Returns:
+            The start of the measured silence the sound falls into, when a cut
+            here would take the end of it off; the mirror of `sound_before`.
+        """
+        if not self.transcribed or not self.pauses or self._in_silence(seconds):
+            return None
+        begun = [quiet for quiet, _ in self.pauses if seconds < quiet <= seconds + ONSET_REACH_SECONDS]
+        if not begun:
+            return None
+        fall = min(begun)
+        loud = min(end for start, end in self.pauses if start == fall)
+        if fall - seconds < UNHEARD_SECONDS or self._accounted(seconds, fall, (fall, loud)):
+            return None
+        return fall
+
+    def _accounted(self, start: float, end: float, silence: Tuple[float, float]) -> bool:
+        """Say whether the transcript has a word for the sound in a stretch next to a silence.
+
+        A word that also runs into the silence does not count: it is itself
+        misplaced. That is the case this is for — the transcript stretched
+        「抽」 from 5.44s across a silence to 6.74s, and it was heard from 6.34s.
+
+        Args:
+            start: Where the stretch starts, in source seconds.
+            end: Where it ends.
+            silence: The measured silence it borders.
+
+        Returns:
+            True when a word covers part of the stretch and none of the silence.
+        """
+        tolerance = EDGE_TOLERANCE_SECONDS
+        return any(
+            opened < end - tolerance and closed > start + tolerance
+            and not (opened < silence[1] - tolerance and closed > silence[0] + tolerance)
+            for opened, closed in self.words
+        )
+
+    def _in_silence(self, seconds: float) -> bool:
+        """Say whether a moment sits in a measured silence."""
+        return any(
+            quiet - EDGE_TOLERANCE_SECONDS <= seconds <= loud + EDGE_TOLERANCE_SECONDS for quiet, loud in self.pauses
         )
 
     def spoken_between(self, start: float, end: float) -> str:

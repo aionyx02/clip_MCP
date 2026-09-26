@@ -482,3 +482,19 @@ def test_a_line_the_recogniser_wrote_over_silence_is_not_cut_into() -> None:
     analysis = talking()
     analysis.silences = [Span(start=0.5, end=5.5)]
     assert checks(project_of(clip("a", "x", 0, 1.5, 0)), {"x": analysis}) == []
+
+def test_a_cut_in_a_real_silence_is_clean_whatever_the_word_timings_say() -> None:
+    # The transcript runs 天氣 on to 很好 with 0.05s between; the microphone heard half a
+    # second of nothing there.
+    analysis = talking()
+    analysis.silences = [Span(start=2.1, end=2.6)]
+    analysis.transcript.segments[0].words[2].start = 2.05
+    assert checks(project_of(clip("a", "x", 0, 2.4, 0)), {"x": analysis}) == []
+
+def test_a_cut_that_takes_off_a_start_the_transcript_missed_is_found() -> None:
+    # The second sentence really starts at 5.6, where the silence ends; the transcript says
+    # 6.0. Starting the clip at 6.0 takes the first syllable off.
+    analysis = talking()
+    analysis.silences = [Span(start=5.0, end=5.6)]
+    found = checks(project_of(clip("a", "x", 6.0, 9.5, 0)), {"x": analysis})
+    assert [check for check, _ in found] == ["mid_speech"] and "starts in the middle" in found[0][1]

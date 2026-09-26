@@ -18,7 +18,7 @@ from typing import List, Mapping, Optional, Sequence, Tuple
 
 from app.engine.builder import DUCK_DEPTH_DB, Talking
 from app.engine.plan import LENGTH_TOLERANCE
-from app.engine.semantic import share_covered, was_audible
+from app.engine.semantic import clean_cuts, share_covered, was_audible
 from app.engine.subtitles import caption_overflow, captioned_clips
 from app.models.media import MediaAnalysis
 from app.models.timeline import CaptionStyle, Clip, PlacedCue, Project
@@ -45,6 +45,10 @@ MUSIC_UNDER_TALKING_DB = 12.0
 CLEAN_GAP_SECONDS = 0.2
 # How far either side of a cut to look for a clean one to offer instead. Provisional.
 CLEAN_SEARCH_SECONDS = 3.0
+# A cut inside a measured silence at least this long is clean whatever the word timings
+# say: the transcriber runs a word on across a pause often enough that taking its word
+# for it refused cuts made in the middle of real silence. Provisional.
+CLEAN_SILENCE_SECONDS = 0.3
 # How much of the same stretch of a file has to come back before it is the same shot shown
 # twice rather than two neighbouring moments. Provisional.
 REPEAT_SECONDS = 1.0
@@ -346,17 +350,26 @@ def _clean_points(analysis: MediaAnalysis) -> List[float]:
                 points.append((before.end + after.start) / 2)
     return sorted(points)
 
-def _inside_speech(analysis: MediaAnalysis, at: float) -> bool:
+def _inside_speech(analysis: MediaAnalysis, at: float, opens: bool) -> bool:
     """Tell whether a cut at one moment of a file lands in the middle of somebody talking.
 
     Args:
         analysis: The file's analysis.
         at: The moment, in source seconds.
+        opens: Whether the cut starts a clip rather than ending one.
 
     Returns:
         True inside a word, or between two words of one sentence closer
-        together than a pause.
+        together than a pause, or where sound the transcript missed runs
+        right up to the cut on the side it keeps out. Never inside a measured
+        silence of `CLEAN_SILENCE_SECONDS` or more.
     """
+    if any(span.start <= at <= span.end and span.end - span.start >= CLEAN_SILENCE_SECONDS
+           for span in analysis.silences):
+        return False
+    known = clean_cuts(analysis)
+    if (known.sound_before(at) if opens else known.sound_after(at)) is not None:
+        return True
     for segment in _said(analysis):
         if not segment.start < at < segment.end:
             continue
@@ -395,7 +408,7 @@ def _speech_cuts(clips: Sequence[Clip], analyses: Mapping[str, MediaAnalysis]) -
             ("ends", float(clip.audio_source_end), float(clip.audio_timeline_out)),
         )
         for side, at, landed in ends:
-            if at <= 0 or at >= analysis.duration or not _inside_speech(analysis, at):
+            if at <= 0 or at >= analysis.duration or not _inside_speech(analysis, at, side == "starts"):
                 continue
             near = [point for point in _clean_points(analysis) if abs(point - at) <= CLEAN_SEARCH_SECONDS]
             advice = (
