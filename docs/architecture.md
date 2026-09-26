@@ -62,9 +62,13 @@ clip_MCP/
 │   │   │                          #   semantic_timelines / semantic_clips / plans
 │   │   └── skills/                # 內建 AI 使用指南（以 MCP resources 提供，不綁定模型）
 │   │       └── clip-editing/
-│   │           ├── SKILL.md                # 主指南（每次載入）
-│   │           ├── pacing-and-structure.md # 剪輯節奏與結構（需要時才讀）
-│   │           └── examples.md             # 完整範例（需要時才讀）
+│   │           ├── SKILL.md                # 主指南（每次載入）：這句話對應哪個工具，與何時讀哪個子檔
+│   │           ├── reading-footage.md      # 讀素材：內容、搜尋、段落；沒有計畫的一整個資料夾
+│   │           ├── editing-intelligence.md # 選哪些、怎麼排、蓋什麼、配什麼音樂——寫 plan
+│   │           ├── pacing-and-structure.md # 多長、開在哪、切多快
+│   │           ├── platform-conventions.md # 各平台的規格、字幕樣式、出片前檢查、多比例、章節封面、匯出
+│   │           ├── feedback-handling.md    # 使用者的抱怨對應到 plan 的哪個修改；版本與回退
+│   │           └── examples.md             # 完整範例
 │   └── run.py                     # 直接執行用的啟動腳本（等同 clip-mcp 指令）
 ├── tests/                         # pytest；用 ffmpeg 即時產生素材，工作區隔離在暫存目錄
 │   ├── conftest.py                # 共用 fixture：測試用工作區與合成影音檔

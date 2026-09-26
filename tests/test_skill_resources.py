@@ -14,13 +14,17 @@ from typing import get_args
 import pytest
 from fastmcp import Client
 
+from app.models.plan import PlanAmendment
 from app.models.timeline import EditOperation
 from app.server import SKILLS_DIR, mcp
 
 SKILL_DIR = Path(SKILLS_DIR) / "clip-editing"
 SKILL = (SKILL_DIR / "SKILL.md").read_text(encoding="utf-8")
-# The guide is the three files together: a client told to read them has them all.
+# The guide is every file together: a client told to read them has them all.
 GUIDE = "\n".join(path.read_text(encoding="utf-8") for path in sorted(SKILL_DIR.glob("*.md")))
+SUPPORTING = sorted(path.name for path in SKILL_DIR.glob("*.md") if path.name != "SKILL.md")
+# The main file before it was split: whatever it answers, it answers in under half of this.
+UNSPLIT_LINES = 804
 
 def resources() -> dict:
     """List the skill resources the server publishes.
@@ -48,6 +52,17 @@ def operation_actions() -> set:
     for model in get_args(get_args(EditOperation)[0]):
         actions.add(get_args(model.model_fields["action"].annotation)[0])
     return actions
+
+def amendment_actions() -> set:
+    """Collect every plan amendment's `action` value.
+
+    Returns:
+        The amendments `amend_plan` accepts.
+    """
+    return {
+        get_args(model.model_fields["action"].annotation)[0]
+        for model in get_args(get_args(PlanAmendment)[0])
+    }
 
 def tool_names() -> set:
     """Collect every tool name a client actually sees.
@@ -116,12 +131,31 @@ def test_every_edit_operation_is_mentioned_in_the_guide() -> None:
     assert missing == [], f"operations missing from SKILL.md: {missing}"
 
 def test_the_guide_never_names_an_operation_that_does_not_exist() -> None:
-    used = set(re.findall(r'"action":\s*"([a-z_]+)"', SKILL))
-    unknown = sorted(used - operation_actions())
-    assert unknown == [], f"SKILL.md uses operations the server does not accept: {unknown}"
+    # Every file, not only the main one: an amendment written in a split-out file is
+    # sent just the same, and one the server does not know fails just the same.
+    used = set(re.findall(r'"action":\s*"([a-z_]+)"', GUIDE))
+    unknown = sorted(used - operation_actions() - amendment_actions())
+    assert unknown == [], f"the guide uses actions the server does not accept: {unknown}"
 
-@pytest.mark.parametrize("name", ["pacing-and-structure.md", "examples.md"])
+def test_every_plan_amendment_is_mentioned_in_the_guide() -> None:
+    # The amendments are how feedback lands; one the guide never names is feedback that
+    # has to be done the long way, by sending the whole plan again.
+    missing = sorted(action for action in amendment_actions() if action not in GUIDE)
+    assert missing == [], f"amendments missing from the guide: {missing}"
+
+@pytest.mark.parametrize("name", SUPPORTING)
 def test_the_split_out_files_say_what_they_are_for(name: str) -> None:
     text = (SKILL_DIR / name).read_text(encoding="utf-8")
     assert text.startswith("# ")
     assert "SKILL.md" in text, "a supporting file should say where it is referenced from"
+    # Progressive disclosure only works when a file says when it is wanted, first thing.
+    opening = text.split("\n\n", 2)[1]
+    assert "when" in opening.lower(), f"{name} should open by saying when to read it"
+
+@pytest.mark.parametrize("name", SUPPORTING)
+def test_the_main_file_says_when_to_read_every_other_one(name: str) -> None:
+    assert f"skill://clip-editing/{name}" in SKILL, f"SKILL.md never says when to read {name}"
+
+def test_the_main_file_stays_under_half_its_old_length() -> None:
+    """It grew to 804 lines of everything at once. It answers one question now."""
+    assert len(SKILL.splitlines()) <= UNSPLIT_LINES // 2

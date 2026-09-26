@@ -21,18 +21,21 @@ habit.
 
 **Take out the dead air before taking out content.** Most raw footage
 tightens by roughly a third just by removing pauses, restarts, and the
-seconds before and after someone speaks. Do that first. Only when it is still
-too long should you start dropping things the user might have wanted.
+seconds before and after someone speaks. A plan does that at every cut on its
+own, and `set_pacing` makes it stricter across the whole video. Only when it
+is still too long should you start dropping things the user might have wanted.
 
 **End on purpose.** Do not let it trail off on someone reaching for the
 camera. Trim the last clip to the last meaningful frame, and put the music
 fade-out there.
 
-**Respect the frame.** Output is center-cropped to fill, so in a vertical
-project the left and right of a landscape source are gone, and on a phone the
-platform's own captions and buttons cover roughly the top and bottom eighth.
-Check `preview_project` instead of assuming, and say so when something
-important falls outside.
+**Respect the frame.** Output is cropped to fill, so in a vertical project
+most of the width of a landscape source is gone. The crop follows the face
+the analysis found, but only the largest one, and anything else off to the
+side is lost; on a phone the platform's own captions and buttons cover part
+of the frame as well (`skill://clip-editing/platform-conventions.md`). Check
+`preview_project` instead of assuming, and say so when something important
+falls outside.
 
 Length is a decision, not a default. Ask for it unless the user said, and
 name a number when you propose one: 「短一點」 gives you nothing to cut to.
