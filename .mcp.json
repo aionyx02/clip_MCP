@@ -1,8 +1,0 @@
-{
-  "mcpServers": {
-    "clip-mcp": {
-      "command": "uv",
-      "args": ["run", "clip-mcp"]
-    }
-  }
-}

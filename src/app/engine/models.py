@@ -24,6 +24,7 @@ import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from typing import Callable, Optional
+from app.workspace import workspace_dir
 
 MEGABYTE = 1024 * 1024
 DOWNLOAD_CHUNK_BYTES = 1024 * 1024
@@ -88,7 +89,7 @@ def models_dir() -> str:
 
     Returns:
         The absolute path. By default `models/` inside the workspace, so that
-        it follows `CLIP_MCP_WORKSPACE` and deleting the workspace takes the
+        it follows wherever the workspace is and deleting it takes the
         models with it. `CLIP_MCP_MODELS` moves them elsewhere for anyone who
         would rather keep several gigabytes off that drive, or share one copy
         between workspaces — at the cost of the thing the default buys, which
@@ -97,7 +98,7 @@ def models_dir() -> str:
     override = os.environ.get("CLIP_MCP_MODELS")
     if override:
         return os.path.abspath(override)
-    return os.path.join(os.path.abspath(os.environ.get("CLIP_MCP_WORKSPACE", "workspace")), "models")
+    return os.path.join(workspace_dir(), "models")
 
 def whisper_dir() -> str:
     """Directory the speech recognition model is downloaded into.

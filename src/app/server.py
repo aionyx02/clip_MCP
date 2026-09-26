@@ -61,8 +61,9 @@ from app.engine.subtitles import (
 )
 from app.engine.renderer import JobManager
 from app.storage.repo import Repository
+from app.workspace import workspace_dir
 
-WORKSPACE_DIR = os.path.abspath(os.environ.get("CLIP_MCP_WORKSPACE", "workspace"))
+WORKSPACE_DIR = workspace_dir()
 SKILLS_DIR = Path(__file__).parent / "skills"
 MAX_STORYBOARD_TILES = 36
 MAX_CLIP_RESULTS = 200
@@ -3111,7 +3112,10 @@ def cancel_job(job_id: str) -> dict:
 
 def main():
     """Run the MCP server over the stdio transport."""
-    mcp.run()
+    # The banner goes to stderr, which every client keeps as its server log; a box of
+    # ASCII art in it on every start is noise, and on a console that is not UTF-8 it
+    # arrives mangled.
+    mcp.run(show_banner=False)
 
 if __name__ == "__main__":
     main()

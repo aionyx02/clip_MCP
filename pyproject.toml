@@ -26,7 +26,7 @@ dependencies = [
 ]
 
 [project.scripts]
-clip-mcp = "app.server:main"
+clip-mcp = "app.cli:main"
 
 [build-system]
 requires = ["uv_build>=0.11.18,<0.12"]

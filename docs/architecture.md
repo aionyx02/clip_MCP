@@ -9,6 +9,9 @@ clip_MCP/
 ├── src/
 │   ├── app/
 │   │   ├── __init__.py
+│   │   ├── cli.py                 # clip-mcp 指令：預設跑伺服器，setup 註冊客戶端，check 自我檢查
+│   │   ├── clients.py             # 註冊到 Claude Code／Desktop、Codex、opencode（先備份，可 dry run）
+│   │   ├── workspace.py           # 工作區在哪：環境變數 > 指標檔 > 原始碼目錄或使用者資料夾
 │   │   ├── server.py              # FastMCP 工具入口與路由
 │   │   ├── models/                # Pydantic 領域資料模型
 │   │   │   ├── __init__.py
@@ -104,13 +107,12 @@ clip_MCP/
 ├── docs/
 │   ├── architecture.md
 │   └── roadmap.md                 # 只留待辦：還缺的量測與剪輯功能、評測、里程碑
-├── workspace/                     # 本機資料與產出（CLIP_MCP_WORKSPACE 可覆寫，已 gitignore）
+├── workspace/                     # 從原始碼執行時的預設工作區（位置怎麼決定見 app/workspace.py，已 gitignore）
 │   ├── clip_mcp.db                # 專案、素材、分析結果、工作狀態
 │   ├── models/                    # 模型權重（CLIP_MCP_MODELS 可覆寫）
 │   ├── outputs/<job_id>/          # 每次 render 各自一個目錄，成品與字幕 ASS 都在裡面
 │   │                              #   成品以專案名稱命名，沒名字才退回 ID
 │   └── jobs/<job_id>/             # 分析工作的暫存
-├── .mcp.json                      # 客戶端設定：在此目錄啟動的 MCP 客戶端會自動掛上本伺服器
 ├── fastmcp.json                   # 伺服器設定：fastmcp CLI 的進入點與環境（fastmcp run / dev）
 ├── pyproject.toml                 # 相依套件與 clip-mcp 進入點（uv 管理，鎖在 uv.lock）
 └── README.md

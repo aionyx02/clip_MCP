@@ -112,30 +112,37 @@
 ```bash
 git clone https://github.com/aionyx02/clip_MCP.git
 cd clip_MCP
-uv sync
+uv tool install --editable .   # 裝成全域指令 clip-mcp，有自己的環境
+clip-mcp setup                 # 註冊到這台電腦上找得到的 AI 客戶端
+clip-mcp check                 # 確認：用哪個工作區、FFmpeg 在不在、各客戶端註冊了沒
 ```
+
+`setup` 會自動註冊 **Claude Code**（使用者層級，任何資料夾都能用）、**opencode**
+（`~/.config/opencode/opencode.json[c]`）、**Codex CLI**（`~/.codex/config.toml`）
+與 **Claude Desktop**，沒裝的就跳過。改之前都會留一份 `.bak`；先看會改什麼用
+`clip-mcp setup --dry-run`，只註冊某一個用 `--client opencode`。重跑是安全的，沒變就不動。
+註冊完重開客戶端即可，在哪個資料夾開都一樣。
+
+`--editable` 表示指令直接跑這份原始碼：`git pull` 之後重開客戶端就生效；
+相依套件有變時再跑一次 `uv tool install --editable . --reinstall`。
+不要讓客戶端用 `uv run clip-mcp`：`uv run` 每次啟動都會重寫專案 `.venv` 裡的
+`clip-mcp.exe`，只要有另一個客戶端正在跑它，就會因檔案被占用而啟動失敗。
 
 第一次執行語音辨識時會下載 `large-v3-turbo` 模型。
 
-## 接到 AI 客戶端
+### 手動設定其他客戶端
 
-專案內已附 `.mcp.json`，在此目錄啟動 Claude Code 即可直接使用。
-
-其他客戶端（Claude Desktop 等）加入這段設定：
+任何支援 stdio 的 MCP 客戶端，命令都只要 `clip-mcp` 本身（`clip-mcp check` 會印出完整路徑），
+不需要參數、不需要工作目錄，也不需要告訴它工作區在哪：
 
 ```json
-{
-  "mcpServers": {
-    "clip-mcp": {
-      "command": "uv",
-      "args": ["--directory", "/path/to/clip_MCP", "run", "clip-mcp"]
-    }
-  }
-}
+{ "mcpServers": { "clip-mcp": { "command": "C:\\Users\\you\\.local\\bin\\clip-mcp.exe", "args": [] } } }
 ```
 
-伺服器走 stdio transport。也可以用 `uv run fastmcp run fastmcp.json` 啟動，
-或 `uv run fastmcp dev fastmcp.json` 開 MCP Inspector 除錯。
+ChatGPT（網頁與 App）只接受透過 HTTPS 連線的遠端 MCP 伺服器，無法啟動你電腦上的程式；
+而這個伺服器能讀寫本機檔案，不適合直接開到網路上。要用 OpenAI 的模型請用 Codex CLI。
+
+除錯：`uv run fastmcp dev fastmcp.json` 開 MCP Inspector。
 
 ## 工具
 
@@ -214,7 +221,17 @@ uv sync
 
 ## 工作區與環境變數
 
-素材資料庫、暫存與成品都放在 `workspace/`：
+素材資料庫、暫存與成品都放在工作區。伺服器由哪個客戶端、從哪個資料夾啟動都一樣，
+工作區依序這樣決定（`clip-mcp check` 會說是哪一條選中的）：
+
+1. 環境變數 `CLIP_MCP_WORKSPACE`：臨時指到別處用。
+2. 指標檔：`clip-mcp setup` 寫的一行設定，Windows 在 `%APPDATA%\clip-mcp\config.toml`，
+   macOS 在 `~/Library/Application Support/clip-mcp/config.toml`，Linux 在 `~/.config/clip-mcp/config.toml`。
+   要搬工作區：把資料夾搬走，再跑 `clip-mcp setup --workspace <新位置>`。
+3. 都沒有：從原始碼執行（git clone，含 `--editable` 安裝）就用專案裡的 `workspace/`；
+   以一般套件安裝則用使用者資料夾（Windows `%LOCALAPPDATA%\clip-mcp\workspace`）。
+
+工作區的內容：
 
 ```
 workspace/
@@ -236,7 +253,7 @@ workspace/
 
 | 變數 | 預設 | 說明 |
 |---|---|---|
-| `CLIP_MCP_WORKSPACE` | `workspace` | 工作區路徑 |
+| `CLIP_MCP_WORKSPACE` | 見上 | 工作區路徑；優先於指標檔 |
 | `CLIP_MCP_MODELS` | `<工作區>/models` | 模型權重放哪。預設在工作區內，刪專案就一起刪掉 |
 | `CLIP_MCP_WHISPER_MODEL` | `large-v3-turbo` | 語音辨識模型 |
 | `CLIP_MCP_WHISPER_DEVICE` | `auto` | `cuda` 或 `cpu`；auto 會偵測 CUDA，失敗時退回 CPU |
