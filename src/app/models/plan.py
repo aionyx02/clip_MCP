@@ -155,6 +155,14 @@ class MusicPlan(BaseModel):
         ..., min_length=1, description="In the order they play; each runs until the next one comes in",
     )
     duck_under_speech: bool = Field(default=True, description="Drop the music while someone is talking")
+    crossfade_seconds: float = Field(
+        default=0.0,
+        ge=0,
+        le=10,
+        description="When one song gives way to the next, overlap them this long: the next comes in early and "
+                    "rises while this one fades. 0 meets them end to end, each with its own fades. How long is "
+                    "a matter of taste, so it is only ever what the plan says",
+    )
 
 class Pacing(BaseModel):
     """How tight the whole cut is.
@@ -178,6 +186,15 @@ class Pacing(BaseModel):
         le=0.5,
         description="Air left before and after every cut, in seconds, never more than the footage has. Lower is "
                     "tighter; 0 starts every line the instant its picture does. Null for the default, 0.1",
+    )
+    speed: Optional[float] = Field(
+        default=None,
+        ge=0.5,
+        le=2.0,
+        description="Play the whole sequence this much faster, voices at their own pitch: 1.1 is a tenth quicker, "
+                    "which most viewers do not notice as speed. Markers, covering picture, music and cuts on the "
+                    "beat are all laid out at the new pace. Covering picture itself plays at normal speed. Null "
+                    "for 1.0",
     )
 
 class PlanTarget(BaseModel):
@@ -330,7 +347,8 @@ def describe_amendment(op: "PlanAmendment") -> str:
         return f"uncovered {op.over_clip_id}"
     if isinstance(op, SetPacingOp):
         return (f"pacing: pauses over {op.pacing.pause_seconds or 'default'}s out, "
-                f"{op.pacing.breath_seconds if op.pacing.breath_seconds is not None else 'default'}s of air")
+                f"{op.pacing.breath_seconds if op.pacing.breath_seconds is not None else 'default'}s of air, "
+                f"x{op.pacing.speed or 1:g}")
     if isinstance(op, SetMusicLevelOp):
         return f"music x{op.scale:g}" + (f" from {op.beat_id}" if op.beat_id else "")
     if isinstance(op, SetTargetOp):

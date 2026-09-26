@@ -324,3 +324,79 @@ def test_the_export_tool_writes_the_file(media: Path) -> None:
     assert "<spine>" in Path(written["output_path"]).read_text(encoding="utf-8")
     with pytest.raises(ValueError, match="no captions"):
         export_timeline(project, "srt")
+
+def with_speed_and_a_dissolve() -> Project:
+    """A cut with a clip at double speed and one that dissolves in, and quieter music.
+
+    Returns:
+        The project.
+    """
+    return project_of(
+        clip("p1", "x", 1, 3, 0),
+        clip("p2", "x", 10, 14, 2, speed=2.0),
+        clip("p3", "x", 20, 23, 4, transition_in=Dissolve(kind="dissolve", seconds=Decimal("0.5"))),
+        music=[clip("m1", "m", 0, 7, 0, volume=0.5)],
+        markers=[(0, "開場"), (4, "結尾")],
+    )
+
+def test_an_edl_carries_speed_and_places_what_follows_by_the_time_it_plays() -> None:
+    text, behind = write_edl(with_speed_and_a_dissolve(), ASSETS)
+    events = [line.split() for line in text.splitlines() if line[:3].isdigit()]
+    # Four seconds of source at double speed is two on the timeline, so the next event starts at 4.
+    assert events[1][-4:] == ["00:00:10:00", "00:00:14:00", "00:00:02:00", "00:00:04:00"]
+    assert events[2][-2] == "00:00:04:00"
+    assert "M2   AX       060.0                00:00:10:00" in text
+    assert not any(line.startswith("speed changes") for line in behind)
+
+def test_otio_carries_speed_transitions_and_the_files_own_timecode() -> None:
+    timeline = json.loads(write_otio(with_speed_and_a_dissolve(), ASSETS, {"x": 36000.0})[0])
+    items = timeline["tracks"]["children"][0]["children"]
+    assert [item["OTIO_SCHEMA"] for item in items] == ["Clip.2", "Clip.2", "Transition.1", "Clip.2"]
+    fast = items[1]
+    assert fast["effects"][0]["time_scalar"] == 2.0
+    # Its range is where it starts in the file and how long it runs on the track.
+    assert (fast["source_range"]["start_time"]["value"], fast["source_range"]["duration"]["value"]) == (36010 * 30, 60)
+    dissolve = items[2]
+    assert dissolve["transition_type"] == "SMPTE_Dissolve"
+    # Ours ends on the cut, so all of it overlaps the clip before.
+    assert (dissolve["in_offset"]["value"], dissolve["out_offset"]["value"]) == (15, 0)
+
+def test_otio_says_what_a_wipe_was_when_it_cannot_say_it_as_one() -> None:
+    from app.models.timeline import Wipe
+
+    project = project_of(clip("p1", "x", 1, 3, 0), clip("p2", "x", 10, 12, 2, transition_in=Wipe(
+        kind="wipe", seconds=Decimal("0.6"), direction="left")))
+    text, behind = write_otio(project, ASSETS)
+    wipe = json.loads(text)["tracks"]["children"][0]["children"][1]
+    assert wipe["transition_type"] == "Custom_Transition"
+    assert wipe["metadata"]["clip_mcp"]["direction"] == "left"
+    assert any(line.startswith("wipes and dips") for line in behind)
+
+def test_fcpxml_carries_speed_level_and_timecode() -> None:
+    text, behind = write_fcpxml(with_speed_and_a_dissolve(), ASSETS, {"x": 36000.0})
+    root = ElementTree.fromstring(text.split("\n", 2)[2])
+    assert {asset.get("id"): asset.get("start") for asset in root.iter("asset")}["r3"] == "36000s"
+    spine = root.find(".//spine")
+    fast = spine[1]
+    assert (fast.get("offset"), fast.get("start"), fast.get("duration")) == ("2s", "36010s", "2s")
+    points = [(point.get("time"), point.get("value")) for point in fast.find("timeMap")]
+    assert points == [("36010s", "36010s"), ("36012s", "36014s")]
+    music = spine[0].find("asset-clip[@lane='-1']")
+    assert music.find("adjust-volume").get("amount") == "-6.0dB"
+    assert not any(line.startswith(("speed changes", "volume")) for line in behind)
+    assert any(line.startswith("transitions") for line in behind)
+
+@pytest.mark.parametrize("written, rate, expected", [
+    ("10:00:00:00", "25", 36000.0),
+    ("01:00:00;02", "30000/1001", 107894 * 1001 / 30000),
+    (None, "30", None),
+], ids=["non-drop", "drop-frame", "none"])
+def test_a_files_own_timecode_is_read(tmp_path: Path, written, rate: str, expected) -> None:
+    from app.engine.probe import probe_file, timecode_start
+
+    path = tmp_path / "stamped.mov"
+    command = ["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi", "-i", f"testsrc=size=160x120:rate={rate}:duration=1",
+               "-c:v", "libx264", "-pix_fmt", "yuv420p"]
+    subprocess.run(command + (["-timecode", written] if written else []) + [str(path)], check=True)
+    found = timecode_start(probe_file(str(path)))
+    assert found == (None if expected is None else pytest.approx(expected, abs=1e-6))

@@ -34,15 +34,15 @@ from app.engine.diarize import speaker_model_name
 from app.engine.rhythm import rhythm_model_name
 from app.engine.faces import framing_note
 from app.engine.plan import (
-    BROLL_TRACK_ID, MUSIC_TRACK_ID, VIDEO_TRACK_ID, broll_covers, broll_slots, check_plan, check_recompile,
-    compile_operations, compiled_duration, diff_plans, piece_changes, plan_pieces,
+    BROLL_TRACK_ID, COMPILED_TRACKS, MUSIC_TRACK_ID, VIDEO_TRACK_ID, broll_covers, broll_slots, check_plan, check_recompile,
+    compile_operations, compiled_duration, diff_plans, music_beds, piece_changes, plan_pieces,
 )
 from app.engine.sections import build_sections, candidate_hash, check_sections, propose_candidates
 from app.engine.semantic import (
     build_timeline, clean_cuts, content_scores, join_voices, timeline_input_hash, voice_levels,
 )
 from app.engine.ffmpeg import hidden_window_flags
-from app.engine.probe import picture_size, probe_file
+from app.engine.probe import picture_size, probe_file, timecode_start
 from app.engine.reframe import Framing, centre_at, frame_project
 from app.engine.builder import DEFAULT_LOUDNESS_TARGET, FFmpegRenderer
 from app.engine.delivery import CHECKS, chapter_metadata, chapters, check_delivery, clock, cover_candidates
@@ -1831,7 +1831,7 @@ def compile_plan(project_id: str, expected_version: int, plan_id: Optional[str] 
         raise ValueError(f"project {project_id} not found")
     pieces = plan_pieces(plan, clips, children, assets, cuts)
     covers, _, _ = broll_covers(plan, pieces, clips, assets, cuts)
-    blocked = check_recompile(plan, project, pieces, covers)
+    blocked = check_recompile(plan, project, pieces, covers, music_beds(plan, pieces, assets, cuts))
     if blocked:
         raise ValueError("compiling would undo work already on this project:\n- " + "\n- ".join(blocked))
 
@@ -1843,7 +1843,7 @@ def compile_plan(project_id: str, expected_version: int, plan_id: Optional[str] 
         for track in edited.tracks:
             for clip in track.clips:
                 origin = provenance.get(clip.id)
-                if origin is not None and track.id in (VIDEO_TRACK_ID, MUSIC_TRACK_ID, BROLL_TRACK_ID):
+                if origin is not None and track.id in COMPILED_TRACKS:
                     clip.from_plan_id = origin["from_plan_id"]
                     clip.from_clip_ids = origin["from_clip_ids"]
                     clip.pinned = origin["pinned"]
@@ -2017,8 +2017,8 @@ def preview_plan_diff(
     ]
     names = {beat.id: beat.name for beat in [*before.beats, *after.beats]}
     for beat_id in dict.fromkeys([piece.beat_id for piece in [*old, *new] if piece.beat_id]):
-        was = sum(piece.duration for piece in old if piece.beat_id == beat_id)
-        now = sum(piece.duration for piece in new if piece.beat_id == beat_id)
+        was = sum(piece.played for piece in old if piece.beat_id == beat_id)
+        now = sum(piece.played for piece in new if piece.beat_id == beat_id)
         if round(was, 1) != round(now, 1):
             lines.append(f"part {names.get(beat_id, beat_id)}: {was:.1f}s -> {now:.1f}s")
 
@@ -2030,9 +2030,9 @@ def preview_plan_diff(
         where = f"was {format_timestamp(change.at)}" if change.status == "dropped" else format_timestamp(change.at)
         shots.append((assets[piece.asset_id].path, middle, f"#{number} {where} {tag}".strip()))
         borders.append(CHANGE_COLOURS.get(change.status))
-        length = f"{piece.duration:.1f}s"
+        length = f"{piece.played:.1f}s"
         if change.status == "retrimmed" and change.was is not None:
-            length = f"{change.was.duration:.1f}s -> {piece.duration:.1f}s"
+            length = f"{change.was.played:.1f}s -> {piece.played:.1f}s"
         if change.status != "kept":
             lines.append(f"#{number}: {change.status} | {where} | {length} | {', '.join(piece.from_clip_ids)}")
     if len(shots) > MAX_STORYBOARD_TILES:
@@ -2940,6 +2940,28 @@ def export_cover(
     picture.save(path, "JPEG", quality=92)
     return {"output_path": path, "width": project.width, "height": project.height}
 
+def _timecodes(assets: Mapping[str, Asset]) -> Dict[str, float]:
+    """Read the timecode each file starts at, for an editing program to line it up by.
+
+    Read at export rather than kept on the asset: it is only wanted here, and a
+    file that cannot be read now simply starts at zero.
+
+    Args:
+        assets: The files, keyed by asset ID.
+
+    Returns:
+        The second each file's timecode starts at, for the files that carry one.
+    """
+    found: Dict[str, float] = {}
+    for asset_id, asset in assets.items():
+        try:
+            start = timecode_start(probe_file(asset.path))
+        except (FileNotFoundError, RuntimeError):
+            start = None
+        if start:
+            found[asset_id] = start
+    return found
+
 @mcp.tool()
 def export_timeline(
     project_id: str,
@@ -2954,10 +2976,11 @@ def export_timeline(
     alone, one picture track with its sound. `srt` writes the stored captions
     as they fall in the cut, which every one of those programs imports.
 
-    The edit comes across — every clip's in and out, its place and track, and
-    the parts of the video as markers — but not what this server draws
-    itself: speed changes, transitions, colour, volume and fades, voice
-    repair, where an inset sits. `left_behind` says which of those this cut
+    The edit comes across — every clip's in and out, its place and track,
+    speed changes, and the parts of the video as markers, on each file's own
+    timecode where it has one. `otio` also carries transitions and `fcpxml`
+    each clip's level. What stays behind is what this server draws itself:
+    colour, fades, voice repair, where an inset sits. `left_behind` says which of those this cut
     uses; tell the user, so they are not surprised in the other program.
 
     Args:
@@ -2987,7 +3010,8 @@ def export_timeline(
         if project.base_video_track is None or not project.base_video_track.clips:
             raise ValueError(f"project {project_id} has nothing on its sequence to export")
         writer = {"edl": write_edl, "otio": write_otio, "fcpxml": write_fcpxml}[format]
-        text, behind = writer(project, _referenced_assets(project))
+        assets = _referenced_assets(project)
+        text, behind = writer(project, assets, _timecodes(assets))
     folder = os.path.join(WORKSPACE_DIR, "outputs", f"export-{uuid.uuid4()}")
     os.makedirs(folder, exist_ok=True)
     path = os.path.join(folder, _output_name(project, "timeline").replace(".mp4", f".{format}"))

@@ -17,7 +17,7 @@ making the decisions it was built to stay out of.
 
 import bisect
 import math
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from difflib import SequenceMatcher
 from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 
@@ -54,7 +54,12 @@ HEAD_TRIM_SECONDS = 2.0
 TAIL_TRIM_SECONDS = 2.0
 VIDEO_TRACK_ID = "main"
 MUSIC_TRACK_ID = "music"
+# Where the incoming song goes while two cross-fade: a track holds one clip at a time, so
+# the songs alternate between the two.
+MUSIC_B_TRACK_ID = "music_b"
 BROLL_TRACK_ID = "broll"
+# Every track a compile owns and rebuilds; any other track belongs to whoever made it.
+COMPILED_TRACKS = (VIDEO_TRACK_ID, MUSIC_TRACK_ID, MUSIC_B_TRACK_ID, BROLL_TRACK_ID)
 # How long one shot of covering picture may run. Under the first it reads as a flicker
 # rather than a shot; over the second the viewer has lost the thread of what is being
 # said underneath. Both provisional until there is a corpus to tune them against.
@@ -89,10 +94,12 @@ class Pace:
         breath: Air left before and after every cut, in seconds.
         pause: How long a silence inside a shot has to run before it is taken
             out, in seconds.
+        speed: How fast the whole sequence plays.
     """
 
     breath: float = BREATH_SECONDS
     pause: float = PAUSE_SECONDS
+    speed: float = 1.0
 
 def pace_of(plan: EditPlan) -> Pace:
     """Read how tight a plan asks its cut to be.
@@ -106,6 +113,7 @@ def pace_of(plan: EditPlan) -> Pace:
     return Pace(
         breath=BREATH_SECONDS if plan.pacing.breath_seconds is None else plan.pacing.breath_seconds,
         pause=PAUSE_SECONDS if plan.pacing.pause_seconds is None else plan.pacing.pause_seconds,
+        speed=1.0 if plan.pacing.speed is None else plan.pacing.speed,
     )
 
 @dataclass(frozen=True)
@@ -121,6 +129,8 @@ class Piece:
             the piece's identity rather than a note about it.
         beat_id: The part of the video it belongs to, which is what the
             timeline's markers are made from.
+        speed: How fast it plays: the plan's pacing speed, set once the
+            windows are settled.
     """
 
     asset_id: str
@@ -128,15 +138,29 @@ class Piece:
     end: float
     from_clip_ids: Tuple[str, ...]
     beat_id: str = ""
+    speed: float = 1.0
 
     @property
     def duration(self) -> float:
-        """Length of the window in seconds.
+        """Length of the window in its file, in seconds.
 
         Returns:
-            The seconds it covers.
+            The seconds of source it covers.
         """
         return self.end - self.start
+
+    @property
+    def played(self) -> float:
+        """Length of the window on the timeline, at its speed.
+
+        Everything about where things land in the cut — markers, covers,
+        music, beats, the cut's length — is counted in this, not in
+        `duration`.
+
+        Returns:
+            The seconds it takes up on the timeline.
+        """
+        return self.duration / self.speed
 
 def _breath(clip: SemanticClip, breath: float) -> Tuple[float, float]:
     """Work out how much air a clip can be given at each end.
@@ -886,12 +910,13 @@ def _on_the_beat(
         piece = out[index]
         on_beat = playing is not None and playing.cut_on_beat and song is not None and song.beats
         if index + 1 < len(out) and on_beat:
-            closing_at = position + piece.duration
+            closing_at = position + piece.played
             shifts = [
                 round(beat - closing_at, 3)
                 for beat in _beats_near(song.beats, entry, length, entered_at, closing_at)
             ]
             known = cuts.get(piece.asset_id)
+            # A shift is timeline seconds; the window's end moves by that much of its file.
             if not shifts or abs(shifts[0]) <= ON_BEAT_SECONDS:
                 pass
             elif known is None or not known.transcribed:
@@ -900,17 +925,17 @@ def _on_the_beat(
                 reachable = [
                     shift for shift in shifts
                     if abs(shift) <= BEAT_SNAP_SECONDS and _may_close_at(
-                        piece, out[index + 1], round(piece.end + shift, 3), known, assets.get(piece.asset_id),
-                        pace_of(plan).breath,
+                        piece, out[index + 1], round(piece.end + shift * piece.speed, 3), known,
+                        assets.get(piece.asset_id), pace_of(plan).breath,
                     )
                 ]
                 if reachable:
-                    end = round(piece.end + reachable[0], 3)
-                    out[index] = Piece(piece.asset_id, piece.start, end, piece.from_clip_ids, piece.beat_id)
+                    end = round(piece.end + reachable[0] * piece.speed, 3)
+                    out[index] = replace(piece, end=end)
                     moved.append(abs(reachable[0]))
                 else:
                     stuck += 1
-        position += out[index].duration
+        position += out[index].played
 
     notes: List[str] = []
     if moved:
@@ -966,7 +991,12 @@ def compile_pieces(
     for stage in (_without_retakes, _without_pauses, _trimmed_ends, _off_bad_frames):
         pieces, said = stage(pieces, cuts, pace)
         notes.extend(said)
-    pieces, said = _on_the_beat(plan, _merge(pieces), assets, cuts)
+    merged = _merge(pieces)
+    if pace.speed != 1.0:
+        # Set once the windows are settled: every stage before this works in the file's own
+        # seconds, and only where things land on the timeline cares how fast they play.
+        merged = [replace(piece, speed=pace.speed) for piece in merged]
+    pieces, said = _on_the_beat(plan, merged, assets, cuts)
     return pieces, notes + said
 
 def plan_pieces(
@@ -1070,7 +1100,7 @@ def _placed(pieces: Sequence[Piece]) -> List[Tuple[Piece, float]]:
     placed, at = [], 0.0
     for piece in pieces:
         placed.append((piece, round(at, 3)))
-        at += piece.duration
+        at += piece.played
     return placed
 
 def _in_cut(clip: SemanticClip, placed: Sequence[Tuple[Piece, float]]) -> Optional[Tuple[float, float]]:
@@ -1094,7 +1124,8 @@ def _in_cut(clip: SemanticClip, placed: Sequence[Tuple[Piece, float]]) -> Option
         opened = max(piece.start, clip.source_range.start)
         closed = min(piece.end, clip.source_range.end)
         if closed > opened:
-            return round(at + (opened - piece.start), 3), round(at + (closed - piece.start), 3)
+            return (round(at + (opened - piece.start) / piece.speed, 3),
+                    round(at + (closed - piece.start) / piece.speed, 3))
     return None
 
 def compiled_duration(pieces: Sequence[Piece]) -> float:
@@ -1106,7 +1137,7 @@ def compiled_duration(pieces: Sequence[Piece]) -> float:
     Returns:
         The total in seconds.
     """
-    return round(sum(piece.duration for piece in pieces), 3)
+    return round(sum(piece.played for piece in pieces), 3)
 
 def _under(placed: Sequence[Tuple[Piece, float]], seconds: float) -> Optional[Tuple[Piece, float]]:
     """Find the window playing at one second of the timeline.
@@ -1119,7 +1150,7 @@ def _under(placed: Sequence[Tuple[Piece, float]], seconds: float) -> Optional[Tu
         The window and where it starts, or None past the end of the cut.
     """
     for piece, at in placed:
-        if at <= seconds < round(at + piece.duration, 3):
+        if at <= seconds < round(at + piece.played, 3):
             return piece, at
     return None
 
@@ -1142,7 +1173,7 @@ def _splits_a_sentence(
     """
     piece, at = under
     known = cuts.get(piece.asset_id) if cuts else None
-    return known is not None and known.splits_a_sentence(piece.start + (seconds - at))
+    return known is not None and known.splits_a_sentence(piece.start + (seconds - at) * piece.speed)
 
 def broll_covers(
     plan: EditPlan,
@@ -1187,7 +1218,7 @@ def broll_covers(
 
     in_beat: Dict[str, float] = {}
     for piece in pieces:
-        in_beat[piece.beat_id] = in_beat.get(piece.beat_id, 0.0) + piece.duration
+        in_beat[piece.beat_id] = in_beat.get(piece.beat_id, 0.0) + piece.played
 
     covers: List[Cover] = []
     covered_in_beat: Dict[str, float] = {}
@@ -1355,7 +1386,7 @@ def broll_slots(
     slots: List[dict] = []
     for run in runs:
         opened = run[0][1]
-        closed = round(run[-1][1] + run[-1][0].duration, 3)
+        closed = round(run[-1][1] + run[-1][0].played, 3)
         seconds = round(closed - opened, 3)
         if seconds < BROLL_LONG_SHOT_SECONDS:
             continue
@@ -1484,6 +1515,21 @@ def _cue_problems(plan: EditPlan, pieces: Sequence[Piece]) -> List[str]:
         return []
     first = _beginnings(pieces)
     problems: List[str] = []
+    crossfade = plan.music.crossfade_seconds
+    if crossfade:
+        starts = _starts(pieces)
+        total = compiled_duration(pieces)
+        entered = sorted(
+            (0 if cue.beat_id is None else first[cue.beat_id], cue) for cue in plan.music.cues
+            if cue.beat_id is None or cue.beat_id in first
+        )
+        for (index, cue), (following, incoming) in zip(entered, entered[1:]):
+            part = starts[following] - starts[index]
+            if cue.asset_id and incoming.asset_id and crossfade > part:
+                problems.append(
+                    f"music: a {crossfade:g}s cross-fade into the cue on {incoming.beat_id} is longer than the "
+                    f"{part:.1f}s part before it; shorten `crossfade_seconds`"
+                )
     previous = -1
     for position, cue in enumerate(plan.music.cues, start=1):
         if cue.beat_id is None:
@@ -1703,7 +1749,7 @@ def _compiled_clips(project: Optional[Project]) -> List[Tuple[str, Clip]]:
         return []
     return [
         (track.id, clip)
-        for track in project.tracks if track.id in (VIDEO_TRACK_ID, MUSIC_TRACK_ID, BROLL_TRACK_ID)
+        for track in project.tracks if track.id in COMPILED_TRACKS
         for clip in track.clips
     ]
 
@@ -1712,6 +1758,7 @@ def check_recompile(
     project: Project,
     pieces: Sequence[Piece],
     covers: Sequence[Cover] = (),
+    beds: Sequence["Bed"] = (),
 ) -> List[str]:
     """Check that compiling over a project would not destroy work done by hand.
 
@@ -1728,6 +1775,8 @@ def check_recompile(
         pieces: The windows the plan compiles to.
         covers: The B-roll the plan lays over them, which is identified by its
             own pair of clips rather than by a window.
+        beds: The music the plan lays under them, each stretch identified by
+            its cue and its pass through the song.
 
     Returns:
         One message per problem, empty when the project is safe to compile
@@ -1736,11 +1785,24 @@ def check_recompile(
     problems: List[str] = []
     available = {piece.from_clip_ids for piece in pieces}
     available |= {(cover.clip_id, cover.over_clip_id) for cover in covers}
-    if plan.music is not None:
-        # The music bed is made of no semantic clips at all, so an empty identity is what
-        # it has. It still has a place in the new cut as long as the plan still has music.
+    available |= {bed.key for bed in beds}
+    if beds:
+        # A music clip compiled before stretches had names of their own carries none; it
+        # was the first stretch, and is taken as the first stretch now.
         available.add(())
     for track_id, clip in _compiled_clips(project):
+        if clip.pinned and track_id in (MUSIC_TRACK_ID, MUSIC_B_TRACK_ID) and beds:
+            ordered = sorted((bed for bed in beds if bed.track_id == track_id), key=lambda bed: bed.timeline_in)
+            match = next((index for index, bed in enumerate(ordered) if bed.key == tuple(clip.from_clip_ids)),
+                         0 if not clip.from_clip_ids else None)
+            if match is not None and match + 1 < len(ordered):
+                room = ordered[match + 1].timeline_in - ordered[match].timeline_in
+                if float(clip.timeline_duration) > room + 0.001:
+                    problems.append(
+                        f"music clip {clip.id} was lengthened by hand to {float(clip.timeline_duration):.1f}s, "
+                        f"and the next stretch of music now starts {room:.1f}s after it; shorten it, or unpin "
+                        "it with set_clip_pinned to let the plan lay it again"
+                    )
         if clip.pinned:
             if tuple(clip.from_clip_ids) not in available:
                 problems.append(
@@ -1791,7 +1853,7 @@ def plan_markers(plan: EditPlan, pieces: Sequence[Piece]) -> List[dict]:
                 "timeline_in": round(position, 3),
                 "from_beat_id": piece.beat_id,
             })
-        position += piece.duration
+        position += piece.played
     return markers
 
 @dataclass(frozen=True)
@@ -1806,6 +1868,11 @@ class Bed:
         volume: Its gain.
         fade_in: Seconds of fade at its start.
         fade_out: Seconds of fade at its end.
+        key: What it is, for matching a stretch adjusted by hand on the next
+            compile: which cue it belongs to and which pass of that cue's song
+            it is. Stable for as long as the cue comes in on the same beat.
+        lane: 0 for the first music track, 1 for the second, which a song
+            cross-fading in over another is laid on.
     """
 
     asset_id: str
@@ -1815,6 +1882,18 @@ class Bed:
     volume: float
     fade_in: float
     fade_out: float
+    key: Tuple[str, ...] = ()
+    lane: int = 0
+
+    @property
+    def track_id(self) -> str:
+        """Say which music track this stretch goes on.
+
+        Returns:
+            The first music track, or the second for a song that comes in
+            cross-fading over the one before.
+        """
+        return MUSIC_TRACK_ID if self.lane == 0 else MUSIC_B_TRACK_ID
 
 def music_beds(
     plan: EditPlan,
@@ -1852,31 +1931,49 @@ def music_beds(
     position = 0.0
     for piece in pieces:
         starts.append(round(position, 3))
-        position += piece.duration
+        position += piece.played
     total = round(position, 3)
     entries = sorted(_cue_entries(plan, pieces).items())
+    crossfade = plan.music.crossfade_seconds
     beds: List[Bed] = []
+    lane, sounding = 0, False
     for order, (index, cue) in enumerate(entries):
         at = starts[index]
         until = starts[entries[order + 1][0]] if order + 1 < len(entries) else total
         if cue.asset_id is None or until <= at:
+            sounding = False
             continue
         entry = song_entry(cue, cuts.get(cue.asset_id) if cuts else None)
+        # A song cross-fading in over the one before starts early, and from earlier in
+        # itself by the same amount — so at the cut it is exactly where the cue said, on
+        # its beat when it cuts on the beat. Never from before the top of the song.
+        lead = min(crossfade, entry, at) if crossfade and sounding else 0.0
+        if lead:
+            lane = 1 - lane
+            # The song going out fades over exactly the stretch the one coming in rises.
+            beds[-1] = replace(beds[-1], fade_out=round(min(lead, beds[-1].end - beds[-1].start), 3))
+        else:
+            lane = 0
         # Everything settled to the millisecond the timeline keeps before it is added up,
         # so a loop can neither run a hair past the file nor overlap the next one.
         last = _song_length(assets.get(cue.asset_id))
         parts: List[Tuple[float, float, float]] = []
-        cursor = at
+        cursor, begin = round(at - lead, 3), round(entry - lead, 3)
         while until - cursor > 0.001:
-            end = round(until - cursor + entry, 3) if last is None else min(round(until - cursor + entry, 3), last)
-            if end - entry <= 0.001:
+            end = round(until - cursor + begin, 3) if last is None else min(round(until - cursor + begin, 3), last)
+            if end - begin <= 0.001:
                 break
-            parts.append((entry, end, round(cursor, 3)))
-            cursor = round(cursor + end - entry, 3)
+            parts.append((begin, end, round(cursor, 3)))
+            cursor = round(cursor + end - begin, 3)
+            # Loops come back to where the cue came in, not to the lead-in before it.
+            begin = entry
         if not parts:
+            sounding = False
             continue
+        sounding = True
         lengths = [end - start for start, end, _ in parts]
-        fade_in, fade_out = min(cue.fade_in, lengths[0]), min(cue.fade_out, lengths[-1])
+        fade_in = lead if lead else min(cue.fade_in, lengths[0])
+        fade_out = min(cue.fade_out, lengths[-1])
         if len(parts) == 1 and fade_in + fade_out > lengths[0]:
             # One short stretch with both fades on it: shrink them in proportion rather
             # than let one swallow the other.
@@ -1887,6 +1984,8 @@ def music_beds(
                 asset_id=cue.asset_id, start=start, end=end, timeline_in=timeline_in, volume=cue.volume,
                 fade_in=round(fade_in, 3) if number == 0 else 0.0,
                 fade_out=round(fade_out, 3) if number == len(parts) - 1 else 0.0,
+                key=(f"cue:{cue.beat_id or '^'}", f"pass:{number + 1}"),
+                lane=lane,
             ))
     return beds
 
@@ -2001,6 +2100,8 @@ def compile_operations(
         level = piece_gain(piece, clips, gains)
         if level != 1.0:
             placed["volume"] = level
+        if piece.speed != 1.0:
+            placed["speed"] = piece.speed
         if pinned is not None:
             placed.update(_as_made(pinned))
         operations.append(placed)
@@ -2060,25 +2161,36 @@ def compile_operations(
     # does and a part with no music is a gap on the track rather than a clip of silence.
     beds = music_beds(plan, pieces, assets, cuts)
     if beds:
-        if MUSIC_TRACK_ID not in present:
-            operations.append({
-                "action": "add_track", "track_id": MUSIC_TRACK_ID, "track_type": "audio",
-                "duck_under_speech": plan.music.duck_under_speech,
-            })
-        else:
-            operations.append({
-                "action": "set_track_audio", "track_id": MUSIC_TRACK_ID,
-                "duck_under_speech": plan.music.duck_under_speech,
-            })
+        for track_id in dict.fromkeys(bed.track_id for bed in sorted(beds, key=lambda bed: bed.lane)):
+            if track_id not in present:
+                operations.append({
+                    "action": "add_track", "track_id": track_id, "track_type": "audio",
+                    "duck_under_speech": plan.music.duck_under_speech,
+                })
+            else:
+                operations.append({
+                    "action": "set_track_audio", "track_id": track_id,
+                    "duck_under_speech": plan.music.duck_under_speech,
+                })
         for position, bed in enumerate(beds, start=1):
             clip_id = f"m{position:03d}"
-            operations.append({
-                "action": "add_clip", "track_id": MUSIC_TRACK_ID, "clip_id": clip_id,
+            laid = {
+                "action": "add_clip", "track_id": bed.track_id, "clip_id": clip_id,
                 "asset_id": bed.asset_id, "source_range": {"start": bed.start, "end": bed.end},
                 "timeline_in": bed.timeline_in, "volume": bed.volume,
                 "audio_fade_in": bed.fade_in, "audio_fade_out": bed.fade_out,
-            })
-            provenance[clip_id] = {"from_plan_id": plan.id, "from_clip_ids": [], "pinned": False}
+            }
+            # A stretch turned down or refaded by hand comes back as it was left; only where
+            # it sits is the plan's. One compiled before stretches had names is the first.
+            pinned = kept.pop((bed.track_id, bed.key), None)
+            if pinned is None and position == 1:
+                pinned = kept.pop((MUSIC_TRACK_ID, ()), None)
+            if pinned is not None:
+                laid.update(_as_made(pinned))
+            operations.append(laid)
+            provenance[clip_id] = {
+                "from_plan_id": plan.id, "from_clip_ids": list(bed.key), "pinned": pinned is not None,
+            }
     return operations, provenance
 
 @dataclass(frozen=True)
@@ -2161,7 +2273,7 @@ def _starts(pieces: Sequence[Piece]) -> List[float]:
     starts, position = [], 0.0
     for piece in pieces:
         starts.append(round(position, 3))
-        position += piece.duration
+        position += piece.played
     return starts
 
 def diff_plans(before: EditPlan, after: EditPlan) -> Dict[str, List[str]]:
@@ -2189,7 +2301,8 @@ def diff_plans(before: EditPlan, after: EditPlan) -> Dict[str, List[str]]:
     if pace_of(before) != pace_of(after):
         was, now = pace_of(before), pace_of(after)
         top.append(
-            f"pacing: pauses over {was.pause:g}s → {now.pause:g}s taken out, {was.breath:g}s → {now.breath:g}s of air"
+            f"pacing: pauses over {was.pause:g}s → {now.pause:g}s taken out, {was.breath:g}s → {now.breath:g}s of air, "
+            f"x{was.speed:g} → x{now.speed:g}"
         )
     if top:
         changes["goal"] = top

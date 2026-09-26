@@ -80,7 +80,10 @@ on — the first may leave it out to start with the video — and plays until th
 next cue takes over: 「開場輕快、訪談段不要音樂、結尾換一首」 is three cues, the
 middle one with no `asset_id`. `start` is where in the song to come in; a song
 shorter than its part loops back to there. The fades are per cue, so two songs
-meet with one fading out as the other fades up.
+meet end to end, one fading out as the other fades up. For the next song to
+overlap the last, set `crossfade_seconds` on the music: it comes in that much
+early and rises while the other fades, and is still exactly where its cue
+says at the cut. How long is taste, so ask rather than choosing.
 
 `cut_on_beat` on a cue moves every picture cut under it onto the song's beat.
 It is a style, not a fix: right for a montage or a fast short, wrong for an

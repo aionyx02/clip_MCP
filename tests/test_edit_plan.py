@@ -28,6 +28,7 @@ from app.engine.plan import (
     TAIL_TRIM_SECONDS,
     BEAT_SNAP_SECONDS,
     check_plan,
+    check_recompile,
     compile_operations,
     compile_pieces,
     compiled_duration,
@@ -1627,7 +1628,7 @@ def cut_points(pieces: List[Piece]) -> List[float]:
     """
     points, position = [], 0.0
     for piece in pieces[:-1]:
-        position += piece.duration
+        position += piece.played
         points.append(round(position, 3))
     return points
 
@@ -1891,3 +1892,174 @@ def test_a_looped_song_goes_onto_the_track_without_a_hair_of_overlap() -> None:
     assert len(music) > 4
     assert all(clip.source_range.end <= Decimal("1.3337") for clip in music)
     assert max(clip.timeline_out for clip in music) == project.duration
+
+def music_by_hand(plan: EditPlan, by_id: dict, assets: dict, index: int = 0, **changes) -> tuple:
+    """Compile a plan's music, then change one stretch of it by hand, which pins it.
+
+    Args:
+        plan: The plan.
+        by_id: The clips.
+        assets: The assets.
+        index: Which stretch to change.
+        **changes: The clip fields changed by hand.
+
+    Returns:
+        `(project, laid)` — a project holding the music with that stretch
+        changed, and the music operations the first compile made.
+    """
+    from app.models.timeline import Clip, TimeRange, Track, TrackType
+
+    operations, provenance = compile_operations(plan, by_id, {}, assets)
+    laid = [op for op in operations if op.get("track_id") == "music" and op["action"] == "add_clip"]
+    music = []
+    for position, op in enumerate(laid):
+        clip = Clip(
+            id=op["clip_id"], asset_id=op["asset_id"], timeline_in=Decimal(str(op["timeline_in"])),
+            source_range=TimeRange(start=Decimal(str(op["source_range"]["start"])),
+                                   end=Decimal(str(op["source_range"]["end"]))),
+            volume=op["volume"], from_plan_id=plan.id, from_clip_ids=provenance[op["clip_id"]]["from_clip_ids"],
+        )
+        if position == index:
+            clip = clip.model_copy(update={**changes, "pinned": True})
+        music.append(clip)
+    return Project(id="p", tracks=[Track(id="music", track_type=TrackType.AUDIO, clips=music)]), laid
+
+def test_music_turned_down_by_hand_stays_down_after_a_recompile() -> None:
+    """It used to be let through the recompile check and then laid again at the plan's level."""
+    plan, by_id, assets = parts()
+    plan = plan.model_copy(update={"music": MusicPlan(cues=[
+        MusicCue(asset_id=SONG, volume=0.4), MusicCue(beat_id="b3", asset_id="other", volume=0.5),
+    ])})
+    project, _ = music_by_hand(plan, by_id, assets, index=1, volume=0.1)
+    pieces = plan_pieces(plan, by_id, {}, assets)
+    assert check_recompile(plan, project, pieces, (), music_beds(plan, pieces, assets)) == []
+    operations, provenance = compile_operations(plan, by_id, {}, assets, project)
+    laid = [op for op in operations if op.get("track_id") == "music" and op["action"] == "add_clip"]
+    assert [op["volume"] for op in laid] == [0.4, 0.1]
+    assert [provenance[op["clip_id"]]["pinned"] for op in laid] == [False, True]
+
+def test_a_music_clip_from_before_stretches_had_names_is_taken_as_the_first() -> None:
+    plan, by_id, assets = parts()
+    plan = plan.model_copy(update={"music": MusicPlan(cues=[MusicCue(asset_id=SONG, volume=0.4)])})
+    project, _ = music_by_hand(plan, by_id, assets, volume=0.2, from_clip_ids=[])
+    operations, _ = compile_operations(plan, by_id, {}, assets, project)
+    assert [op["volume"] for op in operations if op.get("track_id") == "music" and op["action"] == "add_clip"] == [0.2]
+
+def test_music_lengthened_by_hand_into_the_next_stretch_is_refused() -> None:
+    from app.models.timeline import TimeRange
+
+    plan, by_id, assets = parts()
+    plan = plan.model_copy(update={"music": MusicPlan(cues=[
+        MusicCue(asset_id=SONG), MusicCue(beat_id="b3", asset_id="other"),
+    ])})
+    project, laid = music_by_hand(plan, by_id, assets, index=0, source_range=TimeRange(start=Decimal(0), end=Decimal(30)))
+    pieces = plan_pieces(plan, by_id, {}, assets)
+    problems = check_recompile(plan, project, pieces, (), music_beds(plan, pieces, assets))
+    assert any("lengthened by hand" in problem for problem in problems)
+
+def test_two_songs_cross_fade_on_two_tracks_when_the_plan_asks() -> None:
+    plan, by_id, assets = parts()
+    plan = plan.model_copy(update={"music": MusicPlan(crossfade_seconds=1.0, cues=[
+        MusicCue(asset_id=SONG), MusicCue(beat_id="b3", asset_id="other", start=10.0),
+    ])})
+    pieces = plan_pieces(plan, by_id, {}, assets)
+    cut = cut_points(pieces)[1]
+    first, second = music_beds(plan, pieces, assets)
+    # The next song comes in a second early on the other track, and a second earlier in
+    # itself, so at the cut it is at exactly the 10s the cue asked for.
+    assert (first.track_id, second.track_id) == ("music", "music_b")
+    assert second.timeline_in == pytest.approx(cut - 1.0)
+    assert second.start == pytest.approx(9.0)
+    assert first.timeline_in + first.end - first.start == pytest.approx(cut)
+    assert first.fade_out == 1.0 and second.fade_in == 1.0
+
+def test_without_a_cross_fade_the_songs_meet_end_to_end_on_one_track() -> None:
+    plan, by_id, assets = parts()
+    plan = plan.model_copy(update={"music": MusicPlan(cues=[
+        MusicCue(asset_id=SONG), MusicCue(beat_id="b3", asset_id="other"),
+    ])})
+    beds = music_beds(plan, plan_pieces(plan, by_id, {}, assets), assets)
+    assert {bed.track_id for bed in beds} == {"music"}
+
+def test_a_cross_fade_longer_than_the_part_it_leaves_is_refused() -> None:
+    plan, by_id, assets = parts()
+    plan = plan.model_copy(update={"music": MusicPlan(crossfade_seconds=9.0, cues=[
+        MusicCue(asset_id=SONG), MusicCue(beat_id="b2", asset_id="other"),
+    ])})
+    problems, _ = checked(plan, by_id, assets)
+    assert any("cross-fade" in problem and "crossfade_seconds" in problem for problem in problems)
+
+def test_both_songs_are_heard_where_they_cross_fade(planned: dict, tmp_path: Path) -> None:
+    from helpers import level, render
+
+    low, high = tone(tmp_path, "low.mp3", 700), tone(tmp_path, "high.mp3", 1500)
+    stored = EditPlan.model_validate(get_plan(planned["plan_id"])["plan"])
+    first, last = planned["clips"][0]["clip_id"], planned["clips"][2]["clip_id"]
+    saved = save_plan(stored.model_copy(update={
+        "beats": [Beat(id="b1", name="開場"), Beat(id="b2", name="結尾")],
+        "selections": [Selection(clip_id=first, beat_id="b1"), Selection(clip_id=last, beat_id="b2")],
+        "music": MusicPlan(duck_under_speech=False, crossfade_seconds=1.0, cues=[
+            MusicCue(asset_id=low, volume=1.0, fade_in=0, fade_out=0),
+            MusicCue(beat_id="b2", asset_id=high, start=5.0, volume=1.0, fade_in=0, fade_out=0),
+        ]),
+    }))
+    assert saved["problems"] == [], saved["problems"]
+    project = create_project(width=640, height=360)["id"]
+    compile_plan(project_id=project, expected_version=1, plan_id=saved["plan_id"])
+    state = get_project(project)
+    assert {track["id"] for track in state["tracks"]} >= {"music", "music_b"}
+    cut = float(next(track for track in state["tracks"] if track["id"] == "main")["clips"][1]["timeline_in"])
+    out = tmp_path / "crossfade.mp4"
+    render(project, out)
+    # Before the fade only the first song; halfway through it both; after the cut only the second.
+    assert level(out, cut - 1.8, 0.4, freq=700) > level(out, cut - 1.8, 0.4, freq=1500) + 20
+    both = (cut - 0.6, 0.3)
+    assert abs(level(out, *both, freq=700) - level(out, *both, freq=1500)) < 12
+    assert level(out, cut + 0.3, 0.5, freq=1500) > level(out, cut + 0.3, 0.5, freq=700) + 20
+
+def test_speeding_up_the_whole_cut_lays_everything_out_at_the_new_pace() -> None:
+    from app.models.plan import Pacing
+
+    plan, by_id, assets = parts()
+    plan = plan.model_copy(update={"music": MusicPlan(cues=[MusicCue(asset_id=SONG)])})
+    normal = plan_pieces(plan, by_id, {}, assets)
+    fast_plan = plan.model_copy(update={"pacing": Pacing(speed=1.25)})
+    fast = plan_pieces(fast_plan, by_id, {}, assets)
+    # The same footage, played quicker: the cut is shorter by exactly the speed.
+    assert [(piece.start, piece.end) for piece in fast] == [(piece.start, piece.end) for piece in normal]
+    assert compiled_duration(fast) == pytest.approx(compiled_duration(normal) / 1.25, abs=0.002)
+    operations, _ = compile_operations(fast_plan, by_id, {}, assets)
+    sequence = [op for op in operations if op.get("track_id") == "main" and op["action"] == "insert_clip"]
+    assert all(op["speed"] == 1.25 for op in sequence)
+    markers = next(op for op in operations if op["action"] == "set_markers")["markers"]
+    assert [marker["timeline_in"] for marker in markers] == pytest.approx([0.0, *cut_points(fast)])
+    beds = music_beds(fast_plan, fast, assets)
+    assert beds[-1].timeline_in + beds[-1].end - beds[-1].start == pytest.approx(compiled_duration(fast))
+
+def test_covering_picture_lands_where_its_words_are_played_at_the_new_pace() -> None:
+    from app.models.plan import Pacing
+
+    by_id, _, assets, clips = covered()
+    speech = speech_of([clip for clip in clips if clip.asset_id == ASSET_ID])
+    quiet = next(clip for clip in clips if clip.asset_id == BROLL_ASSET)
+    plan = plan_for(
+        [Selection(clip_id=clip.id, beat_id="b1") for clip in speech],
+        broll=[BrollShot(clip_id=quiet.id, over_clip_id=speech[1].id, seconds=1.0)],
+    )
+    normal, _, _ = broll_covers(plan, plan_pieces(plan, by_id, {}, assets), by_id, assets)
+    fast_plan = plan.model_copy(update={"pacing": Pacing(speed=1.25)})
+    fast, refused, _ = broll_covers(fast_plan, plan_pieces(fast_plan, by_id, {}, assets), by_id, assets)
+    assert refused == []
+    assert fast[0].timeline_in == pytest.approx(normal[0].timeline_in / 1.25, abs=0.002)
+    # The cover itself plays at normal speed, for as long as the plan says.
+    assert fast[0].duration == normal[0].duration == 1.0
+
+def test_a_sped_up_cut_compiles_to_the_length_the_plan_says(planned: dict) -> None:
+    stored = EditPlan.model_validate(get_plan(planned["plan_id"])["plan"])
+    from app.models.plan import Pacing
+
+    saved = save_plan(stored.model_copy(update={"pacing": Pacing(speed=1.2)}))
+    expected = validate_plan(saved["plan_id"])["duration"]
+    project = create_project(width=640, height=360)["id"]
+    compile_plan(project_id=project, expected_version=1, plan_id=saved["plan_id"])
+    assert float(get_project(project)["duration"]) == pytest.approx(expected, abs=0.01)

@@ -93,9 +93,11 @@ cut.
 `export_timeline` writes the cut pointed at the original files: `fcpxml` for
 Final Cut, Resolve and Premiere, `otio` for Resolve and OpenTimelineIO tools,
 `edl` for the sequence alone, and `srt` for the captions. The edit comes
-across; what this server draws itself does not — speed changes, transitions,
-colour, volume and fades, voice repair, where an inset sits. `left_behind`
-lists which of those this cut uses: say so when you hand over the file.
+across with its speed changes, on each file's own timecode; `otio` also
+carries transitions and `fcpxml` each clip's level. What this server draws
+itself does not — colour, fades, voice repair, where an inset sits.
+`left_behind` lists which of those this cut uses: say so when you hand over
+the file.
 
 ## Requests about delivery
 

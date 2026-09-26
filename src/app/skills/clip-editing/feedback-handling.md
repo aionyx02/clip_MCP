@@ -24,7 +24,8 @@ retyped to do it, and those reasons are the part that cannot be rebuilt.
   picture.
 - The whole video: `set_pacing` makes every cut tighter or looser at once —
   a lower `pause_seconds` takes out more dead air, a lower `breath_seconds`
-  leaves less around every cut. `set_music_level` turns the music by a
+  leaves less around every cut, and `speed` plays the whole sequence faster
+  with voices at their own pitch (1.1 is rarely noticed as speed). `set_music_level` turns the music by a
   `scale`, everywhere or from one `beat_id`. `set_target` changes the length
   or platform the cut is held to. `drop_beat` takes out a whole part and files
   everything in it under `rejected`.
@@ -60,7 +61,7 @@ let the user steer from there.
 |---|---|
 | 「太長了」 / too long | `set_target` if they name a length; then drop the weakest selections with `drop_selection`, whole parts with `drop_beat`, before retrimming the rest. Take dead air out before content (`set_pacing`) |
 | 「太短」「講不完整」 / too short, cut off | `set_trim` back to `full` on the pieces that stop mid-thought; `validate_plan` notes a cut that still ends mid-sentence |
-| 「整體節奏太慢」「很拖」 / it drags | `set_pacing` with a lower `pause_seconds` (0.45) and `breath_seconds` (0.05); if it still drags, it is the content — drop selections |
+| 「整體節奏太慢」「很拖」 / it drags | `set_pacing` with a lower `pause_seconds` (0.45) and `breath_seconds` (0.05); still slow, add `speed: 1.1`; if it still drags, it is the content — drop selections |
 | 「太趕」「喘不過氣」「剪太碎」 / too rushed, too choppy | `set_pacing` with more air: `breath_seconds` 0.2 and a higher `pause_seconds` (0.9) |
 | 「這段不要」 / lose this bit | `drop_selection` with their reason |
 | 「這整段不要」 / lose this whole part | `drop_beat` with their reason |

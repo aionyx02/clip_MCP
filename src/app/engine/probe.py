@@ -59,3 +59,41 @@ def picture_size(info: Dict[str, Any]) -> Optional[Tuple[int, int]]:
             width, height = height, width
         return int(width), int(height)
     return None
+
+def timecode_start(info: Dict[str, Any]) -> Optional[float]:
+    """Read the second a file's own timecode starts at.
+
+    A professional camera stamps its files with the time of day, or a running
+    count, so the first frame of a clip is 10:00:00:00 rather than zero; an
+    editing program lines the file up by that. A phone does not, and a file
+    without one starts at zero.
+
+    Args:
+        info: What `probe_file` returned.
+
+    Returns:
+        The seconds the first frame's timecode stands for, or None when the
+        file carries none or it cannot be read. Drop-frame timecode — written
+        with a semicolon — is counted the way it is meant: two frame numbers
+        skipped every minute except every tenth.
+    """
+    tags = [info.get("format", {}).get("tags", {})] + [stream.get("tags", {}) for stream in info.get("streams", [])]
+    written = next((value for tag in tags for key, value in tag.items() if key.lower() == "timecode"), None)
+    if not written:
+        return None
+    video = next((stream for stream in info.get("streams", []) if stream.get("codec_type") == "video"), None)
+    rate_text = (video or {}).get("r_frame_rate") or (video or {}).get("avg_frame_rate") or ""
+    try:
+        numerator, denominator = (int(part) for part in rate_text.split("/"))
+        rate = numerator / denominator
+        hours, minutes, seconds, frames = (int(part) for part in written.replace(";", ":").replace(".", ":").split(":"))
+    except (ValueError, ZeroDivisionError):
+        return None
+    nominal = round(rate)
+    count = ((hours * 60 + minutes) * 60 + seconds) * nominal + frames
+    if ";" in written or "." in written:
+        dropped = 2 if nominal == 30 else 4 if nominal == 60 else 0
+        total_minutes = hours * 60 + minutes
+        count -= dropped * (total_minutes - total_minutes // 10)
+    return count / rate
+
