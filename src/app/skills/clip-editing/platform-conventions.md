@@ -12,7 +12,7 @@ from SKILL.md.
 |---|---|---|---|
 | YouTube | landscape, 1920x1080 | `youtube` | Chapters from the parts of the cut; a cover frame |
 | YouTube Shorts | portrait, 1080x1920 | `reels` | No preset of its own; the Reels safe area is the closest |
-| Instagram Reels | portrait, 1080x1920 | `reels` | The caption, handle and audio credit stack up the bottom fifth, so captions sit above it; word-by-word on |
+| Instagram Reels | portrait, 1080x1920 | `reels` | The caption, handle and audio credit take the bottom of the frame, so captions sit just above them; word-by-word on |
 | TikTok | portrait, 1080x1920 | `tiktok` | As Reels, plus the buttons up the right-hand side push the safe area in further |
 | Instagram feed | square, 1080x1080 | `plain` | |
 
@@ -29,6 +29,11 @@ up, along with the text size and outline. Anything given alongside the preset
 wins, so `{"preset": "tiktok", "style": {"karaoke": false}}` is that safe area
 without the word-by-word lighting.
 
+- **One line at a time** (`single_line`, on by default): a caption too long
+  for one line is shown as several lines one after another, never stacked up
+  into the picture. Set the style before `generate_subtitles`, which then
+  keeps each caption to one line of that style. Turn it off only when the user
+  asks for stacked captions.
 - **Word-by-word lighting** (`karaoke`): each word brightens as it is said. On
   for `reels` and `tiktok`, which is where it is expected. It needs the word
   timings `generate_subtitles` puts on a caption; one written by hand has none

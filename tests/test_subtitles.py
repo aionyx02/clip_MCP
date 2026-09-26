@@ -295,10 +295,96 @@ def test_wrap_caption_breaks_chinese_without_spaces(media: Path) -> None:
     lines = wrap_caption(long_line, 12.0)
     assert len(lines) == 4 and all(len(line) <= 12 for line in lines)
 
-def test_build_ass_wraps_long_captions_into_several_lines() -> None:
+def test_build_ass_wraps_long_captions_into_several_lines_when_asked_to_stack() -> None:
     cue = PlacedCue(cue_id="c1", start=0, end=2, text="字" * 30)
-    dialogue = [line for line in build_ass([cue], 1080, 1920).splitlines() if line.startswith("Dialogue")][0]
-    assert dialogue.count(chr(92) + "N") >= 1
+    dialogue = dialogue_of(build_ass([cue], 1080, 1920, CaptionStyle(single_line=False)))
+    assert len(dialogue) == 1 and dialogue[0].count(chr(92) + "N") >= 1
+
+def test_a_caption_too_long_for_a_line_is_shown_one_line_after_another() -> None:
+    cue = PlacedCue(cue_id="c1", start=Decimal(0), end=Decimal(3), text="字" * 30)
+    dialogue = dialogue_of(build_ass([cue], 1080, 1920))
+    texts = [line.split(",,0,0,0,,")[1] for line in dialogue]
+    assert len(dialogue) > 1 and not any(chr(92) + "N" in text for text in texts)
+    assert "".join(texts) == "字" * 30
+    # About as long as each other, not a full line and then a scrap that flashes past.
+    assert max(map(len, texts)) - min(map(len, texts)) <= 1
+    # One after another, from the caption's start to its end with no gap.
+    times = [line.split(",")[1:3] for line in dialogue]
+    assert times[0][0] == "0:00:00.00" and times[-1][1] == "0:00:03.00"
+    assert all(earlier[1] == later[0] for earlier, later in zip(times, times[1:]))
+
+def test_a_line_comes_up_as_its_first_word_is_said() -> None:
+    said = [CueWord(start=Decimal(index) / 2, end=Decimal(index + 1) / 2, text="字字") for index in range(12)]
+    cue = PlacedCue(cue_id="c1", start=Decimal(0), end=Decimal(6), text="字字" * 12, words=said)
+    dialogue = dialogue_of(build_ass([cue], 1080, 1920))
+    assert len(dialogue) == 2
+    # Twelve words of two characters: six each, the second line up as its first word starts.
+    assert dialogue[1].split(",")[1] == "0:00:03.00"
+
+def said_with_a_pause(text: str, before: int, pause: str, step: str = "0.2") -> PlacedCue:
+    """Build a caption said a character at a time, with one pause in it.
+
+    Args:
+        text: What is said.
+        before: Which character the pause comes before.
+        pause: How long the pause runs, in seconds.
+        step: How long each character takes to say.
+
+    Returns:
+        The caption, with its word timings.
+    """
+    said, clock = [], Decimal(0)
+    for index, character in enumerate(text):
+        if index == before:
+            clock += Decimal(pause)
+        said.append(CueWord(start=clock, end=clock + Decimal(step), text=character))
+        clock += Decimal(step)
+    return PlacedCue(cue_id="c1", start=Decimal(0), end=clock, text=text, words=said)
+
+def test_a_line_breaks_where_the_speaker_paused() -> None:
+    # Twenty characters take two lines at 1080 wide. Ten and ten would break in the middle
+    # of 「咖啡廳」; the speaker paused after the eighth.
+    text = "今天來點特別的事我們從咖啡廳結束營業開始"
+    lines = [line.split(",,0,0,0,,")[1] for line in dialogue_of(build_ass([said_with_a_pause(text, 8, "0.6")], 1080, 1920))]
+    assert lines == ["今天來點特別的事", "我們從咖啡廳結束營業開始"]
+    # With nothing to go on, the lines come out even.
+    lines = [line.split(",,0,0,0,,")[1] for line in dialogue_of(build_ass([said_with_a_pause("字" * 20, 8, "0")], 1080, 1920))]
+    assert [len(line) for line in lines] == [10, 10]
+
+@pytest.mark.parametrize("before", range(6, 14))
+def test_a_line_never_breaks_inside_a_chinese_word(before: int) -> None:
+    # The recogniser hands back one character at a time; wherever the even break falls,
+    # it must not split the café in two.
+    text = "字" * before + "咖啡廳" + "字" * (20 - before)
+    lines = [line.split(",,0,0,0,,")[1] for line in dialogue_of(build_ass([said_with_a_pause(text, 0, "0")], 1080, 1920))]
+    assert len(lines) > 1 and any("咖啡廳" in line for line in lines)
+
+def test_captions_are_proposed_broken_where_the_speaker_paused(media: Path) -> None:
+    asset = import_asset(str(media / "silent.mp4"))["id"]
+    # Quicker than the drawing test, to fit inside a four-second file.
+    cue = said_with_a_pause("今天來點特別的事我們從咖啡廳結束營業開始", 8, "0.6", step="0.15")
+    transcribe(asset, [TranscriptSegment(
+        start=0.0, end=float(cue.end), text=cue.text,
+        words=[TranscriptWord(text=word.text, start=float(word.start), end=float(word.end)) for word in cue.words],
+    )])
+    project = build_project([video_track(), insert("a", asset, 0, 4)], width=1080, height=1920)
+    assert [item["text"] for item in generate_subtitles(project)["cues"]] == [
+        "今天來點特別的事", "我們從咖啡廳結束營業開始",
+    ]
+
+def test_a_bilingual_caption_keeps_both_its_lines() -> None:
+    cue = PlacedCue(cue_id="c1", start=0, end=2, text="字" * 30, secondary="The first line")
+    assert len(dialogue_of(build_ass([cue], 1080, 1920))) == 1
+
+def test_captions_are_proposed_one_line_wide_for_the_frame(media: Path) -> None:
+    asset = import_asset(str(media / "silent.mp4"))["id"]
+    said = [(character, index * 0.2, index * 0.2 + 0.2) for index, character in enumerate("一二三四五六七八九十" * 2)]
+    transcribe(asset, [TranscriptSegment(start=0.0, end=4.0, text="一二三四五六七八九十" * 2, words=words(*said))])
+    project = build_project([video_track(), insert("a", asset, 0, 4)], width=1080, height=1920)
+    edit(project, [{"action": "set_caption_style", "preset": "tiktok"}])
+    cues = generate_subtitles(project)["cues"]
+    # A tiktok line holds twelve characters at 1080 wide, well under the default count.
+    assert len(cues) > 1 and all(len(cue["text"]) <= 12 for cue in cues)
 
 def test_captions_come_only_from_the_base_track(spoken: str, media: Path) -> None:
     # An inset is a picture over the sequence's sound, not a second voice to caption.

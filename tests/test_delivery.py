@@ -166,8 +166,10 @@ def placed(text: str, **fields) -> PlacedCue:
     return PlacedCue(cue_id="c", start=Decimal(1), end=Decimal(3), text=text, **fields)
 
 def test_a_caption_too_tall_for_the_frame_is_found() -> None:
-    style = CaptionStyle(size_fraction=1 / 6)
+    # Only a caption allowed to stack can climb out of the frame.
+    style = CaptionStyle(size_fraction=1 / 6, single_line=False)
     long = placed("這是一句非常非常長的字幕" * 8)
+    assert caption_overflow([long], 1080, 1920, CaptionStyle(size_fraction=1 / 6)) == []
     assert caption_overflow([long], 1080, 1920, style) == [long]
     assert caption_overflow([placed("短")], 1080, 1920, style) == []
     findings = check_delivery(project_of(clip("a", "x", 0, 10, 0), width=1080, height=1920), {}, captions=[long],

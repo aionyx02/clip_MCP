@@ -214,6 +214,12 @@ class CaptionStyle(BaseModel):
     secondary_scale: float = Field(
         default=0.75, gt=0, le=1, description="How big the second line of a bilingual caption is, against the first",
     )
+    single_line: bool = Field(
+        default=True,
+        description="Never stack a caption into several lines: one too long for a line is shown as several "
+                    "lines one after another, split between words and timed to when they are said. Off, a "
+                    "long caption wraps upwards into the picture. A bilingual caption keeps its two lines",
+    )
 
 # Where each platform's own furniture sits over the picture, how large text has to be to
 # read on a phone held at arm's length, and how heavy an outline it takes to stay legible
@@ -228,11 +234,13 @@ CAPTION_PRESETS: Dict[str, CaptionStyle] = {
     # own control bar to stay above.
     "youtube": CaptionStyle(size_fraction=1 / 20, bottom_fraction=0.10, side_fraction=0.10,
                             outline_fraction=1 / 18),
-    # The caption, the handle and the audio credit stack up the bottom fifth of a Reel.
-    "reels": CaptionStyle(size_fraction=1 / 14, bottom_fraction=0.22, side_fraction=0.10,
+    # The caption, the handle and the audio credit take the bottom of a Reel. Captions sit
+    # just above them rather than clear of the whole stack: one line placed low is what
+    # captioned short video looks like, and a block halfway up the frame covers the subject.
+    "reels": CaptionStyle(size_fraction=1 / 16, bottom_fraction=0.16, side_fraction=0.08,
                           outline_fraction=1 / 10, karaoke=True),
     # Same again, and the buttons up the right-hand side push the safe area in further.
-    "tiktok": CaptionStyle(size_fraction=1 / 13, bottom_fraction=0.26, side_fraction=0.14,
+    "tiktok": CaptionStyle(size_fraction=1 / 15, bottom_fraction=0.18, side_fraction=0.10,
                            outline_fraction=1 / 9, karaoke=True),
 }
 

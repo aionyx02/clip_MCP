@@ -161,7 +161,9 @@ user corrects what is wrong before a render is wasted.
    such as `intro` or `c1`. Put all operations for one request into a single
    `apply_edits` call.
 5. Add music if requested; see [Background music](#background-music).
-6. If the user asked for captions, call `generate_subtitles`, show them the
+6. If the user asked for captions, set the caption style first (the platform
+   file), because each caption is proposed one line wide for that style. Then
+   call `generate_subtitles`, show them the
    lines — transcripts mishear names — and store them with `set_subtitles`
    once they are happy. Correct single lines afterwards with `edit_subtitle`
    and its `cue_id`; never resend the whole set to change one word. Lower

@@ -1,10 +1,12 @@
 """Turn subtitle cues into an ASS file that FFmpeg can burn into the picture."""
 
 import os
+import re
 import unicodedata
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Dict, Iterator, List, Mapping, Optional, Sequence, Tuple
+from functools import lru_cache
+from typing import Callable, Dict, Iterator, List, Mapping, Optional, Sequence, Tuple, Union
 
 from app.engine.semantic import share_covered, speaker_at, was_audible
 from app.models.media import Span, SpeakerTurn, Transcript, TranscriptSegment, TranscriptWord
@@ -49,6 +51,30 @@ UNSPOKEN_COLOUR = "&H00909090"
 # the gap libass leaves between lines. An estimate of the renderer's own spacing rather
 # than a taste, used only to tell whether a block of lines fits in the frame.
 CAPTION_LINE_HEIGHT = 1.25
+# Where a long caption is broken into lines: how much a pause is worth against lines of
+# uneven length, and how long a pause earns the whole of it. Half a second is the gap
+# between two phrases; two lines, one three times the length of the other, cost as much
+# as that pause is worth. Provisional.
+PHRASE_PAUSE_WEIGHT = 0.5
+PHRASE_PAUSE_SECONDS = 0.5
+# Spoken Chinese comes back from the recogniser with few pauses and no punctuation, so the
+# words themselves say where a phrase ends: after a particle that closes one, before a
+# word that opens the next, and never between a number and what it counts (`8|點`,
+# `一|整天`). Weighed against the pause and against uneven lines as above. Provisional.
+PHRASE_CLOSERS = tuple("啊了吧呢囉喔嗎呀啦耶欸哦嘛，。！？、,.!?")
+PHRASE_OPENERS = ("但是", "可是", "不過", "然後", "所以", "因為", "而且", "其實", "結果", "還有", "那", "我", "你", "他", "她")
+PHRASE_NUMERALS = tuple("0123456789一二三四五六七八九十百千萬兩幾半")
+PHRASE_CLOSER_WEIGHT = 0.4
+PHRASE_OPENER_WEIGHT = 0.3
+PHRASE_NUMERAL_PENALTY = 0.8
+# The recogniser hands Chinese back a character at a time, so its words say nothing about
+# where `營業` begins. A dictionary does, and a break inside one of its words is worse than
+# any line being uneven. Heavy rather than forbidden, because a word longer than the room
+# left on a line still has to be broken somewhere. Provisional.
+PHRASE_INSIDE_WORD_PENALTY = 1.5
+# Short lines read faster than full ones, so a line more is worth it to break in the right
+# place, up to one extra line in three. Each extra line costs this much. Provisional.
+PHRASE_EXTRA_LINE_COST = 0.3
 
 def format_ass_time(seconds: float) -> str:
     """Format a time the way an ASS event line expects it.
@@ -337,6 +363,272 @@ def caption_geometry(width: int, height: int, style: CaptionStyle) -> CaptionGeo
         max_units=max(4.0, (width - 2 * margin_h) / font_size),
     )
 
+def _speaker_prefix(cue: PlacedCue, style: CaptionStyle) -> str:
+    """Write the name that goes in front of a caption, when the style shows one.
+
+    Args:
+        cue: The placed caption.
+        style: How captions are drawn.
+
+    Returns:
+        The escaped name and its colon, or nothing.
+    """
+    if style.speaker_mark not in (SpeakerMark.NAME, SpeakerMark.BOTH) or not cue.speaker:
+        return ""
+    # The label when there is no name for it: a caption reading `S2` is still
+    # better than one putting the words in the wrong person's mouth.
+    return f"{escape_ass_inline(style.speaker_names.get(cue.speaker, cue.speaker))}："
+
+def _room(prefix: str, geometry: CaptionGeometry) -> float:
+    """Work out how wide the words of a caption may run beside the name in front of them.
+
+    Args:
+        prefix: The speaker's name as drawn, or nothing.
+        geometry: The frame's caption geometry.
+
+    Returns:
+        The width left, as a multiple of the font size.
+    """
+    return max(4.0, geometry.max_units - sum(_display_width(character) for character in prefix))
+
+def _text_width(text: str) -> float:
+    """Measure a run of text the way a line is measured.
+
+    Args:
+        text: The text.
+
+    Returns:
+        Its width as a multiple of the font size.
+    """
+    return sum(_display_width(character) for character in text)
+
+def _phrased(
+    count: int,
+    fits: Callable[[int, int], bool],
+    width: Callable[[int, int], float],
+    edge: Callable[[int], float],
+) -> List[Tuple[int, int]]:
+    """Break a run of words into lines that end where a phrase does.
+
+    Filling each line to the brim breaks wherever the room runs out: between
+    `下午2` and `點`, or with one character left over to flash past on its own.
+    So every way of breaking into the fewest lines that fit, or a few more, is
+    weighed: lines about as long as each other, each break where a phrase
+    ends, and no more lines than that is worth.
+
+    Args:
+        count: How many words.
+        fits: Whether words `i` up to `j` (not included) fit on one line. A
+            single word always does, since it cannot be broken.
+        width: How wide words `i` up to `j` are.
+        edge: How good a place the start of word `i` is to break, from about
+            -1 (inside a phrase) to 1 (between two).
+
+    Returns:
+        Each line as `(first, past_last)` word indices, in order.
+    """
+    if count == 0:
+        return []
+    fewest, start = 0, 0
+    while start < count:
+        end = start + 1
+        while end < count and fits(start, end + 1):
+            end += 1
+        fewest, start = fewest + 1, end
+    most = min(count, fewest + (fewest + 2) // 3)
+    infinity = float("inf")
+    chosen: List[Tuple[int, int]] = []
+    cheapest = infinity
+    for wanted in range(fewest, most + 1):
+        target = width(0, count) / wanted
+
+        def cost(first: int, past: int) -> float:
+            uneven = ((width(first, past) - target) / target) ** 2 if target else 0.0
+            return uneven - (edge(first) if first else 0.0)
+
+        # best[lines][end]: the cheapest way to put the first `end` words on that many lines.
+        best = [[infinity] * (count + 1) for _ in range(wanted + 1)]
+        back = [[0] * (count + 1) for _ in range(wanted + 1)]
+        best[0][0] = 0.0
+        for lines in range(1, wanted + 1):
+            for end in range(1, count + 1):
+                for first in range(end - 1, -1, -1):
+                    if end - first > 1 and not fits(first, end):
+                        break
+                    if best[lines - 1][first] == infinity:
+                        continue
+                    total = best[lines - 1][first] + cost(first, end)
+                    if total < best[lines][end]:
+                        best[lines][end], back[lines][end] = total, first
+        total = best[wanted][count] + PHRASE_EXTRA_LINE_COST * (wanted - fewest)
+        if total < cheapest:
+            breaks: List[Tuple[int, int]] = []
+            end = count
+            for lines in range(wanted, 0, -1):
+                first = back[lines][end]
+                breaks.append((first, end))
+                end = first
+            cheapest, chosen = total, breaks[::-1]
+    return chosen
+
+_CJK = re.compile(r"[㐀-䶿一-鿿豈-﫿]")
+
+@lru_cache(maxsize=1)
+def _segmenter() -> Callable[[str], List[str]]:
+    """Load the Chinese word splitter once, the first time a Chinese caption is broken.
+
+    Returns:
+        A function from text to its words. The text is read in Simplified,
+        which is what the dictionary is built from: it finds `咖啡厅` whole
+        and `咖啡廳` in two. OpenCC converts one character to one here, so the
+        words map straight back onto the Traditional text.
+    """
+    import logging
+    import warnings
+
+    import opencc
+
+    with warnings.catch_warnings():
+        # jieba's own regular expressions are written in a way Python now warns about.
+        warnings.simplefilter("ignore", SyntaxWarning)
+        import jieba
+    jieba.setLogLevel(logging.WARNING)
+    simplify = opencc.OpenCC("t2s.json").convert
+
+    def split(text: str) -> List[str]:
+        simple = simplify(text)
+        return list(jieba.cut(simple if len(simple) == len(text) else text))
+
+    return split
+
+def word_edges(text: str) -> Optional[set[int]]:
+    """Find where the words of a Chinese caption begin and end.
+
+    Args:
+        text: The caption text.
+
+    Returns:
+        Every character offset a word begins or ends at, or nothing for text
+        with no Chinese in it: other languages already come from the
+        recogniser a word at a time.
+    """
+    if not _CJK.search(text):
+        return None
+    edges, offset = {0}, 0
+    for word in _segmenter()(text):
+        offset += len(word)
+        edges.add(offset)
+    return edges
+
+def _word_lines(
+    words: Sequence[Union[CueWord, TranscriptWord]],
+    fits: Callable[[int, int], bool],
+) -> List[Tuple[int, int]]:
+    """Break timed words into lines where a phrase ends, as far as it can tell.
+
+    Args:
+        words: The words, with their timings.
+        fits: Whether words `i` up to `j` (not included) fit on one line.
+
+    Returns:
+        Each line as `(first, past_last)` word indices, in order.
+    """
+    widths = [_text_width(escape_ass_inline(word.text)) for word in words]
+    offsets = [0]
+    for word in words:
+        offsets.append(offsets[-1] + len(word.text))
+    edges = word_edges("".join(word.text for word in words))
+
+    def edge(index: int) -> float:
+        before, after = words[index - 1].text.strip(), words[index].text.strip()
+        pause = float(words[index].start - words[index - 1].end)
+        score = PHRASE_PAUSE_WEIGHT * min(max(pause, 0.0), PHRASE_PAUSE_SECONDS) / PHRASE_PAUSE_SECONDS
+        if before.endswith(PHRASE_CLOSERS):
+            score += PHRASE_CLOSER_WEIGHT
+        if after.startswith(PHRASE_OPENERS):
+            score += PHRASE_OPENER_WEIGHT
+        if before.endswith(PHRASE_NUMERALS):
+            score -= PHRASE_NUMERAL_PENALTY
+        if edges is not None and offsets[index] not in edges:
+            score -= PHRASE_INSIDE_WORD_PENALTY
+        return score
+
+    return _phrased(len(words), fits, lambda first, past: sum(widths[first:past]), edge)
+
+def _at_share(cue: PlacedCue, share: float) -> Decimal:
+    """Find the moment a given share of the way through a caption.
+
+    Args:
+        cue: The caption.
+        share: How far through it, from 0 to 1.
+
+    Returns:
+        The time on the timeline, to the millisecond.
+    """
+    return (cue.start + (cue.end - cue.start) * Decimal(str(share))).quantize(MILLISECOND)
+
+def one_line_each(cue: PlacedCue, geometry: CaptionGeometry, style: CaptionStyle) -> List[PlacedCue]:
+    """Split a caption too long for one line into lines shown one after another.
+
+    A stack of lines climbs up into the picture, and what a viewer reads at a
+    glance is one line. With word timings each line comes up as its first word
+    is said and stays until the next one does; without them, the caption's time
+    is shared out by how much of it each line holds. Done where the captions are
+    drawn rather than where they are written, so a caption stored for a wide
+    frame still comes out as single lines in a narrow one.
+
+    Args:
+        cue: The placed caption.
+        geometry: The frame's caption geometry.
+        style: How captions are drawn.
+
+    Returns:
+        The caption as one or more captions, in order. Unchanged when it fits,
+        when the style allows stacking, or when it is bilingual: the second
+        language belongs under the whole of the first, not under a piece of it.
+    """
+    if not style.single_line or cue.secondary:
+        return [cue]
+    room = _room(_speaker_prefix(cue, style), geometry)
+    words = [word for word in cue.words if escape_ass_inline(word.text).strip()]
+    if words:
+        widths = [_text_width(escape_ass_inline(word.text)) for word in words]
+        if sum(widths) <= room:
+            return [cue]
+        lines = _word_lines(words, lambda first, past: sum(widths[first:past]) <= room)
+        groups = [list(words[first:past]) for first, past in lines]
+        starts = [cue.start] + [group[0].start for group in groups[1:]]
+        ends = starts[1:] + [cue.end]
+        return [
+            cue.model_copy(update={
+                "start": start, "end": end, "words": group,
+                "text": "".join(word.text for word in group).strip(),
+            })
+            for group, start, end in zip(groups, starts, ends)
+            if end > start
+        ]
+    # Several lines in the stored text are one thing said, so they are read as one run.
+    text = " ".join(part for part in escape_ass_text(cue.text).split("\\N") if part)
+    if _text_width(text) <= room:
+        return [cue]
+    # As few lines as fit, filled evenly; with no timings there are no pauses to prefer,
+    # and `wrap_caption` already knows where the spaces are.
+    fewest = len(wrap_caption(text, room))
+    limit = _text_width(text) / fewest
+    while limit < room and len(wrap_caption(text, limit)) > fewest:
+        limit += 0.5
+    wrapped = wrap_caption(text, min(limit, room))
+    total = sum(_text_width(line) for line in wrapped) or 1.0
+    pieces: List[PlacedCue] = []
+    done = 0.0
+    for line in wrapped:
+        start = _at_share(cue, done / total)
+        done += _text_width(line)
+        end = _at_share(cue, done / total)
+        if end > start:
+            pieces.append(cue.model_copy(update={"start": start, "end": end, "text": line}))
+    return pieces or [cue]
+
 def caption_text(cue: PlacedCue, geometry: CaptionGeometry, style: CaptionStyle) -> Tuple[str, int, int]:
     """Write one caption the way it is drawn, and count its lines.
 
@@ -354,13 +646,8 @@ def caption_text(cue: PlacedCue, geometry: CaptionGeometry, style: CaptionStyle)
         `(text, lines, secondary_lines)` — the event text, empty when there
         is nothing to show, and how many lines of each size it takes.
     """
-    named = style.speaker_mark in (SpeakerMark.NAME, SpeakerMark.BOTH)
-    prefix = ""
-    if named and cue.speaker:
-        # The label when there is no name for it: a caption reading `S2` is still
-        # better than one putting the words in the wrong person's mouth.
-        prefix = f"{escape_ass_inline(style.speaker_names.get(cue.speaker, cue.speaker))}："
-    room = max(4.0, geometry.max_units - sum(_display_width(character) for character in prefix))
+    prefix = _speaker_prefix(cue, style)
+    room = _room(prefix, geometry)
     if style.karaoke and cue.words:
         text = _karaoke_text(cue, room)
     else:
@@ -389,7 +676,9 @@ def caption_overflow(
     Width is already taken care of — every line is broken to fit — so what can
     still go wrong is height: a long line in a narrow frame breaks into so
     many lines that the block climbs past the top of the picture. That happens
-    most when a cut made for landscape is rendered portrait.
+    most when a cut made for landscape is rendered portrait. With the style's
+    `single_line` on, only a bilingual caption can stack, so that is what is
+    left to find.
 
     Args:
         cues: The placed captions.
@@ -406,9 +695,11 @@ def caption_overflow(
     room = height - geometry.margin_v
     over: List[PlacedCue] = []
     for cue in cues:
-        _, lines, below = caption_text(cue, geometry, style)
-        if lines * line + below * line * style.secondary_scale > room:
-            over.append(cue)
+        for piece in one_line_each(cue, geometry, style):
+            _, lines, below = caption_text(piece, geometry, style)
+            if lines * line + below * line * style.secondary_scale > room:
+                over.append(cue)
+                break
     return over
 
 def build_ass(
@@ -463,7 +754,7 @@ def build_ass(
         "[Events]",
         "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text",
     ]
-    for cue in cues:
+    for cue in (piece for placed in cues for piece in one_line_each(placed, geometry, style)):
         text, _, _ = caption_text(cue, geometry, style)
         if not text:
             continue
@@ -481,7 +772,8 @@ def _pieces(
     end: float,
     max_characters: int,
     max_seconds: float,
-) -> Iterator[Tuple[float, float, str]]:
+    max_units: Optional[float] = None,
+) -> Iterator[Tuple[float, float, str, List[CueWord]]]:
     """Split one transcript segment into caption-sized pieces inside a clip.
 
     Word timings are used when the transcript has them, so a long sentence
@@ -494,6 +786,9 @@ def _pieces(
         end: End of the clip's source range in seconds.
         max_characters: Longest caption text before it is broken up.
         max_seconds: Longest caption before it is broken up.
+        max_units: Widest caption before it is broken up, as a multiple of the
+            font size, or no limit. A width rather than a count, because a
+            Chinese character takes twice the room of a Latin letter.
 
     Yields:
         One `(start, end, text, words)` per caption, in source-file seconds.
@@ -509,18 +804,15 @@ def _pieces(
             yield piece_start, piece_end, text, []
         return
 
-    chunks: List[List[TranscriptWord]] = []
-    current: List[TranscriptWord] = []
-    for word in words:
-        length = len("".join(item.text for item in [*current, word]).strip())
-        span = word.end - (current[0].start if current else word.start)
-        if current and (length > max_characters or span > max_seconds):
-            chunks.append(current)
-            current = [word]
-        else:
-            current.append(word)
-    if current:
-        chunks.append(current)
+    def fits(first: int, past: int) -> bool:
+        joined = "".join(word.text for word in words[first:past]).strip()
+        return (
+            len(joined) <= max_characters
+            and words[past - 1].end - words[first].start <= max_seconds
+            and (max_units is None or _text_width(joined) <= max_units)
+        )
+
+    chunks = [words[first:past] for first, past in _word_lines(words, fits)]
 
     for chunk in chunks:
         text = "".join(word.text for word in chunk).strip()
@@ -544,6 +836,7 @@ def timeline_cues(
     max_seconds: float = DEFAULT_MAX_SECONDS,
     silences: Optional[Mapping[str, Sequence[Span]]] = None,
     speakers: Optional[Mapping[str, Sequence[SpeakerTurn]]] = None,
+    max_units: Optional[float] = None,
 ) -> List[SubtitleCue]:
     """Propose captions for the speech that survived the edit.
 
@@ -575,6 +868,9 @@ def timeline_cues(
             carried whether or not the style draws it: whether to show it is a
             decision for later, and losing it here would mean transcribing
             again to get it back.
+        max_units: Widest caption before it is broken up, as a multiple of
+            the font size: one line of the frame the captions are for, so each
+            caption proofread is one line seen. No limit when not given.
 
     Returns:
         The captions, ordered by the footage they come from.
@@ -596,7 +892,7 @@ def timeline_cues(
             if quiet and not was_audible(share_covered(segment.start, segment.end, quiet), True):
                 continue
             for piece_start, piece_end, text, timed in _pieces(
-                segment, start, end, max_characters, max_seconds,
+                segment, start, end, max_characters, max_seconds, max_units,
             ):
                 cue = SubtitleCue(
                     asset_id=clip.asset_id,

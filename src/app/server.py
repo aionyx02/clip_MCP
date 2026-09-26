@@ -53,6 +53,7 @@ from app.engine.subtitles import (
     DEFAULT_MAX_CHARACTERS,
     DEFAULT_MAX_SECONDS,
     build_ass,
+    caption_geometry,
     captioned_clips,
     place_cues,
     timeline_cues,
@@ -2318,7 +2319,10 @@ def generate_subtitles(
     not, because nobody transcribes a song. Insets on video tracks above the
     base are pictures over that sound, so they are not captioned, and neither
     is a clip turned all the way down. Long sentences are broken between
-    words. Nothing is saved: check the wording, fix any name the transcript
+    words, and while the caption style keeps to one line (its `single_line`,
+    on unless turned off) never wider than one line of this project's frame
+    at that style's size, so each caption checked is one line on screen. Set
+    the caption style first for that to be the right width. Nothing is saved: check the wording, fix any name the transcript
     misheard, and then store the captions with a `set_subtitles` operation in
     `apply_edits`. Render them into the picture with `render_project` and
     `burn_subtitles`.
@@ -2392,9 +2396,11 @@ def generate_subtitles(
         ]
         for asset_id, turns in speakers.items()
     }
+    style = project.caption_style
     cues = timeline_cues(
         project, transcripts, max_characters=max_characters, max_seconds=max_seconds,
         silences=silences, speakers=speakers,
+        max_units=caption_geometry(project.width, project.height, style).max_units if style.single_line else None,
     )
     # Counted where the captions land, not where the words were said: two lines from
     # different files overlap only once the cut puts them on screen together.
