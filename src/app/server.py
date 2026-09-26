@@ -20,6 +20,7 @@ from app.models.semantic import (
     ClipDescription, ClipKind, ClipLevel, SectionChoice, SemanticClip, SemanticTimeline, Tag, TagSource,
 )
 from app.models.timeline import (
+    Clip,
     EditOperation,
     Project,
     SetSubtitlesOp,
@@ -42,9 +43,9 @@ from app.engine.semantic import (
     build_timeline, clean_cuts, content_scores, join_voices, timeline_input_hash, voice_levels,
 )
 from app.engine.ffmpeg import hidden_window_flags
-from app.engine.probe import picture_size, probe_file, timecode_start
+from app.engine.probe import picture_size, probe_file, speech_loudness, timecode_start
 from app.engine.reframe import Framing, centre_at, frame_project
-from app.engine.builder import DEFAULT_LOUDNESS_TARGET, FFmpegRenderer
+from app.engine.builder import DEFAULT_LOUDNESS_TARGET, FFmpegRenderer, voice_keys
 from app.engine.delivery import CHECKS, chapter_metadata, chapters, check_delivery, clock, cover_candidates
 from app.engine.frames import format_timestamp, still, storyboard_sheet
 from app.engine.interchange import write_edl, write_fcpxml, write_otio, write_srt
@@ -1346,7 +1347,10 @@ def apply_edits(project_id: str, expected_version: int, operations: list[EditOpe
     how long the sequence runs; `clear_transition` puts a straight cut back.
     `set_clip_speed` changes how fast a clip plays, and with it how long it
     runs, and `preserve_pitch` decides whether the sound keeps its pitch or
-    rises and falls with the speed. `set_track_audio` sets a whole track's `duck_under_speech`.
+    rises and falls with the speed. `set_track_audio` sets a whole track's `duck_under_speech`, and
+    whether it is a `voice` recorded apart from the picture — a narration the
+    footage's own sound and the music drop under. Left unsaid, a track counts
+    as a voice when its recording was transcribed and is mostly sentences.
     `set_markers` replaces the timeline's structure markers — where each part
     of the video begins. `compile_plan` writes one per beat, so a cut compiled
     from a plan arrives with its shape on it; markers added by hand have no
@@ -1948,7 +1952,10 @@ def preview_sound(
     os.makedirs(folder, exist_ok=True)
     mix = os.path.join(folder, _output_name(project, "sound").replace(".mp4", ".m4a"))
     voice, music = os.path.join(folder, "voice.wav"), os.path.join(folder, "music.wav")
-    command = renderer.build_sound(project, _referenced_assets(project), mix, voice, music, loudness_target)
+    command = renderer.build_sound(
+        project, _referenced_assets(project), mix, voice, music, loudness_target,
+        voices=_voices(project),
+    )
     result = subprocess.run(command, capture_output=True, creationflags=hidden_window_flags())
     if result.returncode != 0:
         raise RuntimeError(result.stderr.decode("utf-8", errors="replace").strip()[-500:] or "ffmpeg failed")
@@ -2697,13 +2704,14 @@ def render_project(
 
     assets = _referenced_assets(project)
     framing = _framing(project, assets) if follow_faces else None
+    voices = _voices(project)
     pieces: list = []
     if is_preview:
         cache = _picture_cache()
         command, pieces = renderer.build_incremental(
             project, assets, job.output_path, cache,
             loudness_target=loudness_target, subtitle_path=subtitle_path, framing=framing,
-            chapters_path=chapters_path,
+            chapters_path=chapters_path, voices=voices,
         )
         # What this preview reads from the cache counts as used, so it is kept.
         for argument in command:
@@ -2712,7 +2720,7 @@ def render_project(
     else:
         command = renderer.build_command(
             project, assets, job.output_path, loudness_target=loudness_target, subtitle_path=subtitle_path,
-            framing=framing, chapters_path=chapters_path,
+            framing=framing, chapters_path=chapters_path, voices=voices,
         )
     # One input per clip, all opened at once, is what a render's memory use is made of.
     job.memory_estimate = resources.render_memory_bytes(command.count("-i"))
@@ -2729,6 +2737,26 @@ def render_project(
     if is_preview:
         result["pictures"] = {"rendered": len(pieces), "reused": pictures - len(pieces)}
     return result
+
+def _voices(project: Project) -> Dict[str, float]:
+    """Find the tracks a render treats as a voice recorded apart from the picture.
+
+    Args:
+        project: The project about to be rendered.
+
+    Returns:
+        As `voice_keys`, with each voice clip's talking measured from its file.
+    """
+    assets = _referenced_assets(project)
+
+    def loudness(clip: Clip) -> Optional[float]:
+        asset = assets.get(clip.asset_id)
+        if asset is None:
+            return None
+        start, end = float(clip.source_range.start), float(clip.source_range.end)
+        return speech_loudness(asset.path, start, end - start)
+
+    return voice_keys(project, _analyses(project), loudness)
 
 def _analyses(project: Project) -> Dict[str, MediaAnalysis]:
     """Read the analysis of every file a project plays.
@@ -3018,6 +3046,10 @@ def export_timeline(
         writer = {"edl": write_edl, "otio": write_otio, "fcpxml": write_fcpxml}[format]
         assets = _referenced_assets(project)
         text, behind = writer(project, assets, _timecodes(assets))
+        # Decided at render time from the recordings, so the writers, which never see an
+        # analysis, cannot say it. Only which tracks, not how loud: nothing is measured.
+        if voice_keys(project, _analyses(project), lambda clip: None):
+            behind.append("the footage's sound ducking under a narration, and the narration brought up to level")
     folder = os.path.join(WORKSPACE_DIR, "outputs", f"export-{uuid.uuid4()}")
     os.makedirs(folder, exist_ok=True)
     path = os.path.join(folder, _output_name(project, "timeline").replace(".mp4", f".{format}"))

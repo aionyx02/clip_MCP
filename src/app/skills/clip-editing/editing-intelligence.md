@@ -101,7 +101,20 @@ on a storyboard, and you cannot hear it: `preview_sound` shows it.
 
 ## Cleaning up the sound
 
-Two separate things, both off unless asked for.
+**A narration over footage is handled for you.** When a voice recorded apart
+from the picture — a voice-over, a clip-on microphone's own file — sits on an
+audio track, the render brings it up to a standard level and drops the
+footage's own sound (the street, the café) and any music while it speaks. A
+track counts as a voice when its recording was transcribed and sentences
+cover at least half of it, so analyze the narration file like any other; a
+track set to duck under speech is music and never counts. `set_track_audio` with
+`voice` says so outright either way. Do not turn the footage down by hand for
+this, and do not mute it: the place under a narration is part of the video.
+When the footage also carries someone talking to camera, both are kept, and
+the narration wins where they overlap. `preview_sound` puts the narration on
+the voice side and the place on the other, so you can see it sits under.
+
+Two further things, both off unless asked for.
 
 `set_clip_audio` with `cleanup` repairs one clip's voice: `rumble` takes out
 the low roar of traffic or air conditioning, `hiss` the steady background a
@@ -130,6 +143,7 @@ clip and `audio_fade_in` on the incoming one when the user asks for it.
 | 「這段畫面太悶，蓋點別的」 / cover this with other footage | `propose_broll`, then `amend_plan` with `add_broll` |
 | 「這段畫面不能蓋掉」 / this shot has to be seen | `hold_picture: true` on that selection |
 | 「這個人聲音小很多」「兩個人音量差很多」 / match two people's levels | `save_plan` or `amend_plan` with `level_voices: true`; `validate_plan` says how far apart they are |
+| 「背景很吵，人聲不清楚」 with a narration on its own track / the voice is buried | `preview_sound` first. The footage should already sit under the narration; if the narration is not on the voice side, it was not recognised as one — `set_track_audio` with `voice: true` |
 | 「有雜音」「背景很吵」「嘶嘶聲」 / clean up a voice | `set_clip_audio` with `cleanup`: `rumble` for the low roar, `hiss` for the background, `sibilance` for harsh S sounds |
 | 「每一段換不同的音樂」「訪談那段不要音樂」 / change the music between parts | One music cue per part, each with the `beat_id` it comes in on; a cue with no `asset_id` is silence |
 | 「剪接跟著音樂節拍」 / cut to the beat | `cut_on_beat` on that music cue, after `analyze_asset` on the song. Ask first — it suits a montage, not an interview |

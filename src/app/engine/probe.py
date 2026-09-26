@@ -97,3 +97,43 @@ def timecode_start(info: Dict[str, Any]) -> Optional[float]:
         count -= dropped * (total_minutes - total_minutes // 10)
     return count / rate
 
+
+def speech_loudness(
+    filepath: str, start: float, duration: float, ffmpeg_bin: str = "ffmpeg",
+) -> Optional[float]:
+    """Measure how loud a stretch of a file's sound is where there is any.
+
+    Integrated loudness gates out the silence between sentences, so on a
+    recording of somebody talking it is the level of the talking rather than
+    of the talking averaged with the pauses. Only the sound is decoded.
+
+    Args:
+        filepath: Path to the media file.
+        start: Where the stretch starts, in seconds.
+        duration: How long it runs, in seconds.
+        ffmpeg_bin: Path to, or name of, the ffmpeg executable.
+
+    Returns:
+        The integrated loudness in LUFS, or nothing when the file cannot be
+        read or the stretch is silent.
+    """
+    from app.engine.ffmpeg import hidden_window_flags
+
+    result = subprocess.run(
+        [ffmpeg_bin, "-hide_banner", "-nostats", "-ss", f"{start:.3f}", "-t", f"{duration:.3f}", "-i", filepath,
+         "-vn", "-af", "ebur128", "-f", "null", "-"],
+        stdin=subprocess.DEVNULL, capture_output=True, creationflags=hidden_window_flags(),
+    )
+    if result.returncode != 0:
+        return None
+    summary = result.stderr.decode("utf-8", errors="replace").rsplit("Summary:", 1)[-1]
+    for line in summary.splitlines():
+        label, _, value = line.strip().partition(":")
+        if label == "I":
+            try:
+                loudness = float(value.split()[0])
+            except (IndexError, ValueError):
+                return None
+            # ebur128 reports a stretch with nothing above its gate as -70.
+            return loudness if loudness > -70 else None
+    return None

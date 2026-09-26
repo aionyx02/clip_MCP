@@ -624,6 +624,13 @@ class Track(BaseModel):
         default=False,
         description="Lower this audio track automatically while the video's own sound is loud; audio tracks only",
     )
+    voice: Optional[bool] = Field(
+        default=None,
+        description="A voice recorded apart from the picture, such as a narration: the footage's own sound "
+                    "and any music drop while it speaks. Null decides from the recording, which counts as a "
+                    "voice when it was transcribed and sentences cover at least half of it, unless the track "
+                    "ducks under speech; audio tracks only",
+    )
 
 class Project(BaseModel):
     """An editing project: output format settings plus its tracks."""
@@ -717,6 +724,10 @@ class AddTrackOp(BaseModel):
         default=False,
         description="Lower this track automatically while the video's own sound is loud; audio tracks only",
     )
+    voice: Optional[bool] = Field(default=None, description="A voice recorded apart from the picture, such as a narration: the footage's own sound "
+                    "and any music drop while it speaks. Null decides from the recording, which counts as a "
+                    "voice when it was transcribed and sentences cover at least half of it, unless the track "
+                    "ducks under speech; audio tracks only")
 
 class _NewClipSpec(BaseModel):
     """Fields shared by operations that create a clip."""
@@ -991,6 +1002,15 @@ class SetTrackAudioOp(BaseModel):
     duck_under_speech: Optional[bool] = Field(
         default=None,
         description="Lower this track automatically while the video's own sound is loud; audio tracks only",
+    )
+    voice: Optional[bool] = Field(
+        default=None,
+        description="True or false to say whether this track is a voice recorded apart from the picture; "
+                    "omit to leave it as it is. A track nobody has said this about is judged from its recording",
+    )
+    voice_auto: bool = Field(
+        default=False,
+        description="Forget what was said about `voice`, and judge from the recording again",
     )
 
 class SetClipAudioOp(BaseModel):
@@ -1351,7 +1371,7 @@ def apply_operation(project: Project, op: EditOperation, assets: Mapping[str, As
         if any(track.id == op.track_id for track in project.tracks):
             raise ValueError(f"track {op.track_id} already exists")
         project.tracks.append(
-            Track(id=op.track_id, track_type=op.track_type, duck_under_speech=op.duck_under_speech)
+            Track(id=op.track_id, track_type=op.track_type, duck_under_speech=op.duck_under_speech, voice=op.voice)
         )
         return
 
@@ -1414,6 +1434,10 @@ def apply_operation(project: Project, op: EditOperation, assets: Mapping[str, As
     if isinstance(op, SetTrackAudioOp):
         if op.duck_under_speech is not None:
             track.duck_under_speech = op.duck_under_speech
+        if op.voice_auto:
+            track.voice = None
+        elif op.voice is not None:
+            track.voice = op.voice
         return
     if isinstance(op, AddClipOp):
         track.clips.append(_new_clip(track, op, op.timeline_in))
@@ -1570,6 +1594,16 @@ def validate_project(project: Project, assets: Mapping[str, Asset]) -> None:
     for track in project.tracks:
         if track.duck_under_speech and track.track_type != TrackType.AUDIO:
             raise ValueError(f"track {track.id}: only audio tracks can duck under speech")
+        if track.voice and track.track_type != TrackType.AUDIO:
+            raise ValueError(
+                f"track {track.id}: only an audio track can be a voice recorded apart from the picture; "
+                "the sound of a video track is the footage's own"
+            )
+        if track.voice and track.duck_under_speech:
+            raise ValueError(
+                f"track {track.id}: a voice cannot duck under speech, since it is the speech; "
+                "turn duck_under_speech off, or say the track is not a voice"
+            )
         previous: Optional[Clip] = None
         for clip in sorted(track.clips, key=lambda c: c.timeline_in):
             asset = assets.get(clip.asset_id)
