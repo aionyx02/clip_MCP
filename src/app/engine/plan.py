@@ -81,6 +81,33 @@ ON_BEAT_SECONDS = 0.005
 LENGTH_TOLERANCE = 0.1
 
 @dataclass(frozen=True)
+class Pace:
+    """How tight a cut is, as the compiler applies it.
+
+    Attributes:
+        breath: Air left before and after every cut, in seconds.
+        pause: How long a silence inside a shot has to run before it is taken
+            out, in seconds.
+    """
+
+    breath: float = BREATH_SECONDS
+    pause: float = PAUSE_SECONDS
+
+def pace_of(plan: EditPlan) -> Pace:
+    """Read how tight a plan asks its cut to be.
+
+    Args:
+        plan: The plan.
+
+    Returns:
+        Its pacing, with the defaults where it names none.
+    """
+    return Pace(
+        breath=BREATH_SECONDS if plan.pacing.breath_seconds is None else plan.pacing.breath_seconds,
+        pause=PAUSE_SECONDS if plan.pacing.pause_seconds is None else plan.pacing.pause_seconds,
+    )
+
+@dataclass(frozen=True)
 class Piece:
     """One window of source footage on the compiled timeline.
 
@@ -110,16 +137,17 @@ class Piece:
         """
         return self.end - self.start
 
-def _breath(clip: SemanticClip) -> Tuple[float, float]:
+def _breath(clip: SemanticClip, breath: float) -> Tuple[float, float]:
     """Work out how much air a clip can be given at each end.
 
     Args:
         clip: Clip to pad.
+        breath: How much air the plan asks for.
 
     Returns:
         `(lead, trail)` in seconds, never more than the clip's headroom.
     """
-    return min(BREATH_SECONDS, clip.safe_in), min(BREATH_SECONDS, clip.safe_out)
+    return min(breath, clip.safe_in), min(breath, clip.safe_out)
 
 def _piece(
     clip: SemanticClip,
@@ -130,6 +158,7 @@ def _piece(
     pad_tail: bool = True,
     cuts: Optional[CleanCuts] = None,
     beat_id: str = "",
+    breath: float = BREATH_SECONDS,
 ) -> Piece:
     """Cut one window out of a clip, with air around it where there is room.
 
@@ -149,7 +178,7 @@ def _piece(
     Returns:
         The window, in source seconds and inside the asset.
     """
-    lead, trail = _breath(clip)
+    lead, trail = _breath(clip, breath)
     opened = clip.source_range.start if start is None else start
     closed = clip.source_range.end if end is None else end
     opening = opened - (lead if pad_head else 0.0)
@@ -213,6 +242,7 @@ def _selection_pieces(
     children: Sequence[SemanticClip],
     asset: Asset,
     cuts: Optional[CleanCuts],
+    breath: float = BREATH_SECONDS,
 ) -> List[Piece]:
     """Work out what one selection contributes to the cut.
 
@@ -222,6 +252,7 @@ def _selection_pieces(
         children: That clip's own clips, in time order, empty for an utterance.
         asset: The asset they play from.
         cuts: Where this file may be cut without splitting a word.
+        breath: How much air the plan asks for around each cut.
 
     Returns:
         The windows this selection puts on the timeline, in order.
@@ -230,25 +261,25 @@ def _selection_pieces(
     beat = selection.beat_id
     if trim.kind == TrimKind.KEEP:
         wanted = set(trim.keep_clip_ids)
-        return [_piece(child, asset, beat_id=beat) for child in children if child.id in wanted]
+        return [_piece(child, asset, beat_id=beat, breath=breath) for child in children if child.id in wanted]
     if trim.kind == TrimKind.TIGHTEN:
         # Drop what nobody would keep — the pauses and the unusable picture — and leave the rest.
         kept = [child for child in children if child.kind not in (ClipKind.SILENCE, ClipKind.UNUSABLE)]
         return (
-            [_piece(child, asset, beat_id=beat) for child in kept]
-            if kept else [_piece(clip, asset, beat_id=beat)]
+            [_piece(child, asset, beat_id=beat, breath=breath) for child in kept]
+            if kept else [_piece(clip, asset, beat_id=beat, breath=breath)]
         )
     if trim.kind == TrimKind.HEAD and trim.seconds is not None:
         return [_piece(
             clip, asset, end=min(clip.source_range.start + trim.seconds, clip.source_range.end),
-            pad_tail=False, cuts=cuts, beat_id=beat,
+            pad_tail=False, cuts=cuts, beat_id=beat, breath=breath,
         )]
     if trim.kind == TrimKind.TAIL and trim.seconds is not None:
         return [_piece(
             clip, asset, start=max(clip.source_range.end - trim.seconds, clip.source_range.start),
-            pad_head=False, cuts=cuts, beat_id=beat,
+            pad_head=False, cuts=cuts, beat_id=beat, breath=breath,
         )]
-    return [_piece(clip, asset, beat_id=beat)]
+    return [_piece(clip, asset, beat_id=beat, breath=breath)]
 
 def _merge(pieces: Sequence[Piece]) -> List[Piece]:
     """Join pieces that follow one another closely enough to be one shot.
@@ -323,7 +354,7 @@ def _selected(
             continue
         pieces.extend(_selection_pieces(
             selection, clip, children.get(clip.id, []), asset,
-            None if cuts is None else cuts.get(clip.asset_id),
+            None if cuts is None else cuts.get(clip.asset_id), pace_of(plan).breath,
         ))
     return pieces
 
@@ -368,6 +399,7 @@ def _same_line(first: Piece, second: Piece, cuts: Mapping[str, CleanCuts]) -> bo
 def _without_retakes(
     pieces: Sequence[Piece],
     cuts: Optional[Mapping[str, CleanCuts]],
+    pace: Pace = Pace(),
 ) -> Tuple[List[Piece], List[str]]:
     """Keep one go at each line, where the same one was said more than once.
 
@@ -449,6 +481,7 @@ def _somewhere_clean(seconds: float, known: CleanCuts, opens: bool) -> float:
 def _without_pauses(
     pieces: Sequence[Piece],
     cuts: Optional[Mapping[str, CleanCuts]],
+    pace: Pace = Pace(),
 ) -> Tuple[List[Piece], List[str]]:
     """Take the dead air out of the middle of a window.
 
@@ -472,7 +505,7 @@ def _without_pauses(
     talked_through = 0
     for piece in pieces:
         known = cuts.get(piece.asset_id)
-        dead = known.pauses_inside(piece.start, piece.end, PAUSE_SECONDS) if known is not None else ()
+        dead = known.pauses_inside(piece.start, piece.end, pace.pause) if known is not None else ()
         opened = piece.start
         for quiet, loud in dead:
             # The silence came from the detector and the words came from the
@@ -481,8 +514,8 @@ def _without_pauses(
             # the gap is trusted where it falls — each is settled onto somewhere a cut
             # may actually land, which for an edge inside a word is that word's own
             # boundary.
-            closing = _somewhere_clean(round(quiet + BREATH_SECONDS, 3), known, opens=False)
-            opening = _somewhere_clean(round(loud - BREATH_SECONDS, 3), known, opens=True)
+            closing = _somewhere_clean(round(quiet + pace.breath, 3), known, opens=False)
+            opening = _somewhere_clean(round(loud - pace.breath, 3), known, opens=True)
             if closing <= opened or opening <= closing or opening >= piece.end:
                 # One side would be left with no length at all, so the gap stays
                 # rather than a window of nothing being put on the timeline.
@@ -509,7 +542,7 @@ def _without_pauses(
     notes: List[str] = []
     if taken:
         notes.append(
-            f"{len(taken)} pause(s) longer than {PAUSE_SECONDS:g}s were taken out of the middle of a shot, "
+            f"{len(taken)} pause(s) longer than {pace.pause:g}s were taken out of the middle of a shot, "
             f"{sum(taken):.1f}s in all"
         )
     if talked_through:
@@ -522,6 +555,7 @@ def _without_pauses(
 def _trimmed_ends(
     pieces: Sequence[Piece],
     cuts: Optional[Mapping[str, CleanCuts]],
+    pace: Pace = Pace(),
 ) -> Tuple[List[Piece], List[str]]:
     """Take the run-up off the first window and the wind-down off the last.
 
@@ -564,7 +598,7 @@ def _trimmed_ends(
     known = cuts.get(head.asset_id)
     first_word = known.first_word_in(head.start, head.end) if known is not None else None
     if first_word is not None:
-        wanted = round(first_word - BREATH_SECONDS, 3)
+        wanted = round(first_word - pace.breath, 3)
         opening = round(min(wanted, head.start + HEAD_TRIM_SECONDS), 3)
         if opening > head.start:
             say("before the first word", opening - head.start, round(wanted - opening, 3), HEAD_TRIM_SECONDS)
@@ -574,7 +608,7 @@ def _trimmed_ends(
     known = cuts.get(tail.asset_id)
     last_word = known.last_word_in(tail.start, tail.end) if known is not None else None
     if last_word is not None:
-        wanted = round(last_word + BREATH_SECONDS, 3)
+        wanted = round(last_word + pace.breath, 3)
         closing = round(max(wanted, tail.end - TAIL_TRIM_SECONDS), 3)
         if closing < tail.end:
             say("after the last word", tail.end - closing, round(closing - wanted, 3), TAIL_TRIM_SECONDS)
@@ -585,6 +619,7 @@ def _trimmed_ends(
 def _off_bad_frames(
     pieces: Sequence[Piece],
     cuts: Optional[Mapping[str, CleanCuts]],
+    pace: Pace = Pace(),
 ) -> Tuple[List[Piece], List[str]]:
     """Move any cut point that shows black or frozen picture.
 
@@ -768,6 +803,7 @@ def _may_close_at(
     end: float,
     known: CleanCuts,
     asset: Optional[Asset],
+    breath: float = BREATH_SECONDS,
 ) -> bool:
     """Say whether a window may end somewhere else to put its cut on the beat.
 
@@ -794,8 +830,8 @@ def _may_close_at(
         return False
     if end < piece.end:
         last = known.last_word_in(piece.start, piece.end)
-        return last is None or end >= min(piece.end, last + BREATH_SECONDS)
-    if any(piece.end - EDGE_TOLERANCE_SECONDS < opened < end + BREATH_SECONDS for opened, _ in known.words):
+        return last is None or end >= min(piece.end, last + breath)
+    if any(piece.end - EDGE_TOLERANCE_SECONDS < opened < end + breath for opened, _ in known.words):
         return False
     if any(start < end and stop > piece.end for start, stop in known.bad_picture):
         return False
@@ -864,6 +900,7 @@ def _on_the_beat(
                     shift for shift in shifts
                     if abs(shift) <= BEAT_SNAP_SECONDS and _may_close_at(
                         piece, out[index + 1], round(piece.end + shift, 3), known, assets.get(piece.asset_id),
+                        pace_of(plan).breath,
                     )
                 ]
                 if reachable:
@@ -924,8 +961,9 @@ def compile_pieces(
     """
     pieces = _selected(plan, clips, children, assets, cuts)
     notes: List[str] = []
+    pace = pace_of(plan)
     for stage in (_without_retakes, _without_pauses, _trimmed_ends, _off_bad_frames):
-        pieces, said = stage(pieces, cuts)
+        pieces, said = stage(pieces, cuts, pace)
         notes.extend(said)
     pieces, said = _on_the_beat(plan, _merge(pieces), assets, cuts)
     return pieces, notes + said
@@ -1556,6 +1594,15 @@ def check_plan(
         if rejection.clip_id not in clips:
             notes.append(f"the rejected clip {rejection.clip_id} is not in this timeline")
 
+    pace = pace_of(plan)
+    if pace.pause <= 2 * pace.breath + MERGE_GAP_SECONDS:
+        problems.append(
+            f"pacing: pauses over {pace.pause:g}s cannot be taken out while {pace.breath:g}s of air is left either "
+            f"side of each cut — what would be left between the two halves is under {MERGE_GAP_SECONDS:g}s, "
+            "so they would be joined straight back together. Raise `pause_seconds` above "
+            f"{2 * pace.breath + MERGE_GAP_SECONDS:g}s or lower `breath_seconds`"
+        )
+
     cues = plan.music.cues if plan.music is not None else []
     placed_cues: set = set()
     for position, cue in enumerate(cues, start=1):
@@ -2138,6 +2185,11 @@ def diff_plans(before: EditPlan, after: EditPlan) -> Dict[str, List[str]]:
         top.append(f"platform: {before.target.platform} → {after.target.platform}")
     if before.timeline_id != after.timeline_id:
         top.append(f"footage: {before.timeline_id} → {after.timeline_id}")
+    if pace_of(before) != pace_of(after):
+        was, now = pace_of(before), pace_of(after)
+        top.append(
+            f"pacing: pauses over {was.pause:g}s → {now.pause:g}s taken out, {was.breath:g}s → {now.breath:g}s of air"
+        )
     if top:
         changes["goal"] = top
 

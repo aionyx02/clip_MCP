@@ -48,6 +48,16 @@ _MIGRATIONS: List[List[str]] = [
         "CREATE TABLE plans (id TEXT PRIMARY KEY, timeline_id TEXT NOT NULL, version INTEGER NOT NULL, data TEXT NOT NULL)",
         "CREATE INDEX plans_timeline ON plans (timeline_id)",
     ],
+    [
+        # Every version of every plan, kept. The plans table holds the one in use; this is
+        # what it was before, so a round of feedback that made things worse can be undone.
+        # Append-only: going back writes the old content as a new version rather than
+        # rewinding, so the history is never shorter than the work that was done.
+        "CREATE TABLE plan_versions (plan_id TEXT NOT NULL, version INTEGER NOT NULL, saved_at TEXT NOT NULL, "
+        "note TEXT NOT NULL, data TEXT NOT NULL, PRIMARY KEY (plan_id, version))",
+        "INSERT INTO plan_versions (plan_id, version, saved_at, note, data) "
+        "SELECT id, version, json_extract(data, '$.updated_at'), '', data FROM plans",
+    ],
 ]
 SCHEMA_VERSION = len(_MIGRATIONS)
 
@@ -512,7 +522,7 @@ class Repository:
         )
         return [SemanticClip.model_validate_json(row[0]) for row in rows]
 
-    def save_plan(self, plan: EditPlan) -> EditPlan:
+    def save_plan(self, plan: EditPlan, note: str = "") -> EditPlan:
         """Store an edit plan, raising its version if it already exists.
 
         A plan that is not stored yet is inserted as it stands. One that is
@@ -521,9 +531,12 @@ class Repository:
 
         Args:
             plan: Plan to store.
+            note: What this version is, for its history: the feedback that
+                led to it, or what was changed.
 
         Returns:
-            The stored plan, at its new version.
+            The stored plan, at its new version. The version is also kept in
+            the plan's history.
 
         Raises:
             VersionConflictError: If the stored plan is at a different
@@ -537,6 +550,7 @@ class Repository:
                     "INSERT INTO plans (id, timeline_id, version, data) VALUES (?, ?, ?, ?)",
                     (stored.id, stored.timeline_id, stored.version, stored.model_dump_json()),
                 )
+                self._keep_version(conn, stored, note)
                 return stored
             if row[0] != plan.version:
                 raise VersionConflictError(
@@ -547,7 +561,53 @@ class Repository:
                 "UPDATE plans SET timeline_id = ?, version = ?, data = ? WHERE id = ?",
                 (stored.timeline_id, stored.version, stored.model_dump_json(), stored.id),
             )
+            self._keep_version(conn, stored, note)
             return stored
+
+    @staticmethod
+    def _keep_version(conn: sqlite3.Connection, plan: EditPlan, note: str) -> None:
+        """Add one version of a plan to its history, inside the transaction that saved it.
+
+        Args:
+            conn: The open transaction.
+            plan: The plan as stored.
+            note: What this version is.
+        """
+        conn.execute(
+            "INSERT OR REPLACE INTO plan_versions (plan_id, version, saved_at, note, data) VALUES (?, ?, ?, ?, ?)",
+            (plan.id, plan.version, plan.updated_at.isoformat(), note, plan.model_dump_json()),
+        )
+
+    def get_plan_version(self, plan_id: str, version: int) -> Optional[EditPlan]:
+        """Fetch one version of a plan from its history.
+
+        Args:
+            plan_id: ID of the plan.
+            version: Which version.
+
+        Returns:
+            The plan as it was at that version, or None if there is no such
+            version.
+        """
+        rows = self._query("SELECT data FROM plan_versions WHERE plan_id = ? AND version = ?", (plan_id, version))
+        return EditPlan.model_validate_json(rows[0][0]) if rows else None
+
+    def list_plan_versions(self, plan_id: str) -> List[Dict[str, object]]:
+        """List a plan's history, oldest first.
+
+        Args:
+            plan_id: ID of the plan.
+
+        Returns:
+            One dictionary per version, with its `version`, `saved_at` and
+            `note`.
+        """
+        return [
+            {"version": row[0], "saved_at": row[1], "note": row[2]}
+            for row in self._query(
+                "SELECT version, saved_at, note FROM plan_versions WHERE plan_id = ? ORDER BY version", (plan_id,),
+            )
+        ]
 
     def get_plan(self, plan_id: Optional[str]) -> Optional[EditPlan]:
         """Fetch an edit plan, or the one saved most recently.

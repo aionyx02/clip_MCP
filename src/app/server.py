@@ -15,7 +15,7 @@ from fastmcp.tools import ToolResult
 from fastmcp.utilities.types import Image
 from pydantic import Field, TypeAdapter
 from app.models.media import Asset, Measured, MediaAnalysis, Span, SpeakerTurn
-from app.models.plan import EditPlan, PlanAmendment, apply_amendment
+from app.models.plan import EditPlan, PlanAmendment, apply_amendment, describe_amendment
 from app.models.semantic import (
     ClipDescription, ClipKind, ClipLevel, SectionChoice, SemanticClip, SemanticTimeline, Tag, TagSource,
 )
@@ -1502,7 +1502,7 @@ def _require_plan(plan_id: Optional[str]) -> EditPlan:
     return plan
 
 @mcp.tool()
-def save_plan(plan: EditPlan) -> dict:
+def save_plan(plan: EditPlan, note: str = "") -> dict:
     """Store a plan for a cut: what it is for, its parts, and which footage fills them.
 
     A plan is written in terms of semantic clips rather than seconds. You
@@ -1522,9 +1522,14 @@ def save_plan(plan: EditPlan) -> dict:
     it by one. Saving under a fresh id keeps both, which is how two ways of
     cutting the same footage are compared with `diff_plan`.
 
+    Every version saved is kept, so a round of feedback that made the cut
+    worse can be undone with `revert_plan`; `list_plan_versions` shows them.
+
     Args:
         plan: The plan. `timeline_id` says which footage it is about;
             `timeline_input_hash` is filled in for you.
+        note: What this version is, kept in its history — the user's own
+            words for what they wanted changed are the best thing to put here.
 
     Returns:
         A dictionary with the `plan_id`, its new `version`, the `timeline_id`,
@@ -1540,7 +1545,7 @@ def save_plan(plan: EditPlan) -> dict:
         raise ValueError(f"semantic timeline {plan.timeline_id} not found; build one before planning against it")
 
     stamped = plan.model_copy(update={"timeline_input_hash": timeline.input_hash})
-    stored = repo.save_plan(stamped)
+    stored = repo.save_plan(stamped, note)
     problems, notes = check_plan(stored, *_plan_context(stored))
     newest = repo.get_semantic_timeline(None)
     if newest is not None and newest.id != timeline.id:
@@ -1554,7 +1559,7 @@ def save_plan(plan: EditPlan) -> dict:
     }
 
 @mcp.tool()
-def amend_plan(plan_id: str, expected_version: int, amendments: list[PlanAmendment]) -> dict:
+def amend_plan(plan_id: str, expected_version: int, amendments: list[PlanAmendment], note: str = "") -> dict:
     """Change part of a stored plan without sending the whole thing again.
 
     A cut is argued with one piece at a time — this beat runs long, that shot
@@ -1565,6 +1570,15 @@ def amend_plan(plan_id: str, expected_version: int, amendments: list[PlanAmendme
     out with `drop_selection`, which files it under the plan's rejections with
     the reason so the question can be answered later.
 
+    Some feedback is about the whole video, not one piece of it, and has its
+    own amendments rather than a trim to every selection: `set_pacing` for
+    「整體節奏太慢」 (shorter pauses, less air around every cut),
+    `set_music_level` for 「音樂太大聲」 (everywhere, or from one beat),
+    `set_target` for a new length or platform, and `drop_beat` for
+    「這整段不要」, which files every selection in it under the rejections.
+
+    Every version is kept: `revert_plan` goes back to any of them.
+
     Nothing is compiled here. Call `compile_plan` when the plan reads right.
 
     Args:
@@ -1572,6 +1586,8 @@ def amend_plan(plan_id: str, expected_version: int, amendments: list[PlanAmendme
         expected_version: The plan's current `version`, as `get_plan` reported
             it. The amendment is refused if the stored plan has moved on.
         amendments: What to change, applied in order.
+        note: What the user asked for, in their words, kept with this
+            version in its history alongside what the amendments did.
 
     Returns:
         A dictionary with the `plan_id`, its new `version`, the `timeline_id`,
@@ -1592,7 +1608,103 @@ def amend_plan(plan_id: str, expected_version: int, amendments: list[PlanAmendme
     timeline = repo.get_semantic_timeline(amended.timeline_id)
     if timeline is None:
         raise ValueError(f"the plan is written against timeline {amended.timeline_id}, which no longer exists")
-    stored = repo.save_plan(amended.model_copy(update={"timeline_input_hash": timeline.input_hash}))
+    done = "; ".join(describe_amendment(amendment) for amendment in amendments)
+    stored = repo.save_plan(
+        amended.model_copy(update={"timeline_input_hash": timeline.input_hash}),
+        f"{note} — {done}" if note and done else note or done,
+    )
+    problems, notes = check_plan(stored, *_plan_context(stored))
+    return {
+        "plan_id": stored.id,
+        "version": stored.version,
+        "timeline_id": stored.timeline_id,
+        "problems": problems,
+        "notes": notes,
+    }
+
+def _plan_at(plan_id: str, version: Optional[int]) -> EditPlan:
+    """Fetch a plan as it is now, or as it was at one version.
+
+    Args:
+        plan_id: ID of the plan.
+        version: Which version, or None for the current one.
+
+    Returns:
+        The plan.
+
+    Raises:
+        ValueError: If the plan or that version does not exist.
+    """
+    plan = _require_plan(plan_id)
+    if version is None or version == plan.version:
+        return plan
+    earlier = repo.get_plan_version(plan_id, version)
+    if earlier is None:
+        kept = ", ".join(str(item["version"]) for item in repo.list_plan_versions(plan_id)) or "none"
+        raise ValueError(f"plan {plan_id} has no version {version}; the versions kept are {kept}")
+    return earlier
+
+@mcp.tool()
+def list_plan_versions(plan_id: Optional[str] = None) -> dict:
+    """List every version of a plan, with what each one changed.
+
+    For 「剛剛那樣比較好」 and 「回到前兩版」: every save and every amendment is
+    kept as a version, with the note it was saved with and a count of what
+    changed from the version before.
+
+    Args:
+        plan_id: Plan to read; omit for the one saved most recently.
+
+    Returns:
+        A dictionary with the `plan_id`, its `current` version, and
+        `versions`, oldest first, each with its `version`, `saved_at`, `note`
+        and `changed`, the kinds of change from the version before it.
+
+    Raises:
+        ValueError: If the plan does not exist.
+    """
+    plan = _require_plan(plan_id)
+    versions = repo.list_plan_versions(plan.id)
+    listed, before = [], None
+    for item in versions:
+        now = repo.get_plan_version(plan.id, int(item["version"]))
+        changed = diff_plans(before, now) if before is not None and now is not None else {}
+        listed.append({**item, "changed": {group: len(lines) for group, lines in changed.items()}})
+        before = now
+    return {"plan_id": plan.id, "current": plan.version, "versions": listed}
+
+@mcp.tool()
+def revert_plan(plan_id: str, to_version: int, expected_version: int, note: str = "") -> dict:
+    """Go back to an earlier version of a plan.
+
+    Nothing is thrown away: the earlier version's content is saved as a new
+    version on top, so going back can itself be undone, and the history
+    always says what happened. Compile the plan again afterwards; pieces
+    adjusted by hand on the project stay pinned as before.
+
+    Args:
+        plan_id: Plan to take back.
+        to_version: The version to go back to, from `list_plan_versions`.
+        expected_version: The plan's current version.
+        note: Why, kept with the new version.
+
+    Returns:
+        As `save_plan`: the `plan_id`, its new `version`, the `timeline_id`,
+        and `problems` and `notes` from checking it — the footage may have
+        been analyzed again since that version was written.
+
+    Raises:
+        ValueError: If the plan or the version does not exist, or the current
+            version does not match.
+    """
+    plan = _require_plan(plan_id)
+    if plan.version != expected_version:
+        raise ValueError(f"version conflict: plan {plan.id} is at version {plan.version}, not {expected_version}")
+    earlier = _plan_at(plan_id, to_version)
+    stored = repo.save_plan(
+        earlier.model_copy(update={"version": plan.version}),
+        f"back to version {to_version}" + (f" — {note}" if note else ""),
+    )
     problems, notes = check_plan(stored, *_plan_context(stored))
     return {
         "plan_id": stored.id,
@@ -1603,11 +1715,12 @@ def amend_plan(plan_id: str, expected_version: int, amendments: list[PlanAmendme
     }
 
 @mcp.tool()
-def get_plan(plan_id: Optional[str] = None) -> dict:
+def get_plan(plan_id: Optional[str] = None, version: Optional[int] = None) -> dict:
     """Read a stored plan back, with the other plans there are to compare it with.
 
     Args:
         plan_id: Plan to read; omit for the one saved most recently.
+        version: An earlier version to read instead of the current one.
 
     Returns:
         A dictionary with the `plan` as it was stored — its goal, target,
@@ -1619,6 +1732,8 @@ def get_plan(plan_id: Optional[str] = None) -> dict:
         ValueError: If the plan does not exist, or none have been saved.
     """
     plan = _require_plan(plan_id)
+    if version is not None:
+        plan = _plan_at(plan.id, version)
     return {
         "plan": plan.model_dump(),
         "other_plans": [
@@ -1745,16 +1860,28 @@ def compile_plan(project_id: str, expected_version: int, plan_id: Optional[str] 
     }
 
 @mcp.tool()
-def diff_plan(before_plan_id: str, after_plan_id: str) -> dict:
+def diff_plan(
+    before_plan_id: str,
+    after_plan_id: str,
+    before_version: Optional[int] = None,
+    after_version: Optional[int] = None,
+) -> dict:
     """Say what changed between two plans.
 
     Use this when there are two ways of cutting the same footage, or when a
     plan has been reworked after feedback and the user asks what is actually
     different.
 
+    To see what one round of feedback changed, pass the same plan twice with
+    the two versions.
+
     Args:
         before_plan_id: The earlier plan.
         after_plan_id: The later one.
+        before_version: A version of the earlier plan; its current one when
+            left out.
+        after_version: A version of the later plan; its current one when left
+            out.
 
     Returns:
         A dictionary with the two plan ids and `changes`, grouped as `goal`,
@@ -1767,7 +1894,7 @@ def diff_plan(before_plan_id: str, after_plan_id: str) -> dict:
     return {
         "before": before_plan_id,
         "after": after_plan_id,
-        "changes": diff_plans(_require_plan(before_plan_id), _require_plan(after_plan_id)),
+        "changes": diff_plans(_plan_at(before_plan_id, before_version), _plan_at(after_plan_id, after_version)),
     }
 
 # How each kind of change is framed on the sheet: the colours people already read these
@@ -1835,10 +1962,13 @@ def preview_plan_diff(
     before_plan_id: str,
     after_plan_id: str,
     aspect: Optional[Literal["landscape", "portrait", "square"]] = None,
+    before_version: Optional[int] = None,
+    after_version: Optional[int] = None,
 ) -> ToolResult:
     """Show what changed between two versions of a cut, on one storyboard.
 
-    Use it after a round of feedback, before anything is rendered: instead of
+    Use it after a round of feedback, before anything is rendered — the same
+    plan at two versions, or two plans — instead of
     two storyboards to compare by eye, one sheet of the new cut with every
     shot marked — green for added, yellow for retrimmed (the same footage,
     cut at different points), blue for moved, unmarked for untouched — and
@@ -1854,6 +1984,10 @@ def preview_plan_diff(
         after_plan_id: The later one.
         aspect: Crop the tiles to the shape the cut will be delivered in;
             omit to show the footage uncropped.
+        before_version: A version of the earlier plan. To show what one round
+            of feedback did, pass the same plan twice with the version before
+            the round and the one after.
+        after_version: A version of the later plan.
 
     Returns:
         A listing of the changes and lengths, followed by the sheet.
@@ -1863,8 +1997,8 @@ def preview_plan_diff(
             either does not check out well enough to lay out.
     """
     cuts = []
-    for plan_id in (before_plan_id, after_plan_id):
-        plan = _require_plan(plan_id)
+    for plan_id, version in ((before_plan_id, before_version), (after_plan_id, after_version)):
+        plan = _plan_at(plan_id, version)
         timeline, clips, children, assets, known, levels = _plan_context(plan)
         problems, _ = check_plan(plan, timeline, clips, children, assets, known, levels)
         if problems:

@@ -156,6 +156,30 @@ class MusicPlan(BaseModel):
     )
     duck_under_speech: bool = Field(default=True, description="Drop the music while someone is talking")
 
+class Pacing(BaseModel):
+    """How tight the whole cut is.
+
+    The one place a note like 「整體節奏太慢」 lands. It is not a change to any
+    one selection — every cut in the video gets tighter at once — so it is a
+    setting of the plan rather than an edit to each of its pieces, and the
+    compiler applies it everywhere the same way.
+    """
+
+    pause_seconds: Optional[float] = Field(
+        default=None,
+        gt=0,
+        description="Take out any silence inside a shot longer than this, in seconds. Lower is tighter. Null for "
+                    "the default, 0.6. It has to leave room for a breath either side of the cut it makes, so it "
+                    "cannot go below twice `breath_seconds` plus 0.3",
+    )
+    breath_seconds: Optional[float] = Field(
+        default=None,
+        ge=0,
+        le=0.5,
+        description="Air left before and after every cut, in seconds, never more than the footage has. Lower is "
+                    "tighter; 0 starts every line the instant its picture does. Null for the default, 0.1",
+    )
+
 class PlanTarget(BaseModel):
     """What the finished video has to be."""
 
@@ -187,6 +211,7 @@ class EditPlan(BaseModel):
                     "not something to write at the same time as the selections",
     )
     music: Optional[MusicPlan] = None
+    pacing: Pacing = Field(default_factory=Pacing, description="How tight the whole cut is")
     level_voices: bool = Field(
         default=False,
         description="Turn each person down to match the quietest of them, so two people recorded at very "
@@ -242,10 +267,75 @@ class DropBrollOp(BaseModel):
     action: Literal["drop_broll"] = "drop_broll"
     over_clip_id: str = Field(..., description="The clip the shot being removed starts over")
 
+class SetPacingOp(BaseModel):
+    """Amendment that makes the whole cut tighter or looser at once.
+
+    For feedback about the whole video rather than one part of it: 「整體節奏太慢」
+    is shorter pauses and less air everywhere, not a trim to each piece.
+    """
+
+    action: Literal["set_pacing"] = "set_pacing"
+    pacing: Pacing
+
+class SetMusicLevelOp(BaseModel):
+    """Amendment that turns the music up or down, everywhere or in one part."""
+
+    action: Literal["set_music_level"] = "set_music_level"
+    scale: float = Field(..., gt=0, le=4, description="What to multiply the music's volume by: 0.6 is quieter, 1.5 louder")
+    beat_id: Optional[str] = Field(
+        default=None, description="Only the music cue coming in on this beat; every cue when left out",
+    )
+
+class SetTargetOp(BaseModel):
+    """Amendment that changes what the finished video has to be."""
+
+    action: Literal["set_target"] = "set_target"
+    target: PlanTarget
+
+class DropBeatOp(BaseModel):
+    """Amendment that takes a whole part out of the video, with the reason, for 「這整段不要」."""
+
+    action: Literal["drop_beat"] = "drop_beat"
+    beat_id: str
+    reason: str = Field(default="", description="Why it came out; kept with each of its selections under `rejected`")
+
 PlanAmendment = Annotated[
-    Union[SetTrimOp, SetRationaleOp, AddSelectionOp, DropSelectionOp, AddBrollOp, DropBrollOp],
+    Union[
+        SetTrimOp, SetRationaleOp, AddSelectionOp, DropSelectionOp, AddBrollOp, DropBrollOp,
+        SetPacingOp, SetMusicLevelOp, SetTargetOp, DropBeatOp,
+    ],
     Field(discriminator="action"),
 ]
+
+def describe_amendment(op: "PlanAmendment") -> str:
+    """Say in a few words what one amendment did, for a version's history.
+
+    Args:
+        op: The amendment.
+
+    Returns:
+        The phrase.
+    """
+    if isinstance(op, SetTrimOp):
+        return f"retrimmed {op.clip_id} to {op.trim.kind.value}"
+    if isinstance(op, SetRationaleOp):
+        return f"rewrote why {op.clip_id} is there" + (f", moved it to {op.beat_id}" if op.beat_id else "")
+    if isinstance(op, AddSelectionOp):
+        return f"added {op.selection.clip_id} to {op.selection.beat_id}"
+    if isinstance(op, DropSelectionOp):
+        return f"dropped {op.clip_id}" + (f" ({op.reason})" if op.reason else "")
+    if isinstance(op, AddBrollOp):
+        return f"covered {op.shot.over_clip_id} with {op.shot.clip_id}"
+    if isinstance(op, DropBrollOp):
+        return f"uncovered {op.over_clip_id}"
+    if isinstance(op, SetPacingOp):
+        return (f"pacing: pauses over {op.pacing.pause_seconds or 'default'}s out, "
+                f"{op.pacing.breath_seconds if op.pacing.breath_seconds is not None else 'default'}s of air")
+    if isinstance(op, SetMusicLevelOp):
+        return f"music x{op.scale:g}" + (f" from {op.beat_id}" if op.beat_id else "")
+    if isinstance(op, SetTargetOp):
+        return f"target {op.target.seconds or 'none'}s" + (f" for {op.target.platform}" if op.target.platform else "")
+    return f"dropped the part {op.beat_id}" + (f" ({op.reason})" if op.reason else "")
 
 def _selection_index(plan: EditPlan, clip_id: str) -> int:
     """Find a selection in a plan by the clip it uses.
@@ -298,6 +388,44 @@ def apply_amendment(plan: EditPlan, op: PlanAmendment) -> None:
 
     if isinstance(op, SetTrimOp):
         plan.selections[_selection_index(plan, op.clip_id)].trim = op.trim
+        return
+
+    if isinstance(op, SetPacingOp):
+        plan.pacing = op.pacing
+        return
+
+    if isinstance(op, SetMusicLevelOp):
+        if plan.music is None:
+            raise ValueError("the plan has no music to turn up or down")
+        cues = [cue for cue in plan.music.cues if op.beat_id is None or cue.beat_id == op.beat_id]
+        if not cues:
+            raise ValueError(f"no music cue comes in on {op.beat_id}")
+        for cue in cues:
+            # Capped where the volume field is, rather than refused: turning something up
+            # twice should stop at the ceiling, not fail the second time.
+            cue.volume = round(min(4.0, cue.volume * op.scale), 3)
+        return
+
+    if isinstance(op, SetTargetOp):
+        plan.target = op.target
+        return
+
+    if isinstance(op, DropBeatOp):
+        if not any(beat.id == op.beat_id for beat in plan.beats):
+            known = ", ".join(beat.id for beat in plan.beats) or "none"
+            raise ValueError(f"the plan has no beat {op.beat_id}; its beats are {known}")
+        going = [selection for selection in plan.selections if selection.beat_id == op.beat_id]
+        plan.selections = [selection for selection in plan.selections if selection.beat_id != op.beat_id]
+        plan.beats = [beat for beat in plan.beats if beat.id != op.beat_id]
+        gone = {selection.clip_id for selection in going}
+        plan.rejected = [item for item in plan.rejected if item.clip_id not in gone]
+        plan.rejected += [Rejection(clip_id=selection.clip_id, reason=op.reason) for selection in going]
+        # The same arithmetic a dropped selection gets: covers and music with nowhere to go.
+        plan.broll = [item for item in plan.broll if item.over_clip_id not in gone]
+        if plan.music is not None:
+            plan.music.cues = [cue for cue in plan.music.cues if cue.beat_id != op.beat_id]
+            if not plan.music.cues:
+                plan.music = None
         return
 
     if isinstance(op, SetRationaleOp):

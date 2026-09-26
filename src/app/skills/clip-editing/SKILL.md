@@ -383,8 +383,9 @@ When the user asks for a change — 「第三段太長」, 「開頭無聊」 �
 and compile it again, rather than nudging clips on the timeline. The plan is
 where the reasons live; the timeline is only what fell out of them.
 
-To show them what the change did, save the changed plan under a new id and
-call `preview_plan_diff` with the old and the new: one sheet of the new cut
+To show them what the change did, call `preview_plan_diff` with the plan
+twice, `before_version` the one before the round and `after_version` the one
+after: one sheet of the new cut
 with added shots framed green, retrimmed yellow, moved blue, and the ones
 taken out in red at the end, and a line on how the length changed, part by
 part. Describe it in a sentence or two rather than reading the list out.
@@ -397,6 +398,19 @@ the reason. `add_broll` and `drop_broll` do the same for covering picture. Do
 not send the whole plan through `save_plan` again to move one edge: every
 other selection's reason is retyped to do it, and those reasons are the part
 that cannot be rebuilt.
+
+Some feedback is about the whole video and has its own amendment rather than
+a change to every piece: `set_pacing` for 「整體節奏太慢」 (shorter
+`pause_seconds` takes out more dead air, lower `breath_seconds` leaves less
+around every cut), `set_music_level` for 「音樂太大聲」 (a `scale`, for every
+cue or from one `beat_id`), `set_target` for a new length or platform, and
+`drop_beat` for 「這整段不要」. Pass the user's own words as `note`: they are
+kept with the version.
+
+Every save and every amendment is a version, and all of them are kept.
+「剛剛那樣比較好」 is `list_plan_versions` to find the one they mean and
+`revert_plan` to bring it back — which saves it as a new version on top, so
+nothing is lost either way. Compile again afterwards.
 
 ### Cleaning up the sound
 
@@ -686,7 +700,11 @@ times refer to the source file.
 | 「找出精華剪成 60 秒」 / a 60 s highlight reel | Choose segments by transcript and frames until about 60 s; confirm the list before rendering |
 | 「第 3 分鐘那個畫面是什麼」 / what is on screen at 3:00 | `view_frames` with one `asset_ids` entry, `start: 175`, `end: 185`, `count: 4` |
 | 「現在剪成什麼樣子」 / show me the cut so far | `preview_project`, then describe the order and the cut points |
-| 「改了哪裡？」「跟上一版差在哪」 / what changed since last time | `preview_plan_diff` with the two plans; describe it in a sentence or two |
+| 「改了哪裡？」「跟上一版差在哪」 / what changed since last time | `preview_plan_diff` with the plan twice and the two versions; describe it in a sentence or two |
+| 「剛剛那樣比較好」「回到上一版」 / go back to how it was | `list_plan_versions`, then `revert_plan` to that version, then `compile_plan` |
+| 「整體節奏太慢」 / the whole thing drags | `amend_plan` with `set_pacing`: lower `pause_seconds` (say 0.45) and `breath_seconds` (say 0.05) |
+| 「音樂太大聲」 / the music is too loud | `amend_plan` with `set_music_level`, `scale: 0.6` |
+| 「這整段不要」 / lose this whole part | `amend_plan` with `drop_beat` and the user's reason |
 | 「音樂會不會蓋過講話」「先聽聽看」 / does the music drown the talking, let me hear it | `preview_sound`: read the chart and numbers, and give the user the mix file |
 | 「同一支也出直式」「Reels 跟 YouTube 各一版」 / one cut for several platforms | `render_project` with `frame: "portrait"` (and again with `landscape` or `square`); `preview_project` with the same `frame` first |
 | 「幫我寫 YouTube 章節」 / YouTube chapters | `get_chapters`, paste its `description`; say what `problems` lists |

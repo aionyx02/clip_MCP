@@ -91,6 +91,7 @@ clip_MCP/
 │   ├── test_delivery.py           # 章節（含寫進 MP4）、render 前檢查與拒絕、封面、四種匯出格式
 │   ├── test_incremental_preview.py # 預覽快取：第二次什麼都不重算、改一個剪點只重算那一顆
 │   ├── test_preview_changes.py    # plan 差異的 storyboard、聲音預覽（實際 render 再量 ducking）
+│   ├── test_feedback.py           # 全域修改（節奏、配樂音量、目標、整段拿掉）與版本歷史、回退
 │   ├── test_skill_resources.py    # skill 與 server 不得漂移（工具、操作、分層指標）
 │   ├── test_benchmark.py          # L2 計分：案例驗證、五項底線、剪點餘裕、端到端
 │   └── test_end_to_end.py         # 從資料夾到成片的完整流程
@@ -350,6 +351,20 @@ clip_MCP/
   與 ducking 之後的音軌。逐 0.1 秒量兩軌的電平，畫成一張圖（剪點、段落都標上），
   逐段報出人聲多大、講話時配樂低多少、空檔時配樂回來多少。量的是正規化之前的電平，
   所以要看的是兩者的差而不是絕對值。混好的聲音另存成檔案給使用者聽。
+- **plan 的每一版都留著，回退是往上疊一版**：`plan_versions` 表每次 `save_plan`、
+  `amend_plan`、`revert_plan` 都寫一筆，在同一個交易裡寫，所以不可能存了 plan 卻漏了歷史。
+  回退不是倒帶：舊版的內容被存成**新的一版**，所以「回退」本身也能被回退，
+  歷史永遠不會比做過的事短。每一版帶一個 note——使用者自己說的話，加上這一版的修正做了什麼——
+  所以翻歷史時看得到每一輪回饋是為了什麼。遷移時把現有 plan 的當前版本補進歷史；
+  之前的版本本來就沒存，找不回來。
+- **全域修改是 plan 的設定，不是逐段改**：「整體節奏太慢」會同時動到每一個剪點，
+  寫成對每個選材的 trim 既囉唆又會在下一次加選材時漏掉。所以 `EditPlan.pacing`
+  （`pause_seconds` 多長的靜音要拿掉、`breath_seconds` 每個剪點留多少空氣）是 plan 的欄位，
+  編譯器在每一個清理階段都用它，取代原本寫死的 `PAUSE_SECONDS` / `BREATH_SECONDS`
+  （那兩個常數現在是預設值）。兩者之間那條不等式——拿掉一個氣口後兩邊各留一口呼吸，
+  剩下的要比 merge gap 長，否則會被接回去變成看不見的空轉——在 `check_plan` 裡擋，
+  附上該怎麼調。其餘全域修改是封閉集合的 amendment：`set_music_level`、`set_target`、
+  `drop_beat`（整段拿掉，連同掛在上面的 B-roll 與配樂 cue）。
 - **字幕綁素材時間，樣式綁專案**：一則 `SubtitleCue` 記的是「哪個檔、該檔第幾秒」，
   所以剪輯怎麼搬它都跟著走（搬 clip 字幕跟著搬、刪 clip 字幕跟著消失、切成兩半就在
   兩邊各出現一次）。`CaptionStyle` 則是專案的一個欄位，因為「這支要發到哪」是整支的事。
