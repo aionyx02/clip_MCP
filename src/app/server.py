@@ -1,4 +1,5 @@
 import os
+from datetime import datetime, timezone
 import re
 import subprocess
 import time
@@ -765,6 +766,8 @@ def query_clips(
     min_scores: Optional[dict[str, float]] = None,
     max_scores: Optional[dict[str, float]] = None,
     limit: Annotated[int, Field(ge=1, le=MAX_CLIP_RESULTS)] = 50,
+    offset: Annotated[int, Field(ge=0)] = 0,
+    brief: bool = False,
 ) -> dict:
     """Search the semantic timeline for the clips worth looking at.
 
@@ -776,7 +779,9 @@ def query_clips(
     Results are summaries. Each carries enough to decide whether a clip is
     wanted — what is said, how long it runs, how much room its edges have —
     and `get_semantic_clip` has the full text and word timings for the few
-    that matter.
+    that matter. To read through footage — what was said in a whole folder,
+    in order — ask for `brief`: one line per clip, a few hundred of them in
+    a single result, with `offset` for the next page.
 
     The scores each clip carries are measurements, not opinions. A result
     shows the ones that say whether there is usable content here: `speech` and
@@ -841,12 +846,20 @@ def query_clips(
         max_scores: Upper bounds on scores, such as `{"black": 0.1}` or
             `{"shake": 0.01}` for shots steady enough to hold on screen.
         limit: Largest number of clips to return.
+        offset: How many matching clips to skip first, for the next page.
+        brief: Return `lines` instead of `clips`, in the order the footage
+            was shot: one line per clip, reading
+            `<id> <file> <start>-<end> <kind> [<speaker>] [<topic>] <text>`,
+            with the whole of what is said. The ID there is the part after
+            the timeline's, so `u0125` is `<timeline_id>:u0125`.
 
     Returns:
         A dictionary with the `timeline_id` searched and the matching `clips`,
         each with its `clip_id`, `asset_id`, `kind`, `start` and `end` in the
         source file, `duration`, `safe_in` / `safe_out`, its `text`, and its
-        `scores`. `truncated` is true when the limit cut the results short.
+        `scores` — or with `brief`, their `lines`. `truncated` is true when the
+        limit cut the results short; the next page starts at `offset` plus
+        `limit`.
 
     Raises:
         ValueError: If the timeline does not exist, or a score name is not a
@@ -867,13 +880,59 @@ def query_clips(
         max_duration=max_duration,
         min_scores=min_scores,
         max_scores=max_scores,
-        limit=limit,
+        # Read through in the order it was shot, which needs every match to sort.
+        limit=MAX_TIMELINE_CLIPS if brief else offset + limit,
     )
+    if brief:
+        assets = _dated(repo.get_assets({clip.asset_id for clip in clips}))
+        never = datetime.max.replace(tzinfo=timezone.utc)
+
+        def shot(clip: SemanticClip) -> tuple:
+            """Sort key: when its file was recorded, then its name, then where in it."""
+            asset = assets.get(clip.asset_id)
+            return (asset.recorded_at or never if asset else never,
+                    os.path.basename(asset.path) if asset else "", clip.source_range.start)
+
+        ordered = sorted(clips, key=shot)
+        page = ordered[offset:offset + limit]
+        return {
+            "timeline_id": timeline.id,
+            "lines": [
+                _clip_line(clip, os.path.basename(assets[clip.asset_id].path) if clip.asset_id in assets
+                           else clip.asset_id)
+                for clip in page
+            ],
+            "truncated": offset + limit < len(ordered),
+        }
+    truncated = len(clips) == offset + limit
+    clips = clips[offset:]
     return {
         "timeline_id": timeline.id,
         "clips": [_clip_summary(clip) for clip in clips],
-        "truncated": len(clips) == limit,
+        "truncated": truncated,
     }
+
+def _clip_line(clip: SemanticClip, file_name: str) -> str:
+    """Describe a semantic clip in one line, for reading footage through.
+
+    Args:
+        clip: Clip to describe.
+        file_name: The name of the file it comes from.
+
+    Returns:
+        Its short ID, file, source range, kind, speaker and topic where it
+        has them, and all of what is said or its description.
+    """
+    parts = [
+        clip.id.split(":", 1)[-1], file_name,
+        f"{clip.source_range.start:.1f}-{clip.source_range.end:.1f}", clip.kind.value,
+    ]
+    if clip.speaker:
+        parts.append(clip.speaker)
+    if clip.topic:
+        parts.append(f"[{clip.topic}]")
+    said = clip.text or (clip.description or "")
+    return " ".join(parts + ([said] if said else []))
 
 def _timeline_utterances(timeline: SemanticTimeline) -> List[SemanticClip]:
     """Read every `utterance` clip of a timeline, in order.

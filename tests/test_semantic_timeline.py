@@ -529,3 +529,20 @@ def test_asking_for_more_frames_than_a_sheet_holds_is_refused(analyzed: str) -> 
         frames_for_clips([clip_id] * (MAX_STORYBOARD_TILES + 1))
     with pytest.raises(ValueError, match="at least one clip"):
         frames_for_clips([])
+
+def test_footage_can_be_read_through_one_line_a_clip(media: Path) -> None:
+    from app.server import build_semantic_timeline, import_asset, query_clips
+    from app.server import repo as server_repo
+
+    asset_id = import_asset(str(media / "wide.mp4"))["id"]
+    server_repo.save_analysis(analysis(
+        duration=10.0, segments=[(1.0, 3.0, "第一句話"), (4.0, 6.0, "第二句話")],
+        silences=[(0.0, 1.0), (3.0, 4.0), (6.0, 10.0)], asset_id=asset_id,
+    ))
+    built = build_semantic_timeline([asset_id], rebuild=True)["timeline_id"]
+    lines = query_clips(timeline_id=built, kinds=["speech"], brief=True)["lines"]
+    assert lines[0].split(" ")[1:] == ["wide.mp4", "1.0-3.0", "speech", "第一句話"]
+    # The next page starts where the first one stopped.
+    first = query_clips(timeline_id=built, kinds=["speech"], brief=True, limit=1)
+    second = query_clips(timeline_id=built, kinds=["speech"], brief=True, limit=1, offset=1)
+    assert first["truncated"] and first["lines"] + second["lines"] == lines

@@ -27,6 +27,9 @@ saying what to make of it. It is referenced from SKILL.md.
    `timeline_id`. Building again over unchanged analyses is free and returns
    the same IDs, so call it rather than trying to remember one.
 3. Find material with `query_clips`, not by reading a transcript end to end.
+   When the story is not known yet — a folder with no plan — read it through
+   once with `brief: true`: one line per clip, a page at a time (`offset`),
+   which is what a whole day of footage fits in. Then search.
    Ask for what you need and let the search narrow it: a kind, a phrase, a
    minimum length, a stretch of the file, a bound on the scores. The scores
    cover how well a shot was shot as well as what is in it — exposure, blur,

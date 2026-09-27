@@ -163,7 +163,7 @@ ChatGPT（網頁與 App）只接受透過 HTTPS 連線的遠端 MCP 伺服器，
 | 工具 | 用途 |
 |---|---|
 | `build_semantic_timeline` | 由分析結果推導可檢索的語意片段（同樣輸入必得同一組 ID） |
-| `query_clips` | 依種類、文字、標籤、長度、分數等條件檢索片段 |
+| `query_clips` | 依種類、文字、標籤、長度、分數等條件檢索片段；`brief` 一行一句讀完整批素材，`offset` 翻頁 |
 | `get_semantic_clip` | 讀單一片段的完整文字，可含每個詞的時間 |
 | `propose_sections` / `set_sections` | 產生候選邊界，由模型在候選裡裁決並命名段落與主題 |
 | `frames_for_clips` / `set_clip_tags` | 看圖並把描述寫回片段，標明出處 |
