@@ -1271,17 +1271,31 @@ def _new_clip(track: Track, spec: _NewClipSpec, timeline_in: Decimal) -> Clip:
         layout=spec.layout,
     )
 
-def _shift_clips(track: Track, starting_at: Decimal, delta: Decimal) -> None:
+def _shift_clips(track: Track, starting_at: Decimal, delta: Decimal, joined_at: Optional[Decimal] = None) -> None:
     """Move every clip that starts at or after a position by the same amount.
+
+    A clip that started exactly where the one before it ended is put exactly
+    where that one ends now, rather than moved by `delta`. The two come to the
+    same thing in arithmetic but not in `Decimal`: a clip played at 1.1x is a
+    recurring decimal long, rounded to 28 digits, and adding one rounded
+    difference to every clip after it left the next clip starting 1e-25s before
+    the end of the last — an overlap, which refused the edit — or after it, a
+    gap a transition could not run in over.
 
     Args:
         track: Track whose clips are moved.
         starting_at: Timeline position (seconds); clips starting earlier stay put.
         delta: Seconds to add to each affected clip's `timeline_in`.
+        joined_at: Where a clip that started exactly at `starting_at` now
+            starts: the new end of the clip that was changed, or the start of
+            the one taken out. `starting_at + delta` when not given.
     """
-    for clip in track.clips:
-        if clip.timeline_in >= starting_at:
-            clip.timeline_in += delta
+    moved = sorted((clip for clip in track.clips if clip.timeline_in >= starting_at), key=lambda clip: clip.timeline_in)
+    ended, ends = starting_at, starting_at + delta if joined_at is None else joined_at
+    for clip in moved:
+        was_out = clip.timeline_out
+        clip.timeline_in = ends if clip.timeline_in == ended else clip.timeline_in + delta
+        ended, ends = was_out, clip.timeline_out
 
 def _fit_track(project: Project, track: Track, op: "FitTrackOp", assets: Mapping[str, Asset]) -> None:
     """Make an audio track cover the video exactly, with its fades in the right place.
@@ -1514,21 +1528,21 @@ def apply_operation(project: Project, op: EditOperation, assets: Mapping[str, As
         else:
             position = _find_clip(track, op.before_clip_id).timeline_in
         clip = _new_clip(track, op, position)
-        _shift_clips(track, position, clip.timeline_duration)
+        _shift_clips(track, position, clip.timeline_duration, clip.timeline_out)
         track.clips.append(clip)
     elif isinstance(op, TrimClipOp):
         clip = _find_clip(track, op.clip_id)
         old_out = clip.timeline_out
         clip.source_range = op.new_source_range
         if op.ripple:
-            _shift_clips(track, old_out, clip.timeline_out - old_out)
+            _shift_clips(track, old_out, clip.timeline_out - old_out, clip.timeline_out)
     elif isinstance(op, MoveClipOp):
         _find_clip(track, op.clip_id).timeline_in = op.new_timeline_in
     elif isinstance(op, DeleteOp):
         clip = _find_clip(track, op.clip_id)
         track.clips.remove(clip)
         if op.ripple:
-            _shift_clips(track, clip.timeline_out, -clip.timeline_duration)
+            _shift_clips(track, clip.timeline_out, -clip.timeline_duration, clip.timeline_in)
     elif isinstance(op, SplitClipOp):
         clip = _find_clip(track, op.clip_id)
         if any(other.id == op.new_clip_id for other in track.clips):
@@ -1574,13 +1588,13 @@ def apply_operation(project: Project, op: EditOperation, assets: Mapping[str, As
         clip = _find_clip(track, op.clip_id)
         target = _find_clip(track, op.before_clip_id) if op.before_clip_id is not None else None
         track.clips.remove(clip)
-        _shift_clips(track, clip.timeline_out, -clip.timeline_duration)
+        _shift_clips(track, clip.timeline_out, -clip.timeline_duration, clip.timeline_in)
         # Read the target's position after the space has closed, so it is where the clip really lands.
         position = target.timeline_in if target is not None else max(
             (other.timeline_out for other in track.clips), default=Decimal(0)
         )
-        _shift_clips(track, position, clip.timeline_duration)
         clip.timeline_in = position
+        _shift_clips(track, position, clip.timeline_duration, clip.timeline_out)
         track.clips.append(clip)
     elif isinstance(op, FitTrackOp):
         _fit_track(project, track, op, assets)
@@ -1622,7 +1636,7 @@ def apply_operation(project: Project, op: EditOperation, assets: Mapping[str, As
         if op.preserve_pitch is not None:
             clip.preserve_pitch = op.preserve_pitch
         if op.ripple:
-            _shift_clips(track, was, clip.timeline_out - was)
+            _shift_clips(track, was, clip.timeline_out - was, clip.timeline_out)
     elif isinstance(op, SetClipPinnedOp):
         _find_clip(track, op.clip_id).pinned = op.pinned
 

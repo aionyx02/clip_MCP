@@ -254,3 +254,22 @@ def test_putting_the_sound_back_with_its_picture(two_clips: str) -> None:
     clip = repo.get_project(two_clips).tracks[0].clips[1]
     assert clip.audio_lead == 0
     assert clip.audio_timeline_in == clip.timeline_in
+
+def test_trimming_a_clip_played_faster_keeps_the_ones_after_it_touching() -> None:
+    # A clip at 1.1x is a recurring decimal long. Moving everything after a trim by one
+    # rounded difference left the next two a hair apart, and on a real cut of forty clips
+    # the edit was refused as an overlap, or a dip was refused for having nothing to dip from.
+    from app.models.timeline import Clip, Project, TimeRange, Track, TrimClipOp, apply_operation
+
+    first = Clip(id="a", asset_id="x", source_range=TimeRange(start=Decimal("0.46"), end=Decimal("15.18")),
+                 timeline_in=Decimal(0), speed=1.1)
+    second = Clip(id="b", asset_id="x", source_range=TimeRange(start=Decimal(0), end=Decimal("8.288")),
+                  timeline_in=first.timeline_out, speed=1.1)
+    third = Clip(id="c", asset_id="x", source_range=TimeRange(start=Decimal(0), end=Decimal(2)),
+                 timeline_in=second.timeline_out, speed=1.1)
+    project = Project(id="p", width=1080, height=1920,
+                      tracks=[Track(id="main", track_type="video", clips=[first, second, third])])
+    apply_operation(project, TrimClipOp(
+        track_id="main", clip_id="a", new_source_range=TimeRange(start=Decimal("0.46"), end=Decimal("15.39")),
+    ), {})
+    assert second.timeline_in == first.timeline_out and third.timeline_in == second.timeline_out
