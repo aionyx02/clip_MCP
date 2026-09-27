@@ -20,11 +20,15 @@ from app.models.semantic import (
     ClipDescription, ClipKind, ClipLevel, SectionChoice, SemanticClip, SemanticTimeline, Tag, TagSource,
 )
 from app.models.timeline import (
+    AddSubtitleOp,
     Clip,
     EditOperation,
+    EditSubtitleOp,
     Project,
     SetSubtitlesOp,
+    SubtitleCue,
     TrackType,
+    retimed_words,
     apply_operation,
     validate_project,
 )
@@ -1403,17 +1407,62 @@ def apply_edits(project_id: str, expected_version: int, operations: list[EditOpe
             `add_track`, `add_clip`, `insert_clip`, `trim_clip`, `move_clip`,
             `delete_clip`, `split_clip`, `reorder_clip`, `fit_track`,
             `set_clip_audio`, `set_clip_look`, `set_track_audio`,
-            `set_subtitles`, or `edit_subtitle`.
+            `set_subtitles`, `edit_subtitle`, or `add_subtitle`. Captions stored
+            or corrected here are also remembered against the file they belong
+            to, and the next `generate_subtitles` over that file, in any
+            project, starts from them.
 
     Returns:
-        A dictionary with the `status` and the project's `new_version`.
+        A dictionary with the `status` and the project's `new_version`, and,
+        when captions were stored or corrected, `captions`: each one touched,
+        as it now reads, one line apiece — read them back rather than assume.
 
     Raises:
         ValueError: If the project does not exist, the version does not match,
             an operation references a missing or duplicate track or clip, or
             the resulting timeline breaks a rule above.
     """
-    return {"status": "success", "new_version": _apply(project_id, expected_version, operations).version}
+    saved = _apply(project_id, expected_version, operations)
+    result = {"status": "success", "new_version": saved.version}
+    touched = _touched_captions(saved, operations)
+    if touched:
+        repo.remember_captions(touched)
+        result["captions"] = [_caption_line(saved, cue) for cue in touched]
+    return result
+
+def _touched_captions(project: Project, operations: Sequence) -> List[SubtitleCue]:
+    """Find the captions a batch of edits stored or corrected, as they now stand.
+
+    Args:
+        project: The project after the edits.
+        operations: The edits.
+
+    Returns:
+        Every caption set, added or corrected, in source order; a deleted one
+        is left out.
+    """
+    if any(isinstance(op, SetSubtitlesOp) for op in operations):
+        return list(project.subtitles)
+    named = {op.cue_id for op in operations if isinstance(op, EditSubtitleOp)}
+    added = [(op.asset_id, op.source_start, op.text) for op in operations if isinstance(op, AddSubtitleOp)]
+    return [
+        cue for cue in project.subtitles
+        if cue.id in named or (cue.asset_id, cue.source_start, cue.text) in added
+    ]
+
+def _caption_line(project: Project, cue: SubtitleCue) -> str:
+    """Write one caption as a line to read back: where it lands and what it says.
+
+    Args:
+        project: The project it is on.
+        cue: The caption.
+
+    Returns:
+        Its ID, its time in the cut (or that it is not in the cut), and its text.
+    """
+    placed = [item for item in place_cues(project, [cue])]
+    at = f"{format_timestamp(float(placed[0].start))}" if placed else "not in the cut"
+    return f"{cue.id} {at} {cue.text}" + (f" / {cue.secondary}" if cue.secondary else "")
 
 def _apply(
     project_id: str,
@@ -2422,10 +2471,12 @@ def _joined_people(project: Project, heard: Mapping[str, Sequence[SpeakerTurn]])
 @mcp.tool()
 def generate_subtitles(
     project_id: str,
+    expected_version: int,
     max_characters: Annotated[int, Field(ge=8, le=120)] = DEFAULT_MAX_CHARACTERS,
     max_seconds: Annotated[float, Field(gt=0.2, le=15)] = DEFAULT_MAX_SECONDS,
+    fix_words: Optional[Dict[str, str]] = None,
 ) -> dict:
-    """Propose captions for the edited sequence, from transcripts already made.
+    """Caption the edited sequence from transcripts already made, and store the captions.
 
     Reads the transcript of every clip on the base video track and on the
     audio tracks, keeps only the speech that survived the edit, and moves each
@@ -2437,29 +2488,37 @@ def generate_subtitles(
     words, and while the caption style keeps to one line (its `single_line`,
     on unless turned off) never wider than one line of this project's frame
     at that style's size, so each caption checked is one line on screen. Set
-    the caption style first for that to be the right width. Nothing is saved: check the wording, fix any name the transcript
-    misheard, and then store the captions with a `set_subtitles` operation in
-    `apply_edits`. Render them into the picture with `render_project` and
-    `burn_subtitles`.
+    the caption style first for that to be the right width.
+
+    Wherever somebody has already written or corrected captions for the same
+    stretch of a file — in this project or any other — those are used
+    instead of the transcript, so a correction is made once. Every word in
+    the workspace glossary is corrected as well; `fix_words` adds to it.
+
+    The captions replace any the project had, and come back one line each
+    for proofreading: correct a line with `edit_subtitle`, add one the
+    transcript missed with `add_subtitle`. Render them into the picture with
+    `render_project` and `burn_subtitles`.
 
     Args:
         project_id: ID of the project to caption.
+        expected_version: Version you last read from `get_project`.
         max_characters: Longest caption text before it is broken in two.
         max_seconds: Longest caption before it is broken in two.
+        fix_words: Words the transcriber gets wrong, mapped to what was
+            meant — {"Packet": "Pocket", "裁風寺": "裁縫師"}. Kept for every
+            later caption in this workspace; an empty meaning takes a word
+            out of the glossary.
 
     Returns:
-        A dictionary with `cues`, each holding its `id`, the `asset_id` the
-        words were spoken in, `source_start` and `source_end` in seconds
-        within that file, its `text`, the `speaker` the speaker split credits
-        it to where one voice clearly holds it — `V1`, `V2`, joined across
-        files the same way the clips it sits on are, so one person is one
-        label whichever camera recorded them — and the `words` inside it with
-        their own timings, which is what lets a caption light up as it is
-        said; `assets_without_transcript`, the
-        video sources that still need `analyze_asset` before they can be
-        captioned; and `overlapping`, how many captions land on top of the one
-        before them once the cut puts them on screen, which is worth a look
-        when a narration track talks over footage that speaks for itself.
+        A dictionary with the project's `new_version`; `captions`, each as
+        one line — its ID, where it lands in the cut, and what it says;
+        `reused`, how many came from captions already reviewed; `glossary`,
+        the words corrected; `assets_without_transcript`, the video sources
+        that still need `analyze_asset` before they can be captioned; and
+        `overlapping`, how many captions land on top of the one before them
+        once the cut puts them on screen, which is worth a look when a
+        narration track talks over footage that speaks for itself.
 
     Raises:
         ValueError: If the project does not exist, or nothing it plays has
@@ -2512,26 +2571,80 @@ def generate_subtitles(
         for asset_id, turns in speakers.items()
     }
     style = project.caption_style
-    cues = timeline_cues(
-        project, transcripts, max_characters=max_characters, max_seconds=max_seconds,
-        silences=silences, speakers=speakers,
-        max_units=caption_geometry(project.width, project.height, style).max_units if style.single_line else None,
-    )
+    glossary = repo.update_glossary(fix_words) if fix_words else repo.glossary()
+    proposed = [
+        _corrected(cue, glossary) for cue in timeline_cues(
+            project, transcripts, max_characters=max_characters, max_seconds=max_seconds,
+            silences=silences, speakers=speakers,
+            max_units=caption_geometry(project.width, project.height, style).max_units if style.single_line else None,
+        )
+    ]
+    reviewed = {asset_id: repo.reviewed_captions(asset_id) for asset_id in {cue.asset_id for cue in proposed}}
+    reviewed.update({
+        clip.asset_id: repo.reviewed_captions(clip.asset_id)
+        for clip in (base.clips if base else []) if clip.asset_id not in reviewed
+    })
+    kept = [
+        cue for cue in proposed
+        if not any(_overlaps(cue, known) for known in reviewed.get(cue.asset_id, ()))
+    ]
+    reused = [known.model_copy(update={"id": ""}) for known_list in reviewed.values() for known in known_list]
+    reused = [cue for cue in reused if place_cues(project, [cue])]
+    saved = _apply(project_id, expected_version, [SetSubtitlesOp(cues=[*kept, *reused])])
     # Counted where the captions land, not where the words were said: two lines from
     # different files overlap only once the cut puts them on screen together.
-    placed = place_cues(project, cues)
+    placed = place_cues(saved, saved.subtitles)
     overlapping = sum(1 for earlier, later in zip(placed, placed[1:]) if later.start < earlier.end)
     return {
-        "cues": [cue.model_dump() for cue in cues],
+        "new_version": saved.version,
+        "captions": [
+            f"{cue.cue_id} {format_timestamp(float(cue.start))} {cue.text}"
+            + (f" / {cue.secondary}" if cue.secondary else "")
+            for cue in placed
+        ],
+        "reused": len(reused),
+        "glossary": glossary,
         "assets_without_transcript": untranscribed,
         "overlapping": overlapping,
     }
+
+def _overlaps(first: SubtitleCue, second: SubtitleCue) -> bool:
+    """Say whether two captions of one file cover some of the same words.
+
+    Args:
+        first: One caption.
+        second: The other.
+
+    Returns:
+        True when they share more than a sliver of the file.
+    """
+    shared = min(first.source_end, second.source_end) - max(first.source_start, second.source_start)
+    return float(shared) > 0.05
+
+def _corrected(cue: SubtitleCue, glossary: Mapping[str, str]) -> SubtitleCue:
+    """Correct a proposed caption's text with the workspace glossary.
+
+    Args:
+        cue: The caption as proposed.
+        glossary: Heard words mapped to meant ones.
+
+    Returns:
+        The caption with every glossary word replaced, and its word timings
+        kept where the correction left them fitting.
+    """
+    text = cue.text
+    for heard, meant in glossary.items():
+        text = text.replace(heard, meant)
+    if text == cue.text:
+        return cue
+    return cue.model_copy(update={"text": text, "words": retimed_words(cue.words, text)})
 
 @mcp.tool()
 def get_subtitles(
     project_id: str,
     start: Annotated[float, Field(ge=0)] = 0,
     end: Annotated[Optional[float], Field(ge=0)] = None,
+    words: bool = False,
 ) -> dict:
     """Read the captions stored on a project, a window at a time.
 
@@ -2549,6 +2662,8 @@ def get_subtitles(
         project_id: ID of the project to read.
         start: Start of the window in seconds on the timeline.
         end: End of the window in seconds; omit for the rest of the video.
+        words: Include each caption's word timings, which are long and only
+            needed to check how a caption lights up word by word.
 
     Returns:
         A dictionary with `cues` in the window — each with its `cue_id`,
@@ -2572,7 +2687,7 @@ def get_subtitles(
         if limit <= start:
             raise ValueError(f"the window ends at {limit}s, which is not after its start at {start}s")
     window = [
-        cue.model_dump() for cue in placed
+        cue.model_dump(exclude=None if words else {"words"}) for cue in placed
         if float(cue.end) > start and float(cue.start) < limit
     ]
     return {

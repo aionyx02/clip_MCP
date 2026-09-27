@@ -67,6 +67,22 @@ def workspace() -> Iterator[str]:
     # The server holds its database open, so a locked file must not fail the run.
     shutil.rmtree(WORKSPACE, ignore_errors=True)
 
+@pytest.fixture(autouse=True)
+def forget_reviewed_captions() -> Iterator[None]:
+    """Start every test with no captions remembered and an empty glossary.
+
+    Tests import the same few media files over and over, so the same asset IDs
+    come back, and captions one test stored would otherwise be reused by the
+    next — which is exactly what the memory is for, and exactly what a test
+    that checks captions made from a transcript must not see.
+    """
+    from app.server import repo
+
+    with repo._transaction() as conn:
+        conn.execute("DELETE FROM reviewed_captions")
+        conn.execute("DELETE FROM glossary")
+    yield
+
 @pytest.fixture(scope="session")
 def media(tmp_path_factory: pytest.TempPathFactory) -> Path:
     """Create the media files the tests import.

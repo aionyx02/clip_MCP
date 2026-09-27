@@ -87,11 +87,13 @@ the very start of a video, use `video_fade_in` instead.
   `audio_fade_out` in seconds.
 - **Captions**: anchored to the file and the second the words were spoken, not
   to a moment in the cut, so they follow the footage: move a clip and its lines
-  go with it, drop it and they stop appearing. `generate_subtitles` proposes
+  go with it, drop it and they stop appearing. `generate_subtitles` makes
   them from the transcripts of what is heard in the cut — not insets, not
-  music, not a clip at `volume: 0` — and counts how many land `overlapping`.
-  Nothing is saved until `set_subtitles`, and they only appear in the file
-  with `burn_subtitles`; `set_caption_style` decides how they are drawn, from
+  music, not a clip at `volume: 0` — stores them, and returns one line per
+  caption to proofread. Captions already corrected for the same footage, in
+  any project, are used instead of the transcript, and the workspace glossary
+  (`fix_words`) corrects words the transcriber always gets wrong. They only
+  appear in the file with `burn_subtitles`; `set_caption_style` decides how they are drawn, from
   a platform `preset` (the platform file). `get_subtitles` reports `total`, how many land in the
   cut, and `stored`; `stored` above `total` means some belong to footage the
   edit dropped.
@@ -166,10 +168,13 @@ user corrects what is wrong before a render is wasted.
 5. Add music if requested; see [Background music](#background-music).
 6. If the user asked for captions, set the caption style first (the platform
    file), because each caption is proposed one line wide for that style. Then
-   call `generate_subtitles`, show them the
-   lines — transcripts mishear names — and store them with `set_subtitles`
-   once they are happy. Correct single lines afterwards with `edit_subtitle`
-   and its `cue_id`; never resend the whole set to change one word. Lower
+   call `generate_subtitles` and read every line it returns — transcripts
+   mishear names. Correct a line with `edit_subtitle` and its `cue_id`, add a
+   missing one or text for a shot nobody speaks over with `add_subtitle`, and
+   read back the `captions` the edit returns; never resend the whole set to
+   change one word. A word wrong everywhere goes in `fix_words` once.
+   `set_subtitles` replaces every caption at once, for a set written
+   elsewhere — a translation, a script. Lower
    `max_characters` or `max_seconds` for shorter lines on screen.
 7. Call `preview_project` and look at the storyboard before rendering: the
    clip order, the framing, a cut on a bad frame, for a few seconds' cost. If
@@ -271,9 +276,10 @@ feedback are mapped in their own files.
 | 「標一下開場到哪裡」 / mark where a part begins | `set_markers`; `compile_plan` already writes one per beat |
 | 「這支叫 EP1 台北」 / name this project | `rename_project` with the new `name` |
 | 「做成直式／方形」 / vertical or square | `render_project` with `frame`; see the platform file |
-| 「加字幕」 / add captions | `generate_subtitles`, show the user the lines, `set_subtitles`, then render with `burn_subtitles: true` |
+| 「加字幕」 / add captions | `generate_subtitles`, proofread the lines it returns, fix them with `edit_subtitle`, then render with `burn_subtitles: true` |
+| 「這段沒講話也上個字」 / text over a shot | `add_subtitle` with the shot's `asset_id`, `source_start`, `source_end` in that file and `text`; it shows even on a muted clip |
 | 「字幕有個字打錯了」 / a caption has the wrong word | `get_subtitles` around that moment for its `cue_id`, then `edit_subtitle` with the new `text` |
-| 「後來又加了一段，那段沒有字幕」 / new footage has no captions | `generate_subtitles` again and store the new set |
+| 「後來又加了一段，那段沒有字幕」 / new footage has no captions | `generate_subtitles` again; the lines already corrected come back as corrected |
 | 「這句字幕多停一下」 / hold this caption longer | `edit_subtitle` with a new `source_end` |
 | 「這句不要了」 / drop this caption | `edit_subtitle` with `delete: true` |
 | 「現在剪成什麼樣子」 / show me the cut so far | `preview_project`, then describe the order and the cut points |
@@ -335,7 +341,7 @@ with options the user can pick from.
 | `has no clips on a video track to preview` | Build the video sequence first. |
 | `runs outside the frame` | The inset's `x + width` or `y + height` is over 1.0; shrink it or move it back. |
 | `has no transcribed clips to caption` | Run `analyze_asset` with transcription on the sources first. |
-| `has no captions to burn` | Call `generate_subtitles`, then store them with `set_subtitles`. |
+| `has no captions to burn` | Call `generate_subtitles`. |
 | `caption ... not found` | Read the current `cue_id`s with `get_subtitles`. |
 | `name assets that are not imported` | A caption names footage that is not registered; import it, or drop the caption. |
 | `none of the footage they transcribe is in the cut` | Run `generate_subtitles` again against the sequence as it stands. |

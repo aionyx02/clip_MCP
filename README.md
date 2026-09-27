@@ -190,7 +190,7 @@ ChatGPT（網頁與 App）只接受透過 HTTPS 連線的遠端 MCP 伺服器，
 | `apply_edits` | 以樂觀鎖批次套用編輯操作 |
 | `preview_project` | 剪輯後序列的 storyboard（可選其他比例） |
 | `preview_sound` | 只算聲音：人聲對配樂的圖與可以聽的混音檔 |
-| `generate_subtitles` / `get_subtitles` | 產生與讀取字幕 |
+| `generate_subtitles` / `get_subtitles` | 產生並存下字幕（優先用同一段素材校對過的版本、套用全工作區的錯字表），一行一句回傳供校對；讀取字幕 |
 | `check_render` | render 前檢查黑畫面、爆音、字幕出界、長度 |
 | `render_project` | 背景輸出 MP4（預覽只重算改過的鏡頭；可選比例、燒字幕、響度目標） |
 | `get_chapters` | 從段落產生 YouTube 章節 |
@@ -201,7 +201,7 @@ ChatGPT（網頁與 App）只接受透過 HTTPS 連線的遠端 MCP 伺服器，
 `apply_edits` 接受的操作：`add_track`、`add_clip`、`insert_clip`、`trim_clip`、
 `delete_clip`、`move_clip`、`split_clip`、`reorder_clip`、`fit_track`、
 `set_clip_look`、`set_clip_audio`、`set_clip_speed`、`set_track_audio`、`set_clip_pinned`、
-`set_markers`、`set_subtitles`、`edit_subtitle`、`set_caption_style`、`rename_project`。
+`set_markers`、`set_subtitles`、`edit_subtitle`、`add_subtitle`、`set_caption_style`、`rename_project`。
 
 ## 典型流程
 
@@ -211,7 +211,7 @@ ChatGPT（網頁與 App）只接受透過 HTTPS 連線的遠端 MCP 伺服器，
 4. 素材多的時候先 `propose_sections` / `set_sections` 分段，再從段落裡挑句子。
 5. `save_plan` 寫下要剪什麼、為什麼，`validate_plan` 檢查，`compile_plan` 編譯成時間軸。
 6. `preview_project` 看 storyboard 確認剪點，有配樂就再用 `preview_sound` 確認聲音。
-7. `generate_subtitles` 檢查文字後用 `set_subtitles` 存起來。
+7. `generate_subtitles` 產生並存下字幕，逐行校對，錯的用 `edit_subtitle` 改。
 8. `check_render` 看有沒有要先處理的，`render_project` 先出 `is_preview: true` 預覽，
    滿意後再輸出完整品質；要發到多個平台就每個比例各 render 一次。
 

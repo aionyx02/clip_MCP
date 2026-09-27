@@ -242,6 +242,10 @@ CAPTION_PRESETS: Dict[str, CaptionStyle] = {
     # Same again, and the buttons up the right-hand side push the safe area in further.
     "tiktok": CaptionStyle(size_fraction=1 / 15, bottom_fraction=0.18, side_fraction=0.10,
                            outline_fraction=1 / 9, karaoke=True),
+    # A vertical video minutes long — a podcast episode, a vlog. The Reels safe area, without
+    # words lighting up: over a few minutes that reads as a gimmick, not as emphasis.
+    "vertical": CaptionStyle(size_fraction=1 / 16, bottom_fraction=0.16, side_fraction=0.08,
+                             outline_fraction=1 / 10),
 }
 
 class ClipLayout(BaseModel):
@@ -907,6 +911,47 @@ class EditSubtitleOp(BaseModel):
             raise ValueError("a caption needs text; set delete to remove it instead")
         return self
 
+class AddSubtitleOp(BaseModel):
+    """Edit operation that adds one caption, leaving the rest untouched.
+
+    For a line the transcript missed, or text written for a picture nobody
+    speaks over — 「原本的杯子區」 over a shot of the counter.
+    """
+
+    action: Literal["add_subtitle"] = "add_subtitle"
+    asset_id: str = Field(..., min_length=1, description="The file the caption belongs to")
+    source_start: Decimal = Field(..., ge=0, description="When it starts in that file (seconds)")
+    source_end: Decimal = Field(..., ge=0, description="When it ends in that file (seconds)")
+    text: str = Field(..., min_length=1, description="The caption text")
+    secondary: str = Field(default="", description="Second line of a bilingual caption")
+    speaker: Optional[str] = Field(default=None, description="Who says it, if anybody")
+
+def _bare(text: str) -> str:
+    """Strip a caption to the characters that are said, for matching words to it."""
+    return "".join(character for character in text if character.isalnum())
+
+def retimed_words(words: List[CueWord], text: str) -> List[CueWord]:
+    """Carry a caption's word timings over to corrected text, where they still fit.
+
+    Args:
+        words: The caption's words as timed.
+        text: The corrected text.
+
+    Returns:
+        The same timings with the corrected characters, when the correction
+        changed characters one for one; otherwise none, since timings for
+        words that are gone would light up the wrong syllables.
+    """
+    said = _bare(text)
+    if not words or len(said) != sum(len(_bare(word.text)) for word in words):
+        return []
+    retimed, at = [], 0
+    for word in words:
+        length = len(_bare(word.text))
+        retimed.append(word.model_copy(update={"text": said[at:at + length] if length else word.text}))
+        at += length
+    return retimed
+
 class SetSubtitlesOp(BaseModel):
     """Edit operation that replaces the project's captions."""
 
@@ -1104,7 +1149,7 @@ EditOperation = Annotated[
     Union[
         AddTrackOp, AddClipOp, InsertClipOp, TrimClipOp, DeleteOp, MoveClipOp,
         SplitClipOp, ReorderClipOp, RenameProjectOp, SetTrackAudioOp, SetClipAudioOp,
-        SetClipLookOp, SetClipPinnedOp, SetClipSpeedOp, SetMarkersOp, SetSubtitlesOp, EditSubtitleOp,
+        SetClipLookOp, SetClipPinnedOp, SetClipSpeedOp, SetMarkersOp, SetSubtitlesOp, EditSubtitleOp, AddSubtitleOp,
         SetCaptionStyleOp, FitTrackOp,
     ],
     Field(discriminator="action"),
@@ -1402,6 +1447,17 @@ def apply_operation(project: Project, op: EditOperation, assets: Mapping[str, As
         project.subtitles = number_cues(sorted(op.cues, key=cue_order))
         return
 
+    if isinstance(op, AddSubtitleOp):
+        taken = {item.id for item in project.subtitles}
+        number = len(project.subtitles) + 1
+        while f"c{number}" in taken:
+            number += 1
+        added = SubtitleCue(
+            id=f"c{number}", asset_id=op.asset_id, source_start=op.source_start, source_end=op.source_end,
+            text=op.text, secondary=op.secondary, speaker=op.speaker,
+        )
+        project.subtitles = sorted([*project.subtitles, added], key=cue_order)
+        return
     if isinstance(op, EditSubtitleOp):
         cue = next((item for item in project.subtitles if item.id == op.cue_id), None)
         if cue is None:
@@ -1418,9 +1474,10 @@ def apply_operation(project: Project, op: EditOperation, assets: Mapping[str, As
         }
         # Correcting the words leaves the word timings describing words that are no longer
         # there, and a caption lighting up against the wrong syllables is worse than one
-        # lighting up whole. They go, and `generate_subtitles` makes them again.
+        # lighting up whole — unless the correction only swaps characters one for one, the
+        # commonest correction there is (掐 for 掰), and then each word keeps its timing.
         if op.text is not None:
-            named["words"] = []
+            named["words"] = retimed_words(cue.words, op.text)
         # Re-run the model's own rules on the edited cue: model_copy skips them.
         updated = SubtitleCue.model_validate(cue.model_copy(update=named).model_dump())
         project.subtitles = sorted(

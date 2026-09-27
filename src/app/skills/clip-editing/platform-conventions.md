@@ -37,10 +37,12 @@ without the word-by-word lighting.
 - **Word-by-word lighting** (`karaoke`): each word brightens as it is said. On
   for `reels` and `tiktok`, which is where it is expected. It needs the word
   timings `generate_subtitles` puts on a caption; one written by hand has none
-  and simply lights up whole. Correcting a caption's text drops its timings,
-  so run `generate_subtitles` again if you want them back.
+  and simply lights up whole. A correction that swaps characters one for one
+  keeps them; one that changes how many there are drops them. For a vertical
+  video minutes long, use the `vertical` preset: the same safe area without
+  the lighting.
 - **Bilingual**: put the second language in a caption's `secondary`, either in
-  the `set_subtitles` you store or with `edit_subtitle`. It is drawn smaller
+  `edit_subtitle`, or in `add_subtitle` for a new one. It is drawn smaller
   under the first line. Nothing here translates anything — the words are yours.
 - **Who is talking** (`speaker_mark`): `name` puts the speaker in front of the
   line, `colour` gives each one their own, `both` does both, `off` says

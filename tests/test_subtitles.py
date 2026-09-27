@@ -18,11 +18,11 @@ from app.models.media import (
     MediaAnalysis, Span, SpeakerTurn, Transcript, TranscriptSegment, TranscriptWord, Voice,
 )
 from app.models.timeline import (
-    CAPTION_PRESETS, CaptionStyle, CueWord, EditSubtitleOp, PlacedCue, Project, SetCaptionStyleOp,
-    SpeakerMark, SubtitleCue, apply_operation,
+    CAPTION_PRESETS, AddSubtitleOp, CaptionStyle, CueWord, EditSubtitleOp, PlacedCue, Project, SetCaptionStyleOp,
+    SpeakerMark, SubtitleCue, apply_operation, retimed_words,
 )
-from app.server import generate_subtitles, get_project, get_subtitles, import_asset, render_project, repo
-from helpers import build_project, edit, insert, render, video_track
+from app.server import apply_edits, generate_subtitles, get_project, get_subtitles, import_asset, render_project, repo
+from helpers import caption, build_project, edit, insert, render, video_track
 
 def words(*pairs) -> list:
     """Build transcript words from `(text, start, end)` triples.
@@ -89,7 +89,7 @@ def test_a_caption_with_no_outline_has_no_shadow_either() -> None:
 
 def test_only_the_speech_that_survived_the_edit_is_captioned(spoken: str) -> None:
     project = build_project([video_track(), insert("a", spoken, 3.5, 6.5)])
-    cues = generate_subtitles(project)["cues"]
+    cues = caption(project)["cues"]
     assert [cue["text"] for cue in cues] == ["第二句"]
 
 def test_captions_move_to_where_the_speech_lands_in_the_result(spoken: str) -> None:
@@ -98,7 +98,7 @@ def test_captions_move_to_where_the_speech_lands_in_the_result(spoken: str) -> N
         insert("intro", spoken, 0, 2),
         insert("a", spoken, 3.5, 6.5),
     ])
-    edit(project, [{"action": "set_subtitles", "cues": generate_subtitles(project)["cues"]}])
+    edit(project, [{"action": "set_subtitles", "cues": caption(project)["cues"]}])
     cue = next(item for item in get_subtitles(project)["cues"] if item["text"] == "第二句")
     # The line was at 4.0 in a clip starting at 3.5, placed after a 2 s intro.
     assert float(cue["start"]) == pytest.approx(2.5)
@@ -106,7 +106,7 @@ def test_captions_move_to_where_the_speech_lands_in_the_result(spoken: str) -> N
 
 def test_captions_are_clamped_so_they_do_not_run_past_a_cut(spoken: str) -> None:
     project = build_project([video_track(), insert("a", spoken, 0, 2.0)])
-    edit(project, [{"action": "set_subtitles", "cues": generate_subtitles(project)["cues"]}])
+    edit(project, [{"action": "set_subtitles", "cues": caption(project)["cues"]}])
     cue = get_subtitles(project)["cues"][0]
     assert float(cue["end"]) == pytest.approx(2.0)
 
@@ -118,7 +118,7 @@ def test_captions_follow_the_clips_when_the_cut_is_rearranged(spoken: str) -> No
         insert("first", spoken, 0.5, 3.5),
         insert("second", spoken, 6.5, 9.5),
     ])
-    edit(project, [{"action": "set_subtitles", "cues": generate_subtitles(project)["cues"]}])
+    edit(project, [{"action": "set_subtitles", "cues": caption(project)["cues"]}])
     assert [cue["text"] for cue in get_subtitles(project)["cues"]] == ["第一句", "第三句"]
 
     edit(project, [{"action": "reorder_clip", "track_id": "main", "clip_id": "second", "before_clip_id": "first"}])
@@ -126,7 +126,7 @@ def test_captions_follow_the_clips_when_the_cut_is_rearranged(spoken: str) -> No
 
 def test_a_caption_whose_clip_is_split_is_shown_on_both_sides(spoken: str) -> None:
     project = build_project([video_track(), insert("a", spoken, 0, 10)])
-    edit(project, [{"action": "set_subtitles", "cues": generate_subtitles(project)["cues"]}])
+    edit(project, [{"action": "set_subtitles", "cues": caption(project)["cues"]}])
     # Split through the middle of the second sentence: those words are on screen on both
     # sides of the cut, so the one stored caption is placed twice under the one id.
     edit(project, [{"action": "split_clip", "track_id": "main", "clip_id": "a",
@@ -142,7 +142,7 @@ def test_long_sentences_are_broken_between_words(media: Path) -> None:
         words=words(("one ", 0.0, 1.0), ("two ", 1.0, 2.0), ("three ", 2.0, 3.0), ("four", 3.0, 4.0)),
     )])
     project = build_project([video_track(), insert("a", asset, 0, 4)])
-    cues = generate_subtitles(project, max_characters=8)["cues"]
+    cues = caption(project, max_characters=8)["cues"]
     assert len(cues) > 1
     assert all(len(cue["text"]) <= 10 for cue in cues)
     assert "".join(cue["text"] for cue in cues).replace(" ", "") == "onetwothreefour"
@@ -151,13 +151,13 @@ def test_a_segment_without_word_timings_stays_in_one_piece(media: Path) -> None:
     asset = import_asset(str(media / "silent.mp4"))["id"]
     transcribe(asset, [TranscriptSegment(start=0.0, end=3.0, text="a whole sentence with no word timings")])
     project = build_project([video_track(), insert("a", asset, 0, 3)])
-    cues = generate_subtitles(project, max_characters=8)["cues"]
+    cues = caption(project, max_characters=8)["cues"]
     assert len(cues) == 1
 
 def test_assets_without_a_transcript_are_reported(spoken: str, media: Path) -> None:
     other = import_asset(str(media / "tall.mp4"))["id"]
     project = build_project([video_track(), insert("a", spoken, 0, 3), insert("b", other, 0, 2)])
-    assert generate_subtitles(project)["assets_without_transcript"] == [other]
+    assert caption(project)["assets_without_transcript"] == [other]
 
 def test_a_narration_on_an_audio_track_is_captioned(media: Path) -> None:
     # A voice-over recorded separately: the picture under it says nothing, and the
@@ -173,7 +173,7 @@ def test_a_narration_on_an_audio_track_is_captioned(media: Path) -> None:
         {"action": "add_track", "track_id": "voice", "track_type": "audio"},
         insert("v", voice, 0, 4, track_id="voice"),
     ])
-    spoken_lines = [cue for cue in generate_subtitles(project)["cues"] if cue["text"] == "這一天從早上開始"]
+    spoken_lines = [cue for cue in caption(project)["cues"] if cue["text"] == "這一天從早上開始"]
     # Anchored to the narration file, at the second the words were actually said.
     assert [(cue["asset_id"], cue["source_start"], cue["source_end"]) for cue in spoken_lines] == [
         (voice, Decimal("0.5"), Decimal("2.0"))
@@ -187,7 +187,7 @@ def test_a_music_bed_is_not_reported_as_missing_a_transcript(spoken: str, media:
         insert("m", song, 0, 3, track_id="music"),
     ])
     # Nobody transcribes a song, so it is not a gap to go and fill.
-    assert generate_subtitles(project)["assets_without_transcript"] == []
+    assert caption(project)["assets_without_transcript"] == []
 
 def test_a_clip_turned_all_the_way_down_is_not_captioned(spoken: str, media: Path) -> None:
     # Silenced footage is a picture laid over someone else's sound, so it has no lines
@@ -200,17 +200,17 @@ def test_a_clip_turned_all_the_way_down_is_not_captioned(spoken: str, media: Pat
         insert("cover", other, 0, 2, volume=0),
         insert("heard", spoken, 0, 4),
     ])
-    texts = [cue["text"] for cue in generate_subtitles(project)["cues"]]
+    texts = [cue["text"] for cue in caption(project)["cues"]]
     assert "蓋掉的那段" not in texts and "第一句" in texts
     # And a silenced clip is not a gap in the transcripts either: it could never speak.
-    assert generate_subtitles(project)["assets_without_transcript"] == []
+    assert caption(project)["assets_without_transcript"] == []
 
 def test_a_cut_where_everything_is_silenced_says_so_rather_than_blaming_the_transcripts(spoken: str) -> None:
     # The asset here has been transcribed. Telling anyone to run analyze_asset on it
     # would send them to redo work that was never the problem.
     project = build_project([video_track(), insert("a", spoken, 0, 4, volume=0)])
     with pytest.raises(ValueError, match="nothing audible to caption"):
-        generate_subtitles(project)
+        caption(project)
 
 def test_captions_that_talk_over_each_other_are_counted(spoken: str, media: Path) -> None:
     voice = import_asset(str(media / "song.mp3"))["id"]
@@ -223,7 +223,7 @@ def test_captions_that_talk_over_each_other_are_counted(spoken: str, media: Path
         {"action": "add_track", "track_id": "voice", "track_type": "audio"},
         insert("v", voice, 0, 4, track_id="voice"),
     ])
-    result = generate_subtitles(project)
+    result = caption(project)
     # 第一句 runs 1.0 to 3.0 under a narration line starting at 1.5.
     assert result["overlapping"] == 1
 
@@ -243,7 +243,7 @@ def test_a_sentence_transcribed_over_silence_is_not_captioned(media: Path) -> No
         ]),
     ))
     project = build_project([video_track(), insert("a", asset, 0, 4)])
-    assert [cue["text"] for cue in generate_subtitles(project)["cues"]] == ["真的講了這句"]
+    assert [cue["text"] for cue in caption(project)["cues"]] == ["真的講了這句"]
 
 def test_a_project_with_no_transcripts_is_reported_clearly(media: Path, tmp_path: Path) -> None:
     # Imported under a path of its own: the workspace is shared across this file, so a
@@ -253,7 +253,7 @@ def test_a_project_with_no_transcripts_is_reported_clearly(media: Path, tmp_path
     asset = import_asset(str(untouched))["id"]
     project = build_project([video_track(), insert("a", asset, 0, 2)])
     with pytest.raises(ValueError, match="no transcribed clips"):
-        generate_subtitles(project)
+        caption(project)
 
 def test_burning_without_stored_captions_is_refused(spoken: str) -> None:
     project = build_project([video_track(), insert("a", spoken, 0, 3)])
@@ -266,7 +266,7 @@ def test_captions_are_drawn_low_in_the_picture_when_they_are_due(media: Path, tm
         start=1.0, end=3.0, text="字幕測試", words=words(("字幕測試", 1.0, 3.0)),
     )])
     project = build_project([video_track(), insert("a", asset, 0, 5)], width=640, height=360)
-    edit(project, [{"action": "set_subtitles", "cues": generate_subtitles(project)["cues"]}])
+    edit(project, [{"action": "set_subtitles", "cues": caption(project)["cues"]}])
     stored = repo.get_project(project)
 
     subtitle_file = tmp_path / "subs.ass"
@@ -373,7 +373,7 @@ def test_captions_are_proposed_broken_where_the_speaker_paused(media: Path) -> N
         words=[TranscriptWord(text=word.text, start=float(word.start), end=float(word.end)) for word in cue.words],
     )])
     project = build_project([video_track(), insert("a", asset, 0, 4)], width=1080, height=1920)
-    assert [item["text"] for item in generate_subtitles(project)["cues"]] == [
+    assert [item["text"] for item in caption(project)["cues"]] == [
         "今天來點特別的事", "我們從咖啡廳結束營業開始",
     ]
 
@@ -387,7 +387,7 @@ def test_captions_are_proposed_one_line_wide_for_the_frame(media: Path) -> None:
     transcribe(asset, [TranscriptSegment(start=0.0, end=4.0, text="一二三四五六七八九十" * 2, words=words(*said))])
     project = build_project([video_track(), insert("a", asset, 0, 4)], width=1080, height=1920)
     edit(project, [{"action": "set_caption_style", "preset": "tiktok"}])
-    cues = generate_subtitles(project)["cues"]
+    cues = caption(project)["cues"]
     # A tiktok line holds twelve characters at 1080 wide, well under the default count.
     assert len(cues) > 1 and all(len(cue["text"]) <= 12 for cue in cues)
 
@@ -403,7 +403,7 @@ def test_captions_come_only_from_the_base_track(spoken: str, media: Path) -> Non
          "source_range": {"start": 0, "end": 2}, "timeline_in": 0,
          "layout": {"x": 0.6, "y": 0.6, "width": 0.3, "height": 0.3}},
     ])
-    result = generate_subtitles(project)
+    result = caption(project)
     assert all(cue["text"] != "插入畫面" for cue in result["cues"])
     assert inset not in result["assets_without_transcript"]
 
@@ -422,12 +422,12 @@ def test_captions_burn_from_a_path_with_awkward_characters(media: Path, tmp_path
 
 def test_generated_captions_carry_ids(spoken: str) -> None:
     project = build_project([video_track(), insert("a", spoken, 0, 10)])
-    ids = [cue["id"] for cue in generate_subtitles(project)["cues"]]
+    ids = [cue["id"] for cue in caption(project)["cues"]]
     assert ids == ["c1", "c2", "c3"]
 
 def test_one_caption_can_be_corrected_without_resending_the_rest(spoken: str) -> None:
     project = build_project([video_track(), insert("a", spoken, 0, 10)])
-    edit(project, [{"action": "set_subtitles", "cues": generate_subtitles(project)["cues"]}])
+    edit(project, [{"action": "set_subtitles", "cues": caption(project)["cues"]}])
     before = get_subtitles(project)["cues"]
     edit(project, [{"action": "edit_subtitle", "cue_id": "c2", "text": "改過的句子"}])
     after = get_subtitles(project)["cues"]
@@ -437,7 +437,7 @@ def test_one_caption_can_be_corrected_without_resending_the_rest(spoken: str) ->
 
 def test_a_caption_can_be_retimed_and_deleted(spoken: str) -> None:
     project = build_project([video_track(), insert("a", spoken, 0, 10)])
-    edit(project, [{"action": "set_subtitles", "cues": generate_subtitles(project)["cues"]}])
+    edit(project, [{"action": "set_subtitles", "cues": caption(project)["cues"]}])
     edit(project, [{"action": "edit_subtitle", "cue_id": "c1", "source_end": 3.8}])
     assert float(get_subtitles(project)["cues"][0]["end"]) == 3.8
     edit(project, [{"action": "edit_subtitle", "cue_id": "c2", "delete": True}])
@@ -445,26 +445,26 @@ def test_a_caption_can_be_retimed_and_deleted(spoken: str) -> None:
 
 def test_editing_an_unknown_caption_is_reported_clearly(spoken: str) -> None:
     project = build_project([video_track(), insert("a", spoken, 0, 10)])
-    edit(project, [{"action": "set_subtitles", "cues": generate_subtitles(project)["cues"]}])
+    edit(project, [{"action": "set_subtitles", "cues": caption(project)["cues"]}])
     with pytest.raises(ValueError, match="caption c99 not found"):
         edit(project, [{"action": "edit_subtitle", "cue_id": "c99", "text": "x"}])
 
 def test_a_caption_cannot_be_retimed_to_end_before_it_starts(spoken: str) -> None:
     project = build_project([video_track(), insert("a", spoken, 0, 10)])
-    edit(project, [{"action": "set_subtitles", "cues": generate_subtitles(project)["cues"]}])
+    edit(project, [{"action": "set_subtitles", "cues": caption(project)["cues"]}])
     with pytest.raises(ValueError, match="must end after it starts"):
         edit(project, [{"action": "edit_subtitle", "cue_id": "c1", "source_end": 0.5}])
 
 def test_captions_can_be_read_a_window_at_a_time(spoken: str) -> None:
     project = build_project([video_track(), insert("a", spoken, 0, 10)])
-    edit(project, [{"action": "set_subtitles", "cues": generate_subtitles(project)["cues"]}])
+    edit(project, [{"action": "set_subtitles", "cues": caption(project)["cues"]}])
     window = get_subtitles(project, start=3.5, end=6.5)
     assert [cue["cue_id"] for cue in window["cues"]] == ["c2"]
     assert window["placed"] == 3
 
 def test_get_project_leaves_the_captions_out_by_default(spoken: str) -> None:
     project = build_project([video_track(), insert("a", spoken, 0, 10)])
-    edit(project, [{"action": "set_subtitles", "cues": generate_subtitles(project)["cues"]}])
+    edit(project, [{"action": "set_subtitles", "cues": caption(project)["cues"]}])
     assert "subtitles" not in get_project(project)
     assert get_project(project)["subtitle_count"] == 3
     assert len(get_project(project, include_subtitles=True)["subtitles"]) == 3
@@ -474,7 +474,7 @@ def test_captions_for_footage_the_edit_dropped_stop_appearing(spoken: str) -> No
     # down. Anchored to the footage they simply stop being placed — and stay stored, so
     # putting the footage back brings them back.
     project = build_project([video_track(), insert("a", spoken, 0, 10)])
-    edit(project, [{"action": "set_subtitles", "cues": generate_subtitles(project)["cues"]}])
+    edit(project, [{"action": "set_subtitles", "cues": caption(project)["cues"]}])
     edit(project, [{"action": "trim_clip", "track_id": "main", "clip_id": "a",
                     "new_source_range": {"start": 0, "end": 4}}])
     assert float(get_project(project)["duration"]) == 4.0
@@ -490,7 +490,7 @@ def test_get_subtitles_refuses_a_window_that_ends_before_it_starts(spoken: str) 
 
 def test_a_caption_cannot_be_blanked_instead_of_deleted(spoken: str) -> None:
     project = build_project([video_track(), insert("a", spoken, 0, 10)])
-    edit(project, [{"action": "set_subtitles", "cues": generate_subtitles(project)["cues"]}])
+    edit(project, [{"action": "set_subtitles", "cues": caption(project)["cues"]}])
     with pytest.raises(ValidationError, match="set delete to remove it"):
         edit(project, [{"action": "edit_subtitle", "cue_id": "c1", "text": "   "}])
 
@@ -524,7 +524,7 @@ def test_burning_captions_that_all_belong_to_dropped_footage_is_refused(spoken: 
     transcribe(other, [TranscriptSegment(start=0.0, end=2.0, text="只有這段",
                                          words=words(("只有這段", 0.0, 2.0)))])
     project = build_project([video_track(), insert("a", other, 0, 2)])
-    edit(project, [{"action": "set_subtitles", "cues": generate_subtitles(project)["cues"]}])
+    edit(project, [{"action": "set_subtitles", "cues": caption(project)["cues"]}])
     # Replace the footage the captions came from: they are still stored, and place nowhere.
     edit(project, [
         {"action": "insert_clip", "track_id": "main", "clip_id": "b", "asset_id": spoken,
@@ -650,7 +650,7 @@ def test_generated_captions_carry_the_words_and_who_said_them(media: Path) -> No
         ]),
     ))
     project = build_project([video_track(), insert("a", asset, 0, 5)], width=640, height=360)
-    cue = generate_subtitles(project)["cues"][0]
+    cue = caption(project)["cues"][0]
     assert cue["speaker"] == "S1"
     assert [word["text"] for word in cue["words"]] == ["一", "二"]
 
@@ -670,7 +670,7 @@ def test_one_person_is_one_speaker_across_two_files(media: Path) -> None:
             ]),
         ))
     project = build_project([video_track(), insert("a", wide, 0, 6), insert("b", tall, 0, 6)], width=640, height=360)
-    said = {(cue["asset_id"], cue["text"]): cue["speaker"] for cue in generate_subtitles(project)["cues"]}
+    said = {(cue["asset_id"], cue["text"]): cue["speaker"] for cue in caption(project)["cues"]}
     assert said[(wide, "先講")] == said[(tall, "後講")]
     assert said[(wide, "後講")] == said[(tall, "先講")]
     assert said[(wide, "先講")] != said[(wide, "後講")]
@@ -717,7 +717,7 @@ def test_a_platform_preset_really_moves_the_text_in_the_rendered_picture(
         """Render with one preset and find how far down the picture its text reaches."""
         project = build_project([video_track(), insert("a", asset, 0, 5)], width=360, height=640)
         edit(project, [
-            {"action": "set_subtitles", "cues": generate_subtitles(project)["cues"]},
+            {"action": "set_subtitles", "cues": caption(project)["cues"]},
             {"action": "set_caption_style", "preset": preset},
         ])
         stored = repo.get_project(project)
@@ -745,3 +745,49 @@ def test_a_muted_shot_keeps_the_caption_written_for_its_picture_but_not_its_spee
     said = SubtitleCue(id="s", asset_id=spoken, source_start=Decimal("4.0"), source_end=Decimal("6.0"),
                        text="第二句", words=[CueWord(start=Decimal("4.0"), end=Decimal("6.0"), text="第二句")])
     assert [cue.cue_id for cue in place_cues(stored, [written, said])] == ["t"]
+
+def test_captions_are_stored_and_come_back_one_line_each(spoken: str) -> None:
+    project = build_project([video_track(), insert("a", spoken, 0.0, 9.0)])
+    result = generate_subtitles(project, get_project(project)["version"])
+    assert result["new_version"] == get_project(project)["version"]
+    assert [line.split(" ", 2)[2] for line in result["captions"]] == ["第一句", "第二句", "第三句"]
+    assert len(repo.get_project(project).subtitles) == 3
+
+def test_a_correction_made_in_one_project_is_used_in_the_next(spoken: str) -> None:
+    first = build_project([video_track(), insert("a", spoken, 0.0, 9.0)])
+    caption(first)
+    result = apply_edits(first, get_project(first)["version"], [
+        EditSubtitleOp(cue_id=repo.get_project(first).subtitles[1].id, text="第二局"),
+    ])
+    # Read back as it now stands, and remembered against the file.
+    assert len(result["captions"]) == 1 and result["captions"][0].endswith("第二局")
+
+    second = build_project([video_track(), insert("b", spoken, 3.5, 9.0)])
+    again = caption(second)
+    assert [cue["text"] for cue in again["cues"]] == ["第三句", "第二局"] or \
+        sorted(cue["text"] for cue in again["cues"]) == ["第三句", "第二局"]
+    assert again["reused"] == 1
+
+def test_the_glossary_corrects_every_caption_after_it(spoken: str) -> None:
+    project = build_project([video_track(), insert("a", spoken, 0.0, 9.0)])
+    result = caption(project, fix_words={"句": "局"})
+    assert [cue["text"] for cue in result["cues"]] == ["第一局", "第二局", "第三局"]
+    other = build_project([video_track(), insert("b", spoken, 0.0, 3.5)])
+    assert [cue["text"] for cue in caption(other)["cues"]] == ["第一局"]
+
+def test_one_caption_is_added_without_sending_the_rest(spoken: str) -> None:
+    project = build_project([video_track(), insert("a", spoken, 0.0, 9.0)])
+    caption(project)
+    result = apply_edits(project, get_project(project)["version"], [
+        AddSubtitleOp(asset_id=spoken, source_start=Decimal("6.2"), source_end=Decimal("6.8"), text="（停頓）"),
+    ])
+    assert len(repo.get_project(project).subtitles) == 4
+    assert result["captions"][0].endswith("（停頓）")
+
+def test_a_one_for_one_correction_keeps_the_word_timings() -> None:
+    words = [CueWord(text="掐", start=Decimal("1.0"), end=Decimal("1.5")),
+             CueWord(text="掐", start=Decimal("1.5"), end=Decimal("2.0"))]
+    assert [word.text for word in retimed_words(words, "掰掰")] == ["掰", "掰"]
+    assert [word.start for word in retimed_words(words, "掰掰")] == [Decimal("1.0"), Decimal("1.5")]
+    # A different number of characters leaves nothing to hang the old timings on.
+    assert retimed_words(words, "再見了") == []

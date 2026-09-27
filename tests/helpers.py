@@ -10,7 +10,7 @@ from pydantic import TypeAdapter
 from app.engine import loudness as levelling
 from app.engine.builder import DEFAULT_LOUDNESS_TARGET, FFmpegRenderer
 from app.models.timeline import Clip, EditOperation
-from app.server import _referenced_assets, apply_edits, create_project, get_project, repo
+from app.server import _referenced_assets, apply_edits, create_project, generate_subtitles, get_project, repo
 
 _OPERATIONS = TypeAdapter(List[EditOperation])
 
@@ -192,3 +192,18 @@ def level(path: Path, start: float, duration: float, freq: Optional[float] = Non
     """
     chain = "volumedetect" if freq is None else f"bandpass=f={freq}:width_type=h:w=30,volumedetect"
     return _measure(path, chain, r"mean_volume:\s+(-?[\d.]+) dB", ["-ss", str(start), "-t", str(duration)])
+
+def caption(project_id: str, **options) -> dict:
+    """Caption a project, and read the captions it stored back in full.
+
+    Args:
+        project_id: Project to caption.
+        **options: Extra arguments for `generate_subtitles`.
+
+    Returns:
+        What `generate_subtitles` returned, with `cues`: every caption the
+        project now holds, each as its model dumps.
+    """
+    result = generate_subtitles(project_id, get_project(project_id)["version"], **options)
+    result["cues"] = [cue.model_dump() for cue in repo.get_project(project_id).subtitles]
+    return result

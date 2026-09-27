@@ -17,7 +17,7 @@ from app.server import (
     generate_subtitles, get_job, get_project, get_subtitles,
     import_folder, preview_project, render_project, repo,
 )
-from helpers import build_project, edit, loudness, render
+from helpers import caption, build_project, edit, loudness, render
 
 @pytest.fixture
 def footage(tmp_path_factory: pytest.TempPathFactory, media: Path, audio_media: Path) -> Path:
@@ -81,7 +81,7 @@ def test_a_whole_job_from_a_folder_to_a_finished_file(footage: Path, tmp_path: P
         for clip in music["clips"]
     ) == 12.0
 
-    cues = generate_subtitles(project)["cues"]
+    cues = caption(project)["cues"]
     assert [cue["text"] for cue in cues] == ["開場白", "結尾話"]
     edit(project, [{"action": "set_subtitles", "cues": cues}])
     edit(project, [{"action": "edit_subtitle", "cue_id": "c1", "text": "修正過的開場白"}])

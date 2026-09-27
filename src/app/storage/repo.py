@@ -1,16 +1,17 @@
+import json
 import os
 import re
 import sqlite3
 import threading
 from contextlib import contextmanager
 from datetime import datetime, timezone
-from typing import Callable, Dict, Iterable, Iterator, List, Optional
+from typing import Callable, Dict, Iterable, Iterator, List, Mapping, Optional
 
 from app.models.job import Job
 from app.models.media import Asset, MediaAnalysis
 from app.models.plan import EditPlan
 from app.models.semantic import ClipKind, ClipLevel, SemanticClip, SemanticTimeline
-from app.models.timeline import Project
+from app.models.timeline import Project, SubtitleCue
 
 # Each entry upgrades the schema by one version; PRAGMA user_version records how many have been applied.
 # Append new migrations to the end and never edit ones that have shipped.
@@ -57,6 +58,14 @@ _MIGRATIONS: List[List[str]] = [
         "note TEXT NOT NULL, data TEXT NOT NULL, PRIMARY KEY (plan_id, version))",
         "INSERT INTO plan_versions (plan_id, version, saved_at, note, data) "
         "SELECT id, version, json_extract(data, '$.updated_at'), '', data FROM plans",
+    ],
+    [
+        # Captions somebody wrote or corrected, kept against the file they belong to rather
+        # than the project they were made in, so the next cut of the same footage starts from
+        # them instead of from the transcript again. And the words the transcriber gets wrong
+        # every time, fixed once for every file.
+        "CREATE TABLE reviewed_captions (asset_id TEXT PRIMARY KEY, data TEXT NOT NULL)",
+        "CREATE TABLE glossary (heard TEXT PRIMARY KEY, meant TEXT NOT NULL)",
     ],
 ]
 SCHEMA_VERSION = len(_MIGRATIONS)
@@ -195,6 +204,75 @@ class Repository:
         """
         rows = self._query("SELECT data FROM analyses WHERE asset_id = ?", (asset_id,))
         return MediaAnalysis.model_validate_json(rows[0][0]) if rows else None
+
+    def remember_captions(self, cues: Iterable[SubtitleCue]) -> None:
+        """Keep captions somebody wrote or corrected against the files they belong to.
+
+        A caption replaces any kept before it over the same stretch of the same
+        file, so the latest correction is the one remembered.
+
+        Args:
+            cues: The captions, each anchored to its file.
+        """
+        by_asset: Dict[str, List[SubtitleCue]] = {}
+        for cue in cues:
+            by_asset.setdefault(cue.asset_id, []).append(cue)
+        with self._transaction() as conn:
+            for asset_id, fresh in by_asset.items():
+                rows = conn.execute("SELECT data FROM reviewed_captions WHERE asset_id = ?", (asset_id,)).fetchall()
+                kept = [SubtitleCue.model_validate(item) for item in json.loads(rows[0][0])] if rows else []
+                kept = [
+                    old for old in kept
+                    if not any(old.source_start < new.source_end and new.source_start < old.source_end for new in fresh)
+                ]
+                merged = sorted([*kept, *fresh], key=lambda cue: cue.source_start)
+                conn.execute(
+                    "INSERT INTO reviewed_captions (asset_id, data) VALUES (?, ?) "
+                    "ON CONFLICT(asset_id) DO UPDATE SET data = excluded.data",
+                    (asset_id, json.dumps([cue.model_dump(mode="json") for cue in merged], ensure_ascii=False)),
+                )
+
+    def reviewed_captions(self, asset_id: str) -> List[SubtitleCue]:
+        """Read the captions kept for a file.
+
+        Args:
+            asset_id: The file.
+
+        Returns:
+            Its reviewed captions in source order; empty when there are none.
+        """
+        rows = self._query("SELECT data FROM reviewed_captions WHERE asset_id = ?", (asset_id,))
+        return [SubtitleCue.model_validate(item) for item in json.loads(rows[0][0])] if rows else []
+
+    def update_glossary(self, fixes: Mapping[str, str]) -> Dict[str, str]:
+        """Add to or take from the words every transcript is corrected with.
+
+        Args:
+            fixes: What the transcriber writes, mapped to what was meant. An
+                empty meaning takes the entry away.
+
+        Returns:
+            The whole glossary as it now stands.
+        """
+        with self._transaction() as conn:
+            for heard, meant in fixes.items():
+                if meant:
+                    conn.execute(
+                        "INSERT INTO glossary (heard, meant) VALUES (?, ?) "
+                        "ON CONFLICT(heard) DO UPDATE SET meant = excluded.meant",
+                        (heard, meant),
+                    )
+                else:
+                    conn.execute("DELETE FROM glossary WHERE heard = ?", (heard,))
+        return self.glossary()
+
+    def glossary(self) -> Dict[str, str]:
+        """Read the words every transcript is corrected with.
+
+        Returns:
+            What the transcriber writes, mapped to what was meant.
+        """
+        return dict(self._query("SELECT heard, meant FROM glossary ORDER BY heard"))
 
     def add_project(self, project: Project) -> None:
         """Store a new project.
