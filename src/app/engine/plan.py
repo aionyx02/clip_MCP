@@ -18,9 +18,11 @@ making the decisions it was built to stay out of.
 import bisect
 import math
 from dataclasses import dataclass, replace
+from datetime import timedelta
 from difflib import SequenceMatcher
 from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 
+from app.engine.continuity import Shot, strays
 from app.models.media import Asset
 from app.models.plan import Beat, BeatRole, EditPlan, MusicCue, Selection, TrimKind
 from app.engine.semantic import EDGE_TOLERANCE_SECONDS, CleanCuts
@@ -1830,6 +1832,11 @@ def check_plan(
     for rejection in plan.rejected:
         if rejection.clip_id not in clips:
             notes.append(f"the rejected clip {rejection.clip_id} is not in this timeline")
+    for stray in strays(_shots(plan, clips, assets)):
+        problems.append(
+            f"continuity: {stray}. Move it next to what it belongs with, drop it, or say in its `jump_reason` "
+            "why it belongs here — a flash-forward, a callback"
+        )
     both = sorted({rejection.clip_id for rejection in plan.rejected} & {item.clip_id for item in plan.selections})
     if both:
         problems.append(
@@ -1994,6 +2001,45 @@ def as_left(pieces: Sequence[Piece], project: Optional[Project]) -> Tuple[List[P
             f"{', '.join(piece.from_clip_ids[0] for piece in gone)}"
         )
     return out, notes
+
+def _shots(
+    plan: EditPlan,
+    clips: Mapping[str, SemanticClip],
+    assets: Mapping[str, Asset],
+) -> List[Shot]:
+    """Line a plan's pieces up as shots, with when each was shot and what it is about.
+
+    Args:
+        plan: The plan.
+        clips: The timeline's clips, keyed by ID.
+        assets: The assets they play from, keyed by asset ID.
+
+    Returns:
+        One shot per selection, in the order the video plays them. A clip's
+        topic is its section's; an utterance takes its section's.
+    """
+    hook = {beat.id for beat in plan.beats if beat.role == BeatRole.HOOK}
+    begun: set = set()
+    shots: List[Shot] = []
+    for selection in _ordered_selections(plan):
+        clip = clips.get(selection.clip_id)
+        if clip is None:
+            continue
+        asset = assets.get(clip.asset_id)
+        moment = (
+            asset.recorded_at + timedelta(seconds=clip.source_range.start)
+            if asset is not None and asset.recorded_at is not None else None
+        )
+        parent = clips.get(clip.parent_id) if clip.parent_id else None
+        shots.append(Shot(
+            label=selection.clip_id,
+            moment=moment,
+            topic=clip.topic or (parent.topic if parent is not None else None),
+            opens_part=selection.beat_id not in begun,
+            exempt=selection.beat_id in hook or bool(selection.jump_reason),
+        ))
+        begun.add(selection.beat_id)
+    return shots
 
 def check_recompile(
     plan: EditPlan,

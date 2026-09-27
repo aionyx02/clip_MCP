@@ -1,7 +1,13 @@
 import json
 import os
+import re
 import subprocess
+from datetime import datetime, timezone
 from typing import Any, Dict, Optional, Tuple
+
+# A timestamp written into a file name, as cameras and phones name their files:
+# DJI_20260830121241_0017_D.MP4, VID20260830073357.mp4, video_2026-08-29_23-19-10.mp4.
+_NAMED_TIME = re.compile(r"(20\d\d)-?(\d\d)-?(\d\d)[_\-T ]?(\d\d)-?(\d\d)-?(\d\d)")
 
 
 def probe_file(filepath: str, ffprobe_bin: str = "ffprobe") -> Dict[str, Any]:
@@ -31,6 +37,43 @@ def probe_file(filepath: str, ffprobe_bin: str = "ffprobe") -> Dict[str, Any]:
     if result.returncode != 0:
         raise RuntimeError(f"ffprobe failed: {result.stderr.decode('utf-8', errors='replace').strip()}")
     return json.loads(result.stdout)
+
+def recorded_at(info: Dict[str, Any], filepath: str) -> Optional[datetime]:
+    """Work out when a file was recorded.
+
+    From the time the camera wrote into the file, or failing that from a time
+    in the file's name, read as this machine's local time. Never from when
+    the file was last modified: that is when it was copied, which for a
+    folder of footage is one moment for all of it and says nothing about the
+    order it was shot in.
+
+    Args:
+        info: What `probe_file` returned.
+        filepath: The file's path, for its name.
+
+    Returns:
+        The moment recording started, in UTC, or None when nothing says.
+    """
+    tagged = [info.get("format", {}).get("tags", {}).get("creation_time")] + [
+        stream.get("tags", {}).get("creation_time") for stream in info.get("streams", [])
+    ]
+    for value in tagged:
+        if not value:
+            continue
+        try:
+            moment = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            continue
+        # Cameras with no clock set write 1970 or 2000; that is not a time anything was shot.
+        if moment.year > 2000:
+            return moment if moment.tzinfo else moment.replace(tzinfo=timezone.utc)
+    named = _NAMED_TIME.search(os.path.basename(filepath))
+    if named:
+        try:
+            return datetime(*(int(part) for part in named.groups())).astimezone().astimezone(timezone.utc)
+        except ValueError:
+            return None
+    return None
 
 def picture_size(info: Dict[str, Any]) -> Optional[Tuple[int, int]]:
     """Read how big a file's picture is when it is played.

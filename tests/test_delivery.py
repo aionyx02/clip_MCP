@@ -498,3 +498,16 @@ def test_a_cut_that_takes_off_a_start_the_transcript_missed_is_found() -> None:
     analysis.silences = [Span(start=5.0, end=5.6)]
     found = checks(project_of(clip("a", "x", 6.0, 9.5, 0)), {"x": analysis})
     assert [check for check, _ in found] == ["mid_speech"] and "starts in the middle" in found[0][1]
+
+def test_a_clip_from_the_afternoon_between_two_from_the_morning_is_found() -> None:
+    from datetime import datetime, timezone
+
+    project = project_of(clip("a", "m", 0, 4, 0), clip("b", "p", 0, 4, 4), clip("c", "m", 10, 14, 8))
+    recorded = {"m": datetime(2026, 8, 31, 2, 0, tzinfo=timezone.utc),
+                "p": datetime(2026, 8, 31, 6, 0, tzinfo=timezone.utc)}
+    found = [finding for finding in check_delivery(project, {}, recorded=recorded) if finding.check == "continuity"]
+    assert len(found) == 1 and "clip b" in found[0].message
+    # Where a new part begins, the jump is the part beginning.
+    marked = project_of(clip("a", "m", 0, 4, 0), clip("b", "p", 0, 4, 4), clip("c", "m", 10, 14, 8),
+                        markers=[(4, "下午")])
+    assert not [f for f in check_delivery(marked, {}, recorded=recorded) if f.check == "continuity"]

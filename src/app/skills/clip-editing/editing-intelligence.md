@@ -101,6 +101,16 @@ goes in `rejected`. Within a beat, keep what somebody says whole — a
 sentence cut in half is worse than a sentence left out — and let a beat run
 as long as its point needs rather than giving every file an equal share.
 
+Keep a thread running through the whole video, not only through each beat:
+every beat should move the one-sentence idea on, and a piece that is only
+there because it happened that day is the piece viewers call 「不連貫」.
+`validate_plan` refuses the commonest version of that — a piece dropped
+between two that belong together: shot hours away from both of them, or
+about another topic than both. Move it next to what it belongs with, or drop
+it; only when the jump is the point — a flash-forward, a callback — keep it
+and say so in its `jump_reason`. A hook and the first piece of a beat may
+jump freely, since that is how a part begins.
+
 ## Covering picture (B-roll)
 
 A second pass, after the rough cut is right. `propose_broll` says where the

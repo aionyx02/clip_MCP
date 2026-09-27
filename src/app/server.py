@@ -47,7 +47,7 @@ from app.engine.semantic import (
     build_timeline, clean_cuts, content_scores, join_voices, timeline_input_hash,
 )
 from app.engine.ffmpeg import graph_from_file, hidden_window_flags
-from app.engine.probe import picture_size, probe_file, speech_loudness, timecode_start
+from app.engine.probe import picture_size, probe_file, recorded_at, speech_loudness, timecode_start
 from app.engine.reframe import Framing, centre_at, frame_project
 from app.engine.builder import DEFAULT_LOUDNESS_TARGET, FFmpegRenderer, Talking, voice_keys
 from app.engine.levels import song_level, talking_in
@@ -255,8 +255,35 @@ def _register_asset(filepath: str) -> Asset:
     size = picture_size(info)
     if size is not None:
         asset.width, asset.height = size
+    asset.recorded_at = recorded_at(info, path)
     repo.save_asset(asset)
     return asset
+
+def _dated(assets: Mapping[str, Asset]) -> Dict[str, Asset]:
+    """Make sure every asset knows when it was recorded, where anything says.
+
+    Assets imported before the time was kept do not, so it is read off the
+    file the first time it is asked for and saved, the same way `_sized` does
+    the picture size.
+
+    Args:
+        assets: The assets, keyed by ID.
+
+    Returns:
+        The same assets, each with `recorded_at` filled in where it can be.
+    """
+    dated = {}
+    for asset_id, asset in assets.items():
+        if asset.recorded_at is None and os.path.isfile(asset.path):
+            try:
+                moment = recorded_at(probe_file(asset.path), asset.path)
+            except (OSError, RuntimeError):
+                moment = None
+            if moment is not None:
+                asset = asset.model_copy(update={"recorded_at": moment})
+                repo.save_asset(asset)
+        dated[asset_id] = asset
+    return dated
 
 def _sized(assets: Mapping[str, Asset]) -> Dict[str, Asset]:
     """Make sure every asset with a picture knows how big it is.
@@ -1554,7 +1581,7 @@ def _plan_context(plan: EditPlan) -> tuple:
         analysis = repo.get_analysis(asset_id)
         if analysis is not None:
             cuts[asset_id] = clean_cuts(analysis)
-    return timeline, {clip.id: clip for clip in clips}, children, repo.get_assets(footage | songs), cuts
+    return timeline, {clip.id: clip for clip in clips}, children, _dated(repo.get_assets(footage | songs)), cuts
 
 def _require_plan(plan_id: Optional[str]) -> EditPlan:
     """Fetch a plan, or the one saved most recently.
@@ -2816,7 +2843,8 @@ def render_project(
     frame: Optional[Literal["landscape", "portrait", "square"]] = None,
     follow_faces: bool = True,
     allow: Optional[List[Literal[
-        "bad_picture", "clipping", "music", "mid_speech", "repeated", "unplanned", "captions", "length",
+        "bad_picture", "clipping", "music", "mid_speech", "repeated", "continuity", "unplanned", "captions",
+        "length",
     ]]] = None,
 ) -> dict:
     """Start rendering a project to an MP4 file in the background.
@@ -3052,9 +3080,10 @@ def _findings(project: Project, burn_subtitles: bool) -> list:
         What `delivery.check_delivery` finds.
     """
     placed = place_cues(project, project.subtitles) if burn_subtitles and project.subtitles else None
+    dated = _dated(_referenced_assets(project))
     return check_delivery(
         project, _analyses(project), _plan_target(project), placed, project.caption_style,
-        _talking(project, _voices(project)),
+        _talking(project, _voices(project)), {asset_id: asset.recorded_at for asset_id, asset in dated.items()},
     )
 
 @mcp.tool()
@@ -3066,13 +3095,14 @@ def check_render(
     """Check a cut for what would be noticed in the finished file, without rendering it.
 
     The same check `render_project` runs first and refuses a render over. It
-    looks for eight things: `bad_picture`, black or frozen source picture that
+    looks for nine things: `bad_picture`, black or frozen source picture that
     reaches the screen; `clipping`, a recording squared off at the ceiling,
     which no amount of turning down undoes; `music`, music heard too close
     under somebody talking; `mid_speech`, a cut that lands
     inside a word or between two words of one phrase, with the nearest pause
     to move it to; `repeated`, the same stretch of a file shown twice;
-    `unplanned`, a sequence of three or more clips put together by hand
+    `continuity`, a clip put on by hand between two shot at another
+    moment; `unplanned`, a sequence of three or more clips put together by hand
     rather than compiled from a plan, so nothing says how it opens, turns
     and ends; `captions`, a caption too tall for
     the frame — most likely when a landscape cut is rendered portrait; and

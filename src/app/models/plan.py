@@ -130,6 +130,12 @@ class Selection(BaseModel):
     trim: Trim = Field(default_factory=Trim)
     rationale: str = Field(default="", description="Why this piece, here")
     role: Optional[str] = Field(default=None, description="What it does in the beat, such as 例子 or 結論")
+    jump_reason: Optional[str] = Field(
+        default=None,
+        description="Why this piece is here although it was shot at another time, or is about another topic, "
+                    "than the pieces either side of it — a flash-forward, a callback, a comparison. Only needed "
+                    "when validation names it; a piece dropped in by mistake should be moved instead",
+    )
     speed: Optional[float] = Field(
         default=None,
         ge=0.25,
@@ -329,6 +335,7 @@ class SetRationaleOp(BaseModel):
     rationale: Optional[str] = Field(default=None, description="Why this piece, here")
     role: Optional[str] = Field(default=None, description="What it does in the beat, such as 例子 or 結論")
     beat_id: Optional[str] = Field(default=None, description="Move it into a different beat")
+    jump_reason: Optional[str] = Field(default=None, description="Why it is here although out of time or topic")
 
 class AddSelectionOp(BaseModel):
     """Amendment that puts one more piece of footage into the cut."""
@@ -564,6 +571,8 @@ def apply_amendment(plan: EditPlan, op: PlanAmendment) -> None:
             selection.role = op.role
         if op.beat_id is not None:
             selection.beat_id = op.beat_id
+        if op.jump_reason is not None:
+            selection.jump_reason = op.jump_reason or None
         return
 
     if isinstance(op, AddSelectionOp):

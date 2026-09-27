@@ -14,9 +14,11 @@ answer every time.
 
 import math
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from typing import List, Mapping, Optional, Sequence, Tuple
 
 from app.engine.builder import DUCK_DEPTH_DB, Talking
+from app.engine.continuity import Shot, strays
 from app.engine.plan import LENGTH_TOLERANCE
 from app.engine.semantic import clean_cuts, share_covered, was_audible
 from app.engine.subtitles import caption_overflow, captioned_clips
@@ -34,7 +36,9 @@ YOUTUBE_MIN_CHAPTER_SECONDS = 10.0
 CLIPPED_PEAK_DB = -0.5
 CLIPPED_FLATNESS = 5.0
 # The kinds of finding a render can be told to go ahead in spite of.
-CHECKS = ("bad_picture", "clipping", "music", "mid_speech", "repeated", "unplanned", "captions", "length")
+CHECKS = (
+    "bad_picture", "clipping", "music", "mid_speech", "repeated", "continuity", "unplanned", "captions", "length",
+)
 # How far under the talking music has to sit while somebody speaks, in dB. Under that it
 # competes with the words: the first edits made with the server had music two decibels
 # under the voice, and it was the first thing anybody listening mentioned. Provisional.
@@ -191,6 +195,7 @@ def check_delivery(
     captions: Optional[Sequence[PlacedCue]] = None,
     style: Optional[CaptionStyle] = None,
     talking: Optional[Talking] = None,
+    recorded: Optional[Mapping[str, datetime]] = None,
 ) -> List[Finding]:
     """Find what would be noticed in the finished file, before it is rendered.
 
@@ -205,6 +210,10 @@ def check_delivery(
         talking: Where the talking is and what brings each music track to
             it, from `levels.talking_in`. Without it, how the music sits
             under the voices is not known and not checked.
+        recorded: When each file was recorded, keyed by asset ID, for
+            finding a shot dropped between two from another moment. Only the
+            clips put on by hand are checked: a compiled plan was already
+            checked for the same thing, with its reasons to hand.
 
     Returns:
         The findings, grouped by check in the order of `CHECKS`.
@@ -259,6 +268,7 @@ def check_delivery(
     findings.extend(_music_over_talking(project, talking))
     findings.extend(_speech_cuts(base.clips if base else [], analyses))
     findings.extend(_repeats(base.clips if base else []))
+    findings.extend(_out_of_time(project, recorded or {}))
     if base and len(base.clips) >= UNPLANNED_CLIPS and any(clip.from_plan_id is None for clip in base.clips):
         findings.append(Finding("unplanned", (
             f"these {len(base.clips)} clips were put together by hand, not compiled from a plan, so nothing "
@@ -420,6 +430,34 @@ def _speech_cuts(clips: Sequence[Clip], analyses: Mapping[str, MediaAnalysis]) -
                 f"({at:.2f}s of the file){advice}"
             )))
     return found
+
+def _out_of_time(project: Project, recorded: Mapping[str, datetime]) -> List[Finding]:
+    """Find a shot put on by hand between two from another moment.
+
+    Args:
+        project: The project.
+        recorded: When each file was recorded, keyed by asset ID.
+
+    Returns:
+        One finding per stray run of clips.
+    """
+    base = project.base_video_track
+    clips = sorted(base.clips if base else [], key=lambda clip: clip.timeline_in)
+    parts = {float(marker.timeline_in) for marker in project.markers}
+    shots = [
+        Shot(
+            label=f"clip {clip.id} ({clock(float(clip.timeline_in))})",
+            moment=(recorded[clip.asset_id] + timedelta(seconds=float(clip.source_range.start))
+                    if recorded.get(clip.asset_id) is not None else None),
+            opens_part=float(clip.timeline_in) in parts,
+            exempt=clip.from_plan_id is not None,
+        )
+        for clip in clips
+    ]
+    return [
+        Finding("continuity", f"{stray}; it may be meant — a flash-forward — or dropped in by mistake")
+        for stray in strays(shots)
+    ]
 
 def _repeats(clips: Sequence[Clip]) -> List[Finding]:
     """Find the same stretch of a file shown twice on the sequence.

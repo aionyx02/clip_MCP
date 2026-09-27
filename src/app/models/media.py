@@ -19,6 +19,9 @@ class Asset(BaseModel):
     height: Optional[int] = Field(
         default=None, description="Picture height as it is shown, after any rotation the file asks for",
     )
+    recorded_at: Optional[datetime] = Field(
+        default=None, description="When recording started, from the file's own timestamp or its name; null if unknown",
+    )
 
 class Span(BaseModel):
     """A time span within a media file, in seconds."""

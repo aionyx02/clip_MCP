@@ -8,6 +8,7 @@ built to stay out of.
 """
 
 from dataclasses import replace
+from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -2216,3 +2217,25 @@ def test_a_word_stretched_across_a_silence_does_not_hide_the_sound_after_it() ->
         start=5.44, end=6.74, text="抽", words=[TranscriptWord(start=5.44, end=6.74, text="抽")],
     ))
     assert clean_cuts(made).sound_before(6.74) == pytest.approx(6.34)
+
+def test_a_piece_from_another_time_between_two_that_belong_together_is_handed_back() -> None:
+    by_id, children, assets, clips = covered()
+    first, second = speech_of(clips)[:2]
+    walk = next(clip for clip in clips if clip.asset_id == BROLL_ASSET)
+    # The talking was shot in the morning, the walk that afternoon.
+    assets = {
+        ASSET_ID: assets[ASSET_ID].model_copy(update={"recorded_at": datetime(2026, 8, 31, 2, 0, tzinfo=timezone.utc)}),
+        BROLL_ASSET: assets[BROLL_ASSET].model_copy(update={"recorded_at": datetime(2026, 8, 31, 8, 0, tzinfo=timezone.utc)}),
+    }
+    plan = plan_for([
+        Selection(clip_id=first.id, beat_id="b1"),
+        Selection(clip_id=walk.id, beat_id="b1"),
+        Selection(clip_id=second.id, beat_id="b1"),
+    ])
+    timeline = SemanticTimeline(id="tl_test", asset_ids=[], input_hash="hash", derivation_version=6)
+    problems, _ = check_plan(plan, timeline, by_id, children, assets)
+    assert any(problem.startswith("continuity:") and walk.id in problem for problem in problems)
+    # Said why, it stands.
+    plan.selections[1].jump_reason = "先讓人看到下午要去哪"
+    problems, _ = check_plan(plan, timeline, by_id, children, assets)
+    assert not any(problem.startswith("continuity:") for problem in problems)
