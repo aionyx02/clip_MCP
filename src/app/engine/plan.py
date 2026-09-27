@@ -461,10 +461,12 @@ def _on_the_sound(
     """Open and close each window where its sound does, not where the transcript says.
 
     A window's edges come from word timings, and the transcriber now and then
-    places a first word late or a last one early. The measured silences say
-    where the sound actually rises and falls, so an edge with talking the
-    transcript missed right up against it moves out to the silence, and keeps
-    the breath the plan asks for inside that silence.
+    places a first word late or a last one early. The measured silences, and
+    the second listen where the room was too loud to measure one, say where
+    the sound actually rises and falls, so an edge with talking the transcript
+    missed right up against it moves out to where the talking starts or stops,
+    and keeps the breath the plan asks for without taking in the words either
+    side.
 
     Args:
         pieces: The windows, in order.
@@ -485,12 +487,10 @@ def _on_the_sound(
         start, end = piece.start, piece.end
         onset = known.sound_before(start)
         if onset is not None:
-            quiet = max((q for q, loud in known.pauses if loud == onset), default=onset)
-            start = round(max(onset - pace.breath, quiet, 0.0), 3)
+            start = round(max(onset - pace.breath, known.room_before(onset), 0.0), 3)
         fall = known.sound_after(end)
         if fall is not None:
-            loud = min((l for q, l in known.pauses if q == fall), default=fall)
-            end = round(min(fall + pace.breath, loud), 3)
+            end = round(min(fall + pace.breath, known.room_after(fall)), 3)
         if (start, end) != (piece.start, piece.end):
             moved += (start != piece.start) + (end != piece.end)
             out.append(replace(piece, start=start, end=end))

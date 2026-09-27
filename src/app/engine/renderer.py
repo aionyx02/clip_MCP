@@ -4,13 +4,18 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from typing import Any, Callable, Dict, List, Optional
 
-from app.engine import loudness, resources
-from app.engine.analysis import analyze_media
-from app.engine.ffmpeg import OperationCancelled, run_ffmpeg
+from app.engine import loudness, resources, speak
+from app.engine.analysis import CHINESE_VARIANT_CONFIGS, analyze_media, second_listener
+from app.engine.relisten import hear
+from app.engine.ffmpeg import OperationCancelled, hidden_window_flags, run_ffmpeg
+from app.engine.probe import probe_file
 from app.models.job import Job, JobKind, JobStatus
+from app.models.media import Asset, SyntheticVoice
 from app.storage.repo import Repository
 
 HEARTBEAT_INTERVAL_SECONDS = 1.0
@@ -421,6 +426,83 @@ def _run_analysis(repo: Repository, job: Job, spec: Dict[str, Any], context: Job
     )
     repo.save_analysis(analysis)
 
+def _run_narration(repo: Repository, job: Job, spec: Dict[str, Any], context: JobContext) -> None:
+    """Speak a narration in a voice taken from the footage, and register it as a file.
+
+    Installs the speech model the first time, which is most of the wait.
+
+    Args:
+        repo: Repository holding the footage and receiving the narration.
+        job: Narrate job being run.
+        spec: Job specification with `text`, `speed` and `reference` — the
+            `asset_id`, `start`, `end` and `text` of the voice sample.
+        context: Progress and cancellation for the job.
+
+    Raises:
+        OperationCancelled: If cancellation was requested.
+        ValueError: If the footage the voice comes from no longer exists.
+        RuntimeError: If the install or the speech model fails.
+    """
+    reference = spec["reference"]
+    source = repo.get_assets([reference["asset_id"]]).get(reference["asset_id"])
+    if source is None:
+        raise ValueError(f"asset {reference['asset_id']} not found")
+    if not speak.is_installed():
+        speak.install(lambda fraction, stage: context.report(0.8 * fraction, stage), context.is_cancelled)
+    if context.is_cancelled():
+        raise OperationCancelled()
+    context.report(0.8, "speaking the narration")
+    sample = os.path.join(job.work_dir, "voice-sample.wav")
+    subprocess.run(
+        ["ffmpeg", "-v", "error", "-y", "-ss", f"{reference['start']}", "-to", f"{reference['end']}",
+         "-i", source.path, "-ac", "1", "-ar", "24000", "-af", f"apad=pad_dur={speak.REFERENCE_TAIL_SECONDS}", sample],
+        stdin=subprocess.DEVNULL, capture_output=True, check=True, creationflags=hidden_window_flags(),
+    )
+    output = os.path.join(job.work_dir, "narration.wav")
+    model = speak.speech_model()
+    # Heard back by the recogniser, which is not told what was asked for; a narration that
+    # left words out is spoken again, once, and what it says is kept either way.
+    listener = second_listener()
+    heard = ""
+    for attempt in range(2):
+        speak.speak(sample, reference["text"], spec["text"], output, spec.get("speed", 1.0), model)
+        context.report(0.9, "listening to the narration")
+        heard = hear(output, spec.get("language"), listener)
+        if spec.get("chinese_variant") in CHINESE_VARIANT_CONFIGS:
+            # Written the way the transcript is, so the two read the same to whoever compares them.
+            import opencc
+
+            heard = opencc.OpenCC(f"{CHINESE_VARIANT_CONFIGS[spec['chinese_variant']]}.json").convert(heard)
+        if speak.said_it_all(spec["text"], heard) >= speak.SAID_IT_ALL or attempt:
+            break
+        context.report(0.9, "speaking the narration again: words were missing")
+    info = probe_file(output)
+    narration = Asset(
+        id=str(uuid.uuid4()), path=os.path.abspath(output),
+        duration=Decimal(info["format"]["duration"]), has_video=False, has_audio=True,
+        synthetic=SyntheticVoice(
+            model=model.checkpoint or model.name, license=model.license, commercial_use=model.commercial_use,
+            reference_asset_id=source.id, reference_start=reference["start"], reference_end=reference["end"],
+            text=spec["text"], heard=heard,
+        ),
+    )
+    repo.save_asset(narration)
+    # Analyzed like any recording, so the render knows where it talks: that is what drops the
+    # music and the footage's own sound under it, and a narration nobody transcribed is,
+    # as far as the mix can tell, nobody talking.
+    context.report(0.95, "measuring the narration")
+    repo.save_analysis(analyze_media(
+        narration, job.work_dir, transcribe=True, language=spec.get("language"), prompt=None,
+        chinese_variant=spec.get("chinese_variant"), on_progress=lambda fraction, stage: None,
+        is_cancelled=context.is_cancelled, diarize=False,
+    ))
+
+    def record(current: Job) -> None:
+        """Say which file the narration is."""
+        current.asset_id, current.output_path = narration.id, narration.path
+
+    repo.update_job(job.job_id, record)
+
 def run_worker(repo: Repository, job_id: str) -> None:
     """Run a queued job to completion and record its outcome.
 
@@ -456,6 +538,8 @@ def run_worker(repo: Repository, job_id: str) -> None:
         try:
             if job.kind == JobKind.RENDER:
                 _run_render(job, spec, context)
+            elif job.kind == JobKind.NARRATE:
+                _run_narration(repo, job, spec, context)
             else:
                 _run_analysis(repo, job, spec, context)
         except OperationCancelled:

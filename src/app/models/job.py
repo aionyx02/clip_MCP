@@ -15,6 +15,7 @@ class JobKind(str, Enum):
 
     RENDER = "render"
     ANALYZE = "analyze"
+    NARRATE = "narrate"
 
 class JobStatus(str, Enum):
     """Lifecycle states of a background job."""
@@ -40,7 +41,9 @@ class Job(BaseModel):
     job_id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     kind: JobKind = JobKind.RENDER
     project_id: Optional[str] = Field(default=None, description="Project being rendered (render jobs)")
-    asset_id: Optional[str] = Field(default=None, description="Asset being analyzed (analyze jobs)")
+    asset_id: Optional[str] = Field(
+        default=None, description="Asset being analyzed (analyze jobs), or the narration spoken (narrate jobs)",
+    )
     status: JobStatus = JobStatus.QUEUED
     progress: float = Field(default=0.0, ge=0, le=1, description="Fraction of the work completed so far")
     stage: Optional[str] = Field(default=None, description="What the job is currently doing")

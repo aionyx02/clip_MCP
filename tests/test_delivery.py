@@ -6,6 +6,7 @@ reaches the file: chapters inside the MP4, and a render refused until the
 user has said to go ahead.
 """
 
+import base64
 import json
 import subprocess
 import xml.etree.ElementTree as ElementTree
@@ -21,10 +22,13 @@ from app.engine.delivery import (
     chapters,
     check_delivery,
     cover_candidates,
+    frames_around,
 )
 from app.engine.interchange import left_behind, write_edl, write_fcpxml, write_otio, write_srt
 from app.engine.subtitles import build_ass, caption_overflow
-from app.models.media import Asset, FaceMeasurement, MediaAnalysis, ShotMeasurement, SoundMeasurement, Span
+from app.models.media import (
+    Asset, FaceMeasurement, HeardWord, MediaAnalysis, SecondListen, ShotMeasurement, SoundMeasurement, Span,
+)
 from app.models.timeline import (
     CaptionStyle, Clip, ClipLayout, Dissolve, Marker, PlacedCue, Project, SpeakerMark, TimeRange, Track, TrackType,
 )
@@ -243,9 +247,31 @@ def test_without_a_face_the_sharpest_stretch_is_offered_and_never_black() -> Non
 def test_a_cover_is_saved_at_the_size_the_cut_is_rendered_at(media: Path) -> None:
     asset = import_asset(str(media / "wide.mp4"))["id"]
     project = build_project([video_track(), insert("a", asset, 0, 6)], width=640, height=360)
-    saved = export_cover(project, 2.0, frame="portrait")
+    saved = export_cover(project, 2.0, "test", frame="portrait").structured_content
     with PILImage.open(saved["output_path"]) as picture:
         assert picture.size == (360, 640) == (saved["width"], saved["height"])
+
+def test_a_cover_comes_back_at_feed_size_and_as_a_profile_grid_crops_it(media: Path) -> None:
+    import io
+
+    asset = import_asset(str(media / "wide.mp4"))["id"]
+    project = build_project([video_track(), insert("a", asset, 0, 6)], width=1080, height=1920)
+    shown = export_cover(project, 2.0, "the product, large and sharp").content[1]
+    with PILImage.open(io.BytesIO(base64.b64decode(shown.data))) as preview:
+        # 360 wide in the feed, and beside it the 3:4 middle at 360 by 480.
+        assert preview.size == (360 + 6 + 360, 640)
+
+def test_more_than_one_moment_of_a_shot_can_be_offered_and_never_black() -> None:
+    analysis = MediaAnalysis(asset_id="x", duration=10.0, black_frames=[Span(start=0.0, end=3.0)])
+    offered = cover_candidates(project_of(clip("a", "x", 0, 10, 0)), {"x": analysis}, per_shot=3)
+    assert len(offered) == 3 and all(seconds >= 3.0 for _, seconds in offered)
+
+def test_a_close_look_shows_what_is_on_screen_either_side_of_one_moment() -> None:
+    project = project_of(clip("a", "x", 0, 4, 0), clip("b", "y", 10, 14, 4))
+    found = frames_around(project, {}, 4.0, reach=0.5, step=0.25)
+    assert [(item.id, source, at) for item, source, at in found] == [
+        ("a", 3.5, 3.5), ("a", 3.75, 3.75), ("b", 10.0, 4.0), ("b", 10.25, 4.25), ("b", 10.5, 4.5),
+    ]
 
 # --- export ------------------------------------------------------------------------------
 
@@ -511,3 +537,27 @@ def test_a_clip_from_the_afternoon_between_two_from_the_morning_is_found() -> No
     marked = project_of(clip("a", "m", 0, 4, 0), clip("b", "p", 0, 4, 4), clip("c", "m", 10, 14, 8),
                         markers=[(4, "下午")])
     assert not [f for f in check_delivery(marked, {}, recorded=recorded) if f.check == "continuity"]
+
+def test_a_cut_the_second_listen_hears_as_quiet_is_clean() -> None:
+    # The transcript runs 天氣 on to 3.45; the voice detector hears nobody from 3.0 to 3.5.
+    analysis = talking()
+    analysis.transcript.segments[0].words[1].end = 3.45
+    analysis.second_listen = SecondListen(
+        voiced=[Span(start=1.0, end=3.0), Span(start=3.5, end=5.0)], words=[], model="test",
+    )
+    assert checks(project_of(clip("a", "x", 0, 3.2, 0)), {"x": analysis}) == []
+
+def test_a_cut_that_takes_off_a_word_heard_on_the_second_listen_names_it() -> None:
+    # 我們 is really said from 5.7, softly enough that the voice detector only starts at 6.2.
+    analysis = talking()
+    analysis.second_listen = SecondListen(
+        voiced=[Span(start=6.2, end=9.0)],
+        words=[
+            HeardWord(start=5.7, end=6.2, text="我們", probability=0.9),
+            HeardWord(start=6.2, end=7.0, text="出發", probability=0.9),
+        ],
+        model="test",
+    )
+    found = checks(project_of(clip("a", "x", 6.0, 9.5, 0)), {"x": analysis})
+    assert [check for check, _ in found] == ["mid_speech"]
+    assert "「我們」" in found[0][1] and "really starts at 5.70s" in found[0][1]

@@ -194,7 +194,9 @@ ChatGPT（網頁與 App）只接受透過 HTTPS 連線的遠端 MCP 伺服器，
 | `check_render` | render 前檢查黑畫面、爆音、字幕出界、長度 |
 | `render_project` | 背景輸出 MP4（預覽只重算改過的鏡頭；可選比例、燒字幕、響度目標） |
 | `get_chapters` | 從段落產生 YouTube 章節 |
-| `propose_covers` / `export_cover` | 封面候選與全尺寸封面 |
+| `propose_covers` / `export_cover` | 列出主軸與每格的台詞讓主模型挑封面，可逐段看、可在某一刻前後細看；存檔時附理由與動態牆大小的預覽 |
+| `narrate` | **停用中**（設 `CLIP_MCP_NARRATION=1` 才出現）：使用者同意後用 F5-TTS 以使用者的聲音念旁白。實測聲音帶模型訓練資料的大陸口音，使用者決定先擱置 |
+| `export_notices` | 列出成品的版權與揭露事項（配樂、合成人聲、其他人聲與人臉），寫成 txt 放在影片旁 |
 | `export_timeline` | 匯出 FCPXML／OTIO／EDL（含變速與素材 timecode），或把字幕匯出成 SRT |
 | `get_job` / `cancel_job` | 一次查一批工作的進度（含完成數與平均進度）、取消背景工作 |
 

@@ -19,6 +19,7 @@ from app.engine.diarize import (
     speaker_model_name,
 )
 from app.engine.ffmpeg import OperationCancelled, escape_filter_path, hidden_window_flags, run_ffmpeg
+from app.engine.relisten import Listener, listen_again
 from app.engine.rhythm import measure_rhythm, rhythm_model_name
 from app.models.media import (
     AnalysisRecipe,
@@ -26,6 +27,7 @@ from app.models.media import (
     FaceMeasurement,
     MediaAnalysis,
     Rhythm,
+    SecondListen,
     ShotMeasurement,
     SILENCE_DB,
     SoundMeasurement,
@@ -885,6 +887,55 @@ def transcribe_speech(
         chinese_variant = None
     return Transcript(language=raw.language, model=raw.model, chinese_variant=chinese_variant, segments=segments)
 
+def second_listener() -> Listener:
+    """The speech model and device a check by ear runs on: the transcript's own."""
+    return Listener(whisper_model_name(), _whisper_device(), models.whisper_dir())
+
+def second_listen(
+    path: str,
+    transcript: Transcript,
+    on_progress: Callable[[float], None],
+    is_cancelled: Callable[[], bool],
+    ffmpeg_bin: str = "ffmpeg",
+) -> SecondListen:
+    """Listen to a transcribed file's talking again, without its transcript.
+
+    With the same speech model the transcript was made with, on the same
+    device, falling back to the CPU the same way. What it hears is written
+    the way the transcript is, so the two can be compared word for word.
+
+    Args:
+        path: Media file.
+        transcript: The file's transcript, for its language and script.
+        on_progress: Called with the completed fraction.
+        is_cancelled: Polled to stop early.
+        ffmpeg_bin: Path to, or name of, the FFmpeg executable.
+
+    Returns:
+        What `relisten.listen_again` hears.
+
+    Raises:
+        OperationCancelled: If cancellation was requested.
+    """
+    convert: Callable[[str], str] = lambda text: text
+    if transcript.chinese_variant in CHINESE_VARIANT_CONFIGS:
+        import opencc
+
+        convert = opencc.OpenCC(f"{CHINESE_VARIANT_CONFIGS[transcript.chinese_variant]}.json").convert
+    device = _whisper_device()
+    try:
+        return listen_again(
+            path, transcript.language, Listener(whisper_model_name(), device, models.whisper_dir()),
+            on_progress, is_cancelled, convert, ffmpeg_bin,
+        )
+    except RuntimeError as exc:
+        if device != "cuda" or not any(name in str(exc).lower() for name in ("cuda", "cublas", "cudnn")):
+            raise
+        return listen_again(
+            path, transcript.language, Listener(whisper_model_name(), "cpu", models.whisper_dir()),
+            on_progress, is_cancelled, convert, ffmpeg_bin,
+        )
+
 def discard_scratch(work_dir: str) -> None:
     """Throw away everything the pass wrote for its own use.
 
@@ -932,6 +983,7 @@ def _shares(
         weights.append(("faces", 2.0))
     if with_speech:
         weights.append(("speech", 20.0))
+        weights.append(("relisten", 4.0))
     if with_speakers:
         weights.append(("speakers", 4.0))
     if with_rhythm:
@@ -1077,6 +1129,12 @@ def analyze_media(
             report("speech", "transcribing speech"),
             is_cancelled,
         )
+    listened: Optional[SecondListen] = None
+    if transcript is not None:
+        listened = second_listen(
+            asset.path, transcript, report("relisten", "listening to the talking again without the transcript"),
+            is_cancelled, ffmpeg_bin,
+        )
     if with_speakers:
         turns, voices = find_speakers(
             asset.path, report("speakers", "telling the voices apart"), is_cancelled, speakers, ffmpeg_bin
@@ -1098,6 +1156,7 @@ def analyze_media(
         voices=voices,
         rhythm=rhythm,
         transcript=transcript,
+        second_listen=listened,
         recipe=current_recipe(
             transcript.model if transcript is not None else None,
             ffmpeg_bin,

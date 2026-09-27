@@ -43,6 +43,27 @@ EDGE_TOLERANCE_SECONDS = 0.02
 # missed; this far is as far back as it is looked for. Provisional.
 UNHEARD_SECONDS = 0.15
 ONSET_REACH_SECONDS = 0.6
+# Where no silence was measured — a café, a fan, a street — the second listen is what
+# says where the talking starts and stops. A voiced stretch has to start this far before
+# a cut, or run this far past one, to have been cut into. The ends are given more room
+# because the detector holds on after a voice stops: against the level measured every
+# tenth of a second on the first edit, its ends ran 0.08s to 0.26s late, and its starts
+# were within a window. Provisional.
+VOICED_MARGIN_SECONDS = 0.05
+VOICED_TAIL_MARGIN_SECONDS = 0.15
+# A heard word counts as the detector's to place once this much of it is voiced. The
+# speech model stretches a word back across the pause in front of it — 「然後」 was heard
+# from 18.02s where the voice resumes at 18.24s — so a word the detector hears is where
+# the detector says; one it missed altogether, a soft 「我們」, is where the model says.
+# Provisional.
+VOICED_SHARE = 0.25
+# A word heard on the second listen counts only when the speech model was at least this
+# sure of it. Transcribing near-silence on its own it hears 「字幕」 and 「放入冰箱」 at
+# well under this; the words it was right about were well over it. Provisional.
+HEARD_PROBABILITY = 0.5
+# Two heard words this close together are one phrase, so a cut between them takes the
+# first off the second. Provisional.
+PHRASE_GAP_SECONDS = 0.3
 MOSTLY = 0.5
 NEARLY_ALL = 0.9
 # How much of the talking in a stretch one voice has to hold before the stretch is called
@@ -698,6 +719,14 @@ class CleanCuts:
             unknown are kept apart, because the answers differ: None is a song
             nobody measured, and an empty tuple is one measured and found to
             have no steady pulse.
+        voiced: Where the second listen's voice detector hears talking.
+        heard: The words the second listen heard, each stretch transcribed on
+            its own, as `(start, end, text)`; only those it was at least
+            `HEARD_PROBABILITY` sure of.
+        listened: Whether the file was listened to a second time at all, which
+            tells an empty `voiced` apart from an unknown one.
+        duration: How long the file is, when known, so that a window moved
+            out to the end of the talking never runs past the end of it.
     """
 
     words: Tuple[Tuple[float, float], ...] = ()
@@ -707,6 +736,10 @@ class CleanCuts:
     bad_picture: Tuple[Tuple[float, float], ...] = ()
     transcribed: bool = False
     beats: Optional[Tuple[float, ...]] = None
+    voiced: Tuple[Tuple[float, float], ...] = ()
+    heard: Tuple[Tuple[float, float, str], ...] = ()
+    listened: bool = False
+    duration: Optional[float] = None
 
     def splits_a_word(self, seconds: float) -> bool:
         """Say whether a cut here would land inside a word.
@@ -862,18 +895,223 @@ class CleanCuts:
     def sound_before(self, seconds: float) -> Optional[float]:
         """Find where talking the transcript missed really starts, just before a cut.
 
+        Two things can say so. A measured silence: sound runs up to the cut for
+        at least `UNHEARD_SECONDS` from a silence no more than
+        `ONSET_REACH_SECONDS` back, and the transcript has no word for it. And
+        the second listen, which never read the transcript: a voiced stretch
+        that began no more than `ONSET_REACH_SECONDS` back and runs on through
+        the cut, or a word heard right up against the first one kept, in the
+        same phrase. The second is what answers where the room is never quiet
+        enough to measure a silence in, which is where the first edit made
+        with it lost 「我們」 and 「這個」 off the front of two lines.
+
         Args:
             seconds: Where a window opens, in source seconds.
 
         Returns:
-            The end of the measured silence the sound rises out of, when a cut
-            here would take the start of it off: sound runs up to the cut for
-            at least `UNHEARD_SECONDS` from a silence no more than
-            `ONSET_REACH_SECONDS` back, and the transcript has no word for it.
-            None otherwise, and for a file nobody transcribed or measured.
+            Where the sound really starts, the earliest either finds, when a
+            cut here would take the start of it off. None otherwise, for a cut
+            inside a measured silence, and for a file nobody transcribed.
         """
-        if not self.transcribed or not self.pauses or self._in_silence(seconds):
+        if not self.transcribed or self._in_silence(seconds):
             return None
+        found = [onset for onset in (self._silence_onset(seconds), self._voice_onset(seconds)) if onset is not None]
+        return min(found) if found else None
+
+    def sound_after(self, seconds: float) -> Optional[float]:
+        """Find where talking the transcript missed really stops, just after a cut.
+
+        Args:
+            seconds: Where a window closes, in source seconds.
+
+        Returns:
+            Where the sound really stops, when a cut here would take the end
+            of it off; the mirror of `sound_before`.
+        """
+        if not self.transcribed or self._in_silence(seconds):
+            return None
+        found = [fall for fall in (self._silence_fall(seconds), self._voice_fall(seconds)) if fall is not None]
+        return max(found) if found else None
+
+    def room_before(self, onset: float) -> float:
+        """Find how far before the start of some talking a window may open.
+
+        Args:
+            onset: Where the talking starts, as `sound_before` found it.
+
+        Returns:
+            The start of the silence it rises out of; or else the end of the
+            last voiced stretch or heard word before it, so the breath left in
+            front of a line never takes in the end of the one before; or a
+            second before it when nothing is known to be there.
+        """
+        quiet = [start for start, loud in self.pauses if abs(loud - onset) <= EDGE_TOLERANCE_SECONDS]
+        if quiet:
+            return max(quiet)
+        ended = [end for _, end in self.voiced if end <= onset] + [end for _, end, _ in self.heard if end <= onset]
+        return max(ended, default=onset - 1.0)
+
+    def room_after(self, fall: float) -> float:
+        """Find how far after the end of some talking a window may close.
+
+        Args:
+            fall: Where the talking stops, as `sound_after` found it.
+
+        Returns:
+            The mirror of `room_before`, and never past the end of the file.
+        """
+        loud = [end for start, end in self.pauses if abs(start - fall) <= EDGE_TOLERANCE_SECONDS]
+        if loud:
+            return min(loud)
+        begun = [start for start, _ in self.voiced if start >= fall] + [start for start, _, _ in self.heard if start >= fall]
+        room = min(begun, default=fall + 1.0)
+        return room if self.duration is None else min(room, self.duration)
+
+    def quiet_on_second_listen(self, seconds: float) -> bool:
+        """Say whether the second listen hears nobody at a moment.
+
+        The transcript runs a word on across a pause often enough — 「這」 of
+        「這他媽的」 was given 3.09s to 4.43s, over a third of a second of
+        nothing — that a cut made in real quiet was taken for one through a
+        word.
+
+        Args:
+            seconds: The moment, in source seconds.
+
+        Returns:
+            True when the file was listened to again and the moment is in no
+            voiced stretch, and in no heard word the detector missed.
+        """
+        return (
+            self.listened
+            and not self._in_voice(seconds)
+            and not any(start < seconds < end and not self._voiced_word(start, end) for start, end, _ in self.heard)
+        )
+
+    def _in_voice(self, seconds: float) -> bool:
+        """Say whether the voice detector hears somebody at a moment, clear of its wobbly edges."""
+        return any(
+            start + VOICED_MARGIN_SECONDS < seconds < end - VOICED_TAIL_MARGIN_SECONDS for start, end in self.voiced
+        )
+
+    def _voiced_word(self, start: float, end: float) -> bool:
+        """Say whether the voice detector heard enough of a heard word to be the one to place it."""
+        covered = sum(max(0.0, min(end, until) - max(start, since)) for since, until in self.voiced)
+        return covered >= VOICED_SHARE * max(end - start, 1e-6)
+
+    def heard_cut_off(self, seconds: float, opens: bool) -> str:
+        """Say which words the second listen heard that a cut takes off.
+
+        Args:
+            seconds: Where the cut is, in source seconds.
+            opens: Whether it opens a window rather than closing one.
+
+        Returns:
+            The words as heard, or an empty string when it takes none off.
+        """
+        lost = self._lost_words(seconds, opens)
+        if not lost or self._known_word(*((lost[0][0], seconds) if opens else (seconds, lost[-1][1]))):
+            return ""
+        return "".join(text for _, _, text in lost)
+
+    def _voice_onset(self, seconds: float) -> Optional[float]:
+        """Find talking the second listen hears running up to a cut that opens a window."""
+        found = [
+            start for start, end in self.voiced
+            if seconds - ONSET_REACH_SECONDS <= start <= seconds - VOICED_MARGIN_SECONDS and end > seconds
+        ]
+        found += [start for start, _, _ in self._lost_words(seconds, opens=True)[:1]]
+        found = [onset for onset in found if not self._known_word(onset, seconds)]
+        return min(found) if found else None
+
+    def _voice_fall(self, seconds: float) -> Optional[float]:
+        """Find talking the second listen hears running on past a cut that closes a window."""
+        found = [
+            end for start, end in self.voiced
+            if seconds + VOICED_TAIL_MARGIN_SECONDS <= end <= seconds + ONSET_REACH_SECONDS and start < seconds
+        ]
+        found += [end for _, end, _ in self._lost_words(seconds, opens=False)[-1:]]
+        found = [fall for fall in found if not self._known_word(seconds, fall)]
+        return max(found) if found else None
+
+    def _lost_words(self, seconds: float, opens: bool) -> List[Tuple[float, float, str]]:
+        """Find the words heard on the far side of a cut, in one phrase with the near side.
+
+        Args:
+            seconds: Where the cut is, in source seconds.
+            opens: Whether it opens a window rather than closing one.
+
+        Returns:
+            The words cut off, in order: heard words each within
+            `PHRASE_GAP_SECONDS` of the next, reaching no more than
+            `ONSET_REACH_SECONDS` from the cut, running into a kept word that
+            itself starts (or ends) within `PHRASE_GAP_SECONDS` of the cut.
+            None where the detector hears a pause at the cut and hears the
+            words either side of it: that is a real gap between two lines,
+            whatever the speech model's word edges say.
+        """
+        lost = self._phrase_across(seconds, opens)
+        if lost and not self._in_voice(seconds) and any(self._voiced_word(start, end) for start, end, _ in lost):
+            return []
+        return lost
+
+    def _phrase_across(self, seconds: float, opens: bool) -> List[Tuple[float, float, str]]:
+        """Find the heard words on the far side of a cut that run on from the near side, going by word edges alone."""
+        words = sorted(self.heard)
+        kept_side = [
+            index for index, (start, end, _) in enumerate(words)
+            if ((start + end) / 2 >= seconds if opens else (start + end) / 2 <= seconds)
+        ]
+        if not kept_side:
+            return []
+        if opens:
+            first = kept_side[0]
+            if words[first][0] - seconds > PHRASE_GAP_SECONDS:
+                return []
+            lost: List[Tuple[float, float, str]] = []
+            after = words[first]
+            for word in reversed(words[:first]):
+                if after[0] - word[1] > PHRASE_GAP_SECONDS or seconds - word[0] > ONSET_REACH_SECONDS:
+                    break
+                lost.insert(0, word)
+                after = word
+            return lost
+        last = kept_side[-1]
+        if seconds - words[last][1] > PHRASE_GAP_SECONDS:
+            return []
+        lost = []
+        before = words[last]
+        for word in words[last + 1:]:
+            if word[0] - before[1] > PHRASE_GAP_SECONDS or word[1] - seconds > ONSET_REACH_SECONDS:
+                break
+            lost.append(word)
+            before = word
+        return lost
+
+    def _known_word(self, start: float, end: float) -> bool:
+        """Say whether the transcript has a word lying wholly inside a stretch cut away.
+
+        A cut next to a word the transcript knows about was made on purpose —
+        a 「然後」 taken off the front of a line — and the second listen
+        hearing that word is no reason to put it back. A word that runs on
+        across the cut into what is kept does not count: that is the word
+        misplaced, which is the case this is for.
+
+        Args:
+            start: Where the stretch cut away starts, in source seconds.
+            end: Where it ends.
+
+        Returns:
+            True when a transcribed word starts and ends inside it.
+        """
+        tolerance = EDGE_TOLERANCE_SECONDS
+        return any(
+            opened >= start - tolerance and closed <= end + tolerance and closed - opened > tolerance
+            for opened, closed in self.words
+        )
+
+    def _silence_onset(self, seconds: float) -> Optional[float]:
+        """Find talking the transcript missed between a measured silence and a cut that opens a window."""
         ended = [loud for _, loud in self.pauses if seconds - ONSET_REACH_SECONDS <= loud < seconds]
         if not ended:
             return None
@@ -883,19 +1121,9 @@ class CleanCuts:
             return None
         return onset
 
-    def sound_after(self, seconds: float) -> Optional[float]:
-        """Find where talking the transcript missed really stops, just after a cut.
-
-        Args:
-            seconds: Where a window closes, in source seconds.
-
-        Returns:
-            The start of the measured silence the sound falls into, when a cut
-            here would take the end of it off; the mirror of `sound_before`.
-        """
-        if not self.transcribed or not self.pauses or self._in_silence(seconds):
-            return None
-        begun = [quiet for quiet, _ in self.pauses if seconds < quiet <= seconds + ONSET_REACH_SECONDS]
+    def _silence_fall(self, seconds: float) -> Optional[float]:
+        """Find talking the transcript missed between a cut that closes a window and a measured silence."""
+        begun =[quiet for quiet, _ in self.pauses if seconds < quiet <= seconds + ONSET_REACH_SECONDS]
         if not begun:
             return None
         fall = min(begun)
@@ -1019,6 +1247,7 @@ def clean_cuts(analysis: MediaAnalysis) -> CleanCuts:
     """
     transcript = analysis.transcript
     segments = transcript.segments if transcript is not None else []
+    listened = analysis.second_listen
     return CleanCuts(
         words=tuple(
             (word.start, word.end)
@@ -1031,4 +1260,10 @@ def clean_cuts(analysis: MediaAnalysis) -> CleanCuts:
         bad_picture=_joined([*analysis.black_frames, *analysis.frozen_frames]),
         transcribed=transcript is not None,
         beats=None if analysis.rhythm is None else tuple(analysis.rhythm.beats),
+        voiced=tuple((span.start, span.end) for span in listened.voiced) if listened else (),
+        heard=tuple(
+            (word.start, word.end, word.text) for word in listened.words if word.probability >= HEARD_PROBABILITY
+        ) if listened else (),
+        listened=listened is not None,
+        duration=analysis.duration,
     )

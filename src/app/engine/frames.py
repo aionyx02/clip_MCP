@@ -12,6 +12,40 @@ from app.engine.ffmpeg import hidden_window_flags
 TILE_SIZE = 320
 TILE_GAP = 6
 LABEL_FONT_SIZE = 18
+# How wide a cover is where people first see it: a third of a phone's 1080 pixels in a
+# profile grid, and not much more in a feed or beside another video. A cover that reads
+# only at full size is not read. A convention of the platforms, not a measurement.
+FEED_WIDTH = 360
+# A profile grid shows a vertical video cropped to its middle at this width to height.
+GRID_ASPECT = 3 / 4
+
+def feed_preview(picture: Image.Image) -> bytes:
+    """Show a cover the size it is seen at: in a feed, and for a vertical one in a profile grid too.
+
+    Args:
+        picture: The cover at full size.
+
+    Returns:
+        A JPEG: the cover at `FEED_WIDTH` wide and, for a picture taller than
+        it is wide, beside it the `GRID_ASPECT` middle a profile grid crops
+        it to, at the same width.
+    """
+    width, height = picture.size
+    tiles = [picture.resize((FEED_WIDTH, max(1, round(height * FEED_WIDTH / width))))]
+    if height > width:
+        kept = min(height, round(width / GRID_ASPECT))
+        top = (height - kept) // 2
+        middle = picture.crop((0, top, width, top + kept))
+        tiles.append(middle.resize((FEED_WIDTH, max(1, round(kept * FEED_WIDTH / width)))))
+    sheet = Image.new("RGB", (sum(tile.width for tile in tiles) + TILE_GAP * (len(tiles) - 1),
+                              max(tile.height for tile in tiles)), (16, 16, 16))
+    left = 0
+    for tile in tiles:
+        sheet.paste(tile.convert("RGB"), (left, 0))
+        left += tile.width + TILE_GAP
+    output = io.BytesIO()
+    sheet.save(output, "JPEG", quality=85)
+    return output.getvalue()
 
 def format_timestamp(seconds: float) -> str:
     """Format a time for display, such as `1:02:03.4` or `02:03.4`.

@@ -563,6 +563,13 @@ L2 是重點：它跑得快、可以每次 commit 都跑，而且因為 plan 是
 | `semantic.UNHEARD_SECONDS` / `ONSET_REACH_SECONDS` | 0.15 / 0.6 | 剪點前後多長、多近的「逐字稿沒標到的聲音」算真的字頭字尾 | 太短把呼吸聲當字、剪點一直往外長；太長又漏掉被吃掉的字 |
 | `delivery.CLEAN_SILENCE_SECONDS` | 0.3 | 剪點落在多長的實測靜音裡，就不管逐字稿怎麼說、直接算乾淨 | 太短會把詞中間的短停頓當可剪 |
 | `continuity.NEAR` / `FAR` / `MAX_STRAY_RUN` | 60 分 / 3 小時 / 2 | 前後兩個鏡頭多近算同一刻、中間的多遠算別的時刻、最多幾個連續鏡頭算「被插進來的」 | 太鬆一天內按順序的剪輯也被點名；太緊漏掉插錯的鏡頭 |
+| `semantic.VOICED_MARGIN_SECONDS` / `VOICED_TAIL_MARGIN_SECONDS` | 0.05 / 0.15 | VAD 聽到的人聲要超過剪點多少，才算剪進講話裡 | 太小會把 VAD 收尾拖長的部分當成字尾；太大漏掉被截的尾音 |
+| `semantic.HEARD_PROBABILITY` / `PHRASE_GAP_SECONDS` / `VOICED_SHARE` | 0.5 / 0.3 / 0.25 | 重聽聽到的字要多確定才算數、多近算同一句、多少被 VAD 聽到就以 VAD 為準 | 太鬆會把安靜處轉寫出的「字幕」當真；太嚴又漏掉輕聲的字頭 |
+| `relisten.VOICE_THRESHOLD` / `STRETCH_PAD_SECONDS` | 0.5 / 0.4 | VAD 門檻，以及每段有聲片段前後多聽多少再轉寫 | 門檻低會把雜音當人聲；前後留太少，VAD 沒抓到的輕聲字頭就聽不到 |
+| `speak.SAID_IT_ALL` | 0.85 | 合成旁白重聽後，跟要念的字要多像才算念完整，否則重念一次 | 太嚴會因為辨識器聽錯幾個字而一直重念；太鬆會放過吞字 |
+| `speak.SAMPLE_AGREEMENT` | 0.9 | 逐字稿和第二次聆聽對同一句要多一致，才能拿來當聲音樣本 | 太嚴會找不到樣本；太鬆樣本文字不準，念出來含糊 |
+| `speak.REFERENCE_SHORTEST` / `REFERENCE_LONGEST` / `REFERENCE_TAIL_SECONDS` | 3 / 10 / 0.8 秒 | 聲音樣本的長度，和樣本後面補的靜音 | 樣本太短聲音不像；尾端沒補靜音，第一個字會被吞掉 |
+| `delivery.NOTICE_JOIN_SECONDS` | 3 秒 | 注意事項裡相隔多近的時段合成一段列出 | 只影響好不好讀 |
 | `levels.SONG_SAMPLE_SECONDS` | 60 | 量一首歌的音量聽多長 | 歌曲前後段落差大時（安靜前奏）量偏低 |
 | `loudness.CEILING_DB` | -3.5 dBFS | 最後限幅器的上限（四倍取樣） | 太高 AAC 編碼後超過 -1 dBTP；太低為了達到響度限幅量過多 |
 | `loudness.TOLERANCE_LU` / `ROUNDS` / `MAX_GAIN_DB` | 0.3 / 6 / 12 | 響度補正要多準、最多試幾輪、最多補多少 | 補太多代表限幅器在做大部分的事，聲音會變扁 |

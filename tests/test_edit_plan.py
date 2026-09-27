@@ -41,8 +41,8 @@ from app.engine.plan import (
 from app.engine.sections import build_sections
 from app.engine.semantic import build_timeline, clean_cuts, join_voices
 from app.models.media import (
-    Asset, MediaAnalysis, Rhythm, SoundMeasurement, Span, SpeakerTurn, Transcript, TranscriptSegment,
-    TranscriptWord, Voice,
+    Asset, HeardWord, MediaAnalysis, Rhythm, SecondListen, SoundMeasurement, Span, SpeakerTurn, Transcript,
+    TranscriptSegment, TranscriptWord, Voice,
 )
 from app.models.plan import (
     BeatRole,
@@ -2239,3 +2239,57 @@ def test_a_piece_from_another_time_between_two_that_belong_together_is_handed_ba
     plan.selections[1].jump_reason = "先讓人看到下午要去哪"
     problems, _ = check_plan(plan, timeline, by_id, children, assets)
     assert not any(problem.startswith("continuity:") for problem in problems)
+
+def listened(voiced=(), heard=()) -> SecondListen:
+    """Build a second listen: where the voice detector heard talking, and the words heard.
+
+    Args:
+        voiced: `(start, end)` per voiced stretch.
+        heard: `(start, end, text)` per word heard, each heard for certain.
+
+    Returns:
+        The second listen.
+    """
+    return SecondListen(
+        voiced=spans(voiced),
+        words=[HeardWord(start=start, end=end, text=text, probability=0.9) for start, end, text in heard],
+        model="test",
+    )
+
+def test_a_soft_first_word_the_transcript_left_out_is_put_back() -> None:
+    # 「我們可能要拆個30分鐘」 in a room too loud for any silence to be measured: the
+    # transcript starts the line at 可能, the voice detector only from 10.56, and the second
+    # listen hears 我們 from 10.16, straight on into 可能.
+    made = analysis(duration=20.0, segments=[(10.56, 12.0, "可能要拆")])
+    made.second_listen = listened(voiced=[(10.56, 11.84)], heard=[(10.16, 10.6, "我們"), (10.6, 10.8, "可能")])
+    pieces, notes = compiled(made)
+    assert pieces[0].start == pytest.approx(10.16 - BREATH_SECONDS)
+    assert any("where the sound really starts" in note for note in notes)
+
+def test_where_no_silence_was_measured_the_voice_detector_says_where_the_talking_ends() -> None:
+    # 「我終於成功囉」: the transcript ends 囉 at 9.47, and it is drawn out until 9.82.
+    made = analysis(duration=10.7, segments=[(8.32, 9.47, "我終於成功囉")])
+    made.second_listen = listened(voiced=[(8.32, 9.82)])
+    pieces, _ = compiled(made)
+    assert pieces[-1].end == pytest.approx(9.82 + BREATH_SECONDS)
+
+def test_the_voice_detector_holding_on_after_a_voice_stops_moves_nothing() -> None:
+    # It ran 0.1s past 「一下」 on the first edit, which was over when the transcript said.
+    made = analysis(duration=12.0, segments=[(6.5, 7.93, "給大家示範一下")])
+    made.second_listen = listened(voiced=[(6.5, 8.03)])
+    assert clean_cuts(made).sound_after(7.93) is None
+
+def test_a_word_the_transcript_knows_is_not_put_back() -> None:
+    # 然後 is in the transcript as a sentence of its own, so starting after it is a choice.
+    made = analysis(duration=12.0, segments=[(5.7, 5.95, "然後"), (6.0, 8.0, "出發")])
+    made.second_listen = listened(voiced=[(5.7, 8.0)], heard=[(5.7, 6.0, "然後"), (6.0, 6.5, "出發")])
+    assert clean_cuts(made).sound_before(6.0) is None
+
+def test_a_pause_the_voice_detector_hears_is_a_pause_whatever_the_heard_word_edges_say() -> None:
+    # The speech model stretched 然後 back from 18.24 to 18.02, over the gap after 難受.
+    made = analysis(duration=20.0, segments=[(17.2, 17.84, "真是難受"), (18.24, 19.0, "然後再來")])
+    made.second_listen = listened(
+        voiced=[(17.18, 18.05), (18.24, 20.0)], heard=[(17.54, 17.84, "受"), (18.02, 18.34, "然後")],
+    )
+    known = clean_cuts(made)
+    assert known.sound_after(18.05) is None and known.quiet_on_second_listen(18.1)

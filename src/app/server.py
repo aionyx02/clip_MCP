@@ -1,3 +1,4 @@
+import logging
 import os
 from datetime import datetime, timezone
 import re
@@ -34,8 +35,8 @@ from app.models.timeline import (
     validate_project,
 )
 from app.models.job import Job, JobKind, JobStatus
-from app.engine import loudness, resources
-from app.engine.analysis import current_recipe, sound_note, whisper_model_name
+from app.engine import loudness, resources, speak
+from app.engine.analysis import current_recipe, second_listen, sound_note, whisper_model_name
 from app.engine.diarize import speaker_model_name
 from app.engine.rhythm import rhythm_model_name
 from app.engine.faces import framing_note
@@ -45,15 +46,18 @@ from app.engine.plan import (
 )
 from app.engine.sections import build_sections, candidate_hash, check_sections, propose_candidates
 from app.engine.semantic import (
-    build_timeline, clean_cuts, content_scores, join_voices, timeline_input_hash,
+    build_timeline, clean_cuts, content_scores, join_voices, share_covered, timeline_input_hash,
 )
 from app.engine.ffmpeg import graph_from_file, hidden_window_flags
-from app.engine.probe import picture_size, probe_file, recorded_at, speech_loudness, timecode_start
+from app.engine.probe import picture_size, probe_file, recorded_at, rights_tags, speech_loudness, timecode_start
 from app.engine.reframe import Framing, centre_at, frame_project
 from app.engine.builder import DEFAULT_LOUDNESS_TARGET, FFmpegRenderer, Talking, voice_keys
 from app.engine.levels import song_level, talking_in
-from app.engine.delivery import CHECKS, chapter_metadata, chapters, check_delivery, clock, cover_candidates
-from app.engine.frames import format_timestamp, still, storyboard_sheet
+from app.engine.delivery import (
+    CHECKS, chapter_metadata, chapters, check_delivery, clock, cover_candidates, frames_around, on_screen,
+    rights_facts,
+)
+from app.engine.frames import feed_preview, format_timestamp, still, storyboard_sheet
 from app.engine.interchange import write_edl, write_fcpxml, write_otio, write_srt
 from app.engine.listen import chart, describe, levels, parts_of
 from app.engine.subtitles import (
@@ -70,6 +74,7 @@ from app.storage.repo import Repository
 from app.workspace import workspace_dir
 
 WORKSPACE_DIR = workspace_dir()
+logger = logging.getLogger(__name__)
 SKILLS_DIR = Path(__file__).parent / "skills"
 MAX_STORYBOARD_TILES = 36
 MAX_CLIP_RESULTS = 200
@@ -257,6 +262,9 @@ def _register_asset(filepath: str) -> Asset:
     if size is not None:
         asset.width, asset.height = size
     asset.recorded_at = recorded_at(info, path)
+    if existing is not None:
+        # What somebody said about the file, rather than what was read off it, outlives a re-import.
+        asset.license, asset.synthetic = existing.license, existing.synthetic
     repo.save_asset(asset)
     return asset
 
@@ -1639,7 +1647,7 @@ def _plan_context(plan: EditPlan) -> tuple:
     for asset_id in footage | songs:
         analysis = repo.get_analysis(asset_id)
         if analysis is not None:
-            cuts[asset_id] = clean_cuts(analysis)
+            cuts[asset_id] = clean_cuts(_listened_to(analysis) if asset_id in footage else analysis)
     return timeline, {clip.id: clip for clip in clips}, children, _dated(repo.get_assets(footage | songs)), cuts
 
 def _require_plan(plan_id: Optional[str]) -> EditPlan:
@@ -3095,11 +3103,13 @@ def _voices(project: Project) -> Dict[str, float]:
 
     return voice_keys(project, _analyses(project), loudness)
 
-def _analyses(project: Project) -> Dict[str, MediaAnalysis]:
+def _analyses(project: Project, listened: bool = False) -> Dict[str, MediaAnalysis]:
     """Read the analysis of every file a project plays.
 
     Args:
         project: The project.
+        listened: Whether each transcribed file has to have had its second
+            listen, which is taken now for one analyzed before there was one.
 
     Returns:
         The analyses that exist, keyed by asset ID.
@@ -3108,8 +3118,57 @@ def _analyses(project: Project) -> Dict[str, MediaAnalysis]:
     for asset_id in {clip.asset_id for track in project.tracks for clip in track.clips}:
         analysis = repo.get_analysis(asset_id)
         if analysis is not None:
-            found[asset_id] = analysis
+            found[asset_id] = _listened_to(analysis) if listened else analysis
     return found
+
+def _listened_to(analysis: MediaAnalysis) -> MediaAnalysis:
+    """Give a transcribed file its second listen, if it was analyzed before there was one.
+
+    Once per file, and kept: it takes a few seconds for a short clip and
+    about the length of a long recording divided by twenty on a GPU. Where
+    the file has gone or the listen fails, the analysis is handed back
+    without it, and the cuts are judged by the transcript alone as they were
+    before — a check that cannot run is no reason to stop an edit.
+
+    Args:
+        analysis: The file's analysis.
+
+    Returns:
+        The analysis, with its second listen when it could be taken.
+    """
+    if analysis.transcript is None or analysis.second_listen is not None:
+        return analysis
+    asset = repo.get_assets([analysis.asset_id]).get(analysis.asset_id)
+    if asset is None or not os.path.exists(asset.path):
+        return analysis
+    try:
+        listened = second_listen(asset.path, analysis.transcript, lambda fraction: None, lambda: False)
+    except (RuntimeError, OSError) as exc:
+        logger.warning("second listen of %s failed: %s", asset.path, exc)
+        return analysis
+    # Read again before writing, so an analysis taken again meanwhile is not overwritten
+    # with the one this started from.
+    current = repo.get_analysis(analysis.asset_id)
+    if current is None or current.analyzed_at != analysis.analyzed_at:
+        return analysis.model_copy(update={"second_listen": listened})
+    current.second_listen = listened
+    repo.save_analysis(current)
+    return current
+
+def _plan_of(project: Project) -> Optional[EditPlan]:
+    """Find the plan a project's sequence was compiled from.
+
+    Args:
+        project: The project.
+
+    Returns:
+        The plan, or None when the sequence did not all come from one plan.
+    """
+    base = project.base_video_track
+    compiled_from = {clip.from_plan_id for clip in base.clips} if base else set()
+    if len(compiled_from) != 1 or None in compiled_from:
+        return None
+    return repo.get_plan(next(iter(compiled_from)))
 
 def _plan_target(project: Project) -> Optional[float]:
     """Find how long the plan a project was compiled from asked it to run.
@@ -3121,11 +3180,7 @@ def _plan_target(project: Project) -> Optional[float]:
         The plan's target length, or None when the sequence did not all come
         from one plan or that plan named no length.
     """
-    base = project.base_video_track
-    compiled_from = {clip.from_plan_id for clip in base.clips} if base else set()
-    if len(compiled_from) != 1 or None in compiled_from:
-        return None
-    plan = repo.get_plan(next(iter(compiled_from)))
+    plan = _plan_of(project)
     return plan.target.seconds if plan is not None else None
 
 def _findings(project: Project, burn_subtitles: bool) -> list:
@@ -3141,7 +3196,7 @@ def _findings(project: Project, burn_subtitles: bool) -> list:
     placed = place_cues(project, project.subtitles) if burn_subtitles and project.subtitles else None
     dated = _dated(_referenced_assets(project))
     return check_delivery(
-        project, _analyses(project), _plan_target(project), placed, project.caption_style,
+        project, _analyses(project, listened=True), _plan_target(project), placed, project.caption_style,
         _talking(project, _voices(project)), {asset_id: asset.recorded_at for asset_id, asset in dated.items()},
     )
 
@@ -3227,23 +3282,40 @@ def propose_covers(
     project_id: str,
     frame: Optional[Literal["landscape", "portrait", "square"]] = None,
     follow_faces: bool = True,
+    per_shot: Annotated[int, Field(ge=1, le=4)] = 1,
+    around: Optional[Annotated[float, Field(ge=0)]] = None,
+    part: Optional[str] = None,
 ) -> ToolResult:
-    """Offer frames of the cut as cover or thumbnail candidates, one per shot.
+    """Lay out frames of the cut for you to choose a cover or thumbnail from.
 
-    Which frame makes the cover is a judgement, so this only narrows the
-    field: a frame per shot, never one of black or frozen picture, each the
-    moment its shot's measurements favour — the largest face, or where nobody
-    is seen, the sharpest stretch. Look at the sheet, pick with the user, and
-    save the one they choose with `export_cover`.
+    Choosing is yours, not this tool's: the cover has to show what the video
+    is about, and nothing measured here knows that. So the listing opens with
+    what the plan says the video is for and its parts, and every frame comes
+    with what is being said over it. Pick the frame that shows the video's
+    point — the thing it is about, the result it leads to — and that reads at
+    a glance at the size a feed shows it: one subject, large in the frame,
+    sharp, uncluttered, a face with its eyes open if there is one. Then look
+    closer: call again with `around` set to that moment to see the frames
+    either side of it, and choose the exact one. Offer the user your best one
+    or two with the reason for each, and save the one they choose with
+    `export_cover`.
 
     Args:
         project_id: ID of the project.
         frame: Crop the candidates to another shape, as it would be rendered.
         follow_faces: Crop around the face, as the render does.
+        per_shot: How many moments to offer from each shot: the one its
+            measurements favour and others spread through it.
+        around: A moment of the cut, in seconds, to look at closely instead:
+            every quarter second for two seconds either side of it.
+        part: Only the frames of one part of the cut, by its marker's name
+            or ID — the payoff, where the point of the video usually is, or
+            any part a long cut's sheet had no room for.
 
     Returns:
-        A listing — each candidate's number, time in the cut and clip — and
-        the candidates as one labeled image.
+        What the video is for, a listing — each candidate's number, time in
+        the cut, clip and what is said then — and the candidates as one
+        labeled image.
 
     Raises:
         ValueError: If the project does not exist or has nothing to offer.
@@ -3252,22 +3324,51 @@ def propose_covers(
     if not project:
         raise ValueError(f"project {project_id} not found")
     project = _reshaped(project, frame)
-    offered = cover_candidates(project, _analyses(project))[:MAX_STORYBOARD_TILES]
+    analyses = _analyses(project)
+    if around is None:
+        offered = [
+            (clip, seconds, float(clip.timeline_in) + (seconds - float(clip.source_range.start)) / clip.speed)
+            for clip, seconds in cover_candidates(project, analyses, per_shot)
+        ]
+    else:
+        offered = frames_around(project, analyses, around)
+    if part is not None:
+        marks = sorted(project.markers, key=lambda marker: marker.timeline_in)
+        named = [index for index, marker in enumerate(marks) if part in (marker.name, marker.id)]
+        if not named:
+            raise ValueError(f"no part called {part!r}; the parts are: {', '.join(m.name for m in marks) or 'none'}")
+        opens = float(marks[named[0]].timeline_in)
+        closes = float(marks[named[0] + 1].timeline_in) if named[0] + 1 < len(marks) else float(project.duration)
+        offered = [item for item in offered if opens <= item[2] < closes]
     if not offered:
         raise ValueError(f"project {project_id} has no picture to take a cover from")
+    left_out = max(0, len(offered) - MAX_STORYBOARD_TILES)
+    offered = offered[:MAX_STORYBOARD_TILES]
     assets = _referenced_assets(project)
     framing = _framing(project, assets) if follow_faces else {}
     fps = Fraction(project.fps_num, project.fps_den)
+    said = place_cues(project, project.subtitles) if project.subtitles else []
     shots, listing = [], []
-    for number, (clip, seconds) in enumerate(offered, start=1):
-        at = float(clip.timeline_in) + (seconds - float(clip.source_range.start)) / clip.speed
+    for number, (clip, seconds, at) in enumerate(offered, start=1):
         framed = framing.get(clip.id)
         shots.append((assets[clip.asset_id].path, seconds, f"#{number}  {format_timestamp(at)}",
                       centre_at(framed, clip, seconds, fps) if framed else None))
-        listing.append(f"#{number}: edit {at:.3f}s ({format_timestamp(at)}) | clip {clip.id}")
-    header = f"{len(offered)} cover candidate(s) for project {project_id}, {project.width}x{project.height}:"
+        words = next((cue.text for cue in said if float(cue.start) <= at < float(cue.end)), "")
+        listing.append(f"#{number}: edit {at:.3f}s ({format_timestamp(at)}) | clip {clip.id}"
+                       + (f" | 「{words}」" if words else ""))
+    header = [f"{len(offered)} cover candidate(s) for project {project_id}, {project.width}x{project.height}"
+              + (f", around {around:g}s" if around is not None else "") + ":"]
+    plan = _plan_of(project)
+    if plan is not None and (plan.goal or plan.beats):
+        parts = " → ".join(beat.name or beat.id for beat in plan.beats)
+        header.insert(0, "What the video is for: " + (plan.goal or "(no goal written)")
+                      + (f"\nIts parts: {parts}" if parts else ""))
+    else:
+        header.insert(0, "No plan says what this video is for; ask the user what it is about before choosing.")
+    if left_out:
+        header.append(f"{left_out} more were left out, from the end of the cut; ask for one `part` at a time.")
     return ToolResult(content=[
-        "\n".join([header, *listing]),
+        "\n".join([*header, *listing]),
         Image(data=storyboard_sheet(shots, aspect=project.width / project.height), format="jpeg"),
     ])
 
@@ -3275,24 +3376,30 @@ def propose_covers(
 def export_cover(
     project_id: str,
     seconds: Annotated[float, Field(ge=0)],
+    reason: Annotated[str, Field(min_length=1)],
     frame: Optional[Literal["landscape", "portrait", "square"]] = None,
     follow_faces: bool = True,
-) -> dict:
+) -> ToolResult:
     """Save one frame of the cut as a full-size JPEG, for a cover or thumbnail.
 
     The frame is the one the viewer sees at that moment — covering picture
     where there is some — at the size the cut is rendered at and cropped the
-    way the render crops it.
+    way the render crops it. It comes back at the size a feed shows it too,
+    and for a vertical cut cropped to the 3:4 middle a profile grid shows:
+    look at both before telling the user it is done, and choose again if the
+    subject is lost at that size or falls outside the middle.
 
     Args:
         project_id: ID of the project.
         seconds: The moment in the cut, as `propose_covers` lists it.
+        reason: Why this frame: what of the video's point it shows, and why
+            it reads at a glance. Written for the user, who decides.
         frame: Save it in another shape.
         follow_faces: Crop around the face, as the render does.
 
     Returns:
-        A dictionary with the `output_path` of the JPEG and its `width` and
-        `height`.
+        The `output_path` of the JPEG, its `width` and `height`, the reason,
+        and the cover at feed size.
 
     Raises:
         ValueError: If the project does not exist or nothing is on screen then.
@@ -3301,15 +3408,9 @@ def export_cover(
     if not project:
         raise ValueError(f"project {project_id} not found")
     project = _reshaped(project, frame)
-    on_screen = [
-        clip for track in project.video_tracks for clip in track.clips
-        if (track is project.base_video_track or clip.layout is None)
-        and float(clip.timeline_in) <= seconds < float(clip.timeline_out)
-    ]
-    if not on_screen:
+    clip = on_screen(project, seconds)
+    if clip is None:
         raise ValueError(f"nothing is on screen at {seconds:g}s of project {project_id}")
-    # The topmost full-frame picture is what the viewer sees.
-    clip = on_screen[-1]
     assets = _referenced_assets(project)
     source = float(clip.source_range.start) + (seconds - float(clip.timeline_in)) * clip.speed
     framed = (_framing(project, assets) if follow_faces else {}).get(clip.id)
@@ -3320,7 +3421,268 @@ def export_cover(
     os.makedirs(folder, exist_ok=True)
     path = os.path.join(folder, _output_name(project, "cover" + (f"-{frame}" if frame else "")).replace(".mp4", ".jpg"))
     picture.save(path, "JPEG", quality=92)
-    return {"output_path": path, "width": project.width, "height": project.height}
+    saved = {"output_path": path, "width": project.width, "height": project.height, "reason": reason}
+    grid = ", and the 3:4 middle a profile grid crops a vertical video to" if project.height > project.width else ""
+    return ToolResult(
+        content=[
+            f"Saved {path} ({project.width}x{project.height}). Why: {reason}\n"
+            f"Below: the cover at the size a feed shows it{grid}.",
+            Image(data=feed_preview(picture), format="jpeg"),
+        ],
+        structured_content=saved,
+    )
+
+def narrate(
+    project_id: str,
+    text: Annotated[str, Field(min_length=1)],
+    user_chose_voice: bool,
+    reference_asset_id: Optional[str] = None,
+    reference_start: Optional[Annotated[float, Field(ge=0)]] = None,
+    reference_end: Optional[Annotated[float, Field(gt=0)]] = None,
+    speed: Annotated[float, Field(ge=0.7, le=1.3)] = 1.0,
+) -> dict:
+    """Speak a narration in the user's own voice, cloned from their footage.
+
+    For words written over a picture nobody talks over — 「原本的杯子區，長這樣」
+    over a shot of the counter. A narration is text by default: a caption with
+    `add_subtitle`. Only speak it when the user has said so, and before they
+    decide, tell them three things: it is spoken by a speech model copying
+    their voice from their own footage; the model in use says what it may be
+    used for, as `license` below — the default F5-TTS weights are CC BY-NC,
+    no commercial use, which a video promoting a shop or a product is; and
+    platforms ask for a realistic synthetic voice to be labelled. Clone only
+    the user's own voice, never somebody else's without their consent.
+
+    The first narration installs the speech model, about 5 GB, which takes a
+    while; later ones take seconds. Poll `get_job`; when it is done its
+    `asset_id` is the narration, already analyzed, to lay on an audio track
+    with `voice: true` (`add_track`, then `add_clip` where it is to be heard)
+    so the footage and the music drop under it, and to caption with
+    `add_subtitle` on that asset. Hold its `heard` against what you asked
+    for: a short line now and then comes out with a stray syllable of the
+    voice sample in front of it — say it together with the line next to it.
+
+    Args:
+        project_id: The project the narration is for; the voice is taken from
+            the talking in it.
+        text: What to say, in the words it should be said in.
+        user_chose_voice: Whether the user said this narration should be
+            spoken rather than only shown. False is refused, with what to
+            ask them.
+        reference_asset_id: The recording to take the voice from, to choose
+            the sample yourself; left out, the longest clear sentence of
+            whoever talks most in the cut is used.
+        reference_start: Where the sample starts in that recording, seconds.
+        reference_end: Where it ends; three to ten seconds after the start.
+        speed: How fast to say it.
+
+    Returns:
+        The `job_id` to poll, the voice `sample` used and what is said in it,
+        and the speech model's `license` and whether it allows
+        `commercial_use`.
+
+    Raises:
+        ValueError: If the user did not choose a spoken narration, the
+            project does not exist, or no voice sample can be found.
+    """
+    model = speak.speech_model()
+    if not user_chose_voice:
+        raise ValueError(
+            "ask the user first whether this narration should be spoken in their voice or only shown as a caption, "
+            f"and tell them the speech model's licence: {model.license}. Call again with user_chose_voice true only "
+            "if they say to speak it; otherwise add it as a caption with add_subtitle"
+        )
+    project = repo.get_project(project_id)
+    if not project:
+        raise ValueError(f"project {project_id} not found")
+    sample = _voice_sample(project, reference_asset_id, reference_start, reference_end)
+    job = Job(kind=JobKind.NARRATE, project_id=project_id)
+    job.work_dir = os.path.join(WORKSPACE_DIR, "jobs", job.job_id)
+    job.memory_estimate = speak.NARRATION_MEMORY_BYTES
+    spoken_in = repo.get_analysis(str(sample["asset_id"]))
+    language = spoken_in.transcript.language if spoken_in and spoken_in.transcript else None
+    variant = spoken_in.transcript.chinese_variant if spoken_in and spoken_in.transcript else None
+    job = job_manager.start_job(job, {
+        "text": text, "speed": speed, "reference": sample, "language": language, "chinese_variant": variant,
+    })
+    return {
+        "job_id": job.job_id, "status": job.status.value, "stage": job.stage,
+        "installing_first": not speak.is_installed(),
+        "sample": sample, "license": model.license, "commercial_use": model.commercial_use,
+    }
+
+# Off until a voice is found that sounds like the person: on the first video it was tried
+# on, neither F5-TTS nor BreezyVoice did — F5-TTS carried the accent of the data it was
+# trained on — and the user set it aside. The code stays, and `CLIP_MCP_NARRATION=1`
+# offers the tool again.
+if os.environ.get("CLIP_MCP_NARRATION") == "1":
+    mcp.tool()(narrate)
+
+def _voice_sample(
+    project: Project, asset_id: Optional[str], start: Optional[float], end: Optional[float],
+) -> Dict[str, object]:
+    """Choose the few seconds of the user's voice a narration is spoken in.
+
+    Args:
+        project: The project the narration is for.
+        asset_id: The recording chosen, if one was.
+        start: Where the sample starts in it.
+        end: Where it ends.
+
+    Returns:
+        The sample: `asset_id`, `start`, `end`, and `text`, exactly what is
+        said in it, which the speech model needs to line the voice up.
+
+    Raises:
+        ValueError: If the chosen stretch is untranscribed or the wrong
+            length, or the cut has no sentence long enough to take a voice from.
+    """
+    if asset_id is not None:
+        if start is None or end is None:
+            raise ValueError("give reference_start and reference_end with reference_asset_id")
+        if not speak.REFERENCE_SHORTEST <= end - start <= speak.REFERENCE_LONGEST:
+            raise ValueError(f"a voice sample is {speak.REFERENCE_SHORTEST:g} to {speak.REFERENCE_LONGEST:g} seconds long")
+        analysis = repo.get_analysis(asset_id)
+        if analysis is None or analysis.transcript is None:
+            raise ValueError(f"asset {asset_id} has no transcript, and the speech model needs the words of the sample")
+        said = "".join(
+            word.text for segment in analysis.transcript.segments for word in segment.words
+            if start <= (word.start + word.end) / 2 <= end
+        ).strip()
+        if not said:
+            raise ValueError(f"nobody talks in {start:g}-{end:g}s of asset {asset_id}")
+        return {"asset_id": asset_id, "start": start, "end": end, "text": said}
+
+    # Whoever talks most in the cut is taken to be the user; their longest clear sentence is the sample.
+    analyses = _analyses(project)
+    heard = [clip for clip in (project.base_video_track.clips if project.base_video_track else []) if clip.volume != 0]
+    joined = join_voices(analyses)
+    talk: Dict[str, float] = {}
+    for clip in heard:
+        for turn in analyses[clip.asset_id].speakers if clip.asset_id in analyses else []:
+            label = joined.get((clip.asset_id, turn.speaker))
+            if label is not None:
+                talk[label] = talk.get(label, 0.0) + max(0.0, min(turn.end, float(clip.source_range.end))
+                                                           - max(turn.start, float(clip.source_range.start)))
+    main = max(talk, key=talk.get) if talk else None
+    best = None
+    for asset_id in dict.fromkeys(clip.asset_id for clip in heard):
+        analysis = analyses.get(asset_id)
+        if analysis is None or analysis.transcript is None:
+            continue
+        known = clean_cuts(_listened_to(analysis))
+        sentences = []
+        for segment in analysis.transcript.segments:
+            if main is not None and analysis.speakers:
+                theirs = [span for span in analysis.speakers if joined.get((asset_id, span.speaker)) == main]
+                if share_covered(segment.start, segment.end, theirs) < 0.9:
+                    continue
+            # Out to where the sound really starts and stops, so the words and the sample agree.
+            opens = known.sound_before(segment.start) or segment.start
+            closes = known.sound_after(segment.end) or segment.end
+            # And only where the second listen heard the same words: the model is told what the
+            # sample says, and a sample whose words are wrong comes out mumbled.
+            if analysis.second_listen is not None:
+                again = "".join(word.text for word in analysis.second_listen.words
+                                if opens - 0.1 <= (word.start + word.end) / 2 <= closes + 0.1)
+                if speak.said_it_all(segment.text, again) < speak.SAMPLE_AGREEMENT:
+                    continue
+            sentences.append((round(max(0.0, opens - 0.1), 3), round(min(analysis.duration, closes + 0.1), 3),
+                              segment.text.strip()))
+        chosen = speak.reference_candidates(sentences)
+        if chosen and (best is None or chosen[0][1] - chosen[0][0] > best[2] - best[1]):
+            best = (asset_id, *chosen[0])
+    if best is None:
+        raise ValueError(
+            f"no sentence of {speak.REFERENCE_SHORTEST:g} to {speak.REFERENCE_LONGEST:g} seconds in this cut to take "
+            "the voice from; choose one with reference_asset_id, reference_start and reference_end"
+        )
+    return {"asset_id": best[0], "start": best[1], "end": best[2], "text": best[3]}
+
+@mcp.tool()
+def export_notices(
+    project_id: str,
+    text: Optional[str] = None,
+    licenses: Optional[Dict[str, str]] = None,
+    next_to: Optional[str] = None,
+) -> dict:
+    """Write what the user has to take care of before publishing a cut, as a text file.
+
+    Call it after the final render, twice. The first time, without `text`, it
+    says what is in the cut that may need permission or has to be disclosed —
+    the music under it and what each file says about itself, a voice a speech
+    model spoke and that model's licence, other voices, more than one face on
+    screen — and nothing is written. Write the notices from that, in the
+    user's language, and call again with `text`: for each thing, what the
+    concern is and how to resolve it (the credit line a CC BY song needs, a
+    source to confirm for music whose licence nobody gave, the label a
+    platform wants on a synthetic voice and whether its licence allows this
+    use, the consent of somebody heard or seen). Add what you see in the
+    frames and hear in the footage that no measurement finds: a brand or a
+    logo, music playing in the room, a screen, somebody's work shown. Say
+    plainly where a question is the user's to answer rather than yours.
+
+    Args:
+        project_id: ID of the project.
+        text: The notices, as the user should read them. Leave it out to be
+            told what they have to cover.
+        licenses: Where each file came from and what it may be used for, as
+            the user told you, keyed by asset ID — such as "Kevin MacLeod,
+            incompetech.com, CC BY 4.0". Kept with the file, so the next
+            video that uses it already knows.
+        next_to: The rendered file the notices go with; they are written
+            beside it. Left out, they go in a folder of their own.
+
+    Returns:
+        `facts`, what the notices have to cover; and once `text` is given,
+        `output_path`, the file written — the text followed by those facts,
+        so none of them can be left out.
+
+    Raises:
+        ValueError: If the project, or an asset named in `licenses`, does not exist.
+    """
+    project = repo.get_project(project_id)
+    if not project:
+        raise ValueError(f"project {project_id} not found")
+    assets = _referenced_assets(project)
+    for asset_id, license in (licenses or {}).items():
+        asset = assets.get(asset_id) or repo.get_assets([asset_id]).get(asset_id)
+        if asset is None:
+            raise ValueError(f"asset {asset_id} not found")
+        asset.license = license.strip() or None
+        repo.save_asset(asset)
+        assets[asset_id] = asset
+    tags: Dict[str, Dict[str, str]] = {}
+    for asset_id, asset in assets.items():
+        try:
+            tags[asset_id] = rights_tags(probe_file(asset.path))
+        except (OSError, RuntimeError):
+            tags[asset_id] = {}
+    facts = rights_facts(project, _analyses(project), assets, tags)
+    listed = [
+        " | ".join([
+            fact.kind, fact.subject,
+            ", ".join(f"{clock(start)}–{clock(end)}" for start, end in fact.spans),
+            *fact.detail,
+        ])
+        for fact in facts
+    ]
+    if text is None:
+        return {"facts": listed, "written": False, "next": (
+            "Write the notices from these facts and what you saw and heard in the cut, in the user's language, "
+            "and call again with `text`" + ("" if next_to else " and `next_to` the rendered file")
+        )}
+    if next_to:
+        stem, _ = os.path.splitext(next_to)
+        path = f"{stem}_notices.txt"
+    else:
+        folder = os.path.join(WORKSPACE_DIR, "outputs", f"notices-{uuid.uuid4()}")
+        os.makedirs(folder, exist_ok=True)
+        path = os.path.join(folder, _output_name(project, "notices").replace(".mp4", ".txt"))
+    # With a byte-order mark and Windows line ends, so Notepad opens it right.
+    with open(path, "w", encoding="utf-8-sig", newline="\r\n") as out:
+        out.write(text.rstrip() + "\n\n---\n" + "\n".join(listed or ["(nothing found)"]) + "\n")
+    return {"facts": listed, "written": True, "output_path": path}
 
 def _timecodes(assets: Mapping[str, Asset]) -> Dict[str, float]:
     """Read the timecode each file starts at, for an editing program to line it up by.
@@ -3421,7 +3783,8 @@ def get_job(job_ids: List[str]) -> dict:
     Returns:
         A dictionary with `jobs`, each with its `job_id`, `kind`, `status`,
         `progress` (0.0 to 1.0), the current `stage`, the `asset_id` of an
-        analysis or the `output_path` of a render, and for a failed job its
+        analysis or a narration — with what a recogniser `heard` the
+        narration say — or the `output_path` of a render, and for a failed job its
         `error_message`; and a summary over all of them: `finished` and
         `total` counts, `failed` counting those that failed or were
         cancelled, and `progress`, the average.
@@ -3440,6 +3803,11 @@ def get_job(job_ids: List[str]) -> dict:
         }
         if job.asset_id:
             entry["asset_id"] = job.asset_id
+            if job.kind == JobKind.NARRATE:
+                spoken = repo.get_assets([job.asset_id]).get(job.asset_id)
+                if spoken is not None and spoken.synthetic is not None:
+                    # What a recogniser hears it say, to hold against what it was asked to.
+                    entry["heard"] = spoken.synthetic.heard
         if job.output_path:
             entry["output_path"] = job.output_path
         if job.error_message:

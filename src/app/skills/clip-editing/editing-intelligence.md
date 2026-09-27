@@ -168,6 +168,23 @@ When the footage also carries someone talking to camera, both are kept, and
 the narration wins where they overlap. `preview_sound` puts the narration on
 the voice side and the place on the other, so you can see it sits under.
 
+**A written narration is a caption.** Words for a picture nobody talks over —
+「原本的杯子區，長這樣」 over the counter — go on with `add_subtitle`. There is no
+spoken narration from text: the voice it cloned did not sound like the person
+(it carried the accent of the model's training data), and it is switched off.
+If the user wants the narration heard, the way that works is their own
+recording: list the lines and how long each may run, and lay the file they
+record on an audio track added with `voice: true`, after analyzing it like
+any other recording.
+
+Only when `narrate` is among your tools has somebody switched it back on
+(`CLIP_MCP_NARRATION=1`). Then still never decide for the user: ask whether
+the narration should be heard or only read, and tell them it is a speech
+model copying their voice, what its licence allows (the default F5-TTS
+weights are CC BY-NC: a video promoting a shop or a product is commercial
+use), and that platforms want a realistic synthetic voice labelled. Clone
+nobody's voice but the user's.
+
 Two further things, both off unless asked for.
 
 `set_clip_audio` with `cleanup` repairs one clip's voice: `rumble` takes out
