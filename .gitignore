@@ -92,3 +92,5 @@ workspace/
 # machine, and they quote the person's own brief and their own words about their own
 # work — none of which is the repo's to publish. The README stays; the cases do not.
 corpus/*.json
+
+.docs
