@@ -66,8 +66,9 @@ from app.engine.subtitles import (
     timeline_cues,
 )
 from app.engine.renderer import JobManager
+from app.storage import housekeeping
 from app.storage.repo import Repository
-from app.workspace import workspace_dir
+from app.workspace import output_dir, workspace_dir
 
 WORKSPACE_DIR = workspace_dir()
 SKILLS_DIR = Path(__file__).parent / "skills"
@@ -2178,8 +2179,11 @@ def preview_sound(
         raise ValueError(f"project {project_id} not found")
     if project.base_video_track is None or not project.base_video_track.clips:
         raise ValueError(f"project {project_id} has nothing on its sequence to listen to")
-    folder = os.path.join(WORKSPACE_DIR, "outputs", f"sound-{uuid.uuid4()}")
+    checks = housekeeping.sound_dir(WORKSPACE_DIR, project_id)
+    folder = os.path.join(checks, str(uuid.uuid4()))
     os.makedirs(folder, exist_ok=True)
+    # A sound check is looked at once; only the newest of a project's is kept.
+    housekeeping.prune(checks, {os.path.basename(folder)})
     mix = os.path.join(folder, _output_name(project, "sound").replace(".mp4", ".m4a"))
     voice, music = os.path.join(folder, "voice.wav"), os.path.join(folder, "music.wav")
     assets, voices = _referenced_assets(project), _voices(project)
@@ -2806,6 +2810,26 @@ def _output_name(project: Project, kind: str) -> str:
     stem = " ".join(stem.split())[:MAX_OUTPUT_NAME].strip(" .")
     return f"{stem or project.id}_{kind}.mp4"
 
+def _delivered(job_id: str) -> bool:
+    """Whether a full render finished and its file was saved, so its working folder can go."""
+    job = repo.get_job(job_id)
+    return job is not None and job.status == JobStatus.COMPLETED
+
+def _delivery_name(project: Project, kind: str, extension: str) -> str:
+    """Name a file saved for the user after the project: `EP1 台北.mp4`, `EP1 台北 封面.jpg`.
+
+    Args:
+        project: The project it came from.
+        kind: `output`, `cover` or `timeline`, with `-portrait` and the like
+            for another shape.
+        extension: With its dot.
+
+    Returns:
+        A file name; the caller makes it unique in its folder.
+    """
+    stem = _output_name(project, "x")[: -len("_x.mp4")]
+    return housekeeping.delivery_name(stem, kind, extension)
+
 # A preview is rendered with its short side this long, from pictures cached at that size.
 PREVIEW_SHORT_SIDE = 480
 # Cached preview pictures nobody has used for this long are thrown away. Housekeeping,
@@ -2953,9 +2977,12 @@ def render_project(
 
     Returns:
         A dictionary with the `job_id`, the initial `status`, `stage`, and the
-        absolute `output_path` the file will be written to, named after the
-        project so the outputs folder can be read at a glance. Each job writes to
-        its own directory, so repeated renders never overwrite each other.
+        absolute `output_path` the file will be written to. A full render is
+        saved in the user's videos folder under the project's name, such as
+        `Videos\\clip-mcp\\EP1 台北.mp4`, and `(2)` is added rather than
+        overwrite one already there; `get_job` gives the final path once it is
+        done. A preview is a working file in the workspace, and only the
+        newest preview of each project is kept.
         Renders and analyses run one or two at a time, so that several of them
         cannot exhaust the machine's memory between them; `stage` says what a
         job that has not started yet is waiting for, and is null when it
@@ -2984,9 +3011,18 @@ def render_project(
             + str(sorted({finding.check for finding in blocking}))
         )
     kind = ("preview" if is_preview else "output") + (f"-{frame}" if frame else "")
+    housekeeping.sweep_renders(WORKSPACE_DIR, _delivered)
     job = Job(kind=JobKind.RENDER, project_id=project_id)
-    job.work_dir = os.path.join(WORKSPACE_DIR, "outputs", job.job_id)
-    job.output_path = os.path.join(job.work_dir, _output_name(project, kind))
+    delivered: Optional[str] = None
+    if is_preview:
+        job.work_dir = os.path.join(housekeeping.preview_dir(WORKSPACE_DIR, project_id), job.job_id)
+        job.output_path = os.path.join(job.work_dir, _output_name(project, kind))
+    else:
+        # Rendered in the workspace and moved out whole once finished, so the videos
+        # folder never holds half a file.
+        job.work_dir = os.path.join(housekeeping.render_dir(WORKSPACE_DIR), job.job_id)
+        delivered = housekeeping.unique_path(str(output_dir()), _delivery_name(project, kind, ".mp4"))
+    render_path = os.path.join(job.work_dir, _output_name(project, kind))
 
     subtitle_path = None
     if burn_subtitles:
@@ -3022,7 +3058,7 @@ def render_project(
     if is_preview:
         cache = _picture_cache()
         command, pieces = renderer.build_incremental(
-            project, assets, job.output_path, cache,
+            project, assets, render_path, cache,
             loudness_target=loudness_target, subtitle_path=subtitle_path, framing=framing,
             chapters_path=chapters_path, voices=voices, talking=talking,
         )
@@ -3032,12 +3068,20 @@ def render_project(
                 os.utime(argument)
     else:
         command = renderer.build_command(
-            project, assets, job.output_path, loudness_target=loudness_target, subtitle_path=subtitle_path,
+            project, assets, render_path, loudness_target=loudness_target, subtitle_path=subtitle_path,
             framing=framing, chapters_path=chapters_path, voices=voices, talking=talking,
         )
     # One input per clip, all opened at once, is what a render's memory use is made of.
     job.memory_estimate = resources.render_memory_bytes(command.count("-i"))
-    spec = {"command": command, "duration_seconds": float(renderer.output_duration(project)), "pieces": pieces}
+    spec = {
+        "command": command, "duration_seconds": float(renderer.output_duration(project)), "pieces": pieces,
+        "render_path": render_path,
+    }
+    if delivered:
+        job.output_path = delivered
+        spec["deliver"] = delivered
+    else:
+        spec["prune"] = os.path.dirname(job.work_dir)
     if loudness_target is not None:
         mix_path = os.path.join(job.work_dir, "mix.wav")
         spec["loudness"] = {
@@ -3316,9 +3360,9 @@ def export_cover(
     fps = Fraction(project.fps_num, project.fps_den)
     picture = still(assets[clip.asset_id].path, source, project.width, project.height,
                     centre_at(framed, clip, source, fps) if framed else None)
-    folder = os.path.join(WORKSPACE_DIR, "outputs", f"cover-{uuid.uuid4()}")
+    folder = str(output_dir())
     os.makedirs(folder, exist_ok=True)
-    path = os.path.join(folder, _output_name(project, "cover" + (f"-{frame}" if frame else "")).replace(".mp4", ".jpg"))
+    path = housekeeping.unique_path(folder, _delivery_name(project, "cover" + (f"-{frame}" if frame else ""), ".jpg"))
     picture.save(path, "JPEG", quality=92)
     return {"output_path": path, "width": project.width, "height": project.height}
 
@@ -3398,9 +3442,9 @@ def export_timeline(
         # analysis, cannot say it. Only which tracks, not how loud: nothing is measured.
         if voice_keys(project, _analyses(project), lambda clip: None):
             behind.append("the footage's sound ducking under a narration, and the narration brought up to level")
-    folder = os.path.join(WORKSPACE_DIR, "outputs", f"export-{uuid.uuid4()}")
+    folder = str(output_dir())
     os.makedirs(folder, exist_ok=True)
-    path = os.path.join(folder, _output_name(project, "timeline").replace(".mp4", f".{format}"))
+    path = housekeeping.unique_path(folder, _delivery_name(project, "timeline", f".{format}"))
     # UTF-8 with a byte-order mark only for the EDL: the programs that read EDLs guess the
     # encoding, and a Chinese file name in a FROM CLIP NAME comes out garbled without it.
     with open(path, "w", encoding="utf-8-sig" if format == "edl" else "utf-8", newline="\n") as handle:
@@ -3475,6 +3519,84 @@ def cancel_job(job_id: str) -> dict:
         "cancelled": job is not None and job.status == JobStatus.CANCELLED,
         "status": job.status.value if job else None,
     }
+
+@mcp.tool()
+def storage_usage() -> dict:
+    """Say how much room clip-mcp takes on this computer, and what can be cleared.
+
+    Use it when the user asks how much space this takes or wants room back.
+    Read the sizes out in plain words; never clear anything they did not ask
+    to clear.
+
+    Returns:
+        `items`, each with a `key`, the `label` the user knows it by, its size
+        in `megabytes`, the `path` of its folder, and whether it is
+        `clearable` with `clean_storage` — only what can be made again is.
+        `legacy` is the old outputs folder from before finished videos were
+        saved to the videos folder: sort it out with `tidy_old_outputs`.
+        `outputs` is where finished videos, covers and timeline exports are
+        saved now, and is never cleared.
+    """
+    items = housekeeping.usage(WORKSPACE_DIR, str(output_dir()))
+    return {"items": [
+        {"key": item.key, "label": item.label, "megabytes": round(item.bytes / 1e6, 1), "path": item.path,
+         "clearable": item.clearable}
+        for item in items
+    ]}
+
+@mcp.tool()
+def clean_storage(kinds: List[Literal["previews", "thumbnails", "work"]]) -> dict:
+    """Clear files that can be made again, to give the user disk space back.
+
+    Nothing the user made is touched: projects, analyses and finished videos
+    stay. A preview, a thumbnail or a working file still in use by a render is
+    left. The next preview of a project renders its pictures again, which
+    takes longer once.
+
+    Args:
+        kinds: `previews` (preview renders, sound checks and the pictures they
+            are made from), `thumbnails` (the editor's thumbnails and
+            waveforms), `work` (what analyses and renders leave behind).
+
+    Returns:
+        `freed_megabytes`.
+    """
+    freed = housekeeping.clean(WORKSPACE_DIR, kinds, repo.active_job_ids())
+    return {"freed_megabytes": round(freed / 1e6, 1)}
+
+@mcp.tool()
+def tidy_old_outputs(confirm: bool = False) -> dict:
+    """Sort out the old outputs folder, where every render used to be kept.
+
+    Without `confirm`, only says what would happen: the newest finished video,
+    cover and export of each project move to the videos folder, and the older
+    versions of them go to the recycle bin, from where they can still be
+    restored. Sound checks and render logs stay where they are; `clean_storage`
+    is not how they go either, so say the folder is left with them. Show the
+    user that list and the sizes, and call again with `confirm` only once they
+    have agreed to it.
+
+    Args:
+        confirm: Carry it out.
+
+    Returns:
+        Without `confirm`: `keep` (each file kept and where it goes),
+        `recycle` (how many duplicates and megabytes go to the recycle bin) and
+        `left_in_place` (what stays in the old folder). With
+        it: `kept` (where each went), `recycled`, and `left` — files that
+        could not be moved, such as one open in a player.
+    """
+    planned = housekeeping.legacy_plan(WORKSPACE_DIR, str(output_dir()))
+    if not confirm:
+        recycled = [item for item in planned if item.duplicate]
+        stays = [item for item in planned if not item.keep_as and not item.duplicate]
+        return {
+            "keep": [{"from": item.path, "to": item.keep_as, "megabytes": round(item.bytes / 1e6, 1)}
+                     for item in planned if item.keep_as],
+            "recycle": {"files": len(recycled), "megabytes": round(sum(item.bytes for item in recycled) / 1e6, 1)},
+            "left_in_place": {"files": len(stays), "megabytes": round(sum(item.bytes for item in stays) / 1e6, 1)},
+        }
+    return housekeeping.legacy_apply(WORKSPACE_DIR, planned)
 
 def main():
     """Run the MCP server over the stdio transport."""

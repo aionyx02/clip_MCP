@@ -15,6 +15,8 @@ import pytest
 
 WORKSPACE = tempfile.mkdtemp(prefix="clip-mcp-tests-")
 os.environ["CLIP_MCP_WORKSPACE"] = WORKSPACE
+# Finished videos are saved to the user's Videos folder; a test run must never put one there.
+os.environ["CLIP_MCP_OUTPUT_DIR"] = os.path.join(WORKSPACE, "delivered")
 # The workspace is thrown away after every run, and the models in it are tens of megabytes
 # fetched over the network. Kept in the workspace they would be downloaded again on every
 # run, so the suite points them at somewhere that survives between runs. Production keeps

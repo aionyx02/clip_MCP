@@ -2,8 +2,9 @@
 
 Read this when the user names where the video is going — YouTube, Reels,
 TikTok, Shorts — or asks for captions in a style, several shapes of one cut,
-chapters, a cover, or the edit handed to another editing program. And read
-it before the final render, for the check that comes first. It is referenced
+chapters, a cover, or the edit handed to another editing program, or asks
+where a file went or how much space this takes. And read it before the
+final render, for the check that comes first. It is referenced
 from SKILL.md.
 
 ## What each platform expects
@@ -125,3 +126,25 @@ the file.
 | 「幫我寫 YouTube 章節」 / YouTube chapters | `get_chapters`, paste its `description`; say what `problems` lists |
 | 「挑一張封面」「縮圖」 / pick a cover or thumbnail | `propose_covers`, let the user choose, then `export_cover` |
 | 「我要拿去 Premiere／達文西／Final Cut 修」 / finish it in another editor | `export_timeline` with `fcpxml` (or `otio`, `edl`), plus `srt` for the captions; read out `left_behind` |
+
+## Where files go, and disk space
+
+A finished video, a cover and a timeline export are the user's: they are
+saved in their Videos folder under `clip-mcp`, named after the project
+(`EP1 台北.mp4`, `EP1 台北 封面.jpg`), with `(2)` added rather than
+overwriting. Tell them that folder when a render finishes. Previews and sound
+checks are working files in the workspace; only the newest of each project is
+kept, so do not point the user at an old one.
+
+The footage itself is never copied: projects play it from where it is. So
+moving or deleting a source file breaks the projects that use it — say so if
+the user talks about tidying their footage.
+
+When the user asks how much room this takes, or the disk is full,
+`storage_usage` says it in their words. `clean_storage` clears only what can
+be made again — `previews`, `thumbnails`, `work` — and only the kinds they
+agreed to. An old `outputs` folder from before this layout shows up as
+`legacy`: `tidy_old_outputs` without `confirm` lists what would happen,
+read that back with the sizes, and confirm only once they agree. Only older
+versions of a video, cover or export go, and to the recycle bin rather than
+for good; sound checks and render logs stay where they were.

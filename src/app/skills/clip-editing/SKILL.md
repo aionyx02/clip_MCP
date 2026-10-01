@@ -19,7 +19,7 @@ question comes up, not before; `list_resources` shows everything published.
 | `skill://clip-editing/reading-footage.md` | The request depends on what is said or shown, or the user hands you footage with no plan |
 | `skill://clip-editing/editing-intelligence.md` | You are choosing which footage goes in, in what order, what covers it, and what music goes under it — writing a plan |
 | `skill://clip-editing/pacing-and-structure.md` | You are about to propose a length, an opening, or how fast to cut |
-| `skill://clip-editing/platform-conventions.md` | The user names a platform, asks for captions in a style, several shapes, chapters, a cover, or an export — and before any final render |
+| `skill://clip-editing/platform-conventions.md` | The user names a platform, asks for captions in a style, several shapes, chapters, a cover, or an export, asks where a file went or how much space this takes — and before any final render |
 | `skill://clip-editing/feedback-handling.md` | The user has watched a version and says what is wrong, wants the last one back, or asks what changed |
 | `skill://clip-editing/examples.md` | You want to see a whole exchange from the user's words to the reply |
 

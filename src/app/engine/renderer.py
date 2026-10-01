@@ -11,6 +11,7 @@ from app.engine import loudness, resources
 from app.engine.analysis import analyze_media
 from app.engine.ffmpeg import OperationCancelled, run_ffmpeg
 from app.models.job import Job, JobKind, JobStatus
+from app.storage import housekeeping
 from app.storage.repo import Repository
 
 HEARTBEAT_INTERVAL_SECONDS = 1.0
@@ -388,6 +389,11 @@ def _run_render(job: Job, spec: Dict[str, Any], context: JobContext) -> None:
         lambda fraction: context.report(start + fraction * share),
         context.is_cancelled,
     )
+    if spec.get("deliver"):
+        # A finished video is the user's: it leaves the workspace for where they keep
+        # their videos, under its own name, never over one already there.
+        context.report(1.0, "saving to the videos folder")
+        spec["delivered"] = housekeeping.deliver(spec["render_path"], spec["deliver"])
 
 def _run_analysis(repo: Repository, job: Job, spec: Dict[str, Any], context: JobContext) -> None:
     """Analyze an asset and store the result.
@@ -463,12 +469,17 @@ def run_worker(repo: Repository, job_id: str) -> None:
         except Exception as exc:
             status, error_message = JobStatus.FAILED, str(exc) or type(exc).__name__
 
-    if job.kind == JobKind.RENDER and status != JobStatus.COMPLETED and job.output_path:
+    partial = spec.get("render_path") or job.output_path
+    if job.kind == JobKind.RENDER and status != JobStatus.COMPLETED and partial:
         # Remove the partial file so it cannot be mistaken for a finished render.
         try:
-            os.remove(job.output_path)
+            os.remove(partial)
         except OSError:
             pass
+    if job.kind == JobKind.RENDER and status == JobStatus.COMPLETED:
+        if spec.get("prune"):
+            # Only the newest preview of a project is kept, and any still being rendered.
+            housekeeping.prune(spec["prune"], repo.active_job_ids() | {job.job_id})
 
     def finish(current: Job) -> None:
         """Record the job's final status."""
@@ -477,6 +488,8 @@ def run_worker(repo: Repository, job_id: str) -> None:
         current.stage = None
         if status == JobStatus.COMPLETED:
             current.progress = 1.0
+        if spec.get("delivered"):
+            current.output_path = spec["delivered"]
 
     repo.update_job(job_id, finish)
     # This worker's slot and its memory are free now, so hand them to whatever is waiting

@@ -5,7 +5,7 @@ import sqlite3
 import threading
 from contextlib import contextmanager
 from datetime import datetime, timezone
-from typing import Callable, Dict, Iterable, Iterator, List, Mapping, Optional
+from typing import Callable, Dict, Iterable, Iterator, List, Mapping, Optional, Set
 
 from app.models.job import Job
 from app.models.media import Asset, MediaAnalysis
@@ -352,6 +352,15 @@ class Repository:
         """
         rows = self._query("SELECT data FROM jobs WHERE id = ?", (job_id,))
         return Job.model_validate_json(rows[0][0]) if rows else None
+
+    def active_job_ids(self) -> Set[str]:
+        """Say which jobs are still queued or running, so nothing clears their files.
+
+        Returns:
+            Their IDs.
+        """
+        rows = self._query("SELECT id FROM jobs WHERE json_extract(data, '$.status') IN ('queued', 'running')")
+        return {row[0] for row in rows}
 
     def update_active_jobs(self, change: Callable[[List[Job]], Iterable[str]]) -> List[Job]:
         """Atomically read every unfinished job, decide across them, and write back the ones chosen.

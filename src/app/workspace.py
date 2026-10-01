@@ -159,3 +159,55 @@ def workspace_dir() -> str:
         The absolute path.
     """
     return str(resolve().path)
+
+OUTPUT_VARIABLE = "CLIP_MCP_OUTPUT_DIR"
+# The Videos known folder. Asked for by ID rather than built from the home folder,
+# because OneDrive and the folder's own Location tab both move it.
+VIDEOS_FOLDER_ID = "{18989B1D-99B5-455B-841C-AB7C74E4DDFC}"
+
+def _windows_videos() -> Optional[Path]:
+    """Ask Windows where this user's Videos folder is.
+
+    Returns:
+        The folder, or nothing when the shell cannot say.
+    """
+    import ctypes
+    from ctypes import wintypes
+
+    class Guid(ctypes.Structure):
+        _fields_ = [("Data1", wintypes.DWORD), ("Data2", wintypes.WORD), ("Data3", wintypes.WORD),
+                    ("Data4", wintypes.BYTE * 8)]
+
+    guid = Guid()
+    ctypes.oledll.ole32.CLSIDFromString(VIDEOS_FOLDER_ID, ctypes.byref(guid))
+    found = ctypes.c_wchar_p()
+    try:
+        ctypes.windll.shell32.SHGetKnownFolderPath(ctypes.byref(guid), 0, None, ctypes.byref(found))
+        return Path(found.value) if found.value else None
+    except OSError:
+        return None
+    finally:
+        ctypes.windll.ole32.CoTaskMemFree(found)
+
+def output_dir() -> Path:
+    """Find where finished videos, covers and exports are saved.
+
+    Not the workspace: what was made for the user belongs where they look for
+    their own videos, and the workspace is free to be cleared of everything
+    that can be made again.
+
+    Returns:
+        `CLIP_MCP_OUTPUT_DIR` when set; otherwise a `clip-mcp` folder in the
+        user's Videos folder (Movies on macOS). Not created here.
+    """
+    override = os.environ.get(OUTPUT_VARIABLE)
+    if override:
+        return Path(override).expanduser().resolve()
+    videos = None
+    if sys.platform == "win32":
+        videos = _windows_videos()
+    elif sys.platform == "darwin":
+        videos = Path.home() / "Movies"
+    else:
+        videos = Path(os.environ.get("XDG_VIDEOS_DIR") or Path.home() / "Videos")
+    return (videos or Path.home() / "Videos") / APP_NAME
