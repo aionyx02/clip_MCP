@@ -31,14 +31,14 @@ def test_chosen_files_are_used_where_they_are_never_copied(client: TestClient, m
     monkeypatch.setattr(dialogs, "pick", lambda kind: [str(original)])
     before = set(os.listdir(server.WORKSPACE_DIR))
     result = client.post("/api/pick", json={"kind": "files"}).json()
-    assert result == {"chosen": 1, "imported": 1, "failed": []}
+    assert (result["chosen"], result["imported"], result["failed"], len(result["assets"])) == (1, 1, [], 1)
     listed = {asset["path"] for asset in client.get("/api/assets").json()["assets"]}
     assert str(original.resolve()) in {str(Path(path).resolve()) for path in listed}
     assert set(os.listdir(server.WORKSPACE_DIR)) - before <= {"cache"}
 
 def test_a_cancelled_window_imports_nothing(client: TestClient, monkeypatch) -> None:
     monkeypatch.setattr(dialogs, "pick", lambda kind: [])
-    assert client.post("/api/pick", json={"kind": "folder"}).json() == {"chosen": 0, "imported": 0, "failed": []}
+    assert client.post("/api/pick", json={"kind": "folder"}).json() == {"chosen": 0, "imported": 0, "failed": [], "assets": []}
 
 def test_a_project_whose_footage_is_gone_says_so(client: TestClient, media: Path, tmp_path: Path) -> None:
     moved = tmp_path / "moved.mp4"
@@ -132,3 +132,68 @@ def test_the_editor_watches_a_720_preview_of_the_version_it_shows(client: TestCl
     ).stdout.strip()
     assert size == "1280,720"
     assert client.get(state["url"]).status_code == 200
+
+def captioned_project(client: TestClient, media: Path, footage: Path = None) -> tuple:
+    """A project of one clip from 2 s into a file, with one caption on it.
+
+    Args:
+        client: The editor.
+        media: The test media folder.
+        footage: The file to use; `wide.mp4` when not given.
+
+    Returns:
+        The project's ID and the caption's ID.
+    """
+    asset = server.import_asset(str(footage or media / "wide.mp4"))["id"]
+    made = client.post("/api/projects", json={"name": "字幕"}).json()
+    version = server.repo.get_project(made["id"]).version
+    client.post(f"/api/projects/{made['id']}/edits", json={"expected_version": version, "operations": [
+        {"action": "insert_clip", "track_id": "video", "clip_id": "c1", "asset_id": asset,
+         "source_range": {"start": 2, "end": 6}},
+        {"action": "set_subtitles", "cues": [
+            {"id": "q1", "asset_id": asset, "source_start": 3, "source_end": 4, "text": "我們出發吧"},
+        ]},
+    ]})
+    return made["id"], "q1"
+
+def test_captions_come_back_where_they_fall_in_the_cut(client: TestClient, media: Path) -> None:
+    project, cue = captioned_project(client, media)
+    listed = client.get(f"/api/projects/{project}/captions").json()["captions"]
+    assert listed == [{"cue_id": cue, "start": 1.0, "end": 2.0, "text": "我們出發吧"}]
+
+def test_a_caption_corrected_in_the_editor_is_corrected_in_the_project(client: TestClient, media: Path) -> None:
+    project, cue = captioned_project(client, media)
+    version = server.repo.get_project(project).version
+    answer = client.post(f"/api/projects/{project}/edits", json={"expected_version": version, "operations": [
+        {"action": "edit_subtitle", "cue_id": cue, "text": "我們出發囉"},
+    ]})
+    assert answer.status_code == 200
+    assert client.get(f"/api/projects/{project}/captions").json()["captions"][0]["text"] == "我們出發囉"
+
+def test_captioning_asks_before_transcribing_and_says_if_the_model_must_download(
+    client: TestClient, media: Path, tmp_path: Path, monkeypatch,
+) -> None:
+    # A copy of its own, which no other test can have transcribed.
+    fresh = tmp_path / "fresh.mp4"
+    fresh.write_bytes((media / "wide.mp4").read_bytes())
+    project, _ = captioned_project(client, media, fresh)
+    asked = client.post(f"/api/projects/{project}/captions/make", json={"expected_version": 0}).json()
+    assert [item["name"] for item in asked["needs"]] == ["fresh.mp4"]
+    assert asked["replaces"] == 1
+    assert isinstance(asked["model_missing"], bool)
+    started = []
+    monkeypatch.setattr(server, "analyze_asset", lambda ids, *rest: started.append((ids, rest)) or {"jobs": [{"job_id": "j1"}]})
+    assert client.post(f"/api/projects/{project}/captions/make", json={"transcribe": True}).json() == {"jobs": ["j1"]}
+    assert started[0][1][3] == "zh-TW"
+
+def test_captioning_footage_already_transcribed_goes_straight_to_captions(client: TestClient, media: Path, monkeypatch) -> None:
+    project, _ = captioned_project(client, media)
+    monkeypatch.setattr(editor, "_untranscribed", lambda found: [])
+    monkeypatch.setattr(server, "generate_subtitles", lambda project_id, version: {"new_version": version + 1, "captions": ["a", "b"]})
+    answer = client.post(f"/api/projects/{project}/captions/make", json={"expected_version": 7}).json()
+    assert answer == {"new_version": 8, "count": 2}
+
+def test_a_chosen_song_comes_back_as_an_asset(client: TestClient, media: Path, monkeypatch) -> None:
+    monkeypatch.setattr(dialogs, "pick", lambda kind: [str(media / "song.mp3")] if kind == "music" else [])
+    answer = client.post("/api/pick", json={"kind": "music"}).json()
+    assert answer["imported"] == 1 and len(answer["assets"]) == 1

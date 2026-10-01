@@ -15,16 +15,23 @@ from app.server import MEDIA_EXTENSIONS
 # behind it, which a beginner reads as the app having frozen.
 _open = threading.Lock()
 
-def _media_filter() -> List[tuple]:
-    """The file types offered, media first."""
+# Sound files, offered first when the user is choosing a song.
+AUDIO_EXTENSIONS = (".mp3", ".m4a", ".wav", ".aac", ".flac", ".ogg", ".opus", ".wma", ".aiff")
+
+def _media_filter(music: bool = False) -> List[tuple]:
+    """The file types offered, the ones asked for first."""
     patterns = " ".join(f"*{extension}" for extension in sorted(MEDIA_EXTENSIONS))
+    if music:
+        return [("音樂", " ".join(f"*{extension}" for extension in AUDIO_EXTENSIONS)), ("影片與聲音", patterns),
+                ("所有檔案", "*.*")]
     return [("影片與聲音", patterns), ("所有檔案", "*.*")]
 
 def pick(kind: str) -> List[str]:
     """Show an open window and wait for the user.
 
     Args:
-        kind: `files` for one or more media files, `folder` for a folder.
+        kind: `files` for one or more media files, `folder` for a folder,
+            `music` for one song.
 
     Returns:
         What was chosen; empty when the window was cancelled, or another one
@@ -44,6 +51,9 @@ def pick(kind: str) -> List[str]:
         try:
             if kind == "folder":
                 chosen = filedialog.askdirectory(parent=root, title="選擇素材資料夾", mustexist=True)
+                return [chosen] if chosen else []
+            if kind == "music":
+                chosen = filedialog.askopenfilename(parent=root, title="選擇背景音樂", filetypes=_media_filter(True))
                 return [chosen] if chosen else []
             chosen = filedialog.askopenfilenames(parent=root, title="加入素材", filetypes=_media_filter())
             return list(chosen)

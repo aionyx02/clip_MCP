@@ -60,7 +60,7 @@ function modal(html, onReady) {
 function confirmBox(title, body, action, danger = false) {
   return new Promise((resolve) => {
     modal(`<h2>${esc(title)}</h2><p>${esc(body)}</p>
-      <div class="foot"><button class="btn" data-no>${esc(T.storage.keep)}</button>
+      <div class="foot"><button class="btn" data-no>${esc(T.newProject.cancel)}</button>
       <button class="btn ${danger ? "danger" : "primary"}" data-yes>${esc(action)}</button></div>`, (box, close) => {
       $("[data-no]", box).onclick = () => { close(); resolve(false); };
       $("[data-yes]", box).onclick = () => { close(); resolve(true); };

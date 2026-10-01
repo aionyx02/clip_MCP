@@ -29,7 +29,9 @@ from starlette.staticfiles import StaticFiles
 
 from app import clients, server
 from app.engine.ffmpeg import hidden_window_flags
+from app.engine import models
 from app.engine.frames import extract_frame
+from app.engine.subtitles import captioned_clips, place_cues
 from app.models.timeline import Project
 from app.storage import housekeeping
 from app.ui import dialogs
@@ -249,6 +251,71 @@ async def words(request: Request) -> Response:
                   for word in timed if at - WORDS_AROUND <= word.start <= at + WORDS_AROUND]
     return JSONResponse({"words": found, "transcribed": True})
 
+def _untranscribed(project: Project) -> List[dict]:
+    """The files the captions would come from that nobody has transcribed yet."""
+    missing, seen = [], set()
+    for clip in captioned_clips(project):
+        if clip.asset_id in seen:
+            continue
+        seen.add(clip.asset_id)
+        analysis = server.repo.get_analysis(clip.asset_id)
+        if analysis is None or analysis.transcript is None:
+            asset = server.repo.get_assets([clip.asset_id]).get(clip.asset_id)
+            if asset:
+                missing.append(_asset_summary(asset))
+    return missing
+
+def _speech_model_missing() -> bool:
+    """Whether transcribing would first have to download the speech model."""
+    folder = models.whisper_dir()
+    return not os.path.isdir(folder) or not any(os.scandir(folder))
+
+async def captions(request: Request) -> Response:
+    """The project's captions, each where it falls in the cut as it stands."""
+    found = server.repo.get_project(request.path_params["project_id"])
+    if not found:
+        return _error("project not found", 404)
+    placed = place_cues(found, found.subtitles)
+    return JSONResponse({"captions": [
+        {"cue_id": cue.cue_id, "start": float(cue.start), "end": float(cue.end), "text": cue.text}
+        for cue in placed
+    ]})
+
+async def make_captions(request: Request) -> Response:
+    """Caption the cut: first say what would have to be transcribed, then transcribe it, then caption.
+
+    Transcribing is slow and, the first time, downloads the speech model, so it
+    only starts once the page says the user agreed (`transcribe`).
+    """
+    project_id = request.path_params["project_id"]
+    body = await request.json()
+    found = server.repo.get_project(project_id)
+    if not found:
+        return _error("project not found", 404)
+    missing = _untranscribed(found)
+    if missing and not body.get("transcribe"):
+        return JSONResponse({"needs": missing, "model_missing": _speech_model_missing(),
+                             "replaces": len(found.subtitles)})
+    if missing:
+        # Captions here are read in Traditional Chinese, like the rest of the editor.
+        started = await run_in_threadpool(
+            server.analyze_asset, [asset["id"] for asset in missing], True, None, None, "zh-TW",
+        )
+        return JSONResponse({"jobs": [job["job_id"] for job in started["jobs"]]})
+    try:
+        made = await run_in_threadpool(server.generate_subtitles, project_id, int(body["expected_version"]))
+    except (ValueError, KeyError) as error:
+        return _error(str(error), 409 if "version conflict" in str(error) else 400)
+    return JSONResponse({"new_version": made["new_version"], "count": len(made["captions"])})
+
+async def jobs(request: Request) -> Response:
+    """How a batch of background jobs is getting on, such as the transcriptions captions wait for."""
+    ids = [job_id for job_id in request.query_params.get("ids", "").split(",") if job_id]
+    try:
+        return JSONResponse(server.get_job(ids))
+    except ValueError as error:
+        return _error(str(error), 404)
+
 async def assets(request: Request) -> Response:
     """Every imported file the page can put on the timeline."""
     listed = [_asset_summary(asset) for asset in server.repo.list_assets() if os.path.exists(asset.path)]
@@ -360,9 +427,9 @@ async def output(request: Request) -> Response:
 async def pick(request: Request) -> Response:
     """Ask Windows for files or a folder, and import what was chosen where it is."""
     body = await request.json()
-    kind = "folder" if body.get("kind") == "folder" else "files"
+    kind = body.get("kind") if body.get("kind") in ("folder", "music") else "files"
     chosen = await run_in_threadpool(dialogs.pick, kind)
-    imported, failed = 0, []
+    imported, failed, ids = 0, [], []
     for path in chosen:
         try:
             if kind == "folder":
@@ -370,11 +437,11 @@ async def pick(request: Request) -> Response:
                 imported += len(result["assets"])
                 failed += [os.path.basename(item["path"]) for item in result["skipped"]]
             else:
-                server.import_asset(path)
+                ids.append(server.import_asset(path)["id"])
                 imported += 1
         except (FileNotFoundError, ValueError, RuntimeError):
             failed.append(os.path.basename(path))
-    return JSONResponse({"chosen": len(chosen), "imported": imported, "failed": failed})
+    return JSONResponse({"chosen": len(chosen), "imported": imported, "failed": failed, "assets": ids})
 
 async def storage(request: Request) -> Response:
     """What the workspace holds, or clear the kinds the user chose."""
@@ -470,6 +537,9 @@ def create_app() -> Starlette:
         Route("/api/projects/{project_id}/preview", preview, methods=["GET", "POST"]),
         Route("/api/projects/{project_id}/version", version),
         Route("/api/words/{asset_id}", words),
+        Route("/api/projects/{project_id}/captions", captions),
+        Route("/api/projects/{project_id}/captions/make", make_captions, methods=["POST"]),
+        Route("/api/jobs", jobs),
         Route("/api/assets", assets),
         Route("/api/pick", pick, methods=["POST"]),
         Route("/api/storage", storage, methods=["GET", "POST"]),

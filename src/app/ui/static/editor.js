@@ -7,7 +7,7 @@
 
 (() => {
   const num = Number;
-  const LANE = { base: 70, other: 46 };
+  const LANE = { base: 70, other: 46, captions: 34 };
   const MIN_CLIP = 0.2;
   const POLL_MS = 3000;
 
@@ -26,7 +26,9 @@
 
   async function loadProject() {
     E.project = await api(`/api/projects/${encodeURIComponent(E.id)}`);
+    E.captions = (await api(`/api/projects/${encodeURIComponent(E.id)}/captions`)).captions;
     E.ownVersion = E.project.version;
+    if (E.selectedCaption && !E.captions.some((cue) => cue.cue_id === E.selectedCaption)) E.selectedCaption = null;
     if (E.selected && !findClip(E.selected.track, E.selected.clip)) E.selected = null;
   }
 
@@ -196,6 +198,9 @@
           <span class="sep"></span>
           <button class="btn small edit-action" data-split>${svg("split")}${esc(T.editor.split)}</button>
           <button class="btn small edit-action" data-delete>${icon("trash", 16)}${esc(T.editor.delete)}</button>
+          <span class="sep"></span>
+          <button class="btn small edit-action" data-make-captions>${svg("captions")}${esc(T.captions.make)}</button>
+          <button class="btn small edit-action" data-add-music>${icon("music", 16)}${esc(T.music.add)}</button>
           <div class="grow"></div>
           <button class="icon-btn" data-zoom="-1" title="${esc(T.editor.zoomOut)}">${svg("minus")}</button>
           <input type="range" min="0" max="100" step="1" data-zoom-range>
@@ -225,6 +230,8 @@
     split: '<path d="M12 3v18"/><path d="M8 7H4v10h4M16 7h4v10h-4"/>',
     minus: '<path d="M5 12h14"/>',
     replay: '<path d="M4 12a8 8 0 1 0 2.3-5.7"/><path d="M4 4v5h5"/>',
+    captions: '<rect x="3" y="5" width="18" height="14" rx="3"/><path d="M7 15h4M13 15h4M7 11h10"/>',
+    speaker: '<path d="M4 9h4l5-4v14l-5-4H4z"/><path d="M16 9a4 4 0 0 1 0 6"/>',
   };
   const svg = (name, size = 16) => `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">${EXTRA[name]}</svg>`;
 
@@ -261,9 +268,22 @@
     const canvas = $("[data-canvas]", E.root);
     canvas.style.width = `${contentWidth()}px`;
     const laneList = lanes();
-    heads.innerHTML = laneList.map((lane) => `<div class="tl-head" style="height:${lane.height}px">
+    heads.innerHTML = `<div class="tl-head" style="height:${LANE.captions}px">${svg("captions", 14)}${esc(T.captions.lane)}</div>`
+      + laneList.map((lane) => `<div class="tl-head" style="height:${lane.height}px">
       ${icon(lane.kind === "music" ? "music" : lane.kind === "audio" ? "music" : "film", 14)}${esc(T.editor.tracks[lane.kind === "base" ? "video" : lane.kind])}</div>`).join("");
-    container.innerHTML = laneList.map((lane) => `<div class="lane ${lane.kind === "base" ? "base" : ""}" style="height:${lane.height}px" data-lane="${esc(lane.track.id)}"></div>`).join("");
+    container.innerHTML = `<div class="lane captions" style="height:${LANE.captions}px" data-captions></div>`
+      + laneList.map((lane) => `<div class="lane ${lane.kind === "base" ? "base" : ""}" style="height:${lane.height}px" data-lane="${esc(lane.track.id)}"></div>`).join("");
+    const captionLane = $("[data-captions]", container);
+    for (const cue of E.captions || []) {
+      const block = document.createElement("div");
+      block.className = `cap${cue.cue_id === E.selectedCaption ? " sel" : ""}`;
+      block.dataset.cue = cue.cue_id;
+      block.style.left = `${cue.start * E.pps}px`;
+      block.style.width = `${Math.max(3, (cue.end - cue.start) * E.pps - 1)}px`;
+      block.textContent = cue.text;
+      block.title = cue.text;
+      captionLane.append(block);
+    }
     for (const lane of laneList) {
       const element = $(`[data-lane="${CSS.escape(lane.track.id)}"]`, container);
       const placed = layoutTrack(lane.track, overrides);
@@ -399,7 +419,10 @@
 
   function drawInspector() {
     const panel = $("[data-inspector]", E.root);
+    if (E.selectedCaption) return drawCaptionInspector(panel);
     const clip = E.selected && findClip(E.selected.track, E.selected.clip);
+    const track = clip && E.project.tracks.find((entry) => entry.id === E.selected.track);
+    if (clip && track.track_type === "audio") return drawSoundInspector(panel, clip, track);
     if (!clip) {
       panel.innerHTML = `<p class="hint">${esc(T.editor.inspectorEmpty)}</p>
         <div class="group"><div class="label">${esc(T.editor.shortcutsTitle)}</div>
@@ -420,6 +443,7 @@
         <p class="hint" style="margin:8px 0 0">${esc(T.editor.nudgeHint)}</p>
       </div>
       <div class="group"><div class="label">${esc(T.editor.length)}<b>${clipLength(clip).toFixed(2)} ${esc(T.editor.seconds)}</b></div></div>
+      ${asset?.has_audio ? volumeGroup(clip.volume) : ""}
       <div class="group stack-buttons edit-action">
         <button class="btn" data-split>${svg("split")}${esc(T.editor.split)}</button>
         <button class="btn danger" data-delete>${icon("trash", 16)}${esc(T.editor.delete)}</button>
@@ -431,10 +455,204 @@
     });
     $("[data-split]", panel).onclick = split;
     $("[data-delete]", panel).onclick = remove;
+    wireVolume(panel, (volume) => [{ action: "set_clip_audio", track_id: E.selected.track, clip_id: clip.id, volume }]);
     const handBack = $("[data-handback]", panel);
     if (handBack) handBack.onclick = async () => {
       if (await edit([{ action: "set_clip_pinned", track_id: E.selected.track, clip_id: clip.id, pinned: false }])) toast(T.editor.handedBack);
     };
+  }
+
+  function volumeGroup(volume, label = T.editor.volume) {
+    const percent = Math.round((volume ?? 1) * 100);
+    return `<div class="group edit-action"><div class="label">${esc(label)}<b data-volume-value>${percent}%</b></div>
+      <div class="volume"><button class="icon-btn" data-mute title="${esc(percent ? T.editor.mute : T.editor.unmute)}">${svg("speaker", 18)}</button>
+      <input type="range" min="0" max="200" step="5" value="${percent}" data-volume></div></div>`;
+  }
+
+  // The slider shows its value as it moves and changes the cut once, when it is let go.
+  function wireVolume(panel, operations) {
+    const slider = $("[data-volume]", panel);
+    if (!slider) return;
+    const value = $("[data-volume-value]", panel);
+    slider.oninput = () => { value.textContent = `${slider.value}%`; };
+    slider.onchange = () => edit(operations(num(slider.value) / 100));
+    $("[data-mute]", panel).onclick = () => edit(operations(num(slider.value) > 0 ? 0 : 1));
+  }
+
+  function drawSoundInspector(panel, clip, track) {
+    const asset = E.project.assets[clip.asset_id];
+    const isMusic = Boolean(track.duck_under_speech);
+    const shifts = [-5, -1, 1, 5].map((delta) => `<button data-shift="${delta}">${delta > 0 ? "+" : ""}${delta}</button>`).join("");
+    panel.innerHTML = `<h2>${esc(asset ? asset.name : T.editor.missingFile)}</h2>
+      ${volumeGroup(clip.volume, isMusic ? T.editor.trackVolume : T.editor.volume)}
+      <div class="group edit-action">
+        <div class="label">${esc(T.editor.songStart)}<b>${fmt(num(clip.source_range.start))}</b></div><div class="nudges">${shifts}</div>
+        <p class="hint" style="margin:8px 0 0">${esc(T.editor.songStartHint)}</p>
+      </div>
+      <div class="group stack-buttons edit-action">
+        <button class="btn danger" data-remove-music>${icon("trash", 16)}${esc(isMusic ? T.editor.removeMusic : T.editor.delete)}</button>
+      </div>`;
+    // Music is one bed however many pieces it was looped into, so it is turned up or down as one.
+    const clips = isMusic ? track.clips : [clip];
+    wireVolume(panel, (volume) => clips.map((each) => ({ action: "set_clip_audio", track_id: track.id, clip_id: each.id, volume })));
+    panel.querySelectorAll("[data-shift]").forEach((button) => {
+      button.onclick = () => {
+        const length = num(clip.source_range.end) - num(clip.source_range.start);
+        const limit = asset?.duration ?? Infinity;
+        const start = Math.max(0, Math.min(num(clip.source_range.start) + num(button.dataset.shift), limit - length));
+        edit([{ action: "trim_clip", track_id: track.id, clip_id: clip.id, ripple: false,
+          new_source_range: { start: start.toFixed(3), end: (start + length).toFixed(3) } }]);
+      };
+    });
+    $("[data-remove-music]", panel).onclick = async () => {
+      E.selected = null;
+      const done = await edit(clips.map((each) => ({ action: "delete_clip", track_id: track.id, clip_id: each.id, ripple: false })));
+      if (done && isMusic) toast(T.editor.musicRemoved);
+    };
+  }
+
+  // ------------------------------------------------------------------ captions
+
+  function selectCaption(cueId, jump) {
+    E.selectedCaption = cueId;
+    E.selected = null;
+    const cue = E.captions.find((entry) => entry.cue_id === cueId);
+    if (jump && cue) {
+      E.video.pause();
+      seek(cue.start + 0.01);
+    }
+    drawLanes();
+    drawInspector();
+  }
+
+  function drawCaptionInspector(panel) {
+    const index = E.captions.findIndex((cue) => cue.cue_id === E.selectedCaption);
+    const cue = E.captions[index];
+    panel.innerHTML = `<h2>${esc(T.captions.title)}</h2>
+      <p class="hint">${fmt(cue.start)} – ${fmt(cue.end)}</p>
+      <div class="group edit-action">
+        <textarea class="input caption-text" data-caption rows="3">${esc(cue.text)}</textarea>
+        <p class="hint" style="margin:6px 0 0">${esc(T.captions.enterHint)}</p>
+      </div>
+      <div class="group stack-buttons">
+        <button class="btn primary edit-action" data-save>${esc(T.captions.save)}</button>
+        <div class="nudges" style="grid-template-columns:1fr 1fr">
+          <button data-step-caption="-1" ${index > 0 ? "" : "disabled"}>${esc(T.captions.previous)}</button>
+          <button data-step-caption="1" ${index < E.captions.length - 1 ? "" : "disabled"}>${esc(T.captions.next)}</button>
+        </div>
+        <button class="btn danger edit-action" data-remove-caption>${icon("trash", 16)}${esc(T.captions.remove)}</button>
+      </div>`;
+    const box = $("[data-caption]", panel);
+    const save = async () => {
+      const text = box.value.trim();
+      if (!text || text === cue.text) return;
+      if (await edit([{ action: "edit_subtitle", cue_id: cue.cue_id, text }])) toast(T.captions.saved);
+    };
+    box.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); save(); }
+    });
+    $("[data-save]", panel).onclick = save;
+    panel.querySelectorAll("[data-step-caption]").forEach((button) => {
+      button.onclick = () => {
+        const next = E.captions[index + num(button.dataset.stepCaption)];
+        if (next) selectCaption(next.cue_id, true);
+      };
+    });
+    $("[data-remove-caption]", panel).onclick = async () => {
+      const next = E.captions[index + 1] || E.captions[index - 1];
+      if (await edit([{ action: "edit_subtitle", cue_id: cue.cue_id, delete: true }])) {
+        if (next) selectCaption(next.cue_id, false);
+      }
+    };
+  }
+
+  async function makeCaptions() {
+    if (lockedWhilePlaying() || E.captionsBusy) return;
+    const button = $("[data-make-captions]", E.root);
+    const ask = async (transcribe) => api(`/api/projects/${encodeURIComponent(E.id)}/captions/make`,
+      { expected_version: E.project.version, transcribe });
+    try {
+      E.captionsBusy = true;
+      button.innerHTML = `<span class="spinner"></span>${esc(T.captions.making)}`;
+      // Captions replace the project's, so they are made against the version as it is now.
+      await loadProject();
+      let answer = await ask(false);
+      if (answer.needs) {
+        const notes = [T.captions.needsBody(answer.needs.length), answer.model_missing ? T.captions.modelNotice : "",
+          answer.replaces ? T.captions.replaceNotice(answer.replaces) : ""].filter(Boolean).join(" ");
+        if (!(await confirmBox(T.captions.needsTitle, notes, T.captions.start))) return;
+        answer = await ask(true);
+        if (!(await waitForTranscripts(answer.jobs, button))) return;
+        answer = await ask(false);
+      }
+      if (answer.needs) throw new Error(T.captions.transcribeFailed);
+      await loadProject();
+      drawAll();
+      requestPreview();
+      toast(answer.count ? T.captions.made(answer.count) : T.captions.none, answer.count ? "ok" : "error");
+    } catch (error) {
+      if (/version conflict/.test(error.message)) {
+        toast(T.editor.conflict, "error");
+        await loadProject();
+        drawAll();
+      } else {
+        toast(error.message, "error");
+      }
+    } finally {
+      if (E) {
+        E.captionsBusy = false;
+        button.innerHTML = `${svg("captions")}${esc(T.captions.make)}`;
+      }
+    }
+  }
+
+  async function waitForTranscripts(jobIds, button) {
+    while (E) {
+      const state = await api(`/api/jobs?ids=${jobIds.map(encodeURIComponent).join(",")}`);
+      button.innerHTML = `<span class="spinner"></span>${esc(T.captions.transcribing(state.finished, state.total, Math.round(state.progress * 100)))}`;
+      if (state.finished === state.total) {
+        if (state.failed) { toast(T.captions.transcribeFailed, "error"); return false; }
+        return true;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+    }
+    return false;
+  }
+
+  // ------------------------------------------------------------------ music
+
+  function addMusic() {
+    if (lockedWhilePlaying()) return;
+    const bed = E.project.tracks.find((track) => track.track_type === "audio" && track.duck_under_speech);
+    const replacing = Boolean(bed?.clips.length);
+    modal(`<h2>${esc(T.music.title)}</h2><p>${esc(T.music.body)}</p>
+      <ul class="points">${T.music.points.map((point) => `<li>${esc(point)}</li>`).join("")}</ul>
+      <p class="hint">${esc(T.music.note)}${replacing ? ` ${esc(T.music.replaces)}` : ""}</p>
+      <div class="foot"><button class="btn" data-cancel>${esc(T.newProject.cancel)}</button>
+      <button class="btn primary" data-choose>${icon("music", 16)}${esc(T.music.choose)}</button></div>`, (box, close) => {
+      $("[data-cancel]", box).onclick = close;
+      $("[data-choose]", box).onclick = async () => {
+        close();
+        try {
+          const picked = await api("/api/pick", { kind: "music" });
+          if (!picked.assets.length) {
+            if (picked.failed.length) toast(T.media.failed(picked.failed.join("、")), "error");
+            return;
+          }
+          const assetId = picked.assets[0];
+          const song = (await api("/api/assets")).assets.find((asset) => asset.id === assetId);
+          const trackId = bed ? bed.id : "music";
+          const operations = [
+            ...(bed ? [] : [{ action: "add_track", track_id: trackId, track_type: "audio", duck_under_speech: true }]),
+            ...(bed ? bed.clips.map((clip) => ({ action: "delete_clip", track_id: trackId, clip_id: clip.id, ripple: false })) : []),
+            { action: "insert_clip", track_id: trackId, clip_id: `music-${Math.random().toString(36).slice(2, 7)}`, asset_id: assetId,
+              source_range: { start: "0", end: String(song.duration) }, volume: 0.5 },
+            { action: "fit_track", track_id: trackId, fade_in: "1", fade_out: "2" },
+          ];
+          if (await edit(operations)) toast(T.music.added);
+        } catch (error) { toast(error.message, "error"); }
+      };
+    });
   }
 
   function nudge(clip, trackId, side, by) {
@@ -567,6 +785,11 @@
 
   function onPointerDown(event) {
     if (event.button !== 0) return;
+    const caption = event.target.closest(".cap");
+    if (caption) {
+      selectCaption(caption.dataset.cue, true);
+      return;
+    }
     const clipElement = event.target.closest(".clip");
     const handle = event.target.closest("[data-handle]");
     if (!clipElement) {
@@ -577,6 +800,7 @@
       const trackId = clipElement.dataset.track, clipId = clipElement.dataset.clip;
       const clip = findClip(trackId, clipId);
       E.selected = { track: trackId, clip: clipId };
+      E.selectedCaption = null;
       if (lockedWhilePlaying()) {
         drawLanes();
         drawInspector();
@@ -773,6 +997,8 @@
     $("[data-undo]", page).onclick = undo;
     $("[data-split]", page).onclick = split;
     $("[data-delete]", page).onclick = remove;
+    $("[data-make-captions]", page).onclick = makeCaptions;
+    $("[data-add-music]", page).onclick = addMusic;
     page.querySelectorAll("[data-zoom]").forEach((button) => { button.onclick = () => setZoom(E.pps * (num(button.dataset.zoom) > 0 ? 1.5 : 1 / 1.5)); });
     $("[data-zoom-range]", page).oninput = (event) => setZoom(2 * Math.pow(200, num(event.target.value) / 100));
     $("[data-fit]", page).onclick = fitZoom;
