@@ -25,7 +25,7 @@ def build_project(operations: List[dict], **settings) -> str:
     Returns:
         The new project's ID.
     """
-    project_id = create_project(**settings)["id"]
+    project_id = create_project(**{"name": "測試", **settings})["id"]
     apply_edits(project_id, 1, _OPERATIONS.validate_python(operations))
     return project_id
 

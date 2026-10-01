@@ -67,9 +67,10 @@ the very start of a video, use `video_fade_in` instead.
 - **Project**: output `width`, `height`, and frame rate, plus its tracks.
   These settings cannot be changed later; create a new project instead, or
   render the same one in another shape with `frame`. `get_project` also
-  returns `duration`, the length of the edited video. Give a project a `name`,
-  because `list_projects` shows it and three projects cannot be told apart by
-  their IDs; `rename_project` changes it later.
+  returns `duration`, the length of the edited video. A project must have a
+  `name` — the editor app, `list_projects` and the finished file all show
+  it — so name it for what the video is; `rename_project` changes it later.
+  An older project with none: propose a name and rename it.
 - **Tracks**: the first `video` track is the base: it holds the sequence and
   each clip's own sound, and it decides the output length. Further `video`
   tracks are drawn on top of it; their clips carry their own sound too. Any

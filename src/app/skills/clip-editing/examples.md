@@ -10,7 +10,7 @@ User: 「把 trip1.mp4 和 trip2.mp4 接起來，trip1 只要 5 到 20 秒，做
 
 1. `import_asset` on `trip1.mp4` returns `{"id": "a1", "duration": "42.0", "has_audio": true}`.
    `import_asset` on `trip2.mp4` returns `{"id": "a2", "duration": "18.5", "has_audio": true}`.
-2. `create_project` with `{"width": 1080, "height": 1920}` returns version 1.
+2. `create_project` with `{"name": "旅行短片", "width": 1080, "height": 1920}` returns version 1.
 3. `apply_edits`:
    ```json
    {

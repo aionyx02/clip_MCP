@@ -1040,12 +1040,18 @@ class SetClipLookOp(BaseModel):
         return self
 
 class RenameProjectOp(BaseModel):
-    """Edit operation that gives the project a name, or takes it away again."""
+    """Edit operation that gives the project a new name. Every project has one."""
 
     action: Literal["rename_project"] = "rename_project"
-    name: Optional[str] = Field(
-        default=None, max_length=120, description="What to call the project; null goes back to no name",
-    )
+    name: str = Field(..., min_length=1, max_length=120, description="What to call the project")
+
+    @field_validator("name")
+    @classmethod
+    def not_blank(cls, value: str) -> str:
+        """Refuse a name that is only spaces, which would leave the project nameless."""
+        if not value.strip():
+            raise ValueError("a project needs a name")
+        return value.strip()
 
 class SetTrackAudioOp(BaseModel):
     """Edit operation that changes a whole track's audio behaviour; omitted fields stay unchanged."""
@@ -1440,7 +1446,7 @@ def apply_operation(project: Project, op: EditOperation, assets: Mapping[str, As
         return
 
     if isinstance(op, RenameProjectOp):
-        project.name = op.name.strip() if op.name and op.name.strip() else None
+        project.name = op.name
         return
 
     if isinstance(op, SetSubtitlesOp):

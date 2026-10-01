@@ -1328,7 +1328,7 @@ def view_frames(
 
 @mcp.tool()
 def create_project(
-    name: Annotated[Optional[str], Field(max_length=120)] = None,
+    name: Annotated[str, Field(min_length=1, max_length=120)],
     width: Annotated[int, Field(gt=0, multiple_of=2)] = 1920,
     height: Annotated[int, Field(gt=0, multiple_of=2)] = 1080,
     fps_num: Annotated[int, Field(gt=0)] = 30,
@@ -1341,10 +1341,11 @@ def create_project(
     converted to the output frame rate.
 
     Args:
-        name: What to call the project, such as 'EP1 台北'. Worth giving: it is
-            what `list_projects` shows, and several projects at once are hard
-            to tell apart by ID. Change it later with a `rename_project`
-            operation.
+        name: What to call the project, such as 'EP1 台北' — required. It is
+            what the editor app and `list_projects` show, and what the
+            finished video is called, so name it for what the video is about,
+            not 'test' or 'project'. If the user has not said, propose one in
+            your read-back. Change it later with a `rename_project` operation.
         width: Output width in pixels; must be even.
         height: Output height in pixels; must be even.
         fps_num: Frame rate numerator, e.g. 30000 for 29.97 fps.
@@ -1354,8 +1355,10 @@ def create_project(
         The new project serialized as a dictionary, including its generated
         `id` and initial `version`.
     """
+    if not name.strip():
+        raise ValueError("a project needs a name: what the video is about, such as 'EP1 台北'")
     project = Project(
-        id=str(uuid.uuid4()), name=(name.strip() or None) if name else None,
+        id=str(uuid.uuid4()), name=name.strip(),
         width=width, height=height, fps_num=fps_num, fps_den=fps_den,
     )
     repo.add_project(project)

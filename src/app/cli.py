@@ -104,6 +104,11 @@ def setup(workspace_path: Optional[str], only: Optional[List[str]], dry_run: boo
     for result in clients.register(command, only, dry_run):
         failed |= result.status == "failed"
         print(f"  {result.client:<15} {result.status} - {result.detail}")
+    from app.ui import shortcut
+
+    print("editor:")
+    for line in shortcut.create(dry_run):
+        print(f"  {line}")
     if not dry_run:
         print("Restart each client, or reload its MCP servers, to pick this up.")
     return 1 if failed else 0
@@ -126,12 +131,19 @@ def main(argv: Optional[List[str]] = None) -> None:
     set_up.add_argument("--client", action="append", choices=sorted(clients.CLIENTS), dest="clients",
                         help="only this client; may be given more than once")
     set_up.add_argument("--dry-run", action="store_true", help="say what would change, and change nothing")
+    editor = commands.add_parser("ui", help="open the editor in the browser, to check and adjust a cut by hand")
+    editor.add_argument("--no-browser", action="store_true", help="serve it without opening a window")
     arguments = parser.parse_args(argv)
 
     if arguments.command == "check":
         sys.exit(check())
     if arguments.command == "setup":
         sys.exit(setup(arguments.workspace, arguments.clients, arguments.dry_run))
+    if arguments.command == "ui":
+        from app.ui.launch import run
+
+        run(not arguments.no_browser)
+        return
     from app.server import main as serve
 
     serve()

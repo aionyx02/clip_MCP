@@ -1,5 +1,7 @@
 """Tests for calling a project something other than its ID."""
 
+import pytest
+
 from app.models.timeline import Project
 from app.server import MAX_OUTPUT_NAME, _output_name, create_project, get_project, list_projects
 from helpers import edit
@@ -9,11 +11,10 @@ def test_a_project_can_be_named_when_it_is_created() -> None:
     assert project["name"] == "EP1 台北"
     assert get_project(project["id"])["name"] == "EP1 台北"
 
-def test_a_project_without_a_name_says_so_rather_than_inventing_one() -> None:
-    project = create_project()
-    assert project["name"] is None
-    # Left out of the state the same way a clip's untouched fields are.
-    assert "name" not in get_project(project["id"])
+def test_a_project_without_a_name_is_refused() -> None:
+    # Every unnamed project looked the same in the editor; the AI has to say what it is.
+    with pytest.raises(ValueError, match="needs a name"):
+        create_project(name="   ")
 
 def test_the_listing_shows_the_names_so_several_projects_can_be_told_apart() -> None:
     first = create_project(name="EP1 台北")["id"]
@@ -26,13 +27,11 @@ def test_a_project_can_be_renamed_afterwards() -> None:
     edit(project, [{"action": "rename_project", "name": "EP3 結案這一天"}])
     assert get_project(project)["name"] == "EP3 結案這一天"
 
-def test_renaming_to_nothing_takes_the_name_away() -> None:
+def test_renaming_to_nothing_is_refused() -> None:
     project = create_project(name="EP1")["id"]
-    edit(project, [{"action": "rename_project"}])
-    assert "name" not in get_project(project)
-
-def test_a_name_that_is_only_spaces_does_not_count_as_one() -> None:
-    assert create_project(name="   ")["name"] is None
+    with pytest.raises(ValueError):
+        edit(project, [{"action": "rename_project", "name": "  "}])
+    assert get_project(project)["name"] == "EP1"
 
 
 def named(name, kind="output"):

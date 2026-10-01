@@ -1073,7 +1073,7 @@ def test_a_plan_checks_out_before_anything_is_rendered(planned: dict) -> None:
     assert result["clips"] >= 1 and result["duration"] > 0
 
 def test_compiling_builds_the_cut_on_an_empty_project(planned: dict) -> None:
-    project = create_project(width=640, height=360)["id"]
+    project = create_project(name="測試", width=640, height=360)["id"]
     result = compile_plan(project_id=project, expected_version=1, plan_id=planned["plan_id"])
     assert result["clips"] == result["clips"] and result["duration"] > 0
     state = get_project(project)
@@ -1116,7 +1116,7 @@ def compiled_project(planned: dict) -> str:
     Returns:
         The project ID.
     """
-    project = create_project(width=640, height=360)["id"]
+    project = create_project(name="測試", width=640, height=360)["id"]
     compile_plan(project_id=project, expected_version=1, plan_id=planned["plan_id"])
     return project
 
@@ -1143,7 +1143,7 @@ def test_covering_picture_compiles_onto_a_track_of_its_own(planned: dict, media:
     # Nothing in this cut holds long enough to be worth offering something to cover it.
     assert propose_broll(saved["plan_id"])["slots"] == []
 
-    project = create_project(width=640, height=360)["id"]
+    project = create_project(name="測試", width=640, height=360)["id"]
     compile_plan(project_id=project, expected_version=1, plan_id=saved["plan_id"])
     state = get_project(project)
     tracks = {track["id"]: track for track in state["tracks"]}
@@ -1257,7 +1257,7 @@ def test_unpinning_hands_a_clip_back_to_the_plan(planned: dict) -> None:
     assert float(main_clips(project)[0]["source_range"]["end"]) == pytest.approx(original_end)
 
 def test_a_clip_the_plan_never_made_blocks_the_compile_until_it_is_pinned(planned: dict) -> None:
-    project = create_project(width=640, height=360)["id"]
+    project = create_project(name="測試", width=640, height=360)["id"]
     asset_id = main_clips(compiled_project(planned))[0]["asset_id"]
     apply_edits(project, 1, ops(
         video_track(),
@@ -1287,7 +1287,7 @@ def test_a_plan_that_does_not_check_out_never_compiles(planned: dict) -> None:
         "selections": [*stored.selections, Selection(clip_id="not-a-clip", beat_id="b1")],
     })
     save_plan(broken)
-    project = create_project(width=640, height=360)["id"]
+    project = create_project(name="測試", width=640, height=360)["id"]
     with pytest.raises(ValueError, match="cannot be compiled yet"):
         compile_plan(project_id=project, expected_version=1, plan_id=broken.id)
     assert get_project(project)["tracks"] == []
@@ -1368,7 +1368,7 @@ def test_a_marker_somebody_added_survives_the_next_compile() -> None:
 
 def test_markers_land_on_the_timeline_in_order() -> None:
     """They are written as one set, and read back sorted by where they are."""
-    project_id = create_project(width=1920, height=1080)["id"]
+    project_id = create_project(name="測試", width=1920, height=1080)["id"]
     apply_edits(project_id, 1, ops({"action": "set_markers", "markers": [
         {"id": "b", "name": "結尾", "timeline_in": 9},
         {"id": "a", "name": "開場", "timeline_in": 0},
@@ -1379,7 +1379,7 @@ def test_markers_land_on_the_timeline_in_order() -> None:
 
 def test_two_markers_cannot_share_a_name_on_the_timeline() -> None:
     """An id is how a marker is referred to, so two of them is a broken set."""
-    project_id = create_project(width=1920, height=1080)["id"]
+    project_id = create_project(name="測試", width=1920, height=1080)["id"]
     with pytest.raises(ValueError, match="share the id"):
         apply_edits(project_id, 1, ops({"action": "set_markers", "markers": [
             {"id": "a", "name": "開場", "timeline_in": 0},
@@ -1785,7 +1785,7 @@ def test_the_music_changes_where_the_part_of_the_video_does(planned: dict, tmp_p
     assert saved["problems"] == [], saved["problems"]
     assert any("moved onto the beat" in note for note in saved["notes"])
 
-    project = create_project(width=640, height=360)["id"]
+    project = create_project(name="測試", width=640, height=360)["id"]
     compile_plan(project_id=project, expected_version=1, plan_id=saved["plan_id"])
     state = get_project(project)
     tracks = {track["id"]: track for track in state["tracks"]}
@@ -1933,7 +1933,7 @@ def test_both_songs_are_heard_where_they_cross_fade(planned: dict, tmp_path: Pat
         ]),
     }))
     assert saved["problems"] == [], saved["problems"]
-    project = create_project(width=640, height=360)["id"]
+    project = create_project(name="測試", width=640, height=360)["id"]
     compile_plan(project_id=project, expected_version=1, plan_id=saved["plan_id"])
     state = get_project(project)
     assert {track["id"] for track in state["tracks"]} >= {"music", "music_b"}
@@ -1989,7 +1989,7 @@ def test_a_sped_up_cut_compiles_to_the_length_the_plan_says(planned: dict) -> No
 
     saved = save_plan(stored.model_copy(update={"pacing": Pacing(speed=1.2)}))
     expected = validate_plan(saved["plan_id"])["duration"]
-    project = create_project(width=640, height=360)["id"]
+    project = create_project(name="測試", width=640, height=360)["id"]
     compile_plan(project_id=project, expected_version=1, plan_id=saved["plan_id"])
     assert float(get_project(project)["duration"]) == pytest.approx(expected, abs=0.01)
 
