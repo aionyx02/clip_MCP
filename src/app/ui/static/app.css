@@ -23,6 +23,8 @@
 }
 
 * { box-sizing: border-box; }
+/* `hidden` always wins over a class that sets display. */
+[hidden] { display: none !important; }
 
 html, body {
   margin: 0;

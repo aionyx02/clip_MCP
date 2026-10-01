@@ -43,9 +43,17 @@ UNDO_DEPTH = 50
 # Samples per second kept for a waveform: enough to draw a clip a few pixels per
 # tenth of a second wide, small enough that an hour of sound is a few hundred kilobytes.
 WAVE_RATE = 50
-THUMB_HEIGHTS = (54, 90, 180)
+THUMB_HEIGHTS = (54, 90, 180, 360)
+
+# The editor watches a preview at this short side: enough to read captions and mouths by.
+PREVIEW_SIDE = 720
+# Words this far either side of a cut are shown while it is being dragged.
+WORDS_AROUND = 4.0
 
 _undo: Dict[str, List[Tuple[int, Project]]] = {}
+# The preview the editor last asked for, per project: which version, and the render making it.
+_previews: Dict[str, dict] = {}
+_previews_lock = threading.Lock()
 _undo_lock = threading.Lock()
 
 def _error(message: str, status: int = 400) -> JSONResponse:
@@ -155,6 +163,92 @@ async def undo(request: Request) -> Response:
             stack[-1] = (restored.version, stack[-1][1])
     return JSONResponse({"new_version": restored.version})
 
+def _preview_state(project_id: str) -> dict:
+    """Where the project's preview stands: which version it shows, and how far along it is."""
+    with _previews_lock:
+        entry = dict(_previews.get(project_id) or {})
+    if not entry.get("job_id"):
+        return entry
+    job = server.job_manager.get_job(entry["job_id"])
+    if job:
+        entry.update({"status": job.status.value, "progress": round(job.progress, 3), "stage": job.stage})
+        if job.status.value == "completed" and job.output_path and os.path.exists(job.output_path):
+            entry["url"] = f"/output/{job.job_id}"
+        if job.error_message:
+            entry["error"] = job.error_message
+    return entry
+
+def _start_preview(project_id: str) -> dict:
+    """Render a preview of the project as it is now, unless one of this version is already on its way.
+
+    A preview of an older version still rendering is stopped: nobody is going to watch it.
+    """
+    project = server.repo.get_project(project_id)
+    if not project:
+        raise ValueError(f"project {project_id} not found")
+    with _previews_lock:
+        current = _previews.get(project_id)
+    if current and current.get("version") == project.version:
+        state = _preview_state(project_id)
+        if state.get("status") not in ("failed", "cancelled") or state.get("empty"):
+            return state
+    if current and current.get("job_id"):
+        old = server.job_manager.get_job(current["job_id"])
+        if old and old.status.is_active:
+            server.cancel_job(old.job_id)
+    if not project.base_video_track or not project.base_video_track.clips:
+        with _previews_lock:
+            _previews[project_id] = {"version": project.version, "empty": True}
+        return _preview_state(project_id)
+    def start(captions: bool) -> dict:
+        return server._start_render(
+            project_id, True, server.DEFAULT_LOUDNESS_TARGET, captions, None, True, None, PREVIEW_SIDE,
+        )
+    try:
+        started = start(bool(project.subtitles))
+    except ValueError:
+        # Captions that no longer land on anything in the cut: preview the cut without them.
+        started = start(False)
+    with _previews_lock:
+        _previews[project_id] = {"version": project.version, "job_id": started["job_id"]}
+    return _preview_state(project_id)
+
+async def preview(request: Request) -> Response:
+    """The project's preview: POST makes sure one of the current version is coming, GET says how it is going."""
+    project_id = request.path_params["project_id"]
+    if request.method == "POST":
+        try:
+            return JSONResponse(await run_in_threadpool(_start_preview, project_id))
+        except ValueError as error:
+            return _error(str(error))
+    return JSONResponse(_preview_state(project_id))
+
+async def version(request: Request) -> Response:
+    """The project's version alone, asked every few seconds to notice the AI changing it."""
+    found = server.repo.get_project(request.path_params["project_id"])
+    if not found:
+        return _error("project not found", 404)
+    return JSONResponse({"version": found.version})
+
+async def words(request: Request) -> Response:
+    """What is said in a stretch of a file, word by word, to see what a cut is about to take or give back."""
+    asset_id = request.path_params["asset_id"]
+    try:
+        at = float(request.query_params.get("at", "0"))
+    except ValueError:
+        return _error("at is a number")
+    analysis = server.repo.get_analysis(asset_id)
+    if not analysis or not analysis.transcript:
+        return JSONResponse({"words": [], "transcribed": False})
+    found = []
+    for segment in analysis.transcript.segments:
+        if segment.end < at - WORDS_AROUND or segment.start > at + WORDS_AROUND:
+            continue
+        timed = segment.words or [segment]
+        found += [{"start": word.start, "end": word.end, "text": word.text}
+                  for word in timed if at - WORDS_AROUND <= word.start <= at + WORDS_AROUND]
+    return JSONResponse({"words": found, "transcribed": True})
+
 async def assets(request: Request) -> Response:
     """Every imported file the page can put on the timeline."""
     listed = [_asset_summary(asset) for asset in server.repo.list_assets() if os.path.exists(asset.path)]
@@ -174,6 +268,17 @@ async def media(request: Request) -> Response:
     kind = mimetypes.guess_type(asset.path)[0] or "application/octet-stream"
     return FileResponse(asset.path, media_type=kind)
 
+def _write_thumb(path: str, seconds: float, height: int, cached: Path) -> None:
+    """Decode one frame, shrink it, and keep it as a JPEG."""
+    frame = extract_frame(path, seconds, max_size=height * 2)
+    frame.thumbnail((height * 4, height))
+    cached.parent.mkdir(parents=True, exist_ok=True)
+    buffer = io.BytesIO()
+    frame.save(buffer, "JPEG", quality=78)
+    partial = cached.with_suffix(".part")
+    partial.write_bytes(buffer.getvalue())
+    os.replace(partial, cached)
+
 async def thumb(request: Request) -> Response:
     """One frame of a file, small, for the media bin and the clips on the timeline."""
     asset = _asset_or_none(request.path_params["asset_id"])
@@ -189,14 +294,11 @@ async def thumb(request: Request) -> Response:
     cached = CACHE_DIR / "thumbs" / f"{key}.jpg"
     if not cached.exists():
         try:
-            frame = extract_frame(asset.path, seconds, max_size=height * 2)
+            # Decoding runs off the event loop: a timeline asks for dozens of these at once,
+            # and every other request would wait behind them.
+            await run_in_threadpool(_write_thumb, asset.path, seconds, height, cached)
         except RuntimeError:
             return _error("no frame there", 404)
-        frame.thumbnail((height * 4, height))
-        cached.parent.mkdir(parents=True, exist_ok=True)
-        buffer = io.BytesIO()
-        frame.save(buffer, "JPEG", quality=78)
-        cached.write_bytes(buffer.getvalue())
     return FileResponse(cached, media_type="image/jpeg", headers={"Cache-Control": "max-age=86400"})
 
 async def wave(request: Request) -> Response:
@@ -207,18 +309,22 @@ async def wave(request: Request) -> Response:
     key = hashlib.sha1(f"{asset.path}|{os.path.getmtime(asset.path)}|{WAVE_RATE}".encode()).hexdigest()
     cached = CACHE_DIR / "waves" / f"{key}.json"
     if not cached.exists():
-        sample_rate = WAVE_RATE * 40
-        result = subprocess.run(
-            ["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-i", asset.path,
-             "-map", "0:a:0", "-ac", "1", "-ar", str(sample_rate), "-f", "s16le", "-"],
-            stdin=subprocess.DEVNULL, capture_output=True, creationflags=hidden_window_flags(),
-        )
-        samples = np.frombuffer(result.stdout, dtype=np.int16)
-        usable = len(samples) - len(samples) % 40
-        peaks = (np.abs(samples[:usable].reshape(-1, 40)).max(axis=1) / 32768.0) if usable else np.zeros(0)
-        cached.parent.mkdir(parents=True, exist_ok=True)
-        cached.write_text(json.dumps({"rate": WAVE_RATE, "peaks": [round(float(peak), 3) for peak in peaks]}))
+        await run_in_threadpool(_write_wave, asset.path, cached)
     return FileResponse(cached, media_type="application/json", headers={"Cache-Control": "max-age=86400"})
+
+def _write_wave(path: str, cached: Path) -> None:
+    """Measure a file's loudness peaks and keep them."""
+    samples_per_peak = 40
+    result = subprocess.run(
+        ["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-i", path,
+         "-map", "0:a:0", "-ac", "1", "-ar", str(WAVE_RATE * samples_per_peak), "-f", "s16le", "-"],
+        stdin=subprocess.DEVNULL, capture_output=True, creationflags=hidden_window_flags(),
+    )
+    samples = np.frombuffer(result.stdout, dtype=np.int16)
+    usable = len(samples) - len(samples) % samples_per_peak
+    peaks = np.abs(samples[:usable].reshape(-1, samples_per_peak)).max(axis=1) / 32768.0 if usable else np.zeros(0)
+    cached.parent.mkdir(parents=True, exist_ok=True)
+    cached.write_text(json.dumps({"rate": WAVE_RATE, "peaks": [round(float(peak), 3) for peak in peaks]}))
 
 async def render(request: Request) -> Response:
     """Start a render of the project, a preview unless the full file is asked for."""
@@ -313,8 +419,12 @@ async def ai_clients(request: Request) -> Response:
     return JSONResponse({"clients": await run_in_threadpool(_clients, dry_run)})
 
 async def ping(request: Request) -> Response:
-    """Say this is the editor, so a second start opens this one instead of another."""
-    return JSONResponse({"app": APP_ID})
+    """Say this is the editor, and for which workspace, so a second start opens this one instead of another.
+
+    The workspace matters: an editor for a test workspace and one for the real
+    workspace are two different editors, even when one finds the other's port.
+    """
+    return JSONResponse({"app": APP_ID, "workspace": os.path.normcase(os.path.abspath(server.WORKSPACE_DIR))})
 
 async def index(request: Request) -> Response:
     """The page."""
@@ -336,6 +446,18 @@ class _Stamp:
             Activity.last = time.monotonic()
         await self.application(scope, receive, send)
 
+class _FreshStatic(StaticFiles):
+    """The page's own files, checked with the server every time.
+
+    After an update the window must not keep running yesterday's script from
+    its cache; asking costs a 304 on a machine-local server.
+    """
+
+    def file_response(self, *args, **kwargs) -> Response:
+        response = super().file_response(*args, **kwargs)
+        response.headers["Cache-Control"] = "no-cache"
+        return response
+
 def create_app() -> Starlette:
     """Build the editor's web application."""
     return Starlette(middleware=[Middleware(_Stamp)], routes=[
@@ -345,6 +467,9 @@ def create_app() -> Starlette:
         Route("/api/projects/{project_id}/edits", edits, methods=["POST"]),
         Route("/api/projects/{project_id}/undo", undo, methods=["POST"]),
         Route("/api/projects/{project_id}/render", render, methods=["POST"]),
+        Route("/api/projects/{project_id}/preview", preview, methods=["GET", "POST"]),
+        Route("/api/projects/{project_id}/version", version),
+        Route("/api/words/{asset_id}", words),
         Route("/api/assets", assets),
         Route("/api/pick", pick, methods=["POST"]),
         Route("/api/storage", storage, methods=["GET", "POST"]),
@@ -356,5 +481,5 @@ def create_app() -> Starlette:
         Route("/thumb/{asset_id}", thumb),
         Route("/wave/{asset_id}", wave),
         Route("/output/{job_id}", output),
-        Mount("/static", StaticFiles(directory=STATIC_DIR), name="static"),
+        Mount("/static", _FreshStatic(directory=STATIC_DIR), name="static"),
     ])

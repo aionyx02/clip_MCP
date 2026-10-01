@@ -15,8 +15,10 @@ def client() -> TestClient:
     """The editor, served in-process."""
     return TestClient(editor.create_app())
 
-def test_it_says_it_is_the_editor(client: TestClient) -> None:
-    assert client.get("/api/ping").json() == {"app": "clip-mcp-editor"}
+def test_it_says_it_is_the_editor_and_for_which_workspace(client: TestClient) -> None:
+    answer = client.get("/api/ping").json()
+    assert answer["app"] == "clip-mcp-editor"
+    assert answer["workspace"] == os.path.normcase(os.path.abspath(server.WORKSPACE_DIR))
 
 def test_a_new_project_comes_ready_for_footage_and_music(client: TestClient) -> None:
     made = client.post("/api/projects", json={"name": "新的", "width": 1080, "height": 1920}).json()
@@ -89,3 +91,44 @@ def test_undo_puts_back_the_last_edit_and_refuses_once_something_else_has_edited
     ]))
     assert client.post(f"/api/projects/{made['id']}/undo").status_code == 409
     assert edited["new_version"] == version + 1
+
+def test_the_version_can_be_asked_alone_to_notice_the_ai(client: TestClient) -> None:
+    made = client.post("/api/projects", json={"name": "版本"}).json()
+    assert client.get(f"/api/projects/{made['id']}/version").json() == {"version": server.repo.get_project(made["id"]).version}
+
+def test_words_say_when_nothing_was_transcribed(client: TestClient, media: Path) -> None:
+    asset = server.import_asset(str(media / "silent.mp4"))["id"]
+    assert client.get(f"/api/words/{asset}?at=1").json() == {"words": [], "transcribed": False}
+
+def test_an_empty_project_has_no_preview_to_make(client: TestClient) -> None:
+    made = client.post("/api/projects", json={"name": "空的"}).json()
+    assert client.post(f"/api/projects/{made['id']}/preview").json()["empty"] is True
+
+def test_the_editor_watches_a_720_preview_of_the_version_it_shows(client: TestClient, media: Path) -> None:
+    import subprocess
+    import time
+
+    asset = server.import_asset(str(media / "wide.mp4"))["id"]
+    made = client.post("/api/projects", json={"name": "預覽", "width": 1920, "height": 1080}).json()
+    version = server.repo.get_project(made["id"]).version
+    client.post(f"/api/projects/{made['id']}/edits", json={"expected_version": version, "operations": [
+        {"action": "insert_clip", "track_id": "video", "clip_id": "c1", "asset_id": asset,
+         "source_range": {"start": 0, "end": 2}},
+    ]})
+    started = client.post(f"/api/projects/{made['id']}/preview").json()
+    assert started["version"] == version + 1
+    # Asking again for the same version does not start another render.
+    assert client.post(f"/api/projects/{made['id']}/preview").json()["job_id"] == started["job_id"]
+    deadline = time.monotonic() + 120
+    state = started
+    while state.get("status") not in ("completed", "failed") and time.monotonic() < deadline:
+        time.sleep(0.3)
+        state = client.get(f"/api/projects/{made['id']}/preview").json()
+    assert state["status"] == "completed", state
+    path = server.job_manager.get_job(state["job_id"]).output_path
+    size = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height", "-of", "csv=p=0", path],
+        capture_output=True, text=True,
+    ).stdout.strip()
+    assert size == "1280,720"
+    assert client.get(state["url"]).status_code == 200

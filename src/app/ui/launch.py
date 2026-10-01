@@ -40,8 +40,10 @@ def _running_port() -> Optional[int]:
     try:
         port = int(json.loads(_state_file().read_text(encoding="utf-8"))["port"])
         with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/ping", timeout=1) as answer:
-            if json.load(answer).get("app") == "clip-mcp-editor":
-                return port
+            found = json.load(answer)
+        ours = os.path.normcase(os.path.abspath(workspace_dir()))
+        if found.get("app") == "clip-mcp-editor" and found.get("workspace") == ours:
+            return port
     except (OSError, ValueError, KeyError):
         pass
     return None

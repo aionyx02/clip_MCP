@@ -2839,20 +2839,21 @@ PREVIEW_SHORT_SIDE = 480
 # not a judgement: a picture is re-rendered in seconds if it is wanted again.
 PICTURE_CACHE_DAYS = 14
 
-def _preview_sized(project: Project) -> Project:
+def _preview_sized(project: Project, side: int = PREVIEW_SHORT_SIDE) -> Project:
     """Shrink a project to the size its preview is rendered at.
 
     Args:
         project: The project.
+        side: The preview's short side.
 
     Returns:
-        A copy with its short side `PREVIEW_SHORT_SIDE` long, or the project
-        itself when it is already that small.
+        A copy with its short side `side` long, or the project itself when it
+        is already that small.
     """
     short = min(project.width, project.height)
-    if short <= PREVIEW_SHORT_SIDE:
+    if short <= side:
         return project
-    scale = PREVIEW_SHORT_SIDE / short
+    scale = side / short
     even = lambda value: max(2, int(round(value * scale / 2)) * 2)
     return project.model_copy(update={"width": even(project.width), "height": even(project.height)})
 
@@ -2998,6 +2999,33 @@ def render_project(
         ValueError: If the project does not exist, contains no clips, uses an
             unsupported feature, or the check found something not allowed.
     """
+    return _start_render(
+        project_id, is_preview, loudness_target, burn_subtitles, frame, follow_faces, allow, PREVIEW_SHORT_SIDE,
+    )
+
+def _start_render(
+    project_id: str,
+    is_preview: bool,
+    loudness_target: Optional[float],
+    burn_subtitles: bool,
+    frame: Optional[str],
+    follow_faces: bool,
+    allow: Optional[List[str]],
+    preview_side: int,
+) -> dict:
+    """Start a render; what `render_project` does, with the preview's size open.
+
+    The editor app previews at 720 pixels so captions and mouths can be read;
+    a client previews at 480, which is quicker and plenty to judge a cut by.
+    The size is not on the tool, so a client is never asked to choose it.
+
+    Args:
+        project_id: As for `render_project`, and the rest likewise.
+        preview_side: The short side of a preview, in pixels.
+
+    Returns:
+        As `render_project`.
+    """
     project = repo.get_project(project_id)
     if not project:
         raise ValueError(f"project {project_id} not found")
@@ -3005,7 +3033,7 @@ def render_project(
     project = _reshaped(project, frame)
     findings = _findings(project, burn_subtitles)
     if is_preview:
-        project = _preview_sized(project)
+        project = _preview_sized(project, preview_side)
     blocking = [finding for finding in findings if finding.check not in (allow or [])]
     if blocking and not is_preview:
         raise ValueError(

@@ -277,15 +277,7 @@ async function storagePage(page) {
 // ---------------------------------------------------------------- one project (chapter 3 fills this in)
 
 async function projectPage(page, id) {
-  const project = await api(`/api/projects/${encodeURIComponent(id)}`);
-  page.innerHTML = `<a class="btn small" href="#/">${icon("back", 16)}${esc(T.project.back)}</a>
-    <div class="page-head" style="margin-top:18px"><div><h1>${esc(project.name || T.projects.untitled)}</h1>
-    <p>${esc(T.projects.shapes[shapeOf(project.width, project.height)])} · ${clock(project.duration)}</p></div>
-    <div class="actions"><button class="btn" data-rename>${esc(T.project.rename)}</button></div></div>
-    <div class="empty"><div class="icon-ring">${icon("film", 28)}</div><h2>${esc(T.project.comingSoon)}</h2><p>${esc(T.project.comingSoonBody)}</p></div>`;
-  $("[data-rename]", page).onclick = () => renameProject(project, () => projectPage(page, id));
-  // An older project made before every project had to be named: ask now.
-  if (!project.name) renameProject(project, () => projectPage(page, id), T.project.needsName);
+  await Editor.open(page, id);
 }
 
 function renameProject(project, done, prompt = "") {
@@ -323,6 +315,7 @@ async function route() {
     item.classList.toggle("active", item.dataset.page === (key === "project" ? "projects" : key));
   });
   const page = $("#page");
+  if (key !== "project") Editor.close();
   page.scrollTop = 0;
   try {
     if (key === "project") await projectPage(page, decodeURIComponent(id || ""));
