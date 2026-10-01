@@ -6,10 +6,14 @@ on, or how fast to cut. It is referenced from SKILL.md.
 These are defaults for when the user has no opinion of their own. Drop any of
 them the moment they say otherwise.
 
-**The parts are a story.** Hook, setup, turn, payoff — what each is for is in
-`skill://clip-editing/editing-intelligence.md`. Pacing serves that: the setup
-can breathe, the turn is where the cutting tightens, and the payoff gets a
-beat of silence after it rather than the next thing.
+**The parts have a structure.** Which one, and what each role is for, is in
+`skill://clip-editing/editing-intelligence.md`. Pacing serves it. In 起承轉合
+and 倒敘 the setup can breathe, the turn is where the cutting tightens, and
+the payoff gets a beat of silence after it rather than the next thing. In 清單式
+every item runs about as long as the others, so none feels skipped. In 教學步驟 a
+step runs as long as it takes to see it done, and waiting is sped up rather
+than cut out. In 前後對比 the after holds longer than the before. In 蒙太奇 the
+shots get shorter towards the peak and longer again in the outro.
 
 **Open on the strongest moment.** The first two or three seconds decide
 whether the rest gets watched, so do not open on a title card, a slow pan, or

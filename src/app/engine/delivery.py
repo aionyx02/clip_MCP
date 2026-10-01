@@ -272,8 +272,8 @@ def check_delivery(
     if base and len(base.clips) >= UNPLANNED_CLIPS and any(clip.from_plan_id is None for clip in base.clips):
         findings.append(Finding("unplanned", (
             f"these {len(base.clips)} clips were put together by hand, not compiled from a plan, so nothing "
-            "says what the video is for or how it opens, turns and ends. Write a plan whose parts are a hook, "
-            "a setup, a turn and a payoff, and compile it"
+            "says what the video is for or how its parts hold together. Ask the user which structure it takes — "
+            "起承轉合, 清單式, 教學步驟 or another — write a plan in it, and compile it"
         )))
 
     if captions:

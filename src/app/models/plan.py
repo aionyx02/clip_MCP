@@ -15,7 +15,7 @@ it, and then the plan would no longer determine the cut.
 import uuid
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Annotated, List, Literal, Optional, Union
+from typing import Annotated, Dict, List, Literal, Optional, Union
 
 from pydantic import BaseModel, Field
 
@@ -65,19 +65,129 @@ class Trim(BaseModel):
         description="For `range`: where to stop, in seconds from the clip's own start",
     )
 
-class BeatRole(str, Enum):
-    """What a part does in the story the video tells: 起承轉合.
+class Structure(str, Enum):
+    """The shape the whole video takes, chosen with the user before any footage is.
 
     A video that is only a run of moments, however good each one is, leaves
-    nothing behind. These four are the least a story is made of, and saying
-    which each part is makes a plan with no turn or no ending visible before
-    anything is cut.
+    nothing behind. Each of these is a different answer to what holds the
+    parts together, and each has its own roles — `STRUCTURES` says which, and
+    what a plan in that shape cannot do without.
+    """
+
+    STORY = "story"
+    FLASHBACK = "flashback"
+    PROBLEM_SOLUTION = "problem_solution"
+    LISTICLE = "listicle"
+    TUTORIAL = "tutorial"
+    BEFORE_AFTER = "before_after"
+    REVIEW = "review"
+    MONTAGE = "montage"
+
+class BeatRole(str, Enum):
+    """What a part does in the video's structure.
+
+    Every structure opens on `hook` when it has one; the rest belong to one
+    structure or a few, as `STRUCTURES` lists. Saying which each part is makes
+    a plan with no turn, no steps or no ending visible before anything is cut.
     """
 
     HOOK = "hook"
     SETUP = "setup"
     TURN = "turn"
     PAYOFF = "payoff"
+    PROBLEM = "problem"
+    AGITATE = "agitate"
+    SOLUTION = "solution"
+    RESULT = "result"
+    ITEM = "item"
+    RECAP = "recap"
+    PREP = "prep"
+    STEP = "step"
+    BEFORE = "before"
+    PROCESS = "process"
+    AFTER = "after"
+    FIRST_LOOK = "first_look"
+    DETAIL = "detail"
+    VERDICT = "verdict"
+    BUILD = "build"
+    PEAK = "peak"
+    OUTRO = "outro"
+
+class StructureRules(BaseModel):
+    """What a plan in one structure has to have, and in what order."""
+
+    label: str = Field(..., description="What the user calls it")
+    suits: str = Field(..., description="The videos it is right for, to offer it by")
+    roles: List[BeatRole] = Field(..., description="The roles it allows, in the order they usually play")
+    at_least: Dict[BeatRole, int] = Field(..., description="Roles it cannot do without, and how many beats of each")
+    ends_on: List[BeatRole] = Field(..., description="Roles the last beat may have")
+    in_order: bool = Field(
+        default=False,
+        description="Whether the roles have to play in the order listed; repeats of one role may sit together",
+    )
+
+STRUCTURES = {
+    Structure.STORY: StructureRules(
+        label="起承轉合",
+        suits="vlog、一天的紀錄、有事情發生的片子",
+        roles=[BeatRole.HOOK, BeatRole.SETUP, BeatRole.TURN, BeatRole.PAYOFF],
+        at_least={BeatRole.TURN: 1, BeatRole.PAYOFF: 1},
+        ends_on=[BeatRole.PAYOFF],
+    ),
+    Structure.FLASHBACK: StructureRules(
+        label="倒敘",
+        suits="結局或最關鍵一刻最抓人的故事：先放那一刻，再從頭講到那裡",
+        roles=[BeatRole.HOOK, BeatRole.SETUP, BeatRole.TURN, BeatRole.PAYOFF],
+        at_least={BeatRole.HOOK: 1, BeatRole.TURN: 1, BeatRole.PAYOFF: 1},
+        ends_on=[BeatRole.PAYOFF],
+    ),
+    Structure.PROBLEM_SOLUTION: StructureRules(
+        label="問題→解法",
+        suits="知識型、產品介紹、解決一個痛點的片子",
+        roles=[BeatRole.HOOK, BeatRole.PROBLEM, BeatRole.AGITATE, BeatRole.SOLUTION, BeatRole.RESULT],
+        at_least={BeatRole.PROBLEM: 1, BeatRole.SOLUTION: 1},
+        ends_on=[BeatRole.SOLUTION, BeatRole.RESULT],
+    ),
+    Structure.LISTICLE: StructureRules(
+        label="清單式",
+        suits="「N 個…」：推薦、技巧、地點，一點一段",
+        roles=[BeatRole.HOOK, BeatRole.ITEM, BeatRole.RECAP],
+        at_least={BeatRole.ITEM: 2},
+        ends_on=[BeatRole.ITEM, BeatRole.RECAP],
+        in_order=True,
+    ),
+    Structure.TUTORIAL: StructureRules(
+        label="教學步驟",
+        suits="做菜、手作、軟體操作：先看成品，再一步一步做",
+        roles=[BeatRole.HOOK, BeatRole.PREP, BeatRole.STEP, BeatRole.RESULT],
+        at_least={BeatRole.STEP: 1, BeatRole.RESULT: 1},
+        ends_on=[BeatRole.RESULT],
+        in_order=True,
+    ),
+    Structure.BEFORE_AFTER: StructureRules(
+        label="前後對比",
+        suits="改造、整理、修復、造型：同一個東西變了樣",
+        roles=[BeatRole.HOOK, BeatRole.BEFORE, BeatRole.PROCESS, BeatRole.AFTER],
+        at_least={BeatRole.BEFORE: 1, BeatRole.AFTER: 1},
+        ends_on=[BeatRole.AFTER],
+        in_order=True,
+    ),
+    Structure.REVIEW: StructureRules(
+        label="開箱評測",
+        suits="開箱、試用、比較：看到什麼、好不好、值不值得",
+        roles=[BeatRole.HOOK, BeatRole.FIRST_LOOK, BeatRole.DETAIL, BeatRole.VERDICT],
+        at_least={BeatRole.DETAIL: 1, BeatRole.VERDICT: 1},
+        ends_on=[BeatRole.VERDICT],
+        in_order=True,
+    ),
+    Structure.MONTAGE: StructureRules(
+        label="蒙太奇／氛圍",
+        suits="旅行、活動、空景：跟著音樂堆到高潮，不靠劇情轉折",
+        roles=[BeatRole.HOOK, BeatRole.BUILD, BeatRole.PEAK, BeatRole.OUTRO],
+        at_least={BeatRole.PEAK: 1},
+        ends_on=[BeatRole.PEAK, BeatRole.OUTRO],
+    ),
+}
 
 class Beat(BaseModel):
     """One part of the finished video, and what it is there to do."""
@@ -86,10 +196,12 @@ class Beat(BaseModel):
     name: str = Field(..., min_length=1, description="What this part is, such as 開場 or 結尾")
     role: Optional[BeatRole] = Field(
         default=None,
-        description="What this part does in the story (起承轉合): `hook` opens on the strongest moment or the "
-                    "question the video answers; `setup` gives what the viewer needs to follow; `turn` is where "
-                    "something changes — a problem, a surprise, a decision; `payoff` is what it came to. Every "
-                    "part says one; a plan needs a turn and ends on its payoff",
+        description="What this part does in the plan's `structure`, from that structure's roles. `hook` opens "
+                    "any of them on the strongest moment or the question the video answers. 起承轉合: `setup`, "
+                    "`turn`, `payoff`. 倒敘: the same, with the hook a moment from later. 問題→解法: `problem`, "
+                    "`agitate`, `solution`, `result`. 清單式: `item` per point, `recap`. 教學步驟: `prep`, `step` "
+                    "per step, `result`. 前後對比: `before`, `process`, `after`. 開箱評測: `first_look`, `detail`, "
+                    "`verdict`. 蒙太奇: `build`, `peak`, `outro`. Every part says one",
     )
     intent: str = Field(default="", description="What it has to achieve for the video to work")
     target_seconds: Optional[float] = Field(default=None, gt=0, description="Roughly how long it should run")
@@ -306,6 +418,13 @@ class EditPlan(BaseModel):
         ),
     )
     goal: str = Field(default="", description="What this video is for, in a sentence")
+    structure: Structure = Field(
+        default=Structure.STORY,
+        description="The shape the video takes, as the user chose it: `story` (起承轉合), `flashback` (倒敘), "
+                    "`problem_solution` (問題→解法), `listicle` (清單式), `tutorial` (教學步驟), `before_after` "
+                    "(前後對比), `review` (開箱評測), `montage` (蒙太奇／氛圍). It decides which beat roles the "
+                    "plan may use and which it needs",
+    )
     target: PlanTarget = Field(default_factory=PlanTarget)
     beats: List[Beat] = Field(default_factory=list, description="The parts of the video, in order")
     selections: List[Selection] = Field(default_factory=list, description="The footage, in the order it is used")

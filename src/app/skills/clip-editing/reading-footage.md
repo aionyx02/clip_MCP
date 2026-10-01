@@ -141,15 +141,19 @@ Never transcribe a whole folder up front. Twenty ten-minute files take hours,
 and most of it gets thrown away.
 
 A proposal says what is in the footage, how long each option runs, and what it
-leaves out. Each option is a story, not a list of places: say what it opens
-on, where it turns, and what it comes to. 「每個地點各留一點」 is not an
+leaves out. Each option has a structure, not a list of places: name it
+(起承轉合, 清單式, 教學步驟…, from the editing-intelligence file) and say what
+it opens on, what carries the middle, and what it ends on. Two options may
+cut the same footage in two structures — that is often the clearest choice
+to offer. 「每個地點各留一點」 is not an
 option; it is the fragmented cut nobody wants to watch. Read `skill://clip-editing/pacing-and-structure.md` before naming
 those lengths. Label the options so the user can answer with one letter:
 
 「這 8 支我都看過了，共 42 分鐘。裡面有三條線：海邊 4 分鐘、晚餐聊天有講到之後的行程 6 分鐘，
 另外 2 支畫面晃得很厲害，建議不要用。
-A：「計畫被打亂的一天」，約 90 秒。開在海邊的好天氣，轉在突然下雨躲進餐廳，收在晚餐聊到的下一趟行程。
+A：起承轉合「計畫被打亂的一天」，約 90 秒。開在海邊的好天氣，轉在突然下雨躲進餐廳，收在晚餐聊到的下一趟行程。
 B：只留晚餐那段對話，約 2 分鐘，比較完整：從「下次去哪」開始，吵了一輪，最後決定的地方收尾。
+C：蒙太奇，約 30 秒，不講話只配音樂：海邊的畫面越剪越快，堆到雨打下來那一刻，再用晚餐的燈光收尾。
 你想要哪一種？」
 
 When the user answers 「你決定」, take the first option, say in one line which

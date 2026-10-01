@@ -47,7 +47,7 @@ from app.models.media import (
 from app.models.plan import (
     BeatRole,
     AddBrollOp, Beat, BeatTransition, BrollShot, DropBrollOp, DropSelectionOp, EditPlan, MusicCue, MusicPlan, PlanAmendment,
-    Pacing, PlanTarget, Rejection, Selection, Trim, TrimKind, apply_amendment,
+    Pacing, PlanTarget, Rejection, Selection, Structure, Trim, TrimKind, apply_amendment,
 )
 from app.models.semantic import SectionChoice, SemanticClip, SemanticTimeline
 from app.models.timeline import Clip, Marker, Project, Track
@@ -2024,12 +2024,51 @@ def test_a_plan_that_does_not_tell_a_story_is_refused(roles: tuple, complaint: s
 def test_a_plan_that_begins_turns_and_ends_is_accepted(roles: tuple) -> None:
     assert _story_problems(story(*roles)) == []
 
-def story_checked(selections: List[Selection], beats: List[Beat]) -> List[str]:
+R = BeatRole
+
+@pytest.mark.parametrize(("structure", "roles"), [
+    (Structure.FLASHBACK, (R.HOOK, R.SETUP, R.TURN, R.PAYOFF)),
+    (Structure.PROBLEM_SOLUTION, (R.HOOK, R.PROBLEM, R.AGITATE, R.SOLUTION, R.RESULT)),
+    (Structure.PROBLEM_SOLUTION, (R.PROBLEM, R.SOLUTION)),
+    (Structure.LISTICLE, (R.HOOK, R.ITEM, R.ITEM, R.ITEM, R.RECAP)),
+    (Structure.TUTORIAL, (R.HOOK, R.PREP, R.STEP, R.STEP, R.RESULT)),
+    (Structure.BEFORE_AFTER, (R.HOOK, R.BEFORE, R.PROCESS, R.AFTER)),
+    (Structure.REVIEW, (R.HOOK, R.FIRST_LOOK, R.DETAIL, R.DETAIL, R.VERDICT)),
+    (Structure.MONTAGE, (R.HOOK, R.BUILD, R.PEAK, R.BUILD, R.PEAK, R.OUTRO)),
+])
+def test_every_structure_accepts_a_plan_in_its_own_shape(structure: Structure, roles: tuple) -> None:
+    assert _story_problems(story(*roles), structure) == []
+
+@pytest.mark.parametrize(("structure", "roles", "complaint"), [
+    (Structure.LISTICLE, (R.HOOK, R.SETUP, R.TURN, R.PAYOFF), "清單式 has no place for"),
+    (Structure.STORY, (R.HOOK, R.ITEM, R.ITEM), "起承轉合 has no place for"),
+    (Structure.FLASHBACK, (R.SETUP, R.TURN, R.PAYOFF), "no beat is a hook"),
+    (Structure.LISTICLE, (R.HOOK, R.ITEM, R.RECAP), "needs at least 2"),
+    (Structure.TUTORIAL, (R.PREP, R.STEP, R.PREP, R.RESULT), "comes after a step"),
+    (Structure.TUTORIAL, (R.PREP, R.STEP), "no beat is a result"),
+    (Structure.BEFORE_AFTER, (R.AFTER, R.BEFORE), "comes after an after"),
+    (Structure.PROBLEM_SOLUTION, (R.PROBLEM, R.SOLUTION, R.AGITATE), "end on the solution or the result"),
+    (Structure.REVIEW, (R.DETAIL, R.FIRST_LOOK, R.VERDICT), "開箱評測 plays"),
+    (Structure.MONTAGE, (R.HOOK, R.BUILD, R.OUTRO), "no beat is a peak"),
+])
+def test_a_plan_out_of_its_structures_shape_is_refused(structure: Structure, roles: tuple, complaint: str) -> None:
+    assert any(complaint in problem for problem in _story_problems(story(*roles), structure))
+
+def test_a_plan_says_its_structure_and_is_held_to_it() -> None:
+    clips = lambda found: [Selection(clip_id=speech_of(found)[0].id, beat_id="b1"),
+                           Selection(clip_id=speech_of(found)[1].id, beat_id="b2")]
+    listed = story(R.ITEM, R.ITEM)
+    assert any(problem.startswith("story") for problem in story_checked(clips, listed))
+    plan_checked = story_checked(clips, listed, Structure.LISTICLE)
+    assert not any(problem.startswith("story") for problem in plan_checked)
+
+def story_checked(selections: List[Selection], beats: List[Beat], structure: Structure = Structure.STORY) -> List[str]:
     """Check a plan over the talk footage, with its timeline filled in.
 
     Args:
         selections: The chosen footage.
         beats: The parts.
+        structure: The shape the plan says it takes.
 
     Returns:
         The problems found.
@@ -2038,7 +2077,7 @@ def story_checked(selections: List[Selection], beats: List[Beat]) -> List[str]:
     assets = {ASSET_ID: sourced()}
     timeline, clips = build_timeline(assets, {ASSET_ID: made})
     plan = beats_plan(selections(clips) if callable(selections) else selections, beats).model_copy(
-        update={"timeline_id": timeline.id, "timeline_input_hash": timeline.input_hash},
+        update={"timeline_id": timeline.id, "timeline_input_hash": timeline.input_hash, "structure": structure},
     )
     problems, _ = check_plan(plan, timeline, {clip.id: clip for clip in clips}, {}, assets, None)
     return problems

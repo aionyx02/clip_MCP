@@ -74,26 +74,63 @@ The plan owns the sequence track, the covering picture and the music bed and
 rebuilds all three. Insets and any other track you added are untouched by a
 compile.
 
-## The story
+## The structure
 
-A video is a story, not a run of moments. Before choosing footage, decide
-what the video is about in one sentence — something that changes, not a
-place or a day — and give every beat one of four roles, in this order:
+A video is held together by something, not a run of moments. Before choosing
+footage, decide what the video is about in one sentence — something that
+changes, not a place or a day — and which structure carries it. **The
+structure is the user's to choose.** Unless they have already said, offer the
+two or three that suit the footage, each in one line with what it would open
+on and end on, and let them pick by letter, in the same message as the other
+open questions. Do not pick one silently and do not offer all eight. Put the
+choice in the plan's `structure`; it decides which `role` each beat may have.
+
+| `structure` | 中文 | Roles, in the order they play | Suits |
+|---|---|---|---|
+| `story` (default) | 起承轉合 | `hook` `setup` `turn` `payoff` | A vlog, a day, anything where something happened |
+| `flashback` | 倒敘 | `hook` `setup` `turn` `payoff`; the hook is a moment from later | When the ending or the key moment is the strongest thing shot |
+| `problem_solution` | 問題→解法 | `hook` `problem` `agitate` `solution` `result` | Explainers, a product, fixing a pain point |
+| `listicle` | 清單式 | `hook` `item`… `recap` | 「N 個…」: tips, picks, places — one point a beat |
+| `tutorial` | 教學步驟 | `hook` `prep` `step`… `result` | Cooking, making, software: show the result, then each step |
+| `before_after` | 前後對比 | `hook` `before` `process` `after` | Makeovers, tidying, repairs |
+| `review` | 開箱評測 | `hook` `first_look` `detail`… `verdict` | Unboxing, trying out, comparing |
+| `montage` | 蒙太奇／氛圍 | `hook` `build` `peak` `outro` | Travel, events, scenery cut to music, with no plot |
+
+What each role is for:
 
 - `hook` — the first seconds: the strongest moment, or the question the rest
-  answers. Optional in a very short cut, and always first when there is one.
-- `setup` — what the viewer needs to follow: who, where, what was meant to
-  happen.
-- `turn` — where something changes: it goes wrong, surprises, gets decided.
-  Every story has one. If the footage seems to have none, look for the
+  answers. Optional in a very short cut except in 倒敘, and always first when
+  there is one. In 倒敘 it is lifted from the turn or the payoff, and the
+  setup then goes back to where it began; in 教學步驟 and 前後對比 it is a
+  glimpse of the finished thing.
+- 起承轉合: `setup` is what the viewer needs to follow — who, where, what was
+  meant to happen; `turn` is where something changes: it goes wrong,
+  surprises, gets decided. If the footage seems to have none, look for the
   failure, the wait, the change of plan; ask the user what happened that day
-  rather than inventing it.
-- `payoff` — what it came to. The video ends here, not on whatever was shot
-  last.
+  rather than inventing it. `payoff` is what it came to, and the video ends
+  there, not on whatever was shot last.
+- 問題→解法: `problem` is what is wrong, `agitate` why it matters or what it
+  costs, `solution` what fixes it, `result` what it looks like fixed.
+- 清單式: one `item` beat per point, at least two, and an optional `recap`.
+  Put the strongest point first or last, not in the middle.
+- 教學步驟: `prep` is what you need, one `step` beat per step, `result` the
+  finished thing. Keep the steps in the order they are done.
+- 前後對比: `before`, then `process` (optional, often sped up), then `after`.
+  Match the framing of before and after where the footage allows.
+- 開箱評測: `first_look` is the first impression, a `detail` beat per thing
+  looked at closely, `verdict` whether it is worth it.
+- 蒙太奇: `build` beats rise towards a `peak`, there can be more than one of
+  each, and `outro` lets it settle. The music carries it, so choose the song
+  first and consider `cut_on_beat`.
 
 `validate_plan` refuses a plan with more than one beat or more than one file
-that has a beat with no role, no turn, no payoff, or does not end on the
-payoff. A single part cut from one recording is a trim and needs none.
+that has a beat with no role, a role its structure has no place for, none of
+a role the structure needs (a turn, a step, a peak), or a last beat the
+structure cannot end on. 清單式, 教學步驟, 前後對比 and 開箱評測 also have to play
+their roles in the order above. A single part cut from one recording is a
+trim and needs none. When the user changes structure after a plan is
+written, rewrite the beats' roles with it — the old ones are refused, not
+translated.
 
 Choose each selection for what it does in its beat, and say so in its
 `rationale`: a shot that is only pretty, or only there because it was shot,

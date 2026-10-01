@@ -154,7 +154,8 @@ user corrects what is wrong before a render is wasted.
    of guessing lengths; `inspect_media` gives resolution and frame rate.
 3. When the edit depends on what is said or shown, read the footage first.
    Whenever it uses more than one file or has more than one part, write a
-   plan that tells a story — hook, setup, turn, payoff — and compile it
+   plan in the structure the user chose — 起承轉合, 清單式, 教學步驟 and the
+   rest are in the editing-intelligence file — and compile it
    (`save_plan`, `validate_plan`, `compile_plan`) rather than placing clips
    by hand; the check before a render finds a hand-built sequence.
 4. By hand: `create_project` with the output settings and a `name` the user
@@ -230,6 +231,41 @@ hand:
    `loop: false` if the music should stop when the song runs out. **Never
    work these lengths out yourself**, and run it again after any batch that
    changes the video length.
+
+### Where the music comes from
+
+There is no built-in music library, and the server never fetches music from
+the internet. When the user wants music and has not given a file, ask for
+one, and in the same message tell them in plain words what each kind of
+source means for where the video is going:
+
+- **A commercial song** — bought, or from a streaming app: fine for a video
+  only they watch. Posted to YouTube, Instagram or TikTok, it is almost
+  always caught by the platform's copyright matching: muted, blocked in some
+  countries, or its ad money goes to the song's owner.
+- **The app's own music**: a song added inside Instagram Reels or TikTok is
+  licensed by the platform, and is the safest choice there. Render without
+  music and let them add it in the app; say that captions and cuts are
+  already in place.
+- **Royalty-free libraries** such as the YouTube Studio audio library or
+  Pixabay Music: free to use in videos. Some tracks ask for a credit line in
+  the description, which the download page says.
+- **Creative Commons music**: read the licence. `NC` means no commercial use
+  (a sponsored post, a client's video), `ND` means no changes — trimming and
+  looping may already be one.
+- **A subscription library** such as Epidemic Sound or Artlist: covered for
+  videos published while subscribed, usually tied to their channel.
+
+Say once that this is general guidance, not legal advice, and that the
+licence on the page they downloaded from is what counts. Suggest they keep
+where each song came from for the credit line.
+
+When this client can search the web, you may suggest a few tracks from those
+libraries that fit the structure and the mood — a song with a steady beat for
+a 蒙太奇, something that lifts at the turn for 起承轉合 — with links. Do not
+download one yourself: the licence is something the user agrees to, and
+which terms are enough depends on whether the video is commercial, which only
+they know. They download it and hand you the file.
 
 ## Mapping requests to operations
 
@@ -313,7 +349,13 @@ Use these without asking, and mention the ones you chose in one short line.
 Ask only when a wrong guess would waste a render or go against what the user
 wants:
 - No source file is named, or several could match. This includes 「加點音樂」:
-  there is no built-in music library, so ask for a music file.
+  there is no built-in music library, so ask for a music file, and say what
+  each kind of source means for where the video is going
+  ([Where the music comes from](#where-the-music-comes-from)).
+- The structure of anything more than a trim, unless the user named one:
+  offer the two or three that suit the footage (the editing-intelligence
+  file) and let them pick. It decides what goes first and what it ends on,
+  so a wrong guess is a whole recut.
 - It is unclear which part to keep or remove, as in 「剪短一點」. Propose
   concrete choices: 「要保留前 30 秒，還是去掉開頭和結尾各 5 秒？」
 - The order of several clips is unclear and cannot be inferred.

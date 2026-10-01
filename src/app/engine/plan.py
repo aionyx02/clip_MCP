@@ -24,7 +24,7 @@ from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 
 from app.engine.continuity import Shot, strays
 from app.models.media import Asset
-from app.models.plan import Beat, BeatRole, EditPlan, MusicCue, Selection, TrimKind
+from app.models.plan import STRUCTURES, Beat, BeatRole, EditPlan, MusicCue, Selection, Structure, TrimKind
 from app.engine.semantic import EDGE_TOLERANCE_SECONDS, CleanCuts
 from app.models.semantic import ClipKind, SemanticClip, SemanticTimeline
 from app.models.timeline import MAX_SPEED, MIN_SPEED, Clip, Project
@@ -1686,44 +1686,92 @@ def _cue_problems(plan: EditPlan, pieces: Sequence[Piece]) -> List[str]:
         previous = max(previous, at)
     return problems
 
-def _story_problems(beats: Sequence[Beat]) -> List[str]:
-    """Find what stops a plan's parts from telling a story.
+# Why a structure cannot do without a role, said when a plan has none of it.
+MISSING_ROLE = {
+    BeatRole.HOOK: "倒敘 opens on the moment from later that the rest leads up to, so put it first",
+    BeatRole.TURN: (
+        "nothing changes, so the parts are a list rather than a story. Find where something goes wrong, "
+        "surprises, or is decided, and build a beat around it"
+    ),
+    BeatRole.PAYOFF: "say what it all came to, and end on it",
+    BeatRole.PROBLEM: "say what is wrong before the solution, or the solution answers nothing",
+    BeatRole.SOLUTION: "the problem is never solved; show what fixes it",
+    BeatRole.ITEM: "a list is its points; give each one a beat",
+    BeatRole.STEP: "there is nothing to follow along with; give each step a beat",
+    BeatRole.RESULT: "show what it came out as, and end on it",
+    BeatRole.BEFORE: "the after means nothing without the before",
+    BeatRole.AFTER: "show what it became, and end on it",
+    BeatRole.DETAIL: "a review needs the closer look its verdict rests on",
+    BeatRole.VERDICT: "say whether it is worth it, and end on it",
+    BeatRole.PEAK: "a montage builds to something; find the moment it all comes to and give it a beat",
+}
+
+def _a(role: BeatRole) -> str:
+    """Name a role with its article: a turn, an item."""
+    return f"{'an' if role.value[0] in 'aeiou' else 'a'} {role.value}"
+
+def _story_problems(beats: Sequence[Beat], structure: Structure = Structure.STORY) -> List[str]:
+    """Find what stops a plan's parts from holding together in its structure.
 
     Asked of any plan with more than one part or more than one file. One
     part cut from one recording is a trim — the best thirty seconds of an
-    interview — and a story is not what was asked for; several files strung
-    together as one part is exactly the list of moments this is here to stop.
+    interview — and a structure is not what was asked for; several files
+    strung together as one part is exactly the list of moments this is here
+    to stop.
 
     Args:
         beats: The plan's parts, in the order they play.
+        structure: The shape the plan says it takes.
 
     Returns:
-        What is missing or out of place: a part with no role, no turn, no
-        payoff, a payoff that is not the last part, or a hook that is not the
-        first. Empty for a plan that begins, turns and ends.
+        What is missing or out of place: a part with no role or a role the
+        structure has no place for, too few of a role it needs, a last part
+        it cannot end on, a hook that is not first, or parts out of the order
+        the structure plays them in. Empty for a plan that holds together.
     """
     if not beats:
         return []
+    rules = STRUCTURES[structure]
+    allowed = ", ".join(role.value for role in rules.roles)
     problems: List[str] = []
     unsaid = [beat.id for beat in beats if beat.role is None]
     if unsaid:
         problems.append(
             f"story: these beats do not say what they do in the story: {', '.join(unsaid)}. Give every beat a "
-            "`role` — hook, setup, turn or payoff"
+            f"`role` — for {rules.label}, {allowed}"
+        )
+        return problems
+    foreign = [beat for beat in beats if beat.role not in rules.roles]
+    if foreign:
+        problems.append(
+            f"story: {', '.join(f'{beat.id} is {_a(beat.role)}' for beat in foreign)}, which {rules.label} has "
+            f"no place for; its roles are {allowed}. Use those, or change the plan's `structure` to the one the "
+            "user chose"
         )
         return problems
     roles = [beat.role for beat in beats]
-    if BeatRole.TURN not in roles:
-        problems.append(
-            "story: no beat is a turn — nothing changes, so the parts are a list rather than a story. Find where "
-            "something goes wrong, surprises, or is decided, and build a beat around it"
-        )
-    if BeatRole.PAYOFF not in roles:
-        problems.append("story: no beat is a payoff — say what it all came to, and end on it")
-    elif roles[-1] != BeatRole.PAYOFF:
-        problems.append(f"story: the video ends on {beats[-1].id}, a {roles[-1].value}; end on the payoff")
+    for role, needed in rules.at_least.items():
+        count = roles.count(role)
+        if count == 0:
+            problems.append(f"story: no beat is {_a(role)} — {MISSING_ROLE[role]}")
+        elif count < needed:
+            problems.append(f"story: only {count} beat is {_a(role)}; {rules.label} needs at least {needed}")
+    if roles[-1] not in rules.ends_on:
+        ending = " or ".join(f"the {role.value}" for role in rules.ends_on)
+        problems.append(f"story: the video ends on {beats[-1].id}, {_a(roles[-1])}; end on {ending}")
     if BeatRole.HOOK in roles and roles[0] != BeatRole.HOOK:
         problems.append("story: the hook is not the first beat; open on it")
+    if rules.in_order:
+        rank = {role: index for index, role in enumerate(rules.roles)}
+        latest = roles[0]
+        for beat in beats[1:]:
+            if rank[beat.role] < rank[latest]:
+                problems.append(
+                    f"story: {beat.id}, {_a(beat.role)}, comes after {_a(latest)}; {rules.label} plays "
+                    f"{allowed} in that order"
+                )
+                break
+            latest = beat.role
     return problems
 
 def check_plan(
@@ -1768,7 +1816,7 @@ def check_plan(
         problems.append("two beats share an id")
     files = {clips[selection.clip_id].asset_id for selection in plan.selections if selection.clip_id in clips}
     if len(plan.beats) > 1 or len(files) > 1:
-        problems.extend(_story_problems(plan.beats))
+        problems.extend(_story_problems(plan.beats, plan.structure))
 
     for position, selection in enumerate(plan.selections, start=1):
         where = f"selection {position} ({selection.clip_id})"

@@ -67,8 +67,8 @@ phrase; it names the nearest pause — move the cut there), `repeated` (the same
 stretch of a file shown twice), `continuity` (a clip put on by hand between
 two shot hours away from it — move it, or let it stand if it is a
 flash-forward), `unplanned` (three or more clips put together
-by hand, with no plan saying how the video opens, turns and ends — write one
-and compile it rather than asking to go ahead), `captions` (a caption too tall for the
+by hand, with no plan saying how its parts hold together — ask which structure,
+write one and compile it rather than asking to go ahead), `captions` (a caption too tall for the
 frame, most often in a portrait render of a landscape cut) and `length` (far
 from the length the plan asked for). Each is a fact, not a verdict — the black
 may be a deliberate pause, the user may prefer the longer cut — so tell them
