@@ -1,7 +1,7 @@
 ; The clip-mcp installer. Built by .github/workflows/release.yml, which passes:
 ;   AppVersion    the version, from pyproject.toml
 ;   Wheel         the clip-mcp wheel's file name, in ..\dist
-;   FfmpegUrl     the pinned FFmpeg build, downloaded at install time
+;   FfmpegUrl     the pinned FFmpeg build, downloaded at install time by install.ps1
 ;   FfmpegSha256  its checksum, so a changed or broken download is refused
 ;   FfmpegFolder  the folder inside that zip
 ;
@@ -39,11 +39,17 @@ SolidCompression=yes
 WizardStyle=modern
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
-; tar.exe, which unpacks FFmpeg, comes with Windows 10 1803 and later.
+; curl.exe and tar.exe, which fetch and unpack FFmpeg, come with Windows 10 1803 and later.
 MinVersion=10.0.17763
 ; An update closes what holds clip-mcp's files — the editor, and any AI client running clip-mcp.
 CloseApplications=yes
 RestartApplications=no
+; Inno Setup 6.7 makes Setup and Uninstall refuse junctions made by an ordinary user, and their
+; child processes inherit that. uv reaches its Python through such a junction, so with it on,
+; installing the packages fails (os error 448), and so would clip-mcp's own uninstall step and the
+; editor opened at the end. The guard protects installers run as administrator; this one runs as
+; the user and writes only to the user's own folder.
+RedirectionGuard=no
 
 [Languages]
 Name: "zh_tw"; MessagesFile: "build\ChineseTraditional.isl"
@@ -51,9 +57,12 @@ Name: "zh_tw"; MessagesFile: "build\ChineseTraditional.isl"
 [CustomMessages]
 zh_tw.DesktopIcon=建立桌面捷徑
 zh_tw.LaunchApp=開啟 clip-mcp 剪輯
-zh_tw.Unpacking=正在解開 FFmpeg（影片處理元件）…
-zh_tw.Installing=正在安裝 Python 與 clip-mcp 的元件，第一次需要幾分鐘，請不要關閉…
-zh_tw.InstallFailed=元件沒有安裝成功，最常見的原因是網路中斷。請確認網路後再執行一次安裝程式。%n%n詳細記錄：%1
+zh_tw.StepFfmpeg=正在下載 FFmpeg（影片處理元件，約 115 MB）…
+zh_tw.StepPackages=正在下載並安裝 Python 與 clip-mcp 的元件（約 650 MB），第一次需要幾分鐘，請不要關閉…
+zh_tw.StepSetup=正在完成設定…
+zh_tw.StepCleanup=正在清除下載的暫存檔…
+zh_tw.InstallFailed=元件沒有安裝成功，最常見的原因是網路中斷。請確認網路後再執行一次安裝程式，已下載的部分會接著用。%n%n詳細記錄：%1
+zh_tw.FinishedFailed=安裝沒有完成：元件沒有裝好。請確認網路後再執行一次安裝程式。%n%n詳細記錄：%1
 zh_tw.Finished=安裝完成。%n%n開啟後，到左邊的「連接 AI」選擇要讓哪個 AI 程式使用 clip-mcp；安裝程式不會自動修改任何 AI 程式的設定。
 zh_tw.AskDeleteData=也要刪除你的專案與素材分析資料嗎？%n%n選「是」會把資料移到資源回收筒；選「否」會保留，之後重新安裝還能接著用。%n輸出到「影片\clip-mcp」的成品影片無論如何都不會被刪除。
 
@@ -77,7 +86,7 @@ Name: "{userprograms}\{#AppName}"; Filename: "{app}\bin\clip-mcp-editor.exe"; Ic
 Name: "{userdesktop}\{#AppName}"; Filename: "{app}\bin\clip-mcp-editor.exe"; IconFilename: "{app}\icon.ico"; Tasks: desktopicon
 
 [Run]
-Filename: "{app}\bin\clip-mcp-editor.exe"; Description: "{cm:LaunchApp}"; Flags: postinstall nowait skipifsilent
+Filename: "{app}\bin\clip-mcp-editor.exe"; Description: "{cm:LaunchApp}"; Flags: postinstall nowait skipifsilent; Check: ComponentsInstalled
 ; An update started from the editor runs silently and opens the editor again when it is done.
 Filename: "{app}\bin\clip-mcp-editor.exe"; Flags: nowait; Check: Relaunch
 
@@ -89,55 +98,34 @@ Type: filesandordirs; Name: "{app}"
 [Code]
 var
   DeleteData: Boolean;
+  Installed: Boolean;
+
+function ComponentsInstalled: Boolean;
+begin
+  Result := Installed;
+end;
 
 function Relaunch: Boolean;
 begin
-  Result := WizardSilent and (ExpandConstant('{param:RELAUNCH|0}') = '1');
+  Result := Installed and WizardSilent and (ExpandConstant('{param:RELAUNCH|0}') = '1');
 end;
 
-function FfmpegCurrent: Boolean;
+{ install.ps1 announces each step as "STEP <name>"; that becomes the sentence on the page, and
+  every other line it prints is shown under it, so a slow download is visibly moving. }
+procedure OnInstallOutput(const S: String; const Error, FirstLine: Boolean);
 var
-  Installed: AnsiString;
+  Line, Step: String;
 begin
-  { The same FFmpeg as last time is not downloaded again on an update. }
-  Result := FileExists(ExpandConstant('{app}\ffmpeg\ffmpeg.exe'))
-    and LoadStringFromFile(ExpandConstant('{app}\ffmpeg\build.txt'), Installed)
-    and (Trim(String(Installed)) = '{#FfmpegSha256}');
-end;
-
-function OnDownloadProgress(const Url, FileName: String; const Progress, ProgressMax: Int64): Boolean;
-begin
-  Result := True;
-end;
-
-function PrepareToInstall(var NeedsRestart: Boolean): String;
-begin
-  Result := '';
-  if FfmpegCurrent then
-    Exit;
-  try
-    { Checked against the checksum the build recorded: anything else is refused. }
-    DownloadTemporaryFile('{#FfmpegUrl}', 'ffmpeg.zip', '{#FfmpegSha256}', @OnDownloadProgress);
-  except
-    Result := GetExceptionMessage;
-  end;
-end;
-
-procedure InstallFfmpeg;
-var
-  Code: Integer;
-  Bin: String;
-begin
-  if FfmpegCurrent then
-    Exit;
-  WizardForm.StatusLabel.Caption := CustomMessage('Unpacking');
-  Exec(ExpandConstant('{sys}\tar.exe'), '-xf "' + ExpandConstant('{tmp}\ffmpeg.zip') + '" -C "' + ExpandConstant('{tmp}') + '"',
-    '', SW_HIDE, ewWaitUntilTerminated, Code);
-  Bin := ExpandConstant('{tmp}\{#FfmpegFolder}\bin\');
-  ForceDirectories(ExpandConstant('{app}\ffmpeg'));
-  if FileCopy(Bin + 'ffmpeg.exe', ExpandConstant('{app}\ffmpeg\ffmpeg.exe'), False)
-    and FileCopy(Bin + 'ffprobe.exe', ExpandConstant('{app}\ffmpeg\ffprobe.exe'), False) then
-    SaveStringToFile(ExpandConstant('{app}\ffmpeg\build.txt'), '{#FfmpegSha256}', False);
+  Line := Trim(S);
+  if Copy(Line, 1, 5) = 'STEP ' then begin
+    Step := Copy(Line, 6, MaxInt);
+    if Step = 'ffmpeg' then WizardForm.StatusLabel.Caption := CustomMessage('StepFfmpeg')
+    else if Step = 'packages' then WizardForm.StatusLabel.Caption := CustomMessage('StepPackages')
+    else if Step = 'setup' then WizardForm.StatusLabel.Caption := CustomMessage('StepSetup')
+    else if Step = 'cleanup' then WizardForm.StatusLabel.Caption := CustomMessage('StepCleanup');
+    WizardForm.FilenameLabel.Caption := '';
+  end else if Line <> '' then
+    WizardForm.FilenameLabel.Caption := Copy(Line, 1, 110);
 end;
 
 procedure CurStepChanged(CurStep: TSetupStep);
@@ -146,23 +134,27 @@ var
 begin
   if CurStep <> ssPostInstall then
     Exit;
-  InstallFfmpeg;
-  WizardForm.StatusLabel.Caption := CustomMessage('Installing');
   WizardForm.ProgressGauge.Style := npbstMarquee;
-  Exec('powershell.exe',
-    '-NoProfile -ExecutionPolicy Bypass -File "' + ExpandConstant('{app}\install.ps1') + '" -App "' + ExpandConstant('{app}')
-      + '" -Wheel "' + ExpandConstant('{app}\wheels\{#Wheel}') + '"',
-    '', SW_HIDE, ewWaitUntilTerminated, Code);
+  Installed := ExecAndLogOutput('powershell.exe',
+    '-NoProfile -ExecutionPolicy Bypass -File "' + ExpandConstant('{app}\install.ps1') + '"'
+      + ' -App "' + ExpandConstant('{app}') + '"'
+      + ' -Wheel "' + ExpandConstant('{app}\wheels\{#Wheel}') + '"'
+      + ' -FfmpegUrl "{#FfmpegUrl}" -FfmpegSha256 "{#FfmpegSha256}" -FfmpegFolder "{#FfmpegFolder}"',
+    '', SW_HIDE, ewWaitUntilTerminated, Code, @OnInstallOutput) and (Code = 0);
   WizardForm.ProgressGauge.Style := npbstNormal;
-  if Code <> 0 then
+  if not Installed then
     SuppressibleMsgBox(FmtMessage(CustomMessage('InstallFailed'), [ExpandConstant('{app}\install.log')]),
       mbError, MB_OK, IDOK);
 end;
 
 procedure CurPageChanged(CurPageID: Integer);
 begin
-  if CurPageID = wpFinished then
-    WizardForm.FinishedLabel.Caption := CustomMessage('Finished');
+  if CurPageID = wpFinished then begin
+    if Installed then
+      WizardForm.FinishedLabel.Caption := CustomMessage('Finished')
+    else
+      WizardForm.FinishedLabel.Caption := FmtMessage(CustomMessage('FinishedFailed'), [ExpandConstant('{app}\install.log')]);
+  end;
 end;
 
 function InitializeUninstall: Boolean;
