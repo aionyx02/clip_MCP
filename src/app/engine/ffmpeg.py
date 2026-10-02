@@ -163,7 +163,8 @@ def run_ffmpeg(
             of its log.
     """
     command = graph_from_file(command, f"{os.path.splitext(log_path)[0]}.graph.txt")
-    graphs = [command[index + 1] for index in range(len(command) - 1) if command[index] == "-/filter_complex"]
+    graphs = [command[index + 1] for index in range(len(command) - 1)
+              if command[index] in ("-/filter_complex", "-filter_complex_script")]
     try:
         _run(command, log_path, duration_seconds, on_progress, is_cancelled)
     finally:

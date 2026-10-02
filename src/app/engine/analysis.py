@@ -61,6 +61,10 @@ CAMERA_WIDTH = 320
 # Full accuracy is for stabilising footage. This only measures how much it moves.
 CAMERA_ACCURACY = 9
 SOUND_WINDOW_SECONDS = 1
+# A window cut shorter than this at the end of a file is left out: it is encoder padding —
+# an AAC encoder adds some milliseconds past the end of the sound — and a level measured over
+# a few hundred samples says nothing. Provisional.
+MIN_SOUND_WINDOW_SECONDS = 0.25
 # JPEG quality for the stills the face detector reads. They are thrown away with the
 # job, and a detector does not care about the last few percent of fidelity.
 STILL_QUALITY = 5
@@ -505,10 +509,12 @@ def _sound_measurements(records: Sequence[Tuple[float, Dict[str, float]]], durat
     """
     measurements: List[SoundMeasurement] = []
     for seconds, values in records:
-        end = seconds + SOUND_WINDOW_SECONDS
+        end = min(seconds + SOUND_WINDOW_SECONDS, duration) if duration else seconds + SOUND_WINDOW_SECONDS
+        if measurements and end - seconds < MIN_SOUND_WINDOW_SECONDS:
+            continue
         measurements.append(SoundMeasurement(
             start=round(seconds, 3),
-            end=round(min(end, duration) if duration else end, 3),
+            end=round(end, 3),
             loudness=round(values.get("lavfi.astats.Overall.RMS_level", SILENCE_DB), 2),
             peak=round(values.get("lavfi.astats.Overall.Peak_level", SILENCE_DB), 2),
             noise_floor=round(values.get("lavfi.astats.Overall.Noise_floor", SILENCE_DB), 2),
