@@ -179,3 +179,12 @@ body.editing .page { padding: 0; overflow: hidden; }
 ul.points { margin: 0 0 12px; padding-left: 18px; color: var(--muted); display: flex; flex-direction: column; gap: 8px; }
 ul.points li { line-height: 1.6; }
 .nudges button[disabled] { opacity: .35; cursor: default; }
+
+/* export */
+.choices { display: flex; flex-direction: column; gap: 8px; }
+.choice { display: flex; align-items: center; gap: 10px; cursor: pointer; color: var(--text); font-weight: 600; }
+.choice input { accent-color: var(--accent); width: 16px; height: 16px; }
+.findings { display: flex; flex-direction: column; gap: 10px; max-height: 50vh; overflow-y: auto; }
+.finding { padding: 12px 14px; border-radius: 12px; background: var(--panel-2); border: 1px solid var(--line); }
+.finding p { margin: 4px 0 8px; }
+.finding .times { display: flex; flex-wrap: wrap; gap: 6px; }

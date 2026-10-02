@@ -171,6 +171,8 @@
         <span class="chip" data-locked hidden>${svg("pause", 12)}${esc(T.editor.playingLocked)}</span>
         <div class="grow"></div>
         <span class="chip" data-preview-chip hidden></span>
+        <span class="chip busy" data-export-chip hidden></span>
+        <button class="btn primary" data-export>${icon("download", 16)}${esc(T.exporting.button)}</button>
       </header>
       <section class="ed-viewer">
         <div class="stage-wrap" data-stage-wrap>
@@ -619,6 +621,130 @@
     return false;
   }
 
+  // ------------------------------------------------------------------ export
+
+  const SHAPE_WORDS = { landscape: "橫式", portrait: "直式", square: "方形" };
+
+  function exportDialog() {
+    const own = shapeOf(E.project.width, E.project.height);
+    const shapes = ["", ...Object.keys(SHAPE_WORDS).filter((shape) => shape !== own)];
+    const hasCaptions = (E.captions || []).length > 0;
+    const shapeName = (shape) => (shape ? T.exporting.otherShape(T.projects.shapes[shape]) : T.exporting.sameShape(T.projects.shapes[own]));
+    modal(`<h2>${esc(T.exporting.title)}</h2>
+      <div class="field"><label>${esc(T.exporting.shapeLabel)}</label>
+        <div class="choices">${shapes.map((shape, index) => `<label class="choice"><input type="radio" name="shape" value="${shape}" ${index ? "" : "checked"}><span>${esc(shapeName(shape))}</span></label>`).join("")}</div></div>
+      <div class="field"><label class="choice"><input type="checkbox" data-burn ${hasCaptions ? "checked" : "disabled"}>
+        <span>${esc(hasCaptions ? T.exporting.captionsLabel : T.exporting.captionsNone)}</span></label></div>
+      <p class="hint" data-destination></p>
+      <div class="foot"><button class="btn" data-cancel>${esc(T.newProject.cancel)}</button>
+        <button class="btn primary" data-go>${esc(T.exporting.check)}</button></div>`, (box, close) => {
+      const chosen = () => box.querySelector("input[name=shape]:checked").value;
+      const showDestination = () => {
+        const shape = chosen();
+        $("[data-destination]", box).textContent = T.exporting.destination(`${E.project.name}${shape ? `（${SHAPE_WORDS[shape]}）` : ""}`);
+      };
+      box.querySelectorAll("input[name=shape]").forEach((radio) => { radio.onchange = showDestination; });
+      showDestination();
+      $("[data-cancel]", box).onclick = close;
+      $("[data-go]", box).onclick = async () => {
+        const settings = { frame: chosen(), captions: $("[data-burn]", box).checked };
+        const button = $("[data-go]", box);
+        button.disabled = true;
+        button.innerHTML = `<span class="spinner"></span>${esc(T.exporting.checking)}`;
+        try {
+          const query = new URLSearchParams({ frame: settings.frame, captions: settings.captions ? "1" : "" });
+          const { findings } = await api(`/api/projects/${encodeURIComponent(E.id)}/check?${query}`);
+          close();
+          if (findings.length) showFindings(findings, settings);
+          else startExport(settings, []);
+        } catch (error) {
+          toast(error.message, "error");
+          button.disabled = false;
+          button.textContent = T.exporting.check;
+        }
+      };
+    });
+  }
+
+  // The server's findings are written for the AI; the user gets each kind said plainly, with the
+  // moments the server named turned into buttons that jump there.
+  function showFindings(findings, settings) {
+    const kinds = [...new Set(findings.map((finding) => finding.check))];
+    const rows = kinds.map((kind) => {
+      const [title, body] = T.exporting.findings[kind] || [kind, ""];
+      const times = findings.filter((finding) => finding.check === kind)
+        .flatMap((finding) => [...finding.message.matchAll(/\b(\d+):(\d{2})(?:\.(\d))?\b/g)])
+        .map((match) => num(match[1]) * 60 + num(match[2]) + (match[3] ? num(match[3]) / 10 : 0))
+        .filter((seconds, index, all) => seconds <= E.project.duration + 1 && all.indexOf(seconds) === index)
+        .slice(0, 6);
+      return `<div class="finding"><strong>${esc(title)}</strong><p>${esc(body)}</p>
+        <div class="times">${times.map((seconds) => `<button class="btn small" data-jump="${seconds}">${esc(T.exporting.jumpTo(fmt(seconds)))}</button>`).join("")}</div></div>`;
+    }).join("");
+    modal(`<h2>${esc(T.exporting.foundTitle)}</h2><p>${esc(T.exporting.foundBody)}</p>
+      <div class="findings">${rows}</div>
+      <div class="foot"><button class="btn" data-back>${esc(T.exporting.goBack)}</button>
+        <button class="btn primary" data-ahead>${esc(T.exporting.goAhead)}</button></div>`, (box, close) => {
+      box.querySelectorAll("[data-jump]").forEach((button) => {
+        button.onclick = () => { close(); E.video.pause(); seek(num(button.dataset.jump)); followPlayhead(); };
+      });
+      $("[data-back]", box).onclick = close;
+      // Going ahead allows exactly the kinds that were shown, nothing the user never saw.
+      $("[data-ahead]", box).onclick = () => { close(); startExport(settings, kinds); };
+    });
+  }
+
+  async function startExport(settings, allow) {
+    try {
+      E.exportState = await api(`/api/projects/${encodeURIComponent(E.id)}/export`, { ...settings, allow });
+      toast(T.exporting.started);
+      watchExport();
+    } catch (error) {
+      toast(error.message, "error");
+    }
+  }
+
+  async function watchExport() {
+    clearTimeout(E.exportTimer);
+    const state = E.exportState || {};
+    showExportState();
+    if (state.status === "queued" || state.status === "running") {
+      E.exportTimer = setTimeout(async () => {
+        if (!E) return;
+        try { E.exportState = await api(`/api/projects/${encodeURIComponent(E.id)}/export`); } catch { /* next look */ }
+        watchExport();
+      }, 1000);
+    } else if (state.status === "completed" && !state.announced) {
+      state.announced = true;
+      showExportDone(state);
+    } else if (state.status === "failed" && !state.announced) {
+      state.announced = true;
+      toast(`${T.exporting.failed}${state.error ? `：${state.error}` : ""}`, "error");
+    }
+  }
+
+  function showExportState() {
+    const chip = $("[data-export-chip]", E.root);
+    const state = E.exportState || {};
+    const busy = state.status === "queued" || state.status === "running";
+    chip.hidden = !busy;
+    if (busy) {
+      const percent = Math.round((state.progress || 0) * 100);
+      chip.innerHTML = `<span class="spinner"></span>${esc(state.status === "queued" ? T.exporting.queued : T.exporting.progress(percent))}
+        <span class="bar"><i style="width:${percent}%"></i></span>`;
+    }
+  }
+
+  function showExportDone(state) {
+    modal(`<h2>${esc(T.exporting.done(state.file))}</h2><p>${esc(state.folder)}</p>
+      <div class="foot"><button class="btn" data-close>${esc(T.exporting.close)}</button>
+        <button class="btn" data-play-file>${svg("play")}${esc(T.exporting.play)}</button>
+        <button class="btn primary" data-reveal>${icon("folder", 16)}${esc(T.exporting.reveal)}</button></div>`, (box, close) => {
+      $("[data-close]", box).onclick = close;
+      $("[data-reveal]", box).onclick = () => { api("/api/reveal", { job_id: state.job_id }).catch((error) => toast(error.message, "error")); close(); };
+      $("[data-play-file]", box).onclick = () => { api("/api/reveal", { job_id: state.job_id, play: true }).catch((error) => toast(error.message, "error")); close(); };
+    });
+  }
+
   // ------------------------------------------------------------------ music
 
   function addMusic() {
@@ -968,6 +1094,7 @@
     cancelAnimationFrame(E.frame);
     clearTimeout(E.previewTimer);
     clearTimeout(E.watchTimer);
+    clearTimeout(E.exportTimer);
     document.removeEventListener("keydown", onKey);
     window.removeEventListener("resize", E.onResize);
     E.video.pause();
@@ -999,6 +1126,7 @@
     $("[data-delete]", page).onclick = remove;
     $("[data-make-captions]", page).onclick = makeCaptions;
     $("[data-add-music]", page).onclick = addMusic;
+    $("[data-export]", page).onclick = exportDialog;
     page.querySelectorAll("[data-zoom]").forEach((button) => { button.onclick = () => setZoom(E.pps * (num(button.dataset.zoom) > 0 ? 1.5 : 1 / 1.5)); });
     $("[data-zoom-range]", page).oninput = (event) => setZoom(2 * Math.pow(200, num(event.target.value) / 100));
     $("[data-fit]", page).onclick = fitZoom;
@@ -1030,6 +1158,12 @@
     fitZoom();
     setPlayIcon();
     requestPreview();
+    api(`/api/projects/${encodeURIComponent(id)}/export`).then((state) => {
+      if (!E || !state.job_id) return;
+      // One already finished was announced when it finished; only a running one is followed.
+      E.exportState = { ...state, announced: state.status !== "queued" && state.status !== "running" };
+      watchExport();
+    }).catch(() => {});
     E.frame = requestAnimationFrame(tick);
     E.watchTimer = setTimeout(watchForChanges, POLL_MS);
   }

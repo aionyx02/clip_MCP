@@ -197,3 +197,42 @@ def test_a_chosen_song_comes_back_as_an_asset(client: TestClient, media: Path, m
     monkeypatch.setattr(dialogs, "pick", lambda kind: [str(media / "song.mp3")] if kind == "music" else [])
     answer = client.post("/api/pick", json={"kind": "music"}).json()
     assert answer["imported"] == 1 and len(answer["assets"]) == 1
+
+def test_the_check_before_export_is_the_servers_own(client: TestClient, media: Path, monkeypatch) -> None:
+    project, _ = captioned_project(client, media)
+    asked = []
+    monkeypatch.setattr(server, "check_render", lambda *args: asked.append(args) or {"ok": True, "findings": []})
+    assert client.get(f"/api/projects/{project}/check?frame=portrait&captions=1").json()["ok"] is True
+    assert asked == [(project, "portrait", True)]
+
+def test_an_export_goes_ahead_only_over_what_the_user_was_shown(client: TestClient, media: Path, monkeypatch) -> None:
+    project, _ = captioned_project(client, media)
+    asked = []
+    def fake_render(*args):
+        asked.append(args)
+        return {"job_id": "missing-job"}
+    monkeypatch.setattr(server, "render_project", fake_render)
+    answer = client.post(f"/api/projects/{project}/export", json={"frame": "", "captions": False, "allow": ["mid_speech"]})
+    assert answer.status_code == 200
+    project_id, preview, _, captions, frame, _, allow = asked[0]
+    assert (preview, captions, frame, allow) == (False, False, None, ["mid_speech"])
+    assert client.get(f"/api/projects/{project}/export").json()["job_id"] == "missing-job"
+
+def test_a_finished_export_is_saved_where_the_user_keeps_videos(client: TestClient, media: Path) -> None:
+    import time
+
+    project, _ = captioned_project(client, media)
+    client.post(f"/api/projects/{project}/edits", json={"expected_version": server.repo.get_project(project).version,
+                                                        "operations": [{"action": "rename_project", "name": "交付"}]})
+    findings = client.get(f"/api/projects/{project}/check").json()["findings"]
+    kinds = sorted({finding["check"] for finding in findings})
+    state = client.post(f"/api/projects/{project}/export", json={"allow": kinds}).json()
+    deadline = time.monotonic() + 120
+    while state.get("status") not in ("completed", "failed") and time.monotonic() < deadline:
+        time.sleep(0.3)
+        state = client.get(f"/api/projects/{project}/export").json()
+    assert state["status"] == "completed", state
+    assert state["file"].startswith("交付") and state["folder"] == str(server.output_dir())
+
+def test_only_a_finished_render_can_be_opened(client: TestClient) -> None:
+    assert client.post("/api/reveal", json={"job_id": "nothing"}).status_code == 404

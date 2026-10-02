@@ -55,6 +55,8 @@ WORDS_AROUND = 4.0
 _undo: Dict[str, List[Tuple[int, Project]]] = {}
 # The preview the editor last asked for, per project: which version, and the render making it.
 _previews: Dict[str, dict] = {}
+# The finished file the editor last asked for, per project, kept so a page opened again finds it.
+_exports: Dict[str, dict] = {}
 _previews_lock = threading.Lock()
 _undo_lock = threading.Lock()
 
@@ -393,19 +395,73 @@ def _write_wave(path: str, cached: Path) -> None:
     cached.parent.mkdir(parents=True, exist_ok=True)
     cached.write_text(json.dumps({"rate": WAVE_RATE, "peaks": [round(float(peak), 3) for peak in peaks]}))
 
-async def render(request: Request) -> Response:
-    """Start a render of the project, a preview unless the full file is asked for."""
-    project_id = request.path_params["project_id"]
-    body = await request.json()
+FRAMES = ("landscape", "portrait", "square")
+
+def _export_settings(source) -> Tuple[Optional[str], bool]:
+    """The shape and captions an export was asked for, from a query or a body."""
+    frame = source.get("frame") or None
+    return (frame if frame in FRAMES else None), str(source.get("captions", "")).lower() in ("1", "true", "yes")
+
+async def check(request: Request) -> Response:
+    """What the finished file would show that the user should hear about before it is made."""
+    frame, captions = _export_settings(request.query_params)
     try:
-        started = server.render_project(
-            project_id,
-            is_preview=bool(body.get("preview", True)),
-            allow=body.get("allow") or None,
+        return JSONResponse(await run_in_threadpool(server.check_render, request.path_params["project_id"], frame, captions))
+    except ValueError as error:
+        return _error(str(error), 404)
+
+def _export_state(project_id: str) -> dict:
+    """The project's last export, as the page shows it: how far along, and where the file went."""
+    with _previews_lock:
+        entry = dict(_exports.get(project_id) or {})
+    job = server.job_manager.get_job(entry["job_id"]) if entry.get("job_id") else None
+    if job:
+        entry.update({"status": job.status.value, "progress": round(job.progress, 3), "stage": job.stage,
+                      "file": os.path.basename(job.output_path or ""), "folder": os.path.dirname(job.output_path or "")})
+        if job.error_message:
+            entry["error"] = job.error_message
+    return entry
+
+async def export(request: Request) -> Response:
+    """Make the finished file (POST), or say how the last one is getting on (GET).
+
+    Only kinds of finding the user chose to go ahead with are passed on; the
+    server refuses the render over anything else, the same as for the AI.
+    """
+    project_id = request.path_params["project_id"]
+    if request.method == "GET":
+        return JSONResponse(_export_state(project_id))
+    body = await request.json()
+    frame, captions = _export_settings(body)
+    try:
+        started = await run_in_threadpool(
+            server.render_project, project_id, False, server.DEFAULT_LOUDNESS_TARGET, captions, frame, True,
+            body.get("allow") or None,
         )
     except ValueError as error:
         return _error(str(error))
-    return JSONResponse(started)
+    with _previews_lock:
+        _exports[project_id] = {"job_id": started["job_id"]}
+    return JSONResponse(_export_state(project_id))
+
+def _finished_file(job_id: str) -> Optional[str]:
+    """A finished render's file, by its job: the only files the page may ask to open."""
+    job = server.job_manager.get_job(job_id)
+    if job and job.status.value == "completed" and job.output_path and os.path.exists(job.output_path):
+        return job.output_path
+    return None
+
+async def reveal(request: Request) -> Response:
+    """Show a finished file in File Explorer, selected, or play it in the system's player."""
+    body = await request.json()
+    path = _finished_file(str(body.get("job_id", "")))
+    if not path:
+        return _error("that file is not there", 404)
+    if body.get("play"):
+        os.startfile(path)
+    else:
+        subprocess.Popen(["explorer", "/select,", path])
+    return JSONResponse({"path": path})
 
 async def job(request: Request) -> Response:
     """How a render is getting on."""
@@ -533,7 +589,9 @@ def create_app() -> Starlette:
         Route("/api/projects/{project_id}", project),
         Route("/api/projects/{project_id}/edits", edits, methods=["POST"]),
         Route("/api/projects/{project_id}/undo", undo, methods=["POST"]),
-        Route("/api/projects/{project_id}/render", render, methods=["POST"]),
+        Route("/api/projects/{project_id}/check", check),
+        Route("/api/projects/{project_id}/export", export, methods=["GET", "POST"]),
+        Route("/api/reveal", reveal, methods=["POST"]),
         Route("/api/projects/{project_id}/preview", preview, methods=["GET", "POST"]),
         Route("/api/projects/{project_id}/version", version),
         Route("/api/words/{asset_id}", words),
