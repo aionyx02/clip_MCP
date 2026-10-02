@@ -239,7 +239,7 @@ async function aiPage(page) {
 
 // ---------------------------------------------------------------- storage
 
-const SWATCHES = ["#2ed3c4", "#7c5cff", "#38bdf8", "#f472b6", "#fbbf24", "#a3e635", "#fb923c", "#94a3b8", "#e879f9"];
+const SWATCHES = ["#5b8def", "#7d8aa6", "#6f9f86", "#a3906a", "#8c7ca6", "#6a98a4", "#a07c7c", "#8a8a8f", "#97a06d"];
 
 async function storagePage(page) {
   page.innerHTML = head(T.storage.title, T.storage.subtitle) + `<div data-usage><div class="row skeleton" style="height:120px"></div></div>`;

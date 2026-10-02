@@ -18,6 +18,14 @@
     const m = Math.floor(s / 60);
     return `${m}:${(s - m * 60).toFixed(1).padStart(4, "0")}`;
   };
+  const fps = () => (E?.project ? E.project.fps_num / E.project.fps_den : 30);
+  const timecode = (seconds) => {
+    const rate = Math.round(fps());
+    const frames = Math.max(0, Math.round((seconds || 0) * fps()));
+    const f = frames % rate, total = Math.floor(frames / rate);
+    const pad = (value) => String(value).padStart(2, "0");
+    return `${pad(Math.floor(total / 3600))}:${pad(Math.floor(total / 60) % 60)}:${pad(total % 60)}:${pad(f)}`;
+  };
   const clipLength = (clip) => (num(clip.source_range.end) - num(clip.source_range.start)) / (clip.speed || 1);
   const clipEnd = (clip) => num(clip.timeline_in) + clipLength(clip);
   const assetName = (id) => E.project.assets[id]?.name || id;
@@ -117,14 +125,15 @@
     else if (state.status === "queued") { text = T.editor.previewQueued; kind = "busy"; }
     else if (state.status === "running") { text = T.editor.previewMaking(Math.round((state.progress || 0) * 100)); kind = "busy"; }
     else if (state.status === "failed" || state.error) { text = T.editor.previewFailed; kind = "warn"; }
-    chip.className = `chip ${kind}`;
+    else if (state.url) { text = T.editor.previewReady; kind = "ok"; }
+    chip.className = `state ${kind}`;
     chip.hidden = !text;
     chip.innerHTML = kind === "busy"
       ? `<span class="spinner"></span>${esc(text)}<span class="bar"><i style="width:${Math.round((state.progress || 0) * 100)}%"></i></span>`
       : esc(text);
     if (state.url && state.url !== E.shownUrl) swapPreview(state.url);
     const stale = E.shownVersion !== undefined && E.shownVersion !== E.project.version;
-    notice.hidden = !(state.empty || (!E.shownUrl && text));
+    notice.hidden = !(state.empty || (!E.shownUrl && text && kind !== "ok"));
     notice.textContent = state.empty ? T.editor.previewEmpty : (state.status === "failed" ? `${T.editor.previewFailed}${state.error ? `：${state.error}` : ""}` : text);
     $("[data-stale]", E.root).hidden = !(stale && kind === "busy");
   }
@@ -165,49 +174,54 @@
   function html() {
     return `<div class="editor">
       <header class="ed-top">
-        <a class="btn small" href="#/">${icon("back", 16)}${esc(T.editor.back)}</a>
-        <h1 data-title></h1>
-        <span class="chip warn" data-stale hidden>${esc(T.editor.previewStale)}</span>
-        <span class="chip" data-locked hidden>${svg("pause", 12)}${esc(T.editor.playingLocked)}</span>
+        <a class="icon-btn" href="#/" title="${esc(T.editor.back)}">${icon("back", 16)}</a>
+        <span class="crumb">${esc(T.editor.back)} /</span><h1 data-title></h1>
+        <span class="state warn" data-stale hidden>${esc(T.editor.previewStale)}</span>
+        <span class="state" data-locked hidden>${esc(T.editor.playingLocked)}</span>
         <div class="grow"></div>
-        <span class="chip" data-preview-chip hidden></span>
-        <span class="chip busy" data-export-chip hidden></span>
-        <button class="btn primary" data-export>${icon("download", 16)}${esc(T.exporting.button)}</button>
+        <span class="state" data-preview-chip hidden></span>
+        <span class="state busy" data-export-chip hidden></span>
+        <button class="btn primary small" data-export>${icon("download", 15)}${esc(T.exporting.button)}</button>
       </header>
       <section class="ed-viewer">
+        <div class="viewer-bar"><b>${esc(T.editor.viewerTitle)}</b><span data-format></span></div>
         <div class="stage-wrap" data-stage-wrap>
           <div class="stage" data-stage>
             <video data-video playsinline preload="auto"></video>
             <img class="source" data-source alt="">
-            <span class="tag">${icon("film", 14)}${esc(T.editor.sourceView)}</span>
+            <span class="tag">${icon("film", 13)}${esc(T.editor.sourceView)}</span>
             <div class="words" data-words></div>
             <div class="notice" data-notice hidden></div>
           </div>
         </div>
         <div class="transport">
-          <button class="icon-btn" data-step="-1" title="-1">${svg("prev")}</button>
-          <button class="icon-btn big" data-play disabled title="${esc(T.editor.play)}">${svg("play")}</button>
-          <button class="icon-btn" data-step="1" title="+1">${svg("next")}</button>
-          <button class="icon-btn" data-replay title="${esc(T.editor.replay)}">${svg("replay", 18)}</button>
-          <span class="time" data-time></span>
+          <span class="timecode" data-time></span>
+          <div class="controls">
+            <button class="icon-btn" data-replay title="${esc(T.editor.replay)}">${svg("replay")}</button>
+            <button class="icon-btn" data-step="-1" title="${esc(T.editor.previousFrame)}">${svg("prev")}</button>
+            <button class="icon-btn" data-play disabled title="${esc(T.editor.play)}">${svg("play")}</button>
+            <button class="icon-btn" data-step="1" title="${esc(T.editor.nextFrame)}">${svg("next")}</button>
+          </div>
+          <span class="meta" data-fps></span>
         </div>
       </section>
       <aside class="ed-inspector" data-inspector></aside>
       <section class="ed-timeline">
         <div class="tl-resize" data-resize></div>
         <div class="tl-tools">
-          <button class="btn small edit-action" data-undo>${svg("undo")}${esc(T.editor.undo)}</button>
+          <button class="icon-btn edit-action" data-undo title="${esc(T.editor.undo)}（Ctrl+Z）">${svg("undo")}</button>
           <span class="sep"></span>
-          <button class="btn small edit-action" data-split>${svg("split")}${esc(T.editor.split)}</button>
-          <button class="btn small edit-action" data-delete>${icon("trash", 16)}${esc(T.editor.delete)}</button>
+          <button class="icon-btn edit-action" data-split title="${esc(T.editor.split)}（S）">${svg("split")}</button>
+          <button class="icon-btn edit-action" data-delete title="${esc(T.editor.delete)}（Delete）">${icon("trash", 16)}</button>
           <span class="sep"></span>
-          <button class="btn small edit-action" data-make-captions>${svg("captions")}${esc(T.captions.make)}</button>
-          <button class="btn small edit-action" data-add-music>${icon("music", 16)}${esc(T.music.add)}</button>
+          <button class="icon-btn edit-action" data-make-captions title="${esc(T.captions.make)}">${svg("captions")}</button>
+          <button class="icon-btn edit-action" data-add-music title="${esc(T.music.add)}">${icon("music", 16)}</button>
+          <span class="tl-status" data-tl-status hidden></span>
           <div class="grow"></div>
           <button class="icon-btn" data-zoom="-1" title="${esc(T.editor.zoomOut)}">${svg("minus")}</button>
-          <input type="range" min="0" max="100" step="1" data-zoom-range>
+          <input type="range" min="0" max="100" step="1" data-zoom-range title="${esc(T.editor.zoom)}">
           <button class="icon-btn" data-zoom="1" title="${esc(T.editor.zoomIn)}">${icon("plus", 16)}</button>
-          <button class="btn small" data-fit>${esc(T.editor.fit)}</button>
+          <button class="icon-btn" data-fit title="${esc(T.editor.fit)}">${svg("fit")}</button>
         </div>
         <div class="tl-body">
           <div class="tl-heads" data-heads></div>
@@ -231,6 +245,7 @@
     undo: '<path d="M9 14L4 9l5-5"/><path d="M4 9h10a6 6 0 0 1 0 12h-3"/>',
     split: '<path d="M12 3v18"/><path d="M8 7H4v10h4M16 7h4v10h-4"/>',
     minus: '<path d="M5 12h14"/>',
+    fit: '<path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/>',
     replay: '<path d="M4 12a8 8 0 1 0 2.3-5.7"/><path d="M4 4v5h5"/>',
     captions: '<rect x="3" y="5" width="18" height="14" rx="3"/><path d="M7 15h4M13 15h4M7 11h10"/>',
     speaker: '<path d="M4 9h4l5-4v14l-5-4H4z"/><path d="M16 9a4 4 0 0 1 0 6"/>',
@@ -246,6 +261,8 @@
 
   function drawAll() {
     $("[data-title]", E.root).textContent = E.project.name || T.projects.untitled;
+    $("[data-format]", E.root).textContent = T.editor.format(E.project.width, E.project.height);
+    $("[data-fps]", E.root).textContent = `${Math.round(fps() * 100) / 100} fps`;
     fitStage();
     drawLanes();
     drawRuler();
@@ -270,9 +287,11 @@
     const canvas = $("[data-canvas]", E.root);
     canvas.style.width = `${contentWidth()}px`;
     const laneList = lanes();
-    heads.innerHTML = `<div class="tl-head" style="height:${LANE.captions}px">${svg("captions", 14)}${esc(T.captions.lane)}</div>`
-      + laneList.map((lane) => `<div class="tl-head" style="height:${lane.height}px">
-      ${icon(lane.kind === "music" ? "music" : lane.kind === "audio" ? "music" : "film", 14)}${esc(T.editor.tracks[lane.kind === "base" ? "video" : lane.kind])}</div>`).join("");
+    const videos = laneList.filter((lane) => lane.kind === "base" || lane.kind === "overlay").length;
+    let audio = 0;
+    const trackId = (lane, index) => (lane.kind === "base" || lane.kind === "overlay") ? `V${videos - index}` : `A${++audio}`;
+    heads.innerHTML = `<div class="tl-head" style="height:${LANE.captions}px"><b>T1</b>${esc(T.captions.lane)}</div>`
+      + laneList.map((lane, index) => `<div class="tl-head" style="height:${lane.height}px"><b>${trackId(lane, index)}</b>${esc(T.editor.tracks[lane.kind === "base" ? "video" : lane.kind])}</div>`).join("");
     container.innerHTML = `<div class="lane captions" style="height:${LANE.captions}px" data-captions></div>`
       + laneList.map((lane) => `<div class="lane ${lane.kind === "base" ? "base" : ""}" style="height:${lane.height}px" data-lane="${esc(lane.track.id)}"></div>`).join("");
     const captionLane = $("[data-captions]", container);
@@ -379,25 +398,27 @@
     const canvas = $("canvas", ruler);
     const width = contentWidth();
     const ratio = window.devicePixelRatio || 1;
+    const theme = getComputedStyle(document.documentElement);
     canvas.width = Math.min(32000, width * ratio);
-    canvas.height = 40 * ratio;
+    canvas.height = 32 * ratio;
     canvas.style.width = `${width}px`;
-    canvas.style.height = "40px";
+    canvas.style.height = "32px";
     const context = canvas.getContext("2d");
     context.scale(ratio, ratio);
+    // A label every ~110px: wide enough for a timecode.
     const steps = [0.5, 1, 2, 5, 10, 15, 30, 60, 120, 300];
-    const step = steps.find((value) => value * E.pps >= 70) || 600;
-    context.fillStyle = "#8b8f98";
-    context.strokeStyle = "#3a3c44";
-    context.font = "11px system-ui";
+    const step = steps.find((value) => value * E.pps >= 110) || 600;
+    context.fillStyle = theme.getPropertyValue("--muted").trim();
+    context.strokeStyle = theme.getPropertyValue("--line-2").trim();
+    context.font = `10px ${theme.getPropertyValue("--mono")}`;
     for (let t = 0; t * E.pps < width; t += step / 5) {
       const x = Math.round(t * E.pps) + 0.5;
       const major = Math.abs(t / step - Math.round(t / step)) < 1e-6;
       context.beginPath();
-      context.moveTo(x, major ? 15 : 18);
-      context.lineTo(x, 22);
+      context.moveTo(x, major ? 2 : 12);
+      context.lineTo(x, 17);
       context.stroke();
-      if (major) context.fillText(clock(t), x + 4, 12);
+      if (major) context.fillText(timecode(t), x + 4, 11);
     }
     ruler.querySelectorAll(".marker").forEach((marker) => marker.remove());
     for (const marker of E.project.markers || []) {
@@ -414,17 +435,29 @@
   }
 
   function drawTime() {
-    $("[data-time]", E.root).innerHTML = `<b>${fmt(E.time)}</b> / ${fmt(E.project.duration)}`;
+    $("[data-time]", E.root).innerHTML = `${timecode(E.time)} <span>/ ${timecode(E.project.duration)}</span>`;
   }
 
   // ------------------------------------------------------------------ inspector
 
+  // Tabs as an NLE inspector has them; a tab that means nothing for the selection is greyed out.
   function drawInspector() {
-    const panel = $("[data-inspector]", E.root);
-    if (E.selectedCaption) return drawCaptionInspector(panel);
+    const root = $("[data-inspector]", E.root);
     const clip = E.selected && findClip(E.selected.track, E.selected.clip);
     const track = clip && E.project.tracks.find((entry) => entry.id === E.selected.track);
+    const available = E.selectedCaption ? ["captions"] : !clip ? [] : track.track_type === "audio" ? ["sound"]
+      : (E.project.assets[clip.asset_id]?.has_audio === false ? ["picture"] : ["picture", "sound"]);
+    if (!available.includes(E.tab)) E.tab = available[0];
+    root.innerHTML = `<div class="tabs">${["picture", "sound", "captions"].map((tab) =>
+      `<button type="button" data-tab="${tab}" class="${tab === E.tab ? "on" : ""}" ${available.includes(tab) ? "" : "disabled"}>${esc(T.editor.tabs[tab])}</button>`).join("")}</div>
+      <div class="props" data-props></div>`;
+    root.querySelectorAll("[data-tab]").forEach((button) => {
+      button.onclick = () => { E.tab = button.dataset.tab; drawInspector(); };
+    });
+    const panel = $("[data-props]", root);
+    if (E.selectedCaption) return drawCaptionInspector(panel);
     if (clip && track.track_type === "audio") return drawSoundInspector(panel, clip, track);
+    if (clip && E.tab === "sound") return drawClipSound(panel, clip);
     if (!clip) {
       panel.innerHTML = `<p class="hint">${esc(T.editor.inspectorEmpty)}</p>
         <div class="group"><div class="label">${esc(T.editor.shortcutsTitle)}</div>
@@ -442,10 +475,9 @@
       </div>
       <div class="group edit-action">
         <div class="label">${esc(T.editor.end)}<b>${fmt(num(clip.source_range.end))}</b></div><div class="nudges">${nudges("end")}</div>
-        <p class="hint" style="margin:8px 0 0">${esc(T.editor.nudgeHint)}</p>
+        <p class="hint">${esc(T.editor.nudgeHint)}</p>
       </div>
       <div class="group"><div class="label">${esc(T.editor.length)}<b>${clipLength(clip).toFixed(2)} ${esc(T.editor.seconds)}</b></div></div>
-      ${asset?.has_audio ? volumeGroup(clip.volume) : ""}
       <div class="group stack-buttons edit-action">
         <button class="btn" data-split>${svg("split")}${esc(T.editor.split)}</button>
         <button class="btn danger" data-delete>${icon("trash", 16)}${esc(T.editor.delete)}</button>
@@ -457,11 +489,16 @@
     });
     $("[data-split]", panel).onclick = split;
     $("[data-delete]", panel).onclick = remove;
-    wireVolume(panel, (volume) => [{ action: "set_clip_audio", track_id: E.selected.track, clip_id: clip.id, volume }]);
     const handBack = $("[data-handback]", panel);
     if (handBack) handBack.onclick = async () => {
       if (await edit([{ action: "set_clip_pinned", track_id: E.selected.track, clip_id: clip.id, pinned: false }])) toast(T.editor.handedBack);
     };
+  }
+
+  function drawClipSound(panel, clip) {
+    const asset = E.project.assets[clip.asset_id];
+    panel.innerHTML = `<h2>${esc(asset ? asset.name : T.editor.missingFile)}</h2>${volumeGroup(clip.volume)}`;
+    wireVolume(panel, (volume) => [{ action: "set_clip_audio", track_id: E.selected.track, clip_id: clip.id, volume }]);
   }
 
   function volumeGroup(volume, label = T.editor.volume) {
@@ -575,7 +612,8 @@
       { expected_version: E.project.version, transcribe });
     try {
       E.captionsBusy = true;
-      button.innerHTML = `<span class="spinner"></span>${esc(T.captions.making)}`;
+      button.classList.add("busy");
+      toolbarStatus(T.captions.making);
       // Captions replace the project's, so they are made against the version as it is now.
       await loadProject();
       let answer = await ask(false);
@@ -603,15 +641,22 @@
     } finally {
       if (E) {
         E.captionsBusy = false;
-        button.innerHTML = `${svg("captions")}${esc(T.captions.make)}`;
+        button.classList.remove("busy");
+        toolbarStatus("");
       }
     }
+  }
+
+  function toolbarStatus(text) {
+    const line = $("[data-tl-status]", E.root);
+    line.innerHTML = text ? `<span class="spinner"></span>${esc(text)}` : "";
+    line.hidden = !text;
   }
 
   async function waitForTranscripts(jobIds, button) {
     while (E) {
       const state = await api(`/api/jobs?ids=${jobIds.map(encodeURIComponent).join(",")}`);
-      button.innerHTML = `<span class="spinner"></span>${esc(T.captions.transcribing(state.finished, state.total, Math.round(state.progress * 100)))}`;
+      toolbarStatus(T.captions.transcribing(state.finished, state.total, Math.round(state.progress * 100)));
       if (state.finished === state.total) {
         if (state.failed) { toast(T.captions.transcribeFailed, "error"); return false; }
         return true;
