@@ -82,3 +82,22 @@ def test_the_editor_will_not_update_while_a_render_runs(monkeypatch: pytest.Monk
     monkeypatch.setattr(server.repo, "active_job_ids", lambda: {"job"})
     monkeypatch.setattr(updates, "start_update", lambda on_started: pytest.fail("started an update"))
     assert TestClient(editor.create_app()).post("/api/update", json={}).status_code == 409
+
+@pytest.mark.parametrize(("first_line", "option"), [
+    ("ffmpeg version 6.1.1-3ubuntu5 Copyright (c) 2000-2023 the FFmpeg developers", "-filter_complex_script"),
+    ("ffmpeg version n7.1 Copyright (c) 2000-2024 the FFmpeg developers", "-/filter_complex"),
+    ("ffmpeg version 9.0.2-essentials_build-www.gyan.dev Copyright (c) 2000-2026", "-/filter_complex"),
+    ("ffmpeg version N-118000-g1234abcd Copyright (c) 2000-2026", "-/filter_complex"),
+])
+def test_a_filter_graph_in_a_file_is_handed_over_the_way_that_ffmpeg_reads_it(
+    first_line: str, option: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    from types import SimpleNamespace
+
+    from app.engine import ffmpeg
+
+    ffmpeg._graph_file_option.cache_clear()
+    monkeypatch.setattr(ffmpeg.subprocess, "run", lambda *args, **kwargs: SimpleNamespace(stdout=first_line + "\nbuilt with gcc"))
+    moved = ffmpeg.graph_from_file(["ffmpeg-under-test", "-filter_complex", "[0:v]null[v]"], str(tmp_path / "graph.txt"))
+    ffmpeg._graph_file_option.cache_clear()
+    assert moved[1] == option and moved[2] == str(tmp_path / "graph.txt")

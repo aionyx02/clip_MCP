@@ -1,4 +1,6 @@
+import functools
 import os
+import re
 import subprocess
 import threading
 import time
@@ -75,14 +77,39 @@ class _ProgressReader(threading.Thread):
             if key == "out_time_us" and value.isdigit():
                 self.seconds = int(value) / 1_000_000
 
+@functools.lru_cache(maxsize=None)
+def _graph_file_option(executable: str) -> str:
+    """The option that hands this FFmpeg its filter graph in a file.
+
+    FFmpeg 7 reads any option's value from a file when it is written `-/name`;
+    FFmpeg 6, still what many Linux distributions ship, knows only
+    `-filter_complex_script`, which 7 deprecates. Asked once per executable.
+
+    Args:
+        executable: The FFmpeg to ask.
+
+    Returns:
+        `-/filter_complex`, or `-filter_complex_script` for FFmpeg 6 and older.
+    """
+    try:
+        first = subprocess.run([executable, "-hide_banner", "-version"], capture_output=True, text=True,
+                               timeout=30, creationflags=hidden_window_flags()).stdout.split("\n", 1)[0]
+    except (OSError, subprocess.SubprocessError):
+        return "-/filter_complex"
+    # "ffmpeg version 6.1.1-3ubuntu5", "ffmpeg version n7.1", "ffmpeg version 9.0.2-essentials_build-...".
+    # A git snapshot ("N-118000-g...") has no release number, and is newer than any release.
+    found = re.match(r"\S+ version n?(\d+)\.", first)
+    return "-filter_complex_script" if found and int(found.group(1)) < 7 else "-/filter_complex"
+
 def graph_from_file(command: List[str], graph_path: str) -> List[str]:
     """Move a command's filter graph out of the command line and into a file.
 
     A long timeline builds a graph of tens of thousands of characters, one
     chain per clip, and Windows refuses to start a process whose command line
     passes 32767 characters. FFmpeg reads an option's value from a file when
-    the option is written `-/name`, so the graph goes there instead and the
-    command line stays short however many clips there are.
+    the option is written `-/name` (`-filter_complex_script` before FFmpeg 7),
+    so the graph goes there instead and the command line stays short however
+    many clips there are.
 
     Args:
         command: FFmpeg arguments, starting with the executable.
@@ -101,7 +128,7 @@ def graph_from_file(command: List[str], graph_path: str) -> List[str]:
         path = graph_path if written == 0 else f"{root}{written}{extension}"
         with open(path, "w", encoding="utf-8") as handle:
             handle.write(moved[index + 1])
-        moved[index], moved[index + 1] = "-/filter_complex", path
+        moved[index], moved[index + 1] = _graph_file_option(moved[0]), path
         written += 1
     return moved
 
