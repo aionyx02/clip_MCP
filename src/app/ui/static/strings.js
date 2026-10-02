@@ -258,6 +258,17 @@ window.T = {
     jumpTo: (time) => `跳到 ${time}`,
   },
 
+  update: {
+    badge: (version) => `有新版 ${version}`,
+    title: (version) => `更新到 ${version}？`,
+    body: "更新時 clip-mcp 會暫時關閉；正在使用 clip-mcp 的 AI 程式，更新完要重新開啟它。你的專案和成品都不會受影響。",
+    notes: "這一版的變更",
+    later: "稍後",
+    now: "立即更新",
+    busy: "正在輸出或更新成品畫面，完成後再更新",
+    installing: "正在下載並安裝更新，完成後會自動重新開啟…",
+  },
+
   common: {
     error: "出了點問題",
     retry: "再試一次",

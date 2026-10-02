@@ -92,6 +92,10 @@ def run(open_browser: bool = True) -> None:
     import uvicorn
 
     from app.ui import app as editor
+    from app.ui import updates
+
+    # An installer a past update downloaded is done with by now.
+    updates.clear_old_downloads()
 
     port = _free_port()
     url = f"http://127.0.0.1:{port}/"
@@ -133,6 +137,9 @@ def run(open_browser: bool = True) -> None:
 
 def main() -> None:
     """Start the editor with no console, as the shortcut does."""
+    from app.workspace import use_installed_ffmpeg
+
+    use_installed_ffmpeg()
     if sys.stdout is None:
         # Started without a console there is nowhere for a message to go, and a server
         # that writes to nowhere can fail on it. One small log, replaced on every start.

@@ -56,7 +56,10 @@ class Registration:
 def server_command() -> List[str]:
     """Find the command that starts this server from anywhere.
 
-    The command installed by `uv tool install` comes first: it has an
+    The copy that is running comes first, when it is an installed one: the
+    installer puts clip-mcp in a folder of its own, and a machine can hold a
+    developer's copy as well, so the one asked is the one to hand out. Then
+    the command `uv tool install` put in its default folder: it has an
     environment of its own, so a client starting it never collides with a
     development environment that another client — or a test run — is using
     at the same time. A copy inside a project's `.venv` is the last resort,
@@ -66,6 +69,11 @@ def server_command() -> List[str]:
         The command as a list, first element an absolute path.
     """
     executable = "clip-mcp.exe" if sys.platform == "win32" else "clip-mcp"
+    running = Path(sys.argv[0]) if sys.argv and sys.argv[0] else None
+    if running and running.stem in (SERVER_NAME, f"{SERVER_NAME}-editor"):
+        beside = running.resolve().with_name(executable)
+        if beside.is_file() and ".venv" not in beside.parts:
+            return [str(beside)]
     tool_bin = os.environ.get("UV_TOOL_BIN_DIR") or str(Path.home() / ".local" / "bin")
     installed = Path(tool_bin) / executable
     if installed.is_file():

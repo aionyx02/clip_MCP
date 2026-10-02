@@ -77,6 +77,10 @@ def check() -> int:
         print(f"  {result.client:<15} {state} - {result.detail}")
     return 1 if missing else 0
 
+# Set by `--no-prompt`: the installer runs these commands in a window nobody sees, where a
+# question would wait forever, so it says outright that there is no one to ask.
+NO_PROMPT = False
+
 def _ask(question: str) -> bool:
     """Ask a yes-or-no question, with no for an answer unless the user says yes.
 
@@ -86,7 +90,7 @@ def _ask(question: str) -> bool:
     Returns:
         Whether they said yes. No one to ask — the installer, a script — is a no.
     """
-    if not sys.stdin or not sys.stdin.isatty():
+    if NO_PROMPT or not sys.stdin or not sys.stdin.isatty():
         return False
     try:
         return input(f"{question} [y/N] ").strip().lower() in ("y", "yes")
@@ -95,6 +99,7 @@ def _ask(question: str) -> bool:
 
 def setup(
     workspace_path: Optional[str], only: Optional[List[str]], dry_run: bool, connect_all: bool, shortcuts: bool,
+    ffmpeg_dir: Optional[str] = None,
 ) -> int:
     """Point clip-mcp at one workspace, and connect it to the AI clients the user agrees to.
 
@@ -110,6 +115,7 @@ def setup(
         dry_run: Say what would change without changing anything.
         connect_all: The user chose to connect every client installed here.
         shortcuts: The user chose the desktop and Start menu shortcuts.
+        ffmpeg_dir: Where the installer put FFmpeg, to be found there from now on.
 
     Returns:
         The exit status: 0 unless a client could not be connected.
@@ -122,7 +128,8 @@ def setup(
     if dry_run:
         print(f"would point the workspace at {target} ({workspace.pointer_file()})")
     else:
-        written = workspace.write_pointer(target)
+        written = workspace.write_pointer(target, ffmpeg=Path(ffmpeg_dir) if ffmpeg_dir else None)
+        workspace.use_installed_ffmpeg()
         print(f"workspace: {target}")
         print(f"  written to {written}")
     print(f"command:   {' '.join(command)}")
@@ -219,7 +226,10 @@ def uninstall(dry_run: bool, delete_data: bool) -> int:
         elif not dry_run:
             print(f"kept the workspace: {data}")
     print(f"Finished videos in {workspace.output_dir()} are yours and were left alone.")
-    print("Last, remove the program itself: uv tool uninstall clip-mcp")
+    from app.ui.updates import installed_by_setup
+
+    if installed_by_setup() is None:
+        print("Last, remove the program itself: uv tool uninstall clip-mcp")
     return 1 if failed else 0
 
 def main(argv: Optional[List[str]] = None) -> None:
@@ -243,18 +253,24 @@ def main(argv: Optional[List[str]] = None) -> None:
                         help="connect every client installed here without asking")
     set_up.add_argument("--shortcuts", action="store_true", help="add the editor's shortcuts without asking")
     set_up.add_argument("--dry-run", action="store_true", help="say what would change, and change nothing")
+    set_up.add_argument("--ffmpeg-dir", help="where the installer put ffmpeg.exe and ffprobe.exe")
+    set_up.add_argument("--no-prompt", action="store_true", help="never ask; answer no to anything not given")
     remove = commands.add_parser("uninstall", help="take clip-mcp out of every AI client, and its shortcuts")
     remove.add_argument("--delete-data", action="store_true", help="also move the workspace to the recycle bin")
     remove.add_argument("--dry-run", action="store_true", help="say what would change, and change nothing")
+    remove.add_argument("--no-prompt", action="store_true", help="never ask; answer no to anything not given")
     editor = commands.add_parser("ui", help="open the editor in the browser, to check and adjust a cut by hand")
     editor.add_argument("--no-browser", action="store_true", help="serve it without opening a window")
     arguments = parser.parse_args(argv)
+    workspace.use_installed_ffmpeg()
+    global NO_PROMPT
+    NO_PROMPT = getattr(arguments, "no_prompt", False)
 
     if arguments.command == "check":
         sys.exit(check())
     if arguments.command == "setup":
         sys.exit(setup(arguments.workspace, arguments.clients, arguments.dry_run, arguments.connect_all,
-                       arguments.shortcuts))
+                       arguments.shortcuts, arguments.ffmpeg_dir))
     if arguments.command == "uninstall":
         sys.exit(uninstall(arguments.dry_run, arguments.delete_data))
     if arguments.command == "ui":

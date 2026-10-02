@@ -34,7 +34,7 @@ from app.engine.frames import extract_frame
 from app.engine.subtitles import captioned_clips, place_cues
 from app.models.timeline import Project
 from app.storage import housekeeping
-from app.ui import dialogs
+from app.ui import dialogs, updates
 
 STATIC_DIR = Path(__file__).parent / "static"
 # What `/api/ping` answers, so a second start can tell this editor from anything else on the port.
@@ -566,6 +566,22 @@ async def open_client(request: Request) -> Response:
     os.startfile(result.detail)
     return JSONResponse({"opened": True})
 
+async def update(request: Request) -> Response:
+    """Whether a newer version is out (GET), or install it now (POST).
+
+    Never while a render is running: the installer closes clip-mcp, and a
+    render half done would be lost.
+    """
+    if request.method == "GET":
+        return JSONResponse(await run_in_threadpool(updates.latest))
+    if server.repo.active_job_ids():
+        return _error("busy", 409)
+    try:
+        installing = await run_in_threadpool(updates.start_update, lambda: os._exit(0))
+    except (OSError, RuntimeError) as error:
+        return _error(str(error))
+    return JSONResponse({"installing": installing})
+
 async def ping(request: Request) -> Response:
     """Say this is the editor, and for which workspace, so a second start opens this one instead of another.
 
@@ -630,6 +646,7 @@ def create_app() -> Starlette:
         Route("/api/clients", ai_clients, methods=["GET", "POST"]),
         Route("/api/clients/open", open_client, methods=["POST"]),
         Route("/api/ping", ping),
+        Route("/api/update", update, methods=["GET", "POST"]),
         Route("/api/jobs/{job_id}", job),
         Route("/media/{asset_id}", media),
         Route("/thumb/{asset_id}", thumb),

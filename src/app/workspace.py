@@ -94,6 +94,14 @@ def source_checkout() -> Optional[Path]:
         return root
     return None
 
+def _read_config(path: Optional[Path] = None) -> dict:
+    """Read the pointer file as a whole; nothing when it is missing or unreadable."""
+    try:
+        with open(path or pointer_file(), "rb") as handle:
+            return tomllib.load(handle)
+    except (OSError, tomllib.TOMLDecodeError):
+        return {}
+
 def read_pointer(path: Optional[Path] = None) -> Optional[Path]:
     """Read where the pointer file says the workspace is.
 
@@ -105,34 +113,51 @@ def read_pointer(path: Optional[Path] = None) -> Optional[Path]:
         read, or it names none. A pointer that cannot be read is ignored
         rather than fatal: the server still has to start.
     """
-    path = path or pointer_file()
-    try:
-        with open(path, "rb") as handle:
-            named = tomllib.load(handle).get("workspace")
-    except (OSError, tomllib.TOMLDecodeError):
-        return None
+    named = _read_config(path).get("workspace")
     return Path(named).expanduser().resolve() if isinstance(named, str) and named.strip() else None
 
-def write_pointer(workspace: Path, path: Optional[Path] = None) -> Path:
-    """Write the pointer file, naming a workspace.
+def write_pointer(workspace: Path, path: Optional[Path] = None, ffmpeg: Optional[Path] = None) -> Path:
+    """Write the pointer file, naming a workspace, and the FFmpeg the installer fetched.
 
     Args:
         workspace: The workspace to point at.
         path: The pointer file; the per-user one when not given.
+        ffmpeg: The folder holding `ffmpeg.exe` and `ffprobe.exe`, when the
+            installer put them there; kept as it was when not given.
 
     Returns:
         The file written.
     """
     path = path or pointer_file()
+    kept = _read_config(path).get("ffmpeg")
+    folder = str(ffmpeg.resolve()) if ffmpeg else kept
     path.parent.mkdir(parents=True, exist_ok=True)
     # A TOML basic string escapes the way JSON does, which covers a Windows backslash.
     path.write_text(
         "# Where clip-mcp keeps its projects, analyses, models and renders.\n"
         "# Written by `clip-mcp setup`; every AI client on this machine reads it.\n"
-        f"workspace = {json.dumps(str(workspace.resolve()))}\n",
+        f"workspace = {json.dumps(str(workspace.resolve()))}\n"
+        + (f"# The FFmpeg the installer downloaded for clip-mcp alone.\nffmpeg = {json.dumps(folder)}\n" if folder else ""),
         encoding="utf-8",
     )
     return path
+
+def use_installed_ffmpeg() -> Optional[str]:
+    """Put the FFmpeg the installer downloaded first on this process's own PATH.
+
+    The installer keeps FFmpeg inside clip-mcp's folder rather than adding it
+    to the system's PATH, which is every other program's too. This process,
+    and everything it starts — renders, analyses — find it there instead.
+
+    Returns:
+        The folder added, or nothing when there is none.
+    """
+    folder = _read_config().get("ffmpeg")
+    if not isinstance(folder, str) or not (Path(folder) / ("ffmpeg.exe" if sys.platform == "win32" else "ffmpeg")).exists():
+        return None
+    if folder not in os.environ.get("PATH", "").split(os.pathsep):
+        os.environ["PATH"] = folder + os.pathsep + os.environ.get("PATH", "")
+    return folder
 
 def resolve() -> Workspace:
     """Decide which workspace to use.

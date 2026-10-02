@@ -1,0 +1,112 @@
+# Builds the Windows installer, and publishes it when a version tag is pushed.
+#
+#   git tag v0.1.0 && git push origin v0.1.0   -> tests, installer, GitHub Release with notes
+#   Actions -> release -> Run workflow          -> tests and installer only, kept as a build artifact
+#
+# The tag must match the version in pyproject.toml. Release notes come from installer/notes/<tag>.md.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  UV_VERSION: "0.12.22"
+  # FFmpeg is not shipped in the installer: it is downloaded at install time from this pinned
+  # build, checked against the checksum recorded here at build time.
+  FFMPEG_VERSION: "9.0.2"
+  # Inno Setup 7 changed the script language; this installer is written for 6.
+  INNO_VERSION: "6.7.1"
+  INNO_TAG: "is-6_7_1"
+
+jobs:
+  test:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: ${{ env.UV_VERSION }}
+      - name: FFmpeg for the tests (the same build users get)
+        shell: pwsh
+        run: |
+          gh release download $env:FFMPEG_VERSION --repo GyanD/codexffmpeg --pattern "ffmpeg-$env:FFMPEG_VERSION-essentials_build.zip" --dir $env:RUNNER_TEMP
+          & "$env:SystemRoot\System32\tar.exe" -xf "$env:RUNNER_TEMP\ffmpeg-$env:FFMPEG_VERSION-essentials_build.zip" -C $env:RUNNER_TEMP
+          "$env:RUNNER_TEMP\ffmpeg-$env:FFMPEG_VERSION-essentials_build\bin" | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - run: uv sync --locked
+      - run: uv run --no-sync pytest -q -p no:warnings
+
+  installer:
+    needs: test
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: ${{ env.UV_VERSION }}
+      - name: The tag is the version
+        id: version
+        shell: pwsh
+        run: |
+          $version = (uv run --no-project python -c "import tomllib; print(tomllib.load(open('pyproject.toml','rb'))['project']['version'])").Trim()
+          if ($env:GITHUB_REF_TYPE -eq "tag" -and $env:GITHUB_REF_NAME -ne "v$version") {
+            throw "tag $env:GITHUB_REF_NAME does not match version $version in pyproject.toml"
+          }
+          "version=$version" | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
+      - name: Wheel
+        id: wheel
+        shell: pwsh
+        run: |
+          uv build --wheel -o dist
+          "name=$((Get-ChildItem dist\*.whl).Name)" | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
+      - name: uv, FFmpeg checksum, language file
+        id: parts
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force installer\build | Out-Null
+          gh release download $env:UV_VERSION --repo astral-sh/uv --pattern "uv-x86_64-pc-windows-msvc.zip" --dir $env:RUNNER_TEMP
+          & "$env:SystemRoot\System32\tar.exe" -xf "$env:RUNNER_TEMP\uv-x86_64-pc-windows-msvc.zip" -C installer\build uv.exe
+          $zip = "ffmpeg-$env:FFMPEG_VERSION-essentials_build.zip"
+          gh release download $env:FFMPEG_VERSION --repo GyanD/codexffmpeg --pattern $zip --dir $env:RUNNER_TEMP
+          $sha = (Get-FileHash "$env:RUNNER_TEMP\$zip" -Algorithm SHA256).Hash.ToLower()
+          $url = "https://github.com/GyanD/codexffmpeg/releases/download/$env:FFMPEG_VERSION/$zip"
+          (Get-Content installer\FFMPEG-NOTICE.txt -Raw).Replace("{VERSION}", $env:FFMPEG_VERSION).Replace("{URL}", $url).Replace("{SHA256}", $sha) |
+            Out-File -Encoding utf8 installer\build\FFMPEG-NOTICE.txt
+          Invoke-WebRequest "https://raw.githubusercontent.com/jrsoftware/issrc/$env:INNO_TAG/Files/Languages/Unofficial/ChineseTraditional.isl" -OutFile installer\build\ChineseTraditional.isl
+          "sha=$sha" | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
+          "url=$url" | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - name: Inno Setup
+        run: choco install innosetup --version ${{ env.INNO_VERSION }} --no-progress -y
+      - name: Installer
+        shell: pwsh
+        run: |
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" `
+            "/DAppVersion=${{ steps.version.outputs.version }}" `
+            "/DWheel=${{ steps.wheel.outputs.name }}" `
+            "/DFfmpegUrl=${{ steps.parts.outputs.url }}" `
+            "/DFfmpegSha256=${{ steps.parts.outputs.sha }}" `
+            "/DFfmpegFolder=ffmpeg-${{ env.FFMPEG_VERSION }}-essentials_build" `
+            installer\clip-mcp.iss
+          if ($LASTEXITCODE -ne 0) { throw "ISCC failed" }
+      - uses: actions/upload-artifact@v4
+        with:
+          name: clip-mcp-setup-${{ steps.version.outputs.version }}
+          path: dist/clip-mcp-setup-*.exe
+      - name: Release
+        if: github.ref_type == 'tag'
+        shell: pwsh
+        run: |
+          gh release create $env:GITHUB_REF_NAME (Get-ChildItem dist\clip-mcp-setup-*.exe).FullName `
+            --title "clip-mcp $env:GITHUB_REF_NAME" --notes-file "installer\notes\$env:GITHUB_REF_NAME.md"
+        env:
+          GH_TOKEN: ${{ github.token }}

@@ -356,6 +356,31 @@ async function route() {
   }
 }
 
+// A newer version, offered in the sidebar; nothing is downloaded until the user chooses to update.
+async function checkForUpdate() {
+  let found;
+  try { found = await api("/api/update"); } catch { return; }
+  if (!found.available) return;
+  const item = $("#update");
+  item.innerHTML = `${icon("download")}<span>${esc(T.update.badge(found.version))}</span>`;
+  item.hidden = false;
+  item.onclick = () => modal(`<h2>${esc(T.update.title(found.version))}</h2><p>${esc(T.update.body)}</p>
+    ${found.notes ? `<div class="field"><label>${esc(T.update.notes)}</label><div class="notes-box">${esc(found.notes)}</div></div>` : ""}
+    <div class="foot"><button class="btn" data-later>${esc(T.update.later)}</button><button class="btn primary" data-now>${esc(T.update.now)}</button></div>`,
+  (box, close) => {
+    $("[data-later]", box).onclick = close;
+    $("[data-now]", box).onclick = async () => {
+      try {
+        await api("/api/update", {});
+        close();
+        document.body.innerHTML = `<div class="updating"><span class="spinner"></span>${esc(T.update.installing)}</div>`;
+      } catch (error) {
+        toast(error.message === "busy" ? T.update.busy : error.message, "error");
+      }
+    };
+  });
+}
+
 function start() {
   document.title = T.appName;
   $("#brand-name").textContent = T.appName;
@@ -376,6 +401,8 @@ function start() {
     depth = 0;
     setTimeout(() => { drop.hidden = true; }, 2600);
   });
+
+  checkForUpdate();
 
   // The server stops once the window stops checking in.
   setInterval(() => fetch("/api/ping").catch(() => {}), 10000);

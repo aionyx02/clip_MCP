@@ -1,0 +1,17 @@
+FFmpeg
+
+clip-mcp uses FFmpeg to read, cut and render video. The installer does not carry FFmpeg: it
+downloads the build below during installation, checks it against its SHA-256, and keeps
+ffmpeg.exe and ffprobe.exe in this folder for clip-mcp alone. Nothing is added to the PATH.
+
+  Version:  {VERSION} ("essentials" build by gyan.dev)
+  From:     {URL}
+  SHA-256:  {SHA256}
+
+This build of FFmpeg is licensed under the GNU General Public License, version 3
+(it includes libx264). Its source code is at
+  https://github.com/FFmpeg/FFmpeg/tree/n{VERSION}
+and how it was built is described at
+  https://www.gyan.dev/ffmpeg/builds/
+
+FFmpeg is a trademark of Fabrice Bellard, originator of the FFmpeg project.
