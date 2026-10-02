@@ -113,15 +113,39 @@
 git clone https://github.com/aionyx02/clip_MCP.git
 cd clip_MCP
 uv tool install --editable .   # 裝成全域指令 clip-mcp，有自己的環境
-clip-mcp setup                 # 註冊到這台電腦上找得到的 AI 客戶端
+clip-mcp setup                 # 選工作區，並逐一詢問要連接哪些 AI 客戶端
 clip-mcp check                 # 確認：用哪個工作區、FFmpeg 在不在、各客戶端註冊了沒
 ```
 
-`setup` 會自動註冊 **Claude Code**（使用者層級，任何資料夾都能用）、**opencode**
-（`~/.config/opencode/opencode.json[c]`）、**Codex CLI**（`~/.codex/config.toml`）
-與 **Claude Desktop**，沒裝的就跳過。改之前都會留一份 `.bak`；先看會改什麼用
-`clip-mcp setup --dry-run`，只註冊某一個用 `--client opencode`。重跑是安全的，沒變就不動。
-註冊完重開客戶端即可，在哪個資料夾開都一樣。
+`setup` 不會自動改任何程式的設定：它找出這台電腦裝了哪些客戶端，逐一問你要不要連接（預設是不要）。
+也可以直接指定：`--client gemini-cli`（可重複）只連接指定的，`--all` 連接全部已安裝的，
+`--shortcuts` 加上編輯器的桌面與開始選單捷徑。沒辦法詢問的時候（例如被腳本呼叫）就什麼都不連。
+連接後在編輯器的「連接 AI」頁也能逐一中斷連接。支援的客戶端：
+
+| 客戶端 | 寫到哪裡 |
+|---|---|
+| **Claude Code** | 使用者層級（`claude mcp add --scope user`），任何資料夾都能用 |
+| **Claude Desktop** | `%APPDATA%\Claude\claude_desktop_config.json` |
+| **Codex／ChatGPT 桌面版** | `~/.codex/config.toml`；ChatGPT 桌面版讀同一份，但要在 **Codex 分頁**用，一般聊天模式不能用本機 MCP |
+| **opencode** | `~/.config/opencode/opencode.json[c]` |
+| **Gemini CLI** | `~/.gemini/settings.json` |
+| **LM Studio** | `~/.lmstudio/mcp.json`，存檔後自動載入 |
+| **Cherry Studio** | 不寫檔：它把設定放在自己的資料庫裡，只接受一鍵安裝連結。到編輯器的「連接 AI」頁按「加入 Cherry Studio」，在 Cherry Studio 按允許，再到 MCP 設定把 clip-mcp 打開（`clip-mcp setup` 也會印出這個連結） |
+
+改之前會先備份成同一個資料夾裡的 `<檔名>.clip-mcp.bak`（只留一份，下次改動時覆蓋）；先看會改什麼用
+`clip-mcp setup --dry-run`。重跑是安全的，沒變就不動。
+LM Studio 與 Cherry Studio 要選支援工具呼叫（tool use）的模型；電腦上跑的小模型判斷剪輯會弱很多。
+
+### 移除
+
+```bash
+clip-mcp uninstall             # 從每個 AI 客戶端移除 clip-mcp、刪掉捷徑與它自己的設定檔
+uv tool uninstall clip-mcp     # 最後移除程式本身
+```
+
+`uninstall` 只拿掉 clip-mcp 自己加的那一項，其他設定都不動；Cherry Studio 例外，它的設定在自己的資料庫裡，
+要到 Cherry Studio 的設定 → MCP 伺服器自己刪。工作區（專案、分析、模型）會先問你，要刪的話丟到資源回收筒
+（`--delete-data` 不問直接丟）；輸出到「影片\clip-mcp」的成品永遠不碰。先看會改什麼用 `--dry-run`。
 
 `--editable` 表示指令直接跑這份原始碼：`git pull` 之後重開客戶端就生效；
 相依套件有變時再跑一次 `uv tool install --editable . --reinstall`。
@@ -139,8 +163,9 @@ clip-mcp check                 # 確認：用哪個工作區、FFmpeg 在不在�
 { "mcpServers": { "clip-mcp": { "command": "C:\\Users\\you\\.local\\bin\\clip-mcp.exe", "args": [] } } }
 ```
 
-ChatGPT（網頁與 App）只接受透過 HTTPS 連線的遠端 MCP 伺服器，無法啟動你電腦上的程式；
-而這個伺服器能讀寫本機檔案，不適合直接開到網路上。要用 OpenAI 的模型請用 Codex CLI。
+ChatGPT 的一般聊天（網頁與 App）只接受透過 HTTPS 連線的遠端 MCP 伺服器，無法啟動你電腦上的程式；
+而這個伺服器能讀寫本機檔案，不適合直接開到網路上。要用 OpenAI 的模型，請用 ChatGPT 桌面版的
+Codex 分頁或 Codex CLI，兩者都讀上面那份 `~/.codex/config.toml`。
 
 除錯：`uv run fastmcp dev fastmcp.json` 開 MCP Inspector。
 

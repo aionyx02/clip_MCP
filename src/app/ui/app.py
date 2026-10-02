@@ -523,23 +523,48 @@ async def open_folder(request: Request) -> Response:
     os.startfile(path)
     return JSONResponse({"opened": path})
 
-def _clients(dry_run: bool) -> List[dict]:
-    """Where each AI client stands, or registering with the ones that are installed."""
-    command = clients.server_command()
+def _clients() -> List[dict]:
+    """Where each AI client stands. Only looks: nothing is written to find out."""
     states = []
-    for key, result in zip(clients.CLIENTS, clients.register(command, dry_run=dry_run)):
+    for key, result in zip(clients.CLIENTS, clients.register(clients.server_command(), dry_run=True)):
         states.append({
             "key": key, "name": result.client,
-            "state": {"unchanged": "connected", "registered": "connected", "would register": "not_connected",
-                      "skipped": "not_installed"}.get(result.status, "failed"),
-            "detail": result.detail,
+            "state": {"unchanged": "connected", "would register": "not_connected", "skipped": "not_installed",
+                      "confirm": "confirm"}.get(result.status, "failed"),
+            # The file a change would touch, to say so before asking; a link is the server's to open, never the page's.
+            "detail": "" if result.status == "confirm" else result.detail,
         })
     return states
 
 async def ai_clients(request: Request) -> Response:
-    """Which AI clients can use clip-mcp; POST connects every installed one."""
-    dry_run = request.method != "POST"
-    return JSONResponse({"clients": await run_in_threadpool(_clients, dry_run)})
+    """Which AI clients can use clip-mcp; POST connects or disconnects the one the user chose.
+
+    One client per request, and only the one named: changing another
+    program's settings is something the user does, client by client.
+    """
+    if request.method == "POST":
+        body = await request.json()
+        key = body.get("key")
+        if key not in clients.CLIENTS or key == "cherry-studio":
+            return _error("that client is not connected from here", 404)
+        if body.get("action") == "disconnect":
+            result = (await run_in_threadpool(clients.unregister, [key]))[0]
+        else:
+            result = (await run_in_threadpool(clients.register, clients.server_command(), [key]))[0]
+        if result.status == "failed":
+            return _error(result.detail)
+    return JSONResponse({"clients": await run_in_threadpool(_clients)})
+
+async def open_client(request: Request) -> Response:
+    """Offer this server to a client that only takes one through a link it asks the user about."""
+    body = await request.json()
+    if body.get("key") != "cherry-studio":
+        return _error("that client is connected from here, not by a link", 404)
+    result = clients.register_cherry_studio(clients.server_command(), dry_run=True)
+    if result.status != "confirm":
+        return _error("Cherry Studio is not installed", 404)
+    os.startfile(result.detail)
+    return JSONResponse({"opened": True})
 
 async def ping(request: Request) -> Response:
     """Say this is the editor, and for which workspace, so a second start opens this one instead of another.
@@ -603,6 +628,7 @@ def create_app() -> Starlette:
         Route("/api/storage", storage, methods=["GET", "POST"]),
         Route("/api/open-folder", open_folder, methods=["POST"]),
         Route("/api/clients", ai_clients, methods=["GET", "POST"]),
+        Route("/api/clients/open", open_client, methods=["POST"]),
         Route("/api/ping", ping),
         Route("/api/jobs/{job_id}", job),
         Route("/media/{asset_id}", media),

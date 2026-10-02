@@ -236,3 +236,29 @@ def test_a_finished_export_is_saved_where_the_user_keeps_videos(client: TestClie
 
 def test_only_a_finished_render_can_be_opened(client: TestClient) -> None:
     assert client.post("/api/reveal", json={"job_id": "nothing"}).status_code == 404
+
+
+def test_only_cherry_studio_is_connected_by_opening_a_link(client: TestClient, monkeypatch) -> None:
+    opened = []
+    monkeypatch.setattr(os, "startfile", opened.append, raising=False)
+    assert client.post("/api/clients/open", json={"key": "codex"}).status_code == 404
+    monkeypatch.setattr(editor.clients, "register_cherry_studio",
+                        lambda command, dry_run: editor.clients.Registration("Cherry Studio", "confirm", "cherrystudio://x"))
+    assert client.post("/api/clients/open", json={"key": "cherry-studio"}).status_code == 200
+    assert opened == ["cherrystudio://x"]
+
+
+def test_the_page_connects_and_disconnects_only_the_client_it_names(client: TestClient, monkeypatch) -> None:
+    done = []
+    monkeypatch.setattr(editor.clients, "register",
+                        lambda command, only=None, dry_run=False: done.append(("connect", only, dry_run))
+                        or [editor.clients.Registration("x", "unchanged", "")] * len(only or editor.clients.CLIENTS))
+    monkeypatch.setattr(editor.clients, "unregister",
+                        lambda only=None, dry_run=False: done.append(("disconnect", only, dry_run))
+                        or [editor.clients.Registration("x", "removed", "")])
+    assert client.post("/api/clients", json={}).status_code == 404
+    assert client.post("/api/clients", json={"key": "cherry-studio"}).status_code == 404
+    client.post("/api/clients", json={"key": "gemini-cli", "action": "connect"})
+    client.post("/api/clients", json={"key": "codex", "action": "disconnect"})
+    writes = [entry for entry in done if not entry[2]]
+    assert writes == [("connect", ["gemini-cli"], False), ("disconnect", ["codex"], False)]

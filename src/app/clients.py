@@ -8,18 +8,25 @@ about where the workspace is goes into a client — the server looks that up
 itself (`app.workspace`) — so moving the workspace never means registering
 again.
 
-Every file is backed up before it is changed, and a dry run says what would
-change without changing it.
+Nothing here runs on its own: every change to a client's settings is one the
+user asked for, client by client — from `clip-mcp setup`, which asks, or from
+the editor's 連接 AI page. What is added can be taken out again the same way,
+and `clip-mcp uninstall` takes it out of every client at once.
+
+A file is backed up before it is changed, into one `.clip-mcp.bak` beside it
+that each change replaces, so the client's folder does not fill with copies.
+A dry run says what would change without changing it.
 """
 
+import base64
 import json
 import os
 import re
 import shutil
 import subprocess
 import sys
+import urllib.parse
 from dataclasses import dataclass
-from datetime import datetime
 from pathlib import Path
 from typing import Callable, Dict, List, Optional
 
@@ -34,7 +41,11 @@ class Registration:
 
     Attributes:
         client: The client's name.
-        status: `registered`, `unchanged`, `would register`, `skipped` or `failed`.
+        status: For registering, `registered`, `unchanged`, `would register`,
+            `skipped` (not installed), `failed`, or `confirm` for a client
+            that only takes a server through a link the user approves in the
+            client itself. For removing, `removed`, `absent`, `would remove`,
+            `failed`, or `manual` for a client only the user can take it out of.
         detail: Where, or why not.
     """
 
@@ -77,14 +88,16 @@ def in_development_environment(command: List[str]) -> bool:
     return any(part == ".venv" for part in Path(command[0]).parts)
 
 def _backup(path: Path) -> None:
-    """Copy a file aside before changing it.
+    """Copy a file aside before changing it, over the copy the last change left.
+
+    One copy, not one per change: these are other programs' folders, and a
+    pile of dated copies in them is clutter nobody asked for.
 
     Args:
         path: The file.
     """
     if path.exists():
-        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-        shutil.copy2(path, path.with_name(f"{path.name}.{stamp}.bak"))
+        shutil.copy2(path, path.with_name(f"{path.name}.clip-mcp.bak"))
 
 def _strip_jsonc(text: str) -> str:
     """Turn JSON with comments and trailing commas into plain JSON.
@@ -229,11 +242,36 @@ def _toml_section(command: List[str]) -> str:
         f"args = {json.dumps(command[1:])}\n"
     )
 
-def register_codex(command: List[str], dry_run: bool) -> Registration:
-    """Register with Codex CLI, in `~/.codex/config.toml`.
+def _chatgpt_desktop_installed() -> bool:
+    """Whether the ChatGPT desktop app is installed, which keeps its servers where Codex does.
 
-    Only this server's own section is touched; the rest of the file is kept
-    as it was written, comments and all.
+    It comes from the Microsoft Store, so it has a package folder rather than
+    an install folder; its name is matched loosely so a renamed package is
+    still found.
+    """
+    packages = Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local") / "Packages"
+    return sys.platform == "win32" and packages.is_dir() and any(packages.glob("OpenAI.ChatGPT*"))
+
+def _codex_sections() -> "re.Pattern[str]":
+    """Match this server's sections of a Codex config, under its name now or an old one.
+
+    A section runs from its header to the next line that starts a header, or
+    the end of the file, and takes its own sub-tables (`.env`) with it. By
+    line, not by bracket: the `args` array holds brackets of its own.
+    """
+    names = "|".join(re.escape(name) for name in (SERVER_NAME, *OLD_NAMES))
+    return re.compile(
+        rf'^\[mcp_servers\.(?:{names}|"(?:{names})")(?:\.[^\]\n]+)?\][^\n]*\n?(?:(?!\[).*\n?)*',
+        re.MULTILINE,
+    )
+
+def register_codex(command: List[str], dry_run: bool) -> Registration:
+    """Register with Codex, in `~/.codex/config.toml`.
+
+    The ChatGPT desktop app reads the same file — its Codex tab, not its
+    ordinary chat, which only takes servers on the internet — so this one
+    entry serves both. Only this server's own section is touched; the rest of
+    the file is kept as it was written, comments and all.
 
     Args:
         command: The server command.
@@ -243,19 +281,12 @@ def register_codex(command: List[str], dry_run: bool) -> Registration:
         What happened.
     """
     folder = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex")
-    if not folder.is_dir() and shutil.which("codex") is None:
+    if not folder.is_dir() and shutil.which("codex") is None and not _chatgpt_desktop_installed():
         return Registration("Codex", "skipped", "not installed")
     path = folder / "config.toml"
     text = path.read_text(encoding="utf-8") if path.exists() else ""
     section = _toml_section(command)
-    names = "|".join(re.escape(name) for name in (SERVER_NAME, *OLD_NAMES))
-    # A section runs from its header to the next line that starts a header, or the end of
-    # the file, and takes its own sub-tables (`.env`) with it. By line, not by bracket: the
-    # `args` array holds brackets of its own.
-    pattern = re.compile(
-        rf'^\[mcp_servers\.(?:{names}|"(?:{names})")(?:\.[^\]\n]+)?\][^\n]*\n?(?:(?!\[).*\n?)*',
-        re.MULTILINE,
-    )
+    pattern = _codex_sections()
     found = pattern.findall(text)
     if found == [section] or [part.strip() for part in found] == [section.strip()]:
         return Registration("Codex", "unchanged", str(path))
@@ -270,6 +301,95 @@ def register_codex(command: List[str], dry_run: bool) -> Registration:
     except OSError as error:
         return Registration("Codex", "failed", f"{path}: {error}")
     return Registration("Codex", "registered", str(path))
+
+def _mcp_servers_file(name: str, folder: Path, file: str, command: List[str], dry_run: bool) -> Registration:
+    """Register with a client that keeps its servers under `mcpServers` in a JSON file of its own.
+
+    Args:
+        name: The client's name.
+        folder: Its settings folder; the client counts as installed when it exists.
+        file: The settings file in that folder.
+        command: The server command.
+        dry_run: Say what would change without changing it.
+
+    Returns:
+        What happened.
+    """
+    path = folder / file
+    entry = {"command": command[0], "args": command[1:]}
+    try:
+        status = _update_json(path, lambda settings: _replace_entry(settings.setdefault("mcpServers", {}), entry),
+                              dry_run)
+    except (OSError, ValueError) as error:
+        return Registration(name, "failed", f"{path}: {error}")
+    return Registration(name, status, str(path))
+
+def register_gemini(command: List[str], dry_run: bool) -> Registration:
+    """Register with Gemini CLI, in `~/.gemini/settings.json`, for this user in every folder.
+
+    Args:
+        command: The server command.
+        dry_run: Say what would change without changing it.
+
+    Returns:
+        What happened.
+    """
+    folder = Path.home() / ".gemini"
+    if not folder.is_dir() and shutil.which("gemini") is None:
+        return Registration("Gemini CLI", "skipped", "not installed")
+    return _mcp_servers_file("Gemini CLI", folder, "settings.json", command, dry_run)
+
+def register_lm_studio(command: List[str], dry_run: bool) -> Registration:
+    """Register with LM Studio, in `~/.lmstudio/mcp.json`; it loads the file again as soon as it changes.
+
+    Args:
+        command: The server command.
+        dry_run: Say what would change without changing it.
+
+    Returns:
+        What happened.
+    """
+    folder = Path.home() / ".lmstudio"
+    if not folder.is_dir():
+        return Registration("LM Studio", "skipped", "not installed")
+    return _mcp_servers_file("LM Studio", folder, "mcp.json", command, dry_run)
+
+def cherry_studio_link(command: List[str]) -> str:
+    """The link that offers this server to Cherry Studio, which asks the user before adding it.
+
+    Cherry Studio keeps its servers in its own database rather than a file,
+    so nothing here can write them; it takes them through this link instead,
+    adds them switched off, and the user switches them on.
+
+    Args:
+        command: The server command.
+
+    Returns:
+        A `cherrystudio://` link.
+    """
+    payload = {"mcpServers": {SERVER_NAME: {"command": command[0], "args": command[1:]}}}
+    encoded = base64.b64encode(json.dumps(payload, ensure_ascii=False).encode("utf-8")).decode("ascii")
+    return f"cherrystudio://mcp/install?servers={urllib.parse.quote(encoded, safe='')}"
+
+def register_cherry_studio(command: List[str], dry_run: bool) -> Registration:
+    """Say whether Cherry Studio is here, and give the link that adds this server to it.
+
+    Args:
+        command: The server command.
+        dry_run: Unused: nothing is written either way.
+
+    Returns:
+        `skipped` when it is not installed; otherwise `confirm`, with the link.
+    """
+    if sys.platform == "win32":
+        folder = Path(os.environ.get("APPDATA") or Path.home() / "AppData" / "Roaming") / "CherryStudio"
+    elif sys.platform == "darwin":
+        folder = Path.home() / "Library" / "Application Support" / "CherryStudio"
+    else:
+        folder = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "CherryStudio"
+    if not folder.is_dir():
+        return Registration("Cherry Studio", "skipped", "not installed")
+    return Registration("Cherry Studio", "confirm", cherry_studio_link(command))
 
 def register_claude_code(command: List[str], dry_run: bool) -> Registration:
     """Register with Claude Code, for this user in every folder.
@@ -300,11 +420,148 @@ def register_claude_code(command: List[str], dry_run: bool) -> Registration:
         return Registration("Claude Code", "failed", (added.stderr or added.stdout).strip()[-300:])
     return Registration("Claude Code", "registered", "user scope")
 
+# ----------------------------------------------------------------- taking it out again
+
+def _drop_entry(servers: dict) -> bool:
+    """Take this server, under its name now or an old one, out of a client's table of servers.
+
+    Args:
+        servers: The table, edited in place.
+
+    Returns:
+        Whether anything was there.
+    """
+    found = [name for name in (SERVER_NAME, *OLD_NAMES) if name in servers]
+    for name in found:
+        del servers[name]
+    return bool(found)
+
+def _remove_from_json(name: str, path: Path, table: str, dry_run: bool, comments: bool = False) -> Registration:
+    """Take this server out of a client's JSON settings, leaving everything else as it was.
+
+    Args:
+        name: The client's name.
+        path: Its settings file; a missing one means there is nothing to take out.
+        table: The key its servers are under.
+        dry_run: Say what would change without changing it.
+        comments: The file may hold comments.
+
+    Returns:
+        What happened.
+    """
+    if not path.exists():
+        return Registration(name, "absent", str(path))
+    try:
+        status = _update_json(path, lambda settings: isinstance(settings.get(table), dict) and _drop_entry(settings[table]),
+                              dry_run, comments=comments)
+    except (OSError, ValueError) as error:
+        return Registration(name, "failed", f"{path}: {error}")
+    return Registration(name, {"registered": "removed", "unchanged": "absent",
+                               "would register": "would remove"}[status], str(path))
+
+def unregister_claude_desktop(dry_run: bool) -> Registration:
+    """Take this server out of the Claude desktop app's settings."""
+    if sys.platform == "win32":
+        folder = Path(os.environ.get("APPDATA") or Path.home() / "AppData" / "Roaming") / "Claude"
+    elif sys.platform == "darwin":
+        folder = Path.home() / "Library" / "Application Support" / "Claude"
+    else:
+        folder = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "Claude"
+    return _remove_from_json("Claude Desktop", folder / "claude_desktop_config.json", "mcpServers", dry_run)
+
+def unregister_opencode(dry_run: bool) -> Registration:
+    """Take this server out of opencode's global config."""
+    folder = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "opencode"
+    path = next((folder / name for name in ("opencode.jsonc", "opencode.json") if (folder / name).exists()),
+                folder / "opencode.json")
+    return _remove_from_json("opencode", path, "mcp", dry_run, comments=path.suffix == ".jsonc")
+
+def unregister_gemini(dry_run: bool) -> Registration:
+    """Take this server out of Gemini CLI's settings."""
+    return _remove_from_json("Gemini CLI", Path.home() / ".gemini" / "settings.json", "mcpServers", dry_run)
+
+def unregister_lm_studio(dry_run: bool) -> Registration:
+    """Take this server out of LM Studio's MCP list."""
+    return _remove_from_json("LM Studio", Path.home() / ".lmstudio" / "mcp.json", "mcpServers", dry_run)
+
+def unregister_codex(dry_run: bool) -> Registration:
+    """Take this server's section out of the Codex config, which the ChatGPT desktop app shares."""
+    path = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex") / "config.toml"
+    if not path.exists():
+        return Registration("Codex", "absent", str(path))
+    text = path.read_text(encoding="utf-8")
+    kept = _codex_sections().sub("", text)
+    if kept == text:
+        return Registration("Codex", "absent", str(path))
+    if dry_run:
+        return Registration("Codex", "would remove", str(path))
+    try:
+        _backup(path)
+        path.write_text(kept.rstrip() + "\n" if kept.strip() else "", encoding="utf-8")
+    except OSError as error:
+        return Registration("Codex", "failed", f"{path}: {error}")
+    return Registration("Codex", "removed", str(path))
+
+def unregister_claude_code(dry_run: bool) -> Registration:
+    """Take this server out of Claude Code, through its own command."""
+    claude = shutil.which("claude")
+    if claude is None:
+        return Registration("Claude Code", "absent", "not installed")
+    listed = subprocess.run([claude, "mcp", "get", SERVER_NAME], capture_output=True, text=True,
+                            encoding="utf-8", errors="replace", timeout=60)
+    if listed.returncode != 0:
+        return Registration("Claude Code", "absent", "user scope")
+    if dry_run:
+        return Registration("Claude Code", "would remove", "user scope")
+    removed = subprocess.run([claude, "mcp", "remove", "--scope", "user", SERVER_NAME],
+                             capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60)
+    if removed.returncode != 0:
+        return Registration("Claude Code", "failed", (removed.stderr or removed.stdout).strip()[-300:])
+    return Registration("Claude Code", "removed", "user scope")
+
+def unregister_cherry_studio(dry_run: bool) -> Registration:
+    """Say how to take this server out of Cherry Studio, which keeps it where nothing else can reach."""
+    found = register_cherry_studio(["clip-mcp"], dry_run=True)
+    if found.status == "skipped":
+        return Registration("Cherry Studio", "absent", "not installed")
+    return Registration("Cherry Studio", "manual", "remove clip-mcp in Cherry Studio: Settings → MCP Servers")
+
+UNREGISTER: Dict[str, Callable[[bool], Registration]] = {
+    "claude-code": unregister_claude_code,
+    "claude-desktop": unregister_claude_desktop,
+    "codex": unregister_codex,
+    "opencode": unregister_opencode,
+    "gemini-cli": unregister_gemini,
+    "lm-studio": unregister_lm_studio,
+    "cherry-studio": unregister_cherry_studio,
+}
+
+def unregister(only: Optional[List[str]] = None, dry_run: bool = False) -> List[Registration]:
+    """Take this server out of every client, or the ones named.
+
+    Args:
+        only: Client keys; all of them when not given.
+        dry_run: Say what would change without changing anything.
+
+    Returns:
+        One result per client.
+    """
+    results = []
+    for key in only or list(UNREGISTER):
+        try:
+            results.append(UNREGISTER[key](dry_run))
+        except (OSError, subprocess.SubprocessError) as error:
+            results.append(Registration(key, "failed", str(error)))
+    return results
+
 CLIENTS: Dict[str, Callable[[List[str], bool], Registration]] = {
     "claude-code": register_claude_code,
     "claude-desktop": register_claude_desktop,
     "codex": register_codex,
     "opencode": register_opencode,
+    "gemini-cli": register_gemini,
+    "lm-studio": register_lm_studio,
+    "cherry-studio": register_cherry_studio,
 }
 
 def register(command: List[str], only: Optional[List[str]] = None, dry_run: bool = False) -> List[Registration]:

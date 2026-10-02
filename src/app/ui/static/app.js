@@ -204,8 +204,7 @@ async function fillMedia(page) {
 
 async function aiPage(page) {
   page.innerHTML = head(T.ai.title, T.ai.subtitle,
-    `<button class="btn" data-refresh>${icon("refresh")}${esc(T.ai.refresh)}</button>
-     <button class="btn primary" data-connect>${icon("link")}${esc(T.ai.connectAll)}</button>`)
+    `<button class="btn" data-refresh>${icon("refresh")}${esc(T.ai.refresh)}</button>`)
     + `<div data-clients class="list">${'<div class="row skeleton" style="height:64px"></div>'.repeat(3)}</div>
        <div class="section-title">${esc(T.ai.examplesTitle)}</div>
        <div class="list">${T.ai.examples.map((text, index) => `<div class="prompt"><span>${esc(text)}</span>
@@ -215,25 +214,55 @@ async function aiPage(page) {
   });
   const show = (clients) => {
     const installed = clients.filter((client) => client.state !== "not_installed");
-    const words = { connected: T.ai.connected, not_connected: T.ai.notConnected, not_installed: T.ai.notInstalled, failed: T.ai.failed };
+    const words = { connected: T.ai.connected, not_connected: T.ai.notConnected, not_installed: T.ai.notInstalled,
+      failed: T.ai.failed, confirm: T.ai.confirm };
     const none = installed.length ? "" : `<div class="callout">${icon("info")}<div><strong style="color:var(--text)">${esc(T.ai.noneTitle)}</strong><br>${esc(T.ai.noneBody)}
       <div style="margin-top:10px"><a class="btn primary small" href="https://claude.ai/download" target="_blank" rel="noopener">${icon("download", 16)}${esc(T.ai.download)}</a></div></div></div>`;
-    $("[data-clients]", page).innerHTML = none + clients.map((client) => `<div class="row">${icon("sparkle")}
-      <div class="grow"><strong>${esc(client.name)}</strong><div class="sub" title="${esc(client.detail)}">${esc(client.state === "failed" ? client.detail : "")}</div></div>
-      <span class="pill ${client.state}">${esc(words[client.state])}</span></div>`).join("")
+    // Installed ones first: they are the ones there is something to do about.
+    const ordered = [...clients].sort((a, b) => (a.state === "not_installed") - (b.state === "not_installed"));
+    $("[data-clients]", page).innerHTML = none + ordered.map((client) => {
+      const note = client.state !== "not_installed" ? (T.ai.notes[client.key] || "") : "";
+      const sub = client.state === "failed" ? client.detail : note;
+      const action = client.state === "confirm"
+        ? `<button class="btn small" data-open-client="${esc(client.key)}">${icon("open", 15)}${esc(T.ai.addToCherry)}</button>`
+        : client.state === "connected"
+          ? `<button class="btn small" data-client="${esc(client.key)}" data-action="disconnect">${esc(T.ai.disconnect)}</button>`
+          : client.state === "not_connected" || client.state === "failed"
+            ? `<button class="btn small primary" data-client="${esc(client.key)}" data-action="connect">${icon("link", 15)}${esc(T.ai.connect)}</button>`
+            : "";
+      return `<div class="row">${icon("sparkle")}
+        <div class="grow"><strong>${esc(T.ai.names[client.key] || client.name)}</strong><div class="sub" title="${esc(sub)}">${esc(sub)}</div></div>
+        ${action}<span class="pill ${client.state}">${esc(words[client.state])}</span></div>`;
+    }).join("")
       + (installed.length ? `<div class="callout" style="margin:6px 0 0">${icon("info")}<span>${esc(T.ai.restartHint)}</span></div>` : "");
-    $("[data-connect]", page).disabled = !installed.some((client) => client.state === "not_connected" || client.state === "failed");
+    // One program at a time, and only after the user has read which file changes.
+    page.querySelectorAll("[data-client]").forEach((button) => {
+      button.onclick = async () => {
+        const client = clients.find((entry) => entry.key === button.dataset.client);
+        const name = T.ai.names[client.key] || client.name;
+        const where = /[\\/]/.test(client.detail) ? client.detail : T.ai.itsSettings;
+        const connecting = button.dataset.action === "connect";
+        const agreed = await confirmBox(connecting ? T.ai.connectTitle(name) : T.ai.disconnectTitle(name),
+          connecting ? T.ai.connectBody(where) : T.ai.disconnectBody(where),
+          connecting ? T.ai.connect : T.ai.disconnect, !connecting);
+        if (!agreed) return;
+        try {
+          show((await api("/api/clients", { key: client.key, action: button.dataset.action })).clients);
+          toast(connecting ? T.ai.connectedToast(name) : T.ai.disconnectedToast(name));
+        } catch (error) { toast(error.message, "error"); }
+      };
+    });
+    page.querySelectorAll("[data-open-client]").forEach((button) => {
+      button.onclick = async () => {
+        try {
+          await api("/api/clients/open", { key: button.dataset.openClient });
+          toast(T.ai.cherryOpened);
+        } catch (error) { toast(error.message, "error"); }
+      };
+    });
   };
   const load = async () => show((await api("/api/clients")).clients);
   $("[data-refresh]", page).onclick = load;
-  $("[data-connect]", page).onclick = async (event) => {
-    const button = event.currentTarget;
-    button.disabled = true;
-    button.innerHTML = `<span class="spinner"></span>${esc(T.ai.connecting)}`;
-    try { show((await api("/api/clients", {})).clients); }
-    catch (error) { toast(error.message, "error"); }
-    finally { button.innerHTML = `${icon("link")}${esc(T.ai.connectAll)}`; }
-  };
   await load();
 }
 

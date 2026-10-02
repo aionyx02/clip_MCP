@@ -139,13 +139,14 @@ a.card:hover, button.card:hover { border-color: var(--line-2); background: var(-
 .row { display: flex; align-items: center; gap: 12px; padding: 10px 12px; background: var(--panel); }
 .row svg { width: 16px; height: 16px; color: var(--muted); }
 .row .grow { flex: 1; min-width: 0; }
-.row .sub { color: var(--faint); font-size: 11.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.row .sub { color: var(--faint); font-size: 11.5px; }
 .pill { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; white-space: nowrap; color: var(--muted); }
 .pill::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: currentColor; }
 .pill.connected { color: var(--ok); }
 .pill.not_connected { color: var(--warn); }
 .pill.not_installed { color: var(--faint); }
 .pill.failed { color: var(--danger); }
+.pill.confirm { color: var(--accent); }
 .section-title { margin: 24px 0 8px; font-size: 11.5px; color: var(--muted); font-weight: 700; letter-spacing: .04em; }
 
 /* storage */
