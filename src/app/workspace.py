@@ -142,6 +142,25 @@ def write_pointer(workspace: Path, path: Optional[Path] = None, ffmpeg: Optional
     )
     return path
 
+def forget_ffmpeg(under: Path, path: Optional[Path] = None) -> bool:
+    """Take the FFmpeg out of the pointer file when it lies in a folder about to go.
+
+    Args:
+        under: The folder being removed: the installation's own.
+        path: The pointer file; the per-user one when not given.
+
+    Returns:
+        Whether the pointer named such an FFmpeg and no longer does.
+    """
+    path = path or pointer_file()
+    settings = _read_config(path)
+    folder, named = settings.get("ffmpeg"), read_pointer(path)
+    if not isinstance(folder, str) or named is None or not Path(folder).resolve().is_relative_to(under.resolve()):
+        return False
+    path.unlink()
+    write_pointer(named, path)
+    return True
+
 def use_installed_ffmpeg() -> Optional[str]:
     """Put the FFmpeg the installer downloaded first on this process's own PATH.
 

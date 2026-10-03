@@ -84,6 +84,31 @@ def server_command() -> List[str]:
         return [str(Path(found).resolve())]
     return [sys.executable, "-m", "app.server"]
 
+def other_copies(owner: List[str]) -> List[str]:
+    """Find copies of clip-mcp on this machine other than the one `owner` starts.
+
+    Looked for where `uv tool install` puts its commands and on PATH, which is
+    where a developer's copy is; the installer's own copy is in neither.
+
+    Args:
+        owner: The command of this copy.
+
+    Returns:
+        The other copies' programs.
+    """
+    executable = "clip-mcp.exe" if sys.platform == "win32" else "clip-mcp"
+    places = [Path.home() / ".local" / "bin" / executable]
+    if os.environ.get("UV_TOOL_BIN_DIR"):
+        places.append(Path(os.environ["UV_TOOL_BIN_DIR"]) / executable)
+    found = shutil.which(SERVER_NAME)
+    if found:
+        places.append(Path(found))
+    others = []
+    for place in places:
+        if place.is_file() and not _same_command(str(place), owner) and str(place) not in others:
+            others.append(str(place))
+    return others
+
 def in_development_environment(command: List[str]) -> bool:
     """Tell whether a command runs from a project's own `.venv`.
 

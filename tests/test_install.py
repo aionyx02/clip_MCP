@@ -272,6 +272,35 @@ def test_uninstall_leaves_another_copys_entry_connected(
     servers = json.loads((home / "home" / ".gemini" / "settings.json").read_text(encoding="utf-8"))["mcpServers"]
     assert servers["clip-mcp"]["command"] == COMMAND[0]
 
+def test_uninstall_keeps_the_pointer_another_copy_reads_but_not_its_own_ffmpeg(
+    home: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    from app import cli
+
+    not_on_path(monkeypatch)
+    monkeypatch.setattr(cli, "_ask", lambda question: False)
+    app_folder = tmp_path / "Programs" / "clip-mcp"
+    (app_folder / "bin").mkdir(parents=True)
+    (app_folder / "ffmpeg").mkdir()
+    monkeypatch.setattr(clients, "server_command", lambda: [str(app_folder / "bin" / "clip-mcp.exe")])
+    developer = home / "home" / ".local" / "bin" / ("clip-mcp.exe" if clients.sys.platform == "win32" else "clip-mcp")
+    developer.parent.mkdir(parents=True)
+    developer.write_bytes(b"")
+    (tmp_path / "chosen").mkdir()
+    workspace.write_pointer(tmp_path / "chosen", ffmpeg=app_folder / "ffmpeg")
+    cli.uninstall(dry_run=False, delete_data=False)
+    assert workspace.read_pointer() == (tmp_path / "chosen").resolve()
+    assert "ffmpeg" not in workspace._read_config()
+    developer.unlink()
+    cli.uninstall(dry_run=False, delete_data=False)
+    assert not workspace.pointer_file().exists()
+
+def test_an_ffmpeg_outside_the_folder_being_removed_stays_named(home: Path, tmp_path: Path) -> None:
+    (tmp_path / "ffmpeg").mkdir()
+    workspace.write_pointer(tmp_path / "chosen", ffmpeg=tmp_path / "ffmpeg")
+    assert not workspace.forget_ffmpeg(tmp_path / "Programs" / "clip-mcp")
+    assert workspace._read_config()["ffmpeg"] == str((tmp_path / "ffmpeg").resolve())
+
 def test_cherry_studio_is_never_taken_out_behind_the_users_back(home: Path) -> None:
     if clients.sys.platform != "win32":
         pytest.skip("Cherry Studio's folder is only under APPDATA on Windows")

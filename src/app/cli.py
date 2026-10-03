@@ -177,7 +177,8 @@ def uninstall(dry_run: bool, delete_data: bool) -> int:
     """Take clip-mcp out of everything it was put into, before the program itself is removed.
 
     This copy's entry in every AI client (one that starts another copy of
-    clip-mcp is left connected), the shortcuts, and the pointer file go. The
+    clip-mcp is left connected), the shortcuts, and the pointer file go — the
+    pointer stays when another copy is here, which reads it too. The
     workspace — projects, analyses, models — goes only when the user says so,
     and then to the recycle bin. Finished videos are never touched.
 
@@ -193,9 +194,13 @@ def uninstall(dry_run: bool, delete_data: bool) -> int:
     failed = False
     print("AI clients:")
     # Only this copy's entries: another copy on this machine, a developer's say, stays connected.
-    for result in clients.unregister(dry_run=dry_run, owner=clients.server_command()):
+    owner = clients.server_command()
+    others = clients.other_copies(owner)
+    for result in clients.unregister(dry_run=dry_run, owner=owner):
         failed |= result.status == "failed"
         print(f"  {result.client:<15} {result.status} - {result.detail}")
+        if result.status == "kept":
+            others.append(result.detail)
     from app.ui import shortcut
 
     if dry_run:
@@ -204,7 +209,13 @@ def uninstall(dry_run: bool, delete_data: bool) -> int:
         for removed in shortcut.remove():
             print(f"removed {removed}")
     pointer = workspace.pointer_file()
-    if pointer.exists():
+    if pointer.exists() and others:
+        # Another copy reads it too, and would lose its workspace with it; only the FFmpeg
+        # in this copy's folder, which goes with the folder, is taken out of it.
+        print(f"kept {pointer}: another copy of clip-mcp uses it")
+        if not dry_run:
+            workspace.forget_ffmpeg(Path(owner[0]).resolve().parent.parent)
+    elif pointer.exists():
         print(f"{'would remove' if dry_run else 'removed'} {pointer}")
         if not dry_run:
             pointer.unlink()
