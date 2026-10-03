@@ -22,6 +22,9 @@ const ICONS = {
   back: '<path d="M15 6l-6 6 6 6"/>',
   link: '<path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"/>',
   download: '<path d="M12 4v11M7 10l5 5 5-5M5 20h14"/>',
+  edit: '<path d="M4 20h4L19 9l-4-4L4 16z"/><path d="M13 7l4 4"/>',
+  folderPlus: '<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M12 10v6M9 13h6"/>',
+  moveTo: '<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M10 13h6M13 10l3 3-3 3"/>',
 };
 const icon = (name, size = 18) =>
   `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${ICONS[name]}</svg>`;
@@ -35,7 +38,13 @@ async function api(path, body) {
     throw new Error(T.common.serverGone);
   }
   const data = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(data.error || T.common.error);
+  if (!response.ok) {
+    // What the server sent back stays with the error, for a refusal that says why (which projects, say).
+    const error = new Error(data.error || T.common.error);
+    error.data = data;
+    error.status = response.status;
+    throw error;
+  }
   return data;
 }
 
@@ -88,34 +97,302 @@ async function copyText(text, button) {
   setTimeout(() => { button.innerHTML = before; }, 1600);
 }
 
+// ---------------------------------------------------------------- folders
+// Folders exist only in clip-mcp: filing something away never moves a file on disk,
+// so no project can lose its footage to a tidy-up. Projects and the library each have
+// their own, shown the same way: a trail above, folders first, then what is filed here.
+
+const folderLink = (kind, id) => `#/${kind === "assets" ? "media" : "projects"}${id ? `/${encodeURIComponent(id)}` : ""}`;
+
+function folderTrail(folders, id) {
+  const byId = new Map(folders.map((folder) => [folder.id, folder]));
+  const trail = [];
+  for (let at = byId.get(id); at; at = byId.get(at.parent_id)) trail.unshift(at);
+  return trail;
+}
+
+// The folder and everything inside it: where it cannot be moved to.
+function folderAndBelow(folders, id) {
+  const found = new Set([id]);
+  let grew = true;
+  while (grew) {
+    grew = false;
+    for (const folder of folders) {
+      if (folder.parent_id && found.has(folder.parent_id) && !found.has(folder.id)) { found.add(folder.id); grew = true; }
+    }
+  }
+  return found;
+}
+
+function askFolderName(title, value = "") {
+  return new Promise((resolve) => {
+    modal(`<h2>${esc(title)}</h2>
+      <div class="field"><label>${esc(T.folders.nameLabel)}</label><input class="input" data-name maxlength="80" value="${esc(value)}" placeholder="${esc(T.folders.namePlaceholder)}"></div>
+      <div class="foot"><button class="btn" data-cancel>${esc(T.newProject.cancel)}</button><button class="btn primary" data-save>${esc(T.folders.save)}</button></div>`,
+    (box, close) => {
+      const name = $("[data-name]", box);
+      name.focus();
+      name.select();
+      $("[data-cancel]", box).onclick = () => { close(); resolve(null); };
+      const save = () => {
+        if (!name.value.trim()) { toast(T.folders.nameRequired, "error"); return; }
+        close();
+        resolve(name.value.trim());
+      };
+      $("[data-save]", box).onclick = save;
+      name.addEventListener("keydown", (event) => { if (event.key === "Enter") save(); });
+    });
+  });
+}
+
+// Resolves to the chosen folder's ID, "" for the top, or undefined when the user backs out.
+function chooseFolder(folders, title, current, blocked = new Set()) {
+  return new Promise((resolve) => {
+    const rows = [];
+    const walk = (parent, depth) => folders.filter((folder) => (folder.parent_id || null) === parent).forEach((folder) => {
+      rows.push(`<button data-to="${esc(folder.id)}" style="padding-left:${10 + depth * 18}px" ${blocked.has(folder.id) ? "disabled" : ""}>${icon("folder")}<span>${esc(folder.name)}</span></button>`);
+      walk(folder.id, depth + 1);
+    });
+    walk(null, 1);
+    let chosen = current || "";
+    modal(`<h2>${esc(title)}</h2>
+      <div class="folder-list"><button data-to="">${icon("folder")}<span>${esc(T.folders.top)}</span></button>${rows.join("")}</div>
+      <div class="foot"><button class="btn" data-cancel>${esc(T.newProject.cancel)}</button><button class="btn primary" data-go>${esc(T.folders.move)}</button></div>`,
+    (box, close) => {
+      const mark = () => box.querySelectorAll("[data-to]").forEach((row) => row.classList.toggle("on", row.dataset.to === chosen));
+      const go = () => { close(); resolve(chosen); };
+      box.querySelectorAll("[data-to]").forEach((row) => {
+        row.onclick = () => { chosen = row.dataset.to; mark(); };
+        row.ondblclick = () => { chosen = row.dataset.to; go(); };
+      });
+      mark();
+      $("[data-cancel]", box).onclick = () => { close(); resolve(undefined); };
+      $("[data-go]", box).onclick = go;
+    });
+  });
+}
+
+// One page of things in folders. `config` says what the things are:
+//   kind       "assets" or "projects", which folders and which things
+//   load()     the things, each with `id`, `name` and `folder_id`
+//   head(here) the page's heading, with its buttons
+//   wire(page, refresh) hooks up the heading's own buttons
+//   notes      shown under the heading
+//   lead       the first tile in the grid (the new-project tile)
+//   card(item, extras) one thing as a card, with `extras` (its select box and tools) inside it
+//   opens      a card is a link, so a click opens it unless things are being chosen
+//   remove(ids, items) takes things out for good; resolves to whether it did
+//   empty      what to show when there are no things and no folders at all
+async function folderPage(page, folderId, config) {
+  const { kind } = config;
+  const chosen = new Set();
+  let folders = [], items = [];
+  const refresh = async () => {
+    [folders, items] = await Promise.all([api(`/api/folders?kind=${kind}`).then((data) => data.folders), config.load()]);
+    draw();
+  };
+
+  const fileAway = async (ids, target) => {
+    const where = target ? folders.find((folder) => folder.id === target)?.name : T.folders.top;
+    await api("/api/file", { kind, ids, folder_id: target || null });
+    chosen.clear();
+    toast(T.folders.moved(where));
+    await refresh();
+  };
+  const moveFolder = async (id, target) => {
+    if (id === target) return;
+    await api("/api/folders", { action: "move", id, parent_id: target || null });
+    toast(T.folders.moved(target ? folders.find((folder) => folder.id === target)?.name : T.folders.top));
+    await refresh();
+  };
+  const named = (ids) => ids.length === 1 ? T.folders.moveOne(items.find((item) => item.id === ids[0])?.name || "") : T.folders.moveMany(ids.length);
+
+  function draw() {
+    const here = folderId && folders.some((folder) => folder.id === folderId) ? folderId : null;
+    if (folderId && !here) { location.hash = folderLink(kind, ""); return; }
+    const subfolders = folders.filter((folder) => (folder.parent_id || null) === here);
+    const shown = items.filter((item) => (item.folder_id || null) === here);
+    for (const id of [...chosen]) if (!shown.some((item) => item.id === id)) chosen.delete(id);
+    const scrolled = page.scrollTop;
+
+    if (!items.length && !folders.length) {
+      page.innerHTML = config.head(here) + config.empty;
+      config.wire(page, refresh);
+      $("[data-new-folder]", page).onclick = makeFolder;
+      return;
+    }
+    const trail = [{ id: "", name: T.folders.all[kind] }, ...folderTrail(folders, here)];
+    const trailHtml = `<nav class="trail">${trail.map((crumb, index) => `${index ? '<span class="sep">›</span>' : ""}<a href="${folderLink(kind, crumb.id)}" data-drop="${esc(crumb.id)}" class="${index === trail.length - 1 ? "here" : ""}">${esc(crumb.name)}</a>`).join("")}</nav>`;
+    const count = (id) => items.filter((item) => item.folder_id === id).length + folders.filter((folder) => folder.parent_id === id).length;
+    const tiles = subfolders.map((folder) => `<a class="folder-tile" href="${folderLink(kind, folder.id)}" data-drop="${esc(folder.id)}" data-drag="folder" data-id="${esc(folder.id)}">
+      ${icon("folder", 22)}<div class="grow"><div class="card-title">${esc(folder.name)}</div><div class="sub">${esc(T.folders.items(count(folder.id)))}</div></div>
+      <div class="card-tools"><button class="tool" data-rename="${esc(folder.id)}" title="${esc(T.folders.rename)}">${icon("edit")}</button>
+      <button class="tool" data-move-folder="${esc(folder.id)}" title="${esc(T.folders.moveTo)}">${icon("moveTo")}</button>
+      <button class="tool danger" data-remove-folder="${esc(folder.id)}" title="${esc(T.folders.remove)}">${icon("trash")}</button></div></a>`).join("");
+    const cards = shown.map((item) => {
+      const extras = `<button class="select-box" data-select="${esc(item.id)}" title="${esc(T.folders.choose)}">${icon("check")}</button>
+        <div class="card-tools"><button class="tool" data-move-item="${esc(item.id)}" title="${esc(T.folders.moveTo)}">${icon("moveTo")}</button>
+        ${config.remove ? `<button class="tool danger" data-remove-item="${esc(item.id)}" title="${esc(T.media.remove)}">${icon("trash")}</button>` : ""}</div>`;
+      return config.card(item, extras);
+    }).join("");
+    const bar = chosen.size ? `<div class="selection-bar"><span class="grow">${esc(T.folders.chosen(chosen.size))}</span>
+      <button class="btn small" data-choose-all>${esc(T.folders.chooseAll)}</button>
+      <button class="btn small" data-move-chosen>${icon("moveTo", 15)}${esc(T.folders.moveTo)}</button>
+      ${config.remove ? `<button class="btn small danger" data-remove-chosen>${icon("trash", 15)}${esc(T.media.remove)}</button>` : ""}
+      <button class="btn small" data-clear>${esc(T.folders.clear)}</button></div>` : "";
+    page.innerHTML = config.head(here) + config.notes + trailHtml
+      + (tiles ? `<div class="grid folders">${tiles}</div>` : "")
+      + `<div class="grid${chosen.size ? " choosing" : ""}">${here ? "" : config.lead || ""}${cards}</div>`
+      + (!shown.length && !subfolders.length && here ? `<div class="callout">${icon("info")}<span>${esc(T.folders.emptyHere)}</span></div>` : "")
+      + bar;
+    page.scrollTop = scrolled;
+    config.wire(page, refresh);
+    wire(here);
+  }
+
+  async function makeFolder() {
+    const name = await askFolderName(T.folders.createTitle);
+    if (!name) return;
+    try {
+      await api("/api/folders", { action: "create", kind, name, parent_id: folderId || null });
+      await refresh();
+    } catch (error) { toast(error.message, "error"); }
+  }
+
+  function wire(here) {
+    const act = (selector, handler) => page.querySelectorAll(selector).forEach((element) => {
+      element.addEventListener("click", async (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        try { await handler(element, event); } catch (error) { toast(error.message, "error"); }
+      });
+    });
+    const picked = (id) => chosen.has(id) ? [...chosen] : [id];
+    $("[data-new-folder]", page).onclick = makeFolder;
+    act("[data-select]", (element) => {
+      const id = element.dataset.select;
+      chosen.has(id) ? chosen.delete(id) : chosen.add(id);
+      draw();
+    });
+    // While things are being chosen, a click on a card chooses it rather than opening it.
+    page.querySelectorAll('.card[data-drag="item"]').forEach((card) => {
+      card.classList.toggle("chosen", chosen.has(card.dataset.id));
+      card.addEventListener("click", (event) => {
+        if (!chosen.size && config.opens && !event.ctrlKey) return;
+        event.preventDefault();
+        const id = card.dataset.id;
+        chosen.has(id) ? chosen.delete(id) : chosen.add(id);
+        draw();
+      });
+    });
+    act("[data-choose-all]", () => {
+      items.filter((item) => (item.folder_id || null) === here).forEach((item) => chosen.add(item.id));
+      draw();
+    });
+    act("[data-clear]", () => { chosen.clear(); draw(); });
+    const moveThings = async (ids) => {
+      const target = await chooseFolder(folders, T.folders.moveTitle(named(ids)), here);
+      if (target !== undefined) await fileAway(ids, target);
+    };
+    act("[data-move-item]", (element) => moveThings(picked(element.dataset.moveItem)));
+    act("[data-move-chosen]", () => moveThings([...chosen]));
+    const removeThings = async (ids) => {
+      if (await config.remove(ids, items)) { chosen.clear(); await refresh(); }
+    };
+    act("[data-remove-item]", (element) => removeThings(picked(element.dataset.removeItem)));
+    act("[data-remove-chosen]", () => removeThings([...chosen]));
+    act("[data-rename]", async (element) => {
+      const folder = folders.find((entry) => entry.id === element.dataset.rename);
+      const name = await askFolderName(T.folders.renameTitle, folder.name);
+      if (!name || name === folder.name) return;
+      await api("/api/folders", { action: "rename", id: folder.id, name });
+      await refresh();
+    });
+    act("[data-move-folder]", async (element) => {
+      const folder = folders.find((entry) => entry.id === element.dataset.moveFolder);
+      const target = await chooseFolder(folders, T.folders.moveTitle(T.folders.moveOne(folder.name)), folder.parent_id, folderAndBelow(folders, folder.id));
+      if (target !== undefined) await moveFolder(folder.id, target);
+    });
+    act("[data-remove-folder]", async (element) => {
+      const folder = folders.find((entry) => entry.id === element.dataset.removeFolder);
+      if (!(await confirmBox(T.folders.removeTitle(folder.name), T.folders.removeBody, T.folders.remove, true))) return;
+      await api("/api/folders", { action: "delete", id: folder.id });
+      toast(T.folders.removed);
+      await refresh();
+    });
+
+    // Dragging a card, or the chosen ones, or a folder onto a folder or a step of the trail.
+    page.querySelectorAll("[data-drag]").forEach((element) => {
+      element.draggable = true;
+      element.addEventListener("dragstart", (event) => {
+        const payload = element.dataset.drag === "folder"
+          ? { folder: element.dataset.id } : { ids: picked(element.dataset.id) };
+        event.dataTransfer.setData("application/x-clip-mcp", JSON.stringify(payload));
+        event.dataTransfer.effectAllowed = "move";
+        element.classList.add("dragging");
+      });
+      element.addEventListener("dragend", () => element.classList.remove("dragging"));
+    });
+    page.querySelectorAll("[data-drop]").forEach((target) => {
+      target.addEventListener("dragover", (event) => {
+        if (!event.dataTransfer.types.includes("application/x-clip-mcp")) return;
+        event.preventDefault();
+        target.classList.add("drop-on");
+      });
+      target.addEventListener("dragleave", () => target.classList.remove("drop-on"));
+      target.addEventListener("drop", async (event) => {
+        target.classList.remove("drop-on");
+        const raw = event.dataTransfer.getData("application/x-clip-mcp");
+        if (!raw) return;
+        event.preventDefault();
+        event.stopPropagation();
+        const payload = JSON.parse(raw);
+        try {
+          if (payload.folder) await moveFolder(payload.folder, target.dataset.drop);
+          else await fileAway(payload.ids, target.dataset.drop);
+        } catch (error) { toast(error.message, "error"); }
+      });
+    });
+  }
+
+  page.innerHTML = config.head(folderId) + `<div class="grid">${'<div class="card skeleton" style="height:200px"></div>'.repeat(4)}</div>`;
+  await refresh();
+}
+
+const newFolderButton = () => `<button class="btn" data-new-folder>${icon("folderPlus")}${esc(T.folders.create)}</button>`;
+
 // ---------------------------------------------------------------- projects
 
-async function projectsPage(page) {
-  page.innerHTML = head(T.projects.title, T.projects.subtitle, `<button class="btn primary" data-new>${icon("plus")}${esc(T.projects.create)}</button>`)
-    + `<div class="grid">${'<div class="card skeleton" style="height:200px"></div>'.repeat(4)}</div>`;
-  $("[data-new]", page).onclick = newProject;
-  const { projects } = await api("/api/projects");
-  if (!projects.length) {
-    page.querySelector(".grid").outerHTML = `<div class="empty">
+async function projectsPage(page, folderId) {
+  await folderPage(page, folderId, {
+    kind: "projects",
+    opens: true,
+    load: async () => (await api("/api/projects")).projects,
+    head: () => head(T.projects.title, T.projects.subtitle,
+      `${newFolderButton()}<button class="btn primary" data-new>${icon("plus")}${esc(T.projects.create)}</button>`),
+    wire: (root) => {
+      root.querySelectorAll("[data-new]").forEach((button) => { button.onclick = newProject; });
+      const copy = $("[data-copy]", root);
+      if (copy) copy.onclick = (event) => copyText(T.projects.examplePrompt, event.currentTarget);
+    },
+    notes: "",
+    lead: `<button class="new-card" data-new>${icon("plus", 26)}${esc(T.projects.create)}</button>`,
+    empty: `<div class="empty">
       <div class="icon-ring">${icon("sparkle", 28)}</div>
       <h2>${esc(T.projects.emptyTitle)}</h2><p>${esc(T.projects.emptyBody)}</p>
       <div class="prompt" style="margin-top:8px;max-width:560px"><span>${esc(T.projects.examplePrompt)}</span>
-      <button class="btn small" data-copy>${icon("copy", 16)}${esc(T.ai.copy)}</button></div></div>`;
-    $("[data-copy]", page).onclick = (event) => copyText(T.projects.examplePrompt, event.currentTarget);
-    return;
-  }
-  const cards = projects.map((project) => {
-    const shape = shapeOf(project.width, project.height);
-    const picture = project.thumb ? `<img loading="lazy" alt="" onerror="this.dataset.broken=1" src="${thumbUrl(project.thumb.asset_id, project.thumb.t)}">` : icon("film", 30);
-    const missing = project.missing.length
-      ? `<span class="badge warn" title="${esc(T.projects.missingHint + "\n" + project.missing.join("\n"))}">${icon("alert", 13)}${esc(T.projects.missing(project.missing.length))}</span>` : "";
-    return `<a class="card" href="#/project/${encodeURIComponent(project.id)}">
-      <div class="thumb">${picture}<span class="badge">${clock(project.duration)}</span></div>
-      <div class="card-body"><div class="card-title">${esc(project.name || T.projects.untitled)}${project.name ? "" : ` <span class="badge warn">${esc(T.projects.nameIt)}</span>`}</div>
-      <div class="card-meta"><span>${esc(T.projects.shapes[shape])}</span><span class="dot-sep">${esc(T.projects.clips(project.clips))}</span>${missing}</div></div></a>`;
+      <button class="btn small" data-copy>${icon("copy", 16)}${esc(T.ai.copy)}</button></div></div>`,
+    card: (project, extras) => {
+      const shape = shapeOf(project.width, project.height);
+      const picture = project.thumb ? `<img loading="lazy" alt="" draggable="false" onerror="this.dataset.broken=1" src="${thumbUrl(project.thumb.asset_id, project.thumb.t)}">` : icon("film", 30);
+      const missing = project.missing.length
+        ? `<span class="badge warn" title="${esc(T.projects.missingHint + "\n" + project.missing.join("\n"))}">${icon("alert", 13)}${esc(T.projects.missing(project.missing.length))}</span>` : "";
+      return `<a class="card" href="#/project/${encodeURIComponent(project.id)}" data-drag="item" data-id="${esc(project.id)}" draggable="true">${extras}
+        <div class="thumb">${picture}<span class="badge">${clock(project.duration)}</span></div>
+        <div class="card-body"><div class="card-title">${esc(project.name || T.projects.untitled)}${project.name ? "" : ` <span class="badge warn">${esc(T.projects.nameIt)}</span>`}</div>
+        <div class="card-meta"><span>${esc(T.projects.shapes[shape])}</span><span class="dot-sep">${esc(T.projects.clips(project.clips))}</span>${missing}</div></div></a>`;
+    },
   });
-  page.querySelector(".grid").innerHTML = `<button class="new-card" data-new>${icon("plus", 26)}${esc(T.projects.create)}</button>` + cards.join("");
-  page.querySelectorAll("[data-new]").forEach((button) => { button.onclick = newProject; });
 }
 
 function newProject() {
@@ -158,46 +435,93 @@ function newProject() {
 
 // ---------------------------------------------------------------- media
 
-async function mediaPage(page) {
-  page.innerHTML = head(T.media.title, T.media.subtitle,
-    `<button class="btn" data-pick="folder">${icon("folder")}${esc(T.media.addFolder)}</button>
-     <button class="btn primary" data-pick="files">${icon("plus")}${esc(T.media.addFiles)}</button>`)
-    + `<div class="callout warn">${icon("alert")}<span>${esc(T.media.moveWarning)}</span></div><div data-list></div>`;
+async function mediaPage(page, folderId) {
+  await folderPage(page, folderId, {
+    kind: "assets",
+    opens: false,
+    load: async () => (await api("/api/assets?all=1")).assets,
+    head: () => head(T.media.title, T.media.subtitle,
+      `${newFolderButton()}<button class="btn" data-pick="folder">${icon("folder")}${esc(T.media.addFolder)}</button>
+       <button class="btn primary" data-pick="files">${icon("plus")}${esc(T.media.addFiles)}</button>`),
+    wire: (root, refresh) => wireImport(root, refresh, folderId),
+    notes: `<div class="callout">${icon("info")}<span>${esc(T.media.libraryOnly)}</span></div>
+      <div class="callout warn">${icon("alert")}<span>${esc(T.media.moveWarning)}</span></div>`,
+    empty: `<div class="callout">${icon("info")}<span>${esc(T.media.libraryOnly)}</span></div>
+      <div class="empty"><div class="icon-ring">${icon("film", 28)}</div><h2>${esc(T.media.emptyTitle)}</h2><p>${esc(T.media.emptyBody)}</p></div>`,
+    card: (asset, extras) => {
+      const picture = asset.has_video && !asset.missing
+        ? `<img loading="lazy" alt="" draggable="false" onerror="this.dataset.broken=1" src="${thumbUrl(asset.id, Math.min(1, (asset.duration || 0) / 2))}">`
+        : icon(asset.has_video ? "film" : "music", 30);
+      const kind = asset.has_video ? (asset.has_audio ? "" : `<span class="dot-sep">${esc(T.media.noSound)}</span>`) : `<span class="dot-sep">${esc(T.media.audioOnly)}</span>`;
+      const gone = asset.missing ? `<span class="badge warn" title="${esc(T.media.goneHint)}">${icon("alert", 13)}${esc(T.media.gone)}</span>` : "";
+      return `<div class="card${asset.missing ? " gone" : ""}" title="${esc(asset.path)}" data-drag="item" data-id="${esc(asset.id)}">${extras}<div class="thumb">${picture}
+        <span class="badge">${clock(asset.duration)}</span></div>
+        <div class="card-body"><div class="card-title">${esc(asset.name)}</div><div class="card-meta"><span>${asset.width ? `${asset.width}×${asset.height}` : ""}</span>${kind}${gone}</div></div></div>`;
+    },
+    remove: removeAssets,
+  });
+}
+
+// Files chosen while a folder is open are filed in it.
+function wireImport(page, refresh, folderId) {
   page.querySelectorAll("[data-pick]").forEach((button) => {
     button.onclick = async () => {
       const label = button.innerHTML;
       page.querySelectorAll("[data-pick]").forEach((other) => { other.disabled = true; });
       button.innerHTML = `<span class="spinner"></span>${esc(T.media.picking)}`;
       try {
-        const result = await api("/api/pick", { kind: button.dataset.pick });
+        const result = await api("/api/pick", { kind: button.dataset.pick, folder_id: folderId || null });
         if (!result.chosen) toast(T.media.nothingChosen);
         else if (result.imported) toast(T.media.added(result.imported));
         if (result.failed.length) toast(T.media.failed(result.failed.join("、")), "error");
-        await fillMedia(page);
-      } catch (error) { toast(error.message, "error"); }
-      finally {
+        await refresh();
+      } catch (error) {
+        toast(error.message, "error");
         button.innerHTML = label;
         page.querySelectorAll("[data-pick]").forEach((other) => { other.disabled = false; });
       }
     };
   });
-  await fillMedia(page);
 }
 
-async function fillMedia(page) {
-  const { assets } = await api("/api/assets");
-  const list = $("[data-list]", page);
-  if (!assets.length) {
-    list.innerHTML = `<div class="empty"><div class="icon-ring">${icon("film", 28)}</div><h2>${esc(T.media.emptyTitle)}</h2><p>${esc(T.media.emptyBody)}</p></div>`;
-    return;
-  }
-  list.innerHTML = `<div class="grid">${assets.map((asset) => {
-    const picture = asset.has_video ? `<img loading="lazy" alt="" onerror="this.dataset.broken=1" src="${thumbUrl(asset.id, Math.min(1, (asset.duration || 0) / 2))}">` : icon("music", 30);
-    const kind = asset.has_video ? (asset.has_audio ? "" : `<span class="dot-sep">${esc(T.media.noSound)}</span>`) : `<span class="dot-sep">${esc(T.media.audioOnly)}</span>`;
-    return `<div class="card" title="${esc(asset.path)}"><div class="thumb">${picture}
-      <span class="badge">${clock(asset.duration)}</span></div>
-      <div class="card-body"><div class="card-title">${esc(asset.name)}</div><div class="card-meta"><span>${asset.width ? `${asset.width}×${asset.height}` : ""}</span>${kind}</div></div></div>`;
-  }).join("")}</div>`;
+// Takes files out of the library, and their originals to the recycle bin if the user ticks it.
+// A file still on some project's timeline is refused, with the projects named.
+function removeAssets(ids, assets) {
+  const named = assets.filter((asset) => ids.includes(asset.id));
+  const what = named.length === 1 ? T.media.removeOne(named[0].name) : T.media.removeMany(named.length);
+  const present = named.some((asset) => !asset.missing);
+  return new Promise((resolve) => {
+    modal(`<h2>${esc(T.media.removeTitle(what))}</h2><p>${esc(T.media.removeBody)}</p>
+      ${present ? `<label class="check-line"><input type="checkbox" data-recycle><span>${esc(T.media.recycleToo)}<br><small style="color:var(--muted)">${esc(T.media.recycleHint)}</small></span></label>` : ""}
+      <div class="foot"><button class="btn" data-no>${esc(T.newProject.cancel)}</button><button class="btn danger" data-yes>${icon("trash", 15)}${esc(T.media.remove)}</button></div>`,
+    (box, close) => {
+      $("[data-no]", box).onclick = () => { close(); resolve(false); };
+      $("[data-yes]", box).onclick = async () => {
+        const recycle = Boolean($("[data-recycle]", box)?.checked);
+        close();
+        try {
+          const result = await api("/api/assets/delete", { ids, recycle });
+          toast(T.media.removed(result.removed.length));
+          if (result.not_recycled?.length) toast(T.media.notRecycled(result.not_recycled.join("、")), "error");
+          resolve(true);
+        } catch (error) {
+          if (error.status === 409 && error.data) showInUse(error.data);
+          else toast(error.message, "error");
+          resolve(false);
+        }
+      };
+    });
+  });
+}
+
+function showInUse(data) {
+  const used = data.in_use.length ? `<p>${esc(T.media.inUseBody)}</p><ul class="used-list">${data.in_use.map((item) =>
+    `<li>${esc(item.name)}<br><small>${esc(item.projects.join("、"))}</small></li>`).join("")}</ul>` : "";
+  const busy = data.busy.length ? `<p>${esc(T.media.busyBody(data.busy.join("、")))}</p>` : "";
+  modal(`<h2>${esc(T.media.inUseTitle)}</h2>${used}${busy}
+    <div class="foot"><button class="btn primary" data-ok>${esc(T.common.close)}</button></div>`, (box, close) => {
+    $("[data-ok]", box).onclick = close;
+  });
 }
 
 // ---------------------------------------------------------------- AI clients
@@ -348,7 +672,7 @@ async function route() {
   page.scrollTop = 0;
   try {
     if (key === "project") await projectPage(page, decodeURIComponent(id || ""));
-    else await PAGES[key](page);
+    else await PAGES[key](page, id ? decodeURIComponent(id) : null);
   } catch (error) {
     page.innerHTML = `<div class="empty"><div class="icon-ring">${icon("alert", 28)}</div><h2>${esc(T.common.error)}</h2>
       <p>${esc(error.message)}</p><button class="btn" data-retry>${icon("refresh")}${esc(T.common.retry)}</button></div>`;

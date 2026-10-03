@@ -15,6 +15,7 @@ import os
 import subprocess
 import threading
 import time
+import uuid
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -34,6 +35,7 @@ from app.engine.frames import extract_frame
 from app.engine.subtitles import captioned_clips, place_cues
 from app.models.timeline import Project
 from app.storage import housekeeping
+from app.storage.repo import FOLDER_KINDS
 from app.ui import dialogs, updates
 
 STATIC_DIR = Path(__file__).parent / "static"
@@ -94,7 +96,7 @@ async def projects(request: Request) -> Response:
             {"action": "add_track", "track_id": "music", "track_type": "audio", "duck_under_speech": True},
         ]))
         return JSONResponse({"id": made["id"]})
-    listed = []
+    listed, filed = [], server.repo.folder_of("projects")
     for project in server.repo.list_projects():
         base = project.base_video_track
         clips = base.clips if base else []
@@ -109,6 +111,7 @@ async def projects(request: Request) -> Response:
             # A frame a second in, so a shot that opens on black still shows what it is.
             "thumb": {"asset_id": first.asset_id, "t": float(first.source_range.start) + 1.0} if first else None,
             "missing": missing,
+            "folder_id": filed.get(project.id),
         })
     return JSONResponse({"projects": listed})
 
@@ -319,10 +322,114 @@ async def jobs(request: Request) -> Response:
         return _error(str(error), 404)
 
 async def assets(request: Request) -> Response:
-    """Every imported file the page can put on the timeline."""
-    listed = [_asset_summary(asset) for asset in server.repo.list_assets() if os.path.exists(asset.path)]
+    """Every imported file the page can put on the timeline, and the folder each is filed in.
+
+    With `all`, files that are no longer where they were imported from are
+    listed too, marked `missing`, so the library page can take them out.
+    """
+    everything = request.query_params.get("all") == "1"
+    filed = server.repo.folder_of("assets")
+    listed = []
+    for asset in server.repo.list_assets():
+        present = os.path.exists(asset.path)
+        if present or everything:
+            listed.append({**_asset_summary(asset), "folder_id": filed.get(asset.id), "missing": not present})
     listed.sort(key=lambda asset: asset["name"].lower())
     return JSONResponse({"assets": listed})
+
+def _projects_using(asset_ids: List[str]) -> Dict[str, List[str]]:
+    """The projects that have a clip of each file on their timeline, by name."""
+    wanted, using = set(asset_ids), {}
+    for project in server.repo.list_projects():
+        for asset_id in wanted & {clip.asset_id for track in project.tracks for clip in track.clips}:
+            using.setdefault(asset_id, []).append(project.name or project.id)
+    return using
+
+def _remove_assets(asset_ids: List[str], recycle: bool) -> dict:
+    """Take files out of the library, and their originals to the recycle bin when asked.
+
+    Refused as a whole, with nothing removed, when any of them is still in a
+    project or being analyzed: a project that loses its footage cannot be
+    played or exported, and the user may not know which projects use what.
+    """
+    found = server.repo.get_assets(asset_ids)
+    unknown = sorted(set(asset_ids) - set(found))
+    if unknown:
+        raise LookupError(f"asset {unknown[0]} not found")
+    using = _projects_using(list(found))
+    busy = {job.asset_id for job in (server.repo.get_job(job_id) for job_id in server.repo.active_job_ids())
+            if job and job.asset_id in found}
+    if using or busy:
+        name = lambda asset_id: os.path.basename(found[asset_id].path)
+        return {"removed": [], "in_use": [{"name": name(asset_id), "projects": projects} for asset_id, projects in using.items()],
+                "busy": sorted(name(asset_id) for asset_id in busy)}
+    recycled = []
+    for asset_id, asset in found.items():
+        server.repo.delete_asset(asset_id)
+        if recycle and os.path.exists(asset.path):
+            recycled.append(asset.path)
+    # One trip to the recycle bin for them all; the library entries are gone either way.
+    not_recycled = [] if not recycled or housekeeping.to_recycle_bin(recycled) else [os.path.basename(path) for path in recycled]
+    return {"removed": sorted(found), "in_use": [], "busy": [], "not_recycled": not_recycled}
+
+async def delete_assets(request: Request) -> Response:
+    """Take files out of the library; `recycle` sends the originals to the recycle bin as well."""
+    body = await request.json()
+    ids = [str(asset_id) for asset_id in body.get("ids", []) if asset_id]
+    if not ids:
+        return _error("no files chosen")
+    try:
+        result = await run_in_threadpool(_remove_assets, ids, bool(body.get("recycle")))
+    except LookupError as error:
+        return _error(str(error), 404)
+    return JSONResponse(result, status_code=409 if result["in_use"] or result["busy"] else 200)
+
+async def folders(request: Request) -> Response:
+    """The folders of the library or of the projects (GET), or make, rename, move or remove one (POST).
+
+    Folders live only in clip-mcp: no file on disk is moved, so filing things
+    away can never leave a project without its footage.
+    """
+    if request.method == "GET":
+        kind = request.query_params.get("kind", "")
+        if kind not in FOLDER_KINDS:
+            return _error("kind is assets or projects")
+        return JSONResponse({"folders": server.repo.list_folders(kind)})
+    body = await request.json()
+    action, folder_id = body.get("action"), body.get("id")
+    try:
+        if action == "create":
+            made = server.repo.create_folder(uuid.uuid4().hex, str(body.get("kind", "")), str(body.get("name", "")),
+                                             body.get("parent_id") or None)
+            return JSONResponse(made)
+        if action == "rename":
+            server.repo.rename_folder(str(folder_id), str(body.get("name", "")))
+        elif action == "move":
+            server.repo.move_folder(str(folder_id), body.get("parent_id") or None)
+        elif action == "delete":
+            server.repo.delete_folder(str(folder_id))
+        else:
+            return _error("action is create, rename, move or delete")
+    except ValueError as error:
+        return _error(str(error), 404 if "not found" in str(error) else 400)
+    return JSONResponse({"ok": True})
+
+async def file_items(request: Request) -> Response:
+    """Put files or projects into a folder, or back at the top when `folder_id` is empty."""
+    body = await request.json()
+    kind = body.get("kind")
+    ids = [str(item_id) for item_id in body.get("ids", []) if item_id]
+    known = ({asset.id for asset in server.repo.list_assets()} if kind == "assets"
+             else {project.id for project in server.repo.list_projects()} if kind == "projects" else None)
+    if known is None:
+        return _error("kind is assets or projects")
+    if not ids or not set(ids) <= known:
+        return _error("nothing to file, or something that is not there", 404)
+    try:
+        server.repo.file_items(kind, ids, body.get("folder_id") or None)
+    except ValueError as error:
+        return _error(str(error), 404)
+    return JSONResponse({"ok": True})
 
 def _asset_or_none(asset_id: str):
     """The asset by its ID, or None when it is unknown or its file has gone."""
@@ -491,12 +598,20 @@ async def pick(request: Request) -> Response:
             if kind == "folder":
                 result = server.import_folder(path)
                 imported += len(result["assets"])
+                ids += [item["id"] for item in result["assets"]]
                 failed += [os.path.basename(item["path"]) for item in result["skipped"]]
             else:
                 ids.append(server.import_asset(path)["id"])
                 imported += 1
         except (FileNotFoundError, ValueError, RuntimeError):
             failed.append(os.path.basename(path))
+    # Chosen with one of the library's folders open: filed there, where the user is looking.
+    folder_id = body.get("folder_id")
+    if folder_id and ids:
+        try:
+            server.repo.file_items("assets", ids, str(folder_id))
+        except ValueError:
+            pass
     return JSONResponse({"chosen": len(chosen), "imported": imported, "failed": failed, "assets": ids})
 
 async def storage(request: Request) -> Response:
@@ -640,6 +755,9 @@ def create_app() -> Starlette:
         Route("/api/projects/{project_id}/captions/make", make_captions, methods=["POST"]),
         Route("/api/jobs", jobs),
         Route("/api/assets", assets),
+        Route("/api/assets/delete", delete_assets, methods=["POST"]),
+        Route("/api/folders", folders, methods=["GET", "POST"]),
+        Route("/api/file", file_items, methods=["POST"]),
         Route("/api/pick", pick, methods=["POST"]),
         Route("/api/storage", storage, methods=["GET", "POST"]),
         Route("/api/open-folder", open_folder, methods=["POST"]),

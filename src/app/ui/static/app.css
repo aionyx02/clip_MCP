@@ -213,3 +213,63 @@ a.card:hover, button.card:hover { border-color: var(--line-2); background: var(-
 .update-item:hover { color: var(--text); }
 .notes-box { max-height: 200px; overflow-y: auto; padding: 8px 10px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--well); white-space: pre-wrap; color: var(--muted); font-size: 12px; }
 .updating { position: fixed; inset: 0; display: grid; place-content: center; grid-auto-flow: column; gap: 10px; align-items: center; color: var(--muted); background: var(--bg); }
+
+/* folders: only in clip-mcp, never on disk. Tiles sit before the cards, a trail above them. */
+.trail { display: flex; align-items: center; gap: 2px; margin: -4px 0 12px; flex-wrap: wrap; color: var(--muted); }
+.trail a { color: var(--muted); text-decoration: none; padding: 3px 6px; border-radius: var(--radius-sm); border: 1px solid transparent; }
+.trail a:hover { color: var(--text); background: var(--panel-2); }
+.trail a.here { color: var(--text); font-weight: 500; }
+.trail .sep { color: var(--faint); }
+.folder-tile {
+  position: relative; display: flex; align-items: center; gap: 10px; padding: 12px; min-height: 56px;
+  background: var(--panel); border: 1px solid var(--line); border-radius: var(--radius); color: var(--text); text-decoration: none;
+}
+.folder-tile:hover { border-color: var(--line-2); background: var(--panel-2); }
+.folder-tile > svg { color: var(--muted); flex: none; }
+.folder-tile .grow { min-width: 0; flex: 1; }
+.folder-tile .sub { color: var(--muted); font-size: 11.5px; }
+.folders { margin-bottom: 12px; grid-template-columns: repeat(auto-fill, minmax(200px, 1fr)); }
+.drop-on { outline: 2px solid var(--accent); outline-offset: -2px; background: var(--accent-soft) !important; }
+.dragging { opacity: .45; }
+
+/* what can be done to one card, shown when the pointer is over it or it is chosen */
+.card { position: relative; }
+.card-tools { position: absolute; top: 6px; right: 6px; display: flex; gap: 4px; opacity: 0; transition: opacity .12s; z-index: 1; }
+.card:hover .card-tools, .folder-tile:hover .card-tools, .card-tools:focus-within { opacity: 1; }
+.folder-tile .card-tools { top: 50%; transform: translateY(-50%); }
+.tool {
+  width: 26px; height: 26px; display: grid; place-items: center; padding: 0; cursor: pointer;
+  background: rgba(20, 20, 21, .85); border: 1px solid var(--line-2); border-radius: var(--radius-sm); color: var(--text);
+}
+.tool:hover { background: var(--panel-3); }
+.tool.danger:hover { color: var(--danger); }
+.tool svg { width: 15px; height: 15px; }
+.select-box {
+  position: absolute; top: 6px; left: 6px; z-index: 1; width: 22px; height: 22px; padding: 0; cursor: pointer;
+  display: grid; place-items: center; border-radius: var(--radius-sm);
+  background: rgba(20, 20, 21, .85); border: 1px solid var(--line-2); color: transparent; opacity: 0; transition: opacity .12s;
+}
+.select-box svg { width: 14px; height: 14px; }
+.card:hover .select-box, .choosing .select-box { opacity: 1; }
+.card.chosen { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+.card.chosen .select-box { opacity: 1; background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
+.card.gone .thumb { opacity: .45; }
+.selection-bar {
+  position: sticky; bottom: 0; display: flex; align-items: center; gap: 8px; margin-top: 14px; padding: 8px 12px;
+  background: var(--panel-2); border: 1px solid var(--line-2); border-radius: var(--radius); box-shadow: var(--shadow);
+}
+.selection-bar .grow { flex: 1; }
+.folder-list { max-height: 300px; overflow: auto; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--well); }
+.folder-list button {
+  display: flex; align-items: center; gap: 8px; width: 100%; padding: 7px 10px; border: 0; background: transparent;
+  color: var(--text); cursor: pointer; text-align: left; font: inherit;
+}
+.folder-list button:hover { background: var(--panel-2); }
+.folder-list button.on { background: var(--accent-soft); color: var(--text); }
+.folder-list button[disabled] { color: var(--faint); cursor: default; background: transparent; }
+.folder-list svg { width: 15px; height: 15px; color: var(--muted); flex: none; }
+.check-line { display: flex; gap: 8px; align-items: flex-start; margin: 12px 0 4px; cursor: pointer; }
+.check-line input { margin-top: 3px; accent-color: var(--accent); }
+.used-list { margin: 8px 0 0; padding-left: 18px; color: var(--text); }
+.used-list li { margin: 3px 0; }
+.used-list small { color: var(--muted); }

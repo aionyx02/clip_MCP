@@ -67,7 +67,17 @@ _MIGRATIONS: List[List[str]] = [
         "CREATE TABLE reviewed_captions (asset_id TEXT PRIMARY KEY, data TEXT NOT NULL)",
         "CREATE TABLE glossary (heard TEXT PRIMARY KEY, meant TEXT NOT NULL)",
     ],
+    [
+        # Folders the user sorts the library and the projects into. They exist only here:
+        # the files on disk never move, so no project loses a file to a tidy-up. One table
+        # of folders for both kinds, and which folder each thing is in, apart from the
+        # things themselves, so filing a project away does not count as editing it.
+        "CREATE TABLE folders (id TEXT PRIMARY KEY, kind TEXT NOT NULL, parent_id TEXT, name TEXT NOT NULL)",
+        "CREATE TABLE folder_items (kind TEXT NOT NULL, item_id TEXT NOT NULL, folder_id TEXT NOT NULL, "
+        "PRIMARY KEY (kind, item_id))",
+    ],
 ]
+FOLDER_KINDS = ("assets", "projects")
 SCHEMA_VERSION = len(_MIGRATIONS)
 
 class VersionConflictError(ValueError):
@@ -733,3 +743,176 @@ class Repository:
             (timeline_id,),
         )
         return {f"{level}/{kind}": count for level, kind, count in rows}
+
+    # ------------------------------------------------------------------ folders
+
+    def list_folders(self, kind: str) -> List[Dict[str, Optional[str]]]:
+        """Return the folders of one kind, by name.
+
+        Args:
+            kind: `assets` or `projects`.
+
+        Returns:
+            Each folder's `id`, `parent_id` (None at the top) and `name`.
+        """
+        rows = self._query("SELECT id, parent_id, name FROM folders WHERE kind = ? ORDER BY name COLLATE NOCASE", (kind,))
+        return [{"id": row[0], "parent_id": row[1], "name": row[2]} for row in rows]
+
+    @staticmethod
+    def _folder_kind(conn: sqlite3.Connection, folder_id: str) -> Optional[str]:
+        """The kind of a folder, or None when there is no such folder."""
+        row = conn.execute("SELECT kind FROM folders WHERE id = ?", (folder_id,)).fetchone()
+        return row[0] if row else None
+
+    @staticmethod
+    def _check_name(conn: sqlite3.Connection, kind: str, parent_id: Optional[str], name: str, folder_id: str = "") -> str:
+        """A folder name tidied, refused when empty, too long, or already taken beside it."""
+        name = " ".join(name.split())
+        if not name:
+            raise ValueError("a folder needs a name")
+        if len(name) > 80:
+            raise ValueError("a folder name is at most 80 characters")
+        taken = conn.execute(
+            "SELECT 1 FROM folders WHERE kind = ? AND parent_id IS ? AND name = ? COLLATE NOCASE AND id != ?",
+            (kind, parent_id, name, folder_id),
+        ).fetchone()
+        if taken:
+            raise ValueError(f"there is already a folder called {name} here")
+        return name
+
+    def create_folder(self, folder_id: str, kind: str, name: str, parent_id: Optional[str] = None) -> Dict[str, Optional[str]]:
+        """Make a folder.
+
+        Args:
+            folder_id: Its new ID.
+            kind: `assets` or `projects`.
+            name: What the user called it.
+            parent_id: The folder it goes in; the top when None.
+
+        Returns:
+            The folder.
+
+        Raises:
+            ValueError: For an unknown kind, a parent that is missing or of the
+                other kind, or a name that is empty or already taken beside it.
+        """
+        if kind not in FOLDER_KINDS:
+            raise ValueError(f"folders hold {' or '.join(FOLDER_KINDS)}")
+        with self._transaction() as conn:
+            if parent_id is not None and self._folder_kind(conn, parent_id) != kind:
+                raise ValueError(f"folder {parent_id} not found")
+            name = self._check_name(conn, kind, parent_id, name)
+            conn.execute("INSERT INTO folders (id, kind, parent_id, name) VALUES (?, ?, ?, ?)",
+                         (folder_id, kind, parent_id, name))
+        return {"id": folder_id, "parent_id": parent_id, "name": name}
+
+    def rename_folder(self, folder_id: str, name: str) -> None:
+        """Rename a folder.
+
+        Raises:
+            ValueError: If there is no such folder, or the name is empty or taken.
+        """
+        with self._transaction() as conn:
+            row = conn.execute("SELECT kind, parent_id FROM folders WHERE id = ?", (folder_id,)).fetchone()
+            if not row:
+                raise ValueError(f"folder {folder_id} not found")
+            conn.execute("UPDATE folders SET name = ? WHERE id = ?",
+                         (self._check_name(conn, row[0], row[1], name, folder_id), folder_id))
+
+    def delete_folder(self, folder_id: str) -> None:
+        """Remove a folder; what was in it moves up into the folder around it.
+
+        Nothing in it is deleted, so removing a folder can never cost a file or a project.
+
+        Raises:
+            ValueError: If there is no such folder, or a folder moving up has
+                the name of one already there.
+        """
+        with self._transaction() as conn:
+            row = conn.execute("SELECT kind, parent_id FROM folders WHERE id = ?", (folder_id,)).fetchone()
+            if not row:
+                raise ValueError(f"folder {folder_id} not found")
+            kind, parent_id = row
+            for child_id, child_name in conn.execute(
+                "SELECT id, name FROM folders WHERE parent_id = ?", (folder_id,)
+            ).fetchall():
+                self._check_name(conn, kind, parent_id, child_name, child_id)
+            conn.execute("UPDATE folders SET parent_id = ? WHERE parent_id = ?", (parent_id, folder_id))
+            if parent_id is None:
+                conn.execute("DELETE FROM folder_items WHERE folder_id = ?", (folder_id,))
+            else:
+                conn.execute("UPDATE folder_items SET folder_id = ? WHERE folder_id = ?", (parent_id, folder_id))
+            conn.execute("DELETE FROM folders WHERE id = ?", (folder_id,))
+
+    def move_folder(self, folder_id: str, parent_id: Optional[str]) -> None:
+        """Put a folder inside another, or at the top.
+
+        Raises:
+            ValueError: If either folder is unknown or of another kind, the
+                folder would end up inside itself, or its name is taken there.
+        """
+        with self._transaction() as conn:
+            row = conn.execute("SELECT kind, name FROM folders WHERE id = ?", (folder_id,)).fetchone()
+            if not row:
+                raise ValueError(f"folder {folder_id} not found")
+            kind, name = row
+            ancestor = parent_id
+            while ancestor is not None:
+                if ancestor == folder_id:
+                    raise ValueError("a folder cannot go inside itself")
+                found = conn.execute("SELECT kind, parent_id FROM folders WHERE id = ?", (ancestor,)).fetchone()
+                if not found or found[0] != kind:
+                    raise ValueError(f"folder {ancestor} not found")
+                ancestor = found[1]
+            self._check_name(conn, kind, parent_id, name, folder_id)
+            conn.execute("UPDATE folders SET parent_id = ? WHERE id = ?", (parent_id, folder_id))
+
+    def folder_of(self, kind: str) -> Dict[str, str]:
+        """Which folder each filed item of one kind is in; an item not listed is at the top."""
+        return dict(self._query("SELECT item_id, folder_id FROM folder_items WHERE kind = ?", (kind,)))
+
+    def file_items(self, kind: str, item_ids: Iterable[str], folder_id: Optional[str]) -> None:
+        """Put assets or projects in a folder, or back at the top when `folder_id` is None.
+
+        Raises:
+            ValueError: If the folder is unknown or holds the other kind.
+        """
+        if kind not in FOLDER_KINDS:
+            raise ValueError(f"folders hold {' or '.join(FOLDER_KINDS)}")
+        with self._transaction() as conn:
+            if folder_id is not None and self._folder_kind(conn, folder_id) != kind:
+                raise ValueError(f"folder {folder_id} not found")
+            for item_id in item_ids:
+                if folder_id is None:
+                    conn.execute("DELETE FROM folder_items WHERE kind = ? AND item_id = ?", (kind, item_id))
+                else:
+                    conn.execute(
+                        "INSERT INTO folder_items (kind, item_id, folder_id) VALUES (?, ?, ?) "
+                        "ON CONFLICT(kind, item_id) DO UPDATE SET folder_id = excluded.folder_id",
+                        (kind, item_id, folder_id),
+                    )
+
+    # ------------------------------------------------------------------ taking a file out of the library
+
+    def delete_asset(self, asset_id: str) -> None:
+        """Take a file out of the library, with everything worked out from it.
+
+        Its analysis, its corrected captions, its clips in any semantic
+        timeline, and its place in a folder go. A timeline that also covered
+        other files keeps them. The file on disk is not touched here.
+
+        Args:
+            asset_id: The asset.
+        """
+        with self._transaction() as conn:
+            for statement in ("DELETE FROM assets WHERE id = ?", "DELETE FROM analyses WHERE asset_id = ?",
+                              "DELETE FROM reviewed_captions WHERE asset_id = ?",
+                              "DELETE FROM semantic_clips WHERE asset_id = ?"):
+                conn.execute(statement, (asset_id,))
+            conn.execute("DELETE FROM folder_items WHERE kind = 'assets' AND item_id = ?", (asset_id,))
+            for timeline_id, data in conn.execute("SELECT id, data FROM semantic_timelines").fetchall():
+                timeline = SemanticTimeline.model_validate_json(data)
+                if asset_id in timeline.asset_ids:
+                    timeline.asset_ids = [kept for kept in timeline.asset_ids if kept != asset_id]
+                    conn.execute("UPDATE semantic_timelines SET data = ? WHERE id = ?",
+                                 (timeline.model_dump_json(), timeline_id))

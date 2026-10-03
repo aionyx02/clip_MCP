@@ -118,7 +118,12 @@ mcp = FastMCP(
         "never changes how long the video runs. The person using this server is "
         "editing their own video, not writing code: reply in plain language "
         "with no tool names, IDs, or JSON, and read the plan back in one "
-        "sentence for confirmation before the first render. Projects, assets, "
+        "sentence for confirmation before the first render. Only files in the "
+        "library can go into a project: a file the user names is added to it "
+        "with import_asset or import_folder first, and you tell them it was "
+        "added, since they see the library in the editor app and can take "
+        "files out of it there; a file taken out is no longer usable until it "
+        "is added again. Projects, assets, "
         "analyses, and jobs are saved on disk and survive server restarts."
     ),
 )
@@ -319,6 +324,9 @@ def _sized(assets: Mapping[str, Asset]) -> Dict[str, Asset]:
 def import_asset(filepath: str) -> dict:
     """Register a local media file as an asset that clips can reference.
 
+    This is what puts a file in the library, the only files a project can use;
+    the user sees the library in the editor app, files are never copied, and
+    a file the user takes out of the library there loses its asset ID.
     Importing the same path again re-probes the file and keeps its asset ID.
     Video-track clips need `has_video`, and audio-track clips, such as
     background music, need `has_audio`. Cover art embedded in audio files is

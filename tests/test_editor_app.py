@@ -262,3 +262,118 @@ def test_the_page_connects_and_disconnects_only_the_client_it_names(client: Test
     client.post("/api/clients", json={"key": "codex", "action": "disconnect"})
     writes = [entry for entry in done if not entry[2]]
     assert writes == [("connect", ["gemini-cli"], False), ("disconnect", ["codex"], False)]
+
+
+# --- folders, and taking files out of the library ----------------------------------------
+
+def _copy(media: Path, tmp_path: Path, name: str) -> str:
+    """A file of its own to import, so taking it out never touches what other tests use."""
+    copy = tmp_path / name
+    copy.write_bytes((media / "wide.mp4").read_bytes())
+    return server.import_asset(str(copy))["id"]
+
+def _project_using(client: TestClient, asset_id: str, name: str) -> str:
+    made = client.post("/api/projects", json={"name": name}).json()
+    project = server.repo.get_project(made["id"])
+    client.post(f"/api/projects/{made['id']}/edits", json={"expected_version": project.version, "operations": [
+        {"action": "insert_clip", "track_id": "video", "clip_id": "c1", "asset_id": asset_id,
+         "source_range": {"start": 0, "end": 2}},
+    ]})
+    return made["id"]
+
+def _folder(client: TestClient, kind: str, name: str, parent_id=None) -> str:
+    answer = client.post("/api/folders", json={"action": "create", "kind": kind, "name": name, "parent_id": parent_id})
+    assert answer.status_code == 200, answer.text
+    return answer.json()["id"]
+
+def test_folders_nest_and_keep_their_names_apart(client: TestClient) -> None:
+    trips = _folder(client, "projects", "旅行 資料夾")
+    tainan = _folder(client, "projects", "台南", trips)
+    assert client.post("/api/folders", json={"action": "create", "kind": "projects", "name": "台南", "parent_id": trips}).status_code == 400
+    assert client.post("/api/folders", json={"action": "create", "kind": "projects", "name": "  "}).status_code == 400
+    # The same name elsewhere, or for the other kind, is fine.
+    _folder(client, "projects", "台南")
+    _folder(client, "assets", "旅行 資料夾")
+    assert client.post("/api/folders", json={"action": "create", "kind": "assets", "name": "x", "parent_id": tainan}).status_code == 404
+    assert client.post("/api/folders", json={"action": "move", "id": trips, "parent_id": tainan}).status_code == 400
+    listed = {folder["id"]: folder for folder in client.get("/api/folders?kind=projects").json()["folders"]}
+    assert listed[tainan]["parent_id"] == trips
+    assert client.post("/api/folders", json={"action": "rename", "id": tainan, "name": "台南 2026"}).status_code == 200
+    assert client.get("/api/folders?kind=other").status_code == 400
+
+def test_removing_a_folder_moves_what_was_in_it_up_and_deletes_nothing(client: TestClient) -> None:
+    outer = _folder(client, "projects", "外層")
+    inner = _folder(client, "projects", "內層", outer)
+    made = client.post("/api/projects", json={"name": "收好的"}).json()["id"]
+    assert client.post("/api/file", json={"kind": "projects", "ids": [made], "folder_id": inner}).status_code == 200
+    assert next(item for item in client.get("/api/projects").json()["projects"] if item["id"] == made)["folder_id"] == inner
+    client.post("/api/folders", json={"action": "delete", "id": inner})
+    assert next(item for item in client.get("/api/projects").json()["projects"] if item["id"] == made)["folder_id"] == outer
+    client.post("/api/folders", json={"action": "delete", "id": outer})
+    assert next(item for item in client.get("/api/projects").json()["projects"] if item["id"] == made)["folder_id"] is None
+    assert server.repo.get_project(made) is not None
+
+def test_filing_refuses_a_folder_of_the_other_kind_or_something_unknown(client: TestClient, media: Path, tmp_path: Path) -> None:
+    asset = _copy(media, tmp_path, "收.mp4")
+    projects_folder = _folder(client, "projects", "只放專案")
+    assert client.post("/api/file", json={"kind": "assets", "ids": [asset], "folder_id": projects_folder}).status_code == 404
+    assert client.post("/api/file", json={"kind": "assets", "ids": ["nothing"], "folder_id": None}).status_code == 404
+    assets_folder = _folder(client, "assets", "素材分類")
+    assert client.post("/api/file", json={"kind": "assets", "ids": [asset], "folder_id": assets_folder}).status_code == 200
+    listed = {item["id"]: item for item in client.get("/api/assets").json()["assets"]}
+    assert listed[asset]["folder_id"] == assets_folder
+
+def test_files_chosen_with_a_folder_open_are_filed_in_it(client: TestClient, media: Path, tmp_path: Path, monkeypatch) -> None:
+    copy = tmp_path / "選進資料夾.mp4"
+    copy.write_bytes((media / "tall.mp4").read_bytes())
+    folder = _folder(client, "assets", "選進來")
+    monkeypatch.setattr(dialogs, "pick", lambda kind: [str(copy)])
+    result = client.post("/api/pick", json={"kind": "files", "folder_id": folder}).json()
+    assert server.repo.folder_of("assets")[result["assets"][0]] == folder
+
+def test_a_file_a_project_uses_cannot_be_taken_out_and_the_project_is_named(client: TestClient, media: Path, tmp_path: Path) -> None:
+    asset = _copy(media, tmp_path, "還在用.mp4")
+    _project_using(client, asset, "用著它的專案")
+    answer = client.post("/api/assets/delete", json={"ids": [asset], "recycle": True})
+    assert answer.status_code == 409
+    assert answer.json()["in_use"] == [{"name": "還在用.mp4", "projects": ["用著它的專案"]}]
+    assert server.repo.get_assets([asset]) and (tmp_path / "還在用.mp4").exists()
+
+def test_taking_a_file_out_keeps_the_original_unless_asked(client: TestClient, media: Path, tmp_path: Path, monkeypatch) -> None:
+    recycled = []
+    monkeypatch.setattr(editor.housekeeping, "to_recycle_bin", lambda paths: recycled.extend(paths) or True)
+    kept = _copy(media, tmp_path, "留著原檔.mp4")
+    folder = _folder(client, "assets", "要清掉的")
+    server.repo.file_items("assets", [kept], folder)
+    answer = client.post("/api/assets/delete", json={"ids": [kept], "recycle": False})
+    assert answer.status_code == 200 and answer.json()["removed"] == [kept]
+    assert not server.repo.get_assets([kept]) and kept not in server.repo.folder_of("assets")
+    assert (tmp_path / "留著原檔.mp4").exists() and recycled == []
+    gone = _copy(media, tmp_path, "丟回收筒.mp4")
+    assert client.post("/api/assets/delete", json={"ids": [gone], "recycle": True}).status_code == 200
+    assert recycled == [str((tmp_path / "丟回收筒.mp4").resolve())] or recycled == [os.path.abspath(tmp_path / "丟回收筒.mp4")]
+
+def test_a_file_whose_original_is_gone_is_listed_so_it_can_be_taken_out(client: TestClient, media: Path, tmp_path: Path) -> None:
+    asset = _copy(media, tmp_path, "不見了.mp4")
+    (tmp_path / "不見了.mp4").unlink()
+    assert asset not in {item["id"] for item in client.get("/api/assets").json()["assets"]}
+    listed = {item["id"]: item for item in client.get("/api/assets?all=1").json()["assets"]}
+    assert listed[asset]["missing"] is True
+    assert client.post("/api/assets/delete", json={"ids": [asset], "recycle": True}).status_code == 200
+    assert asset not in {item["id"] for item in client.get("/api/assets?all=1").json()["assets"]}
+
+def test_a_file_taken_out_leaves_the_rest_of_a_timeline_that_covered_it(tmp_path: Path) -> None:
+    from app.models.media import Asset
+    from app.models.semantic import SemanticTimeline
+    from app.storage.repo import Repository
+
+    store = Repository(str(tmp_path / "library.db"))
+    for asset_id in ("a", "b"):
+        store.save_asset(Asset(id=asset_id, path=str(tmp_path / f"{asset_id}.mp4"), has_video=True, has_audio=True))
+    store.save_semantic_timeline(SemanticTimeline(id="t", asset_ids=["a", "b"], input_hash="h", derivation_version=1), [])
+    folder = store.create_folder("f", "assets", "放這")["id"]
+    store.file_items("assets", ["a", "b"], folder)
+    store.delete_asset("a")
+    assert set(store.get_assets(["a", "b"])) == {"b"}
+    assert store.get_semantic_timeline("t").asset_ids == ["b"]
+    assert store.folder_of("assets") == {"b": folder}
