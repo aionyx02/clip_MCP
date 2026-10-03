@@ -178,7 +178,8 @@ def uninstall(dry_run: bool, delete_data: bool) -> int:
 
     This copy's entry in every AI client (one that starts another copy of
     clip-mcp is left connected), the shortcuts, and the pointer file go — the
-    pointer stays when another copy is here, which reads it too. The
+    pointer stays when another copy is here, which reads it too, and so does
+    the workspace its projects are in, whatever was asked. Otherwise the
     workspace — projects, analyses, models — goes only when the user says so,
     and then to the recycle bin. Finished videos are never touched.
 
@@ -221,7 +222,10 @@ def uninstall(dry_run: bool, delete_data: bool) -> int:
             pointer.unlink()
             if pointer.parent.exists() and not any(pointer.parent.iterdir()):
                 pointer.parent.rmdir()
-    if data.is_dir():
+    if data.is_dir() and others:
+        # The other copy's projects are in it; asked or not, it is not this uninstall's to take.
+        print(f"kept the workspace: {data} - another copy of clip-mcp uses it")
+    elif data.is_dir():
         if dry_run and not delete_data:
             print(f"would ask whether to delete the workspace at {data}; kept unless you say so")
             wanted = False

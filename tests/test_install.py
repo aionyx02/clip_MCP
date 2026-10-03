@@ -276,6 +276,7 @@ def test_uninstall_keeps_the_pointer_another_copy_reads_but_not_its_own_ffmpeg(
     home: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
     from app import cli
+    from app.storage import housekeeping
 
     not_on_path(monkeypatch)
     monkeypatch.setattr(cli, "_ask", lambda question: False)
@@ -291,6 +292,11 @@ def test_uninstall_keeps_the_pointer_another_copy_reads_but_not_its_own_ffmpeg(
     cli.uninstall(dry_run=False, delete_data=False)
     assert workspace.read_pointer() == (tmp_path / "chosen").resolve()
     assert "ffmpeg" not in workspace._read_config()
+    # Not even when the user said to delete it: the other copy's projects are in it.
+    recycled = []
+    monkeypatch.setattr(housekeeping, "to_recycle_bin", lambda paths: recycled.extend(paths) or True)
+    cli.uninstall(dry_run=False, delete_data=True)
+    assert recycled == [] and (tmp_path / "chosen").is_dir()
     developer.unlink()
     cli.uninstall(dry_run=False, delete_data=False)
     assert not workspace.pointer_file().exists()
