@@ -210,6 +210,68 @@ def test_disconnecting_codex_keeps_the_rest_of_its_config(home: Path, monkeypatc
     kept = tomllib.loads((home / "codex" / "config.toml").read_text(encoding="utf-8"))
     assert kept == {"model": "gpt-5", "mcp_servers": {"other": {"command": "x"}}}
 
+INSTALLED = [str(Path("C:/Users/someone/AppData/Local/Programs/clip-mcp/bin/clip-mcp.exe"))]
+
+@pytest.mark.parametrize(("register", "unregister", "folder", "file"), [
+    (clients.register_gemini, clients.unregister_gemini, ".gemini", "settings.json"),
+    (clients.register_lm_studio, clients.unregister_lm_studio, ".lmstudio", "mcp.json"),
+])
+def test_one_copy_takes_out_only_its_own_entry(
+    home: Path, monkeypatch: pytest.MonkeyPatch, register, unregister, folder: str, file: str,
+) -> None:
+    not_on_path(monkeypatch)
+    (home / "home" / folder).mkdir(parents=True)
+    register(COMMAND, dry_run=False)
+    path = home / "home" / folder / file
+    result = unregister(dry_run=False, owner=INSTALLED)
+    assert result.status == "kept" and COMMAND[0] in result.detail
+    assert json.loads(path.read_text(encoding="utf-8"))["mcpServers"]["clip-mcp"]["command"] == COMMAND[0]
+    # The same path written another way is still the same copy.
+    assert unregister(dry_run=False, owner=[COMMAND[0].upper()]).status == ("removed" if clients.os.name == "nt" else "kept")
+
+def test_opencode_entry_of_another_copy_stays(home: Path) -> None:
+    (home / "config" / "opencode").mkdir(parents=True)
+    clients.register_opencode(COMMAND, dry_run=False)
+    assert clients.unregister_opencode(dry_run=False, owner=INSTALLED).status == "kept"
+    assert clients.unregister_opencode(dry_run=False, owner=COMMAND).status == "removed"
+
+def test_codex_keeps_the_section_of_another_copy_and_its_env(home: Path) -> None:
+    (home / "codex").mkdir()
+    config = home / "codex" / "config.toml"
+    config.write_text(clients._toml_section(COMMAND) + '\n[mcp_servers.clip-mcp.env]\nA = "1"\n', encoding="utf-8")
+    assert clients.unregister_codex(dry_run=False, owner=INSTALLED).status == "kept"
+    assert tomllib.loads(config.read_text(encoding="utf-8"))["mcp_servers"]["clip-mcp"]["env"] == {"A": "1"}
+    assert clients.unregister_codex(dry_run=False, owner=COMMAND).status == "removed"
+    assert "clip-mcp" not in config.read_text(encoding="utf-8")
+
+def test_claude_code_entry_of_another_copy_stays(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = []
+
+    def run(arguments, **_):
+        calls.append(arguments[1:3])
+        return clients.subprocess.CompletedProcess(arguments, 0, f"clip-mcp:\n  Command: {COMMAND[0]}\n  Args:\n", "")
+
+    monkeypatch.setattr(clients.shutil, "which", lambda name: "claude")
+    monkeypatch.setattr(clients.subprocess, "run", run)
+    assert clients.unregister_claude_code(dry_run=False, owner=INSTALLED).status == "kept"
+    assert ["mcp", "remove"] not in calls
+    assert clients.unregister_claude_code(dry_run=False, owner=COMMAND).status == "removed"
+    assert ["mcp", "remove"] in calls
+
+def test_uninstall_leaves_another_copys_entry_connected(
+    home: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    from app import cli
+
+    not_on_path(monkeypatch)
+    monkeypatch.setattr(cli, "_ask", lambda question: False)
+    monkeypatch.setattr(clients, "server_command", lambda: INSTALLED)
+    (home / "home" / ".gemini").mkdir(parents=True)
+    clients.register_gemini(COMMAND, dry_run=False)
+    cli.uninstall(dry_run=False, delete_data=False)
+    servers = json.loads((home / "home" / ".gemini" / "settings.json").read_text(encoding="utf-8"))["mcpServers"]
+    assert servers["clip-mcp"]["command"] == COMMAND[0]
+
 def test_cherry_studio_is_never_taken_out_behind_the_users_back(home: Path) -> None:
     if clients.sys.platform != "win32":
         pytest.skip("Cherry Studio's folder is only under APPDATA on Windows")
@@ -238,6 +300,7 @@ def test_uninstall_takes_it_out_of_every_client_and_keeps_the_workspace_unless_a
 
     not_on_path(monkeypatch)
     monkeypatch.setattr(cli, "_ask", lambda question: False)
+    monkeypatch.setattr(clients, "server_command", lambda: COMMAND)
     (home / "home" / ".gemini").mkdir(parents=True)
     clients.register_gemini(COMMAND, dry_run=False)
     workspace.write_pointer(tmp_path / "chosen")
@@ -256,7 +319,7 @@ def test_uninstall_offers_to_delete_the_workspace_it_was_using_not_another(
     asked, recycled = [], []
     monkeypatch.setattr(cli, "_ask", lambda question: asked.append(question) or True)
     monkeypatch.setattr(housekeeping, "to_recycle_bin", lambda paths: recycled.extend(paths) or True)
-    monkeypatch.setattr(clients, "unregister", lambda only=None, dry_run=False: [])
+    monkeypatch.setattr(clients, "unregister", lambda only=None, dry_run=False, owner=None: [])
     (tmp_path / "chosen").mkdir()
     workspace.write_pointer(tmp_path / "chosen")
     cli.uninstall(dry_run=False, delete_data=False)

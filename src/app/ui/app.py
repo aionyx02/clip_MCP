@@ -548,7 +548,7 @@ async def ai_clients(request: Request) -> Response:
         if key not in clients.CLIENTS or key == "cherry-studio":
             return _error("that client is not connected from here", 404)
         if body.get("action") == "disconnect":
-            result = (await run_in_threadpool(clients.unregister, [key]))[0]
+            result = (await run_in_threadpool(clients.unregister, [key], False, clients.server_command()))[0]
         else:
             result = (await run_in_threadpool(clients.register, clients.server_command(), [key]))[0]
         if result.status == "failed":

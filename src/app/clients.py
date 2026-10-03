@@ -28,7 +28,7 @@ import sys
 import urllib.parse
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Dict, List, Optional
+from typing import Callable, Dict, List, Optional, Set
 
 SERVER_NAME = "clip-mcp"
 # Names an earlier hand-written entry may have used for this server, replaced rather than
@@ -45,7 +45,8 @@ class Registration:
             `skipped` (not installed), `failed`, or `confirm` for a client
             that only takes a server through a link the user approves in the
             client itself. For removing, `removed`, `absent`, `would remove`,
-            `failed`, or `manual` for a client only the user can take it out of.
+            `failed`, `kept` for an entry that starts another copy of
+            clip-mcp, or `manual` for a client only the user can take it out of.
         detail: Where, or why not.
     """
 
@@ -429,22 +430,58 @@ def register_claude_code(command: List[str], dry_run: bool) -> Registration:
     return Registration("Claude Code", "registered", "user scope")
 
 # ----------------------------------------------------------------- taking it out again
+#
+# Each of these takes an `owner`: the command of the copy doing the removing. A machine
+# can hold two copies — the installer's, and a developer's `uv tool install` — each
+# connected on its own, and uninstalling one must not disconnect the other. So with an
+# owner, an entry is taken out only when it starts that copy; without one, whatever
+# clip-mcp entry is there goes.
 
-def _drop_entry(servers: dict) -> bool:
+def _same_command(found: object, owner: Optional[List[str]]) -> bool:
+    """Whether a client's entry starts the copy of clip-mcp that `owner` names.
+
+    Args:
+        found: The program the entry starts, as the client wrote it.
+        owner: The command of the copy doing the removing, or None for any copy.
+
+    Returns:
+        True when the entry is that copy's, or when no copy was named.
+    """
+    if owner is None:
+        return True
+    if not isinstance(found, str) or not found:
+        return False
+    return os.path.normcase(os.path.normpath(found)) == os.path.normcase(os.path.normpath(owner[0]))
+
+def _entry_program(entry: object) -> object:
+    """The program a JSON entry starts: its `command`, a string, or for opencode a list."""
+    command = entry.get("command") if isinstance(entry, dict) else None
+    return command[0] if isinstance(command, list) and command else command
+
+def _drop_entry(servers: dict, owner: Optional[List[str]], kept: Set[str]) -> bool:
     """Take this server, under its name now or an old one, out of a client's table of servers.
 
     Args:
         servers: The table, edited in place.
+        owner: Take out only entries that start this command; any, when None.
+        kept: Collects the programs of entries left because they start another copy.
 
     Returns:
-        Whether anything was there.
+        Whether anything was taken out.
     """
-    found = [name for name in (SERVER_NAME, *OLD_NAMES) if name in servers]
-    for name in found:
-        del servers[name]
-    return bool(found)
+    dropped = False
+    for name in [name for name in (SERVER_NAME, *OLD_NAMES) if name in servers]:
+        program = _entry_program(servers[name])
+        if _same_command(program, owner):
+            del servers[name]
+            dropped = True
+        else:
+            kept.add(str(program))
+    return dropped
 
-def _remove_from_json(name: str, path: Path, table: str, dry_run: bool, comments: bool = False) -> Registration:
+def _remove_from_json(
+    name: str, path: Path, table: str, dry_run: bool, owner: Optional[List[str]], comments: bool = False,
+) -> Registration:
     """Take this server out of a client's JSON settings, leaving everything else as it was.
 
     Args:
@@ -452,6 +489,7 @@ def _remove_from_json(name: str, path: Path, table: str, dry_run: bool, comments
         path: Its settings file; a missing one means there is nothing to take out.
         table: The key its servers are under.
         dry_run: Say what would change without changing it.
+        owner: Take out only an entry that starts this command; any, when None.
         comments: The file may hold comments.
 
     Returns:
@@ -459,15 +497,19 @@ def _remove_from_json(name: str, path: Path, table: str, dry_run: bool, comments
     """
     if not path.exists():
         return Registration(name, "absent", str(path))
+    kept: Set[str] = set()
     try:
-        status = _update_json(path, lambda settings: isinstance(settings.get(table), dict) and _drop_entry(settings[table]),
-                              dry_run, comments=comments)
+        status = _update_json(
+            path, lambda settings: isinstance(settings.get(table), dict) and _drop_entry(settings[table], owner, kept),
+            dry_run, comments=comments)
     except (OSError, ValueError) as error:
         return Registration(name, "failed", f"{path}: {error}")
+    if status == "unchanged" and kept:
+        return Registration(name, "kept", f"{path}: starts another copy, {', '.join(sorted(kept))}")
     return Registration(name, {"registered": "removed", "unchanged": "absent",
                                "would register": "would remove"}[status], str(path))
 
-def unregister_claude_desktop(dry_run: bool) -> Registration:
+def unregister_claude_desktop(dry_run: bool, owner: Optional[List[str]] = None) -> Registration:
     """Take this server out of the Claude desktop app's settings."""
     if sys.platform == "win32":
         folder = Path(os.environ.get("APPDATA") or Path.home() / "AppData" / "Roaming") / "Claude"
@@ -475,31 +517,55 @@ def unregister_claude_desktop(dry_run: bool) -> Registration:
         folder = Path.home() / "Library" / "Application Support" / "Claude"
     else:
         folder = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "Claude"
-    return _remove_from_json("Claude Desktop", folder / "claude_desktop_config.json", "mcpServers", dry_run)
+    return _remove_from_json("Claude Desktop", folder / "claude_desktop_config.json", "mcpServers", dry_run, owner)
 
-def unregister_opencode(dry_run: bool) -> Registration:
+def unregister_opencode(dry_run: bool, owner: Optional[List[str]] = None) -> Registration:
     """Take this server out of opencode's global config."""
     folder = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "opencode"
     path = next((folder / name for name in ("opencode.jsonc", "opencode.json") if (folder / name).exists()),
                 folder / "opencode.json")
-    return _remove_from_json("opencode", path, "mcp", dry_run, comments=path.suffix == ".jsonc")
+    return _remove_from_json("opencode", path, "mcp", dry_run, owner, comments=path.suffix == ".jsonc")
 
-def unregister_gemini(dry_run: bool) -> Registration:
+def unregister_gemini(dry_run: bool, owner: Optional[List[str]] = None) -> Registration:
     """Take this server out of Gemini CLI's settings."""
-    return _remove_from_json("Gemini CLI", Path.home() / ".gemini" / "settings.json", "mcpServers", dry_run)
+    return _remove_from_json("Gemini CLI", Path.home() / ".gemini" / "settings.json", "mcpServers", dry_run, owner)
 
-def unregister_lm_studio(dry_run: bool) -> Registration:
+def unregister_lm_studio(dry_run: bool, owner: Optional[List[str]] = None) -> Registration:
     """Take this server out of LM Studio's MCP list."""
-    return _remove_from_json("LM Studio", Path.home() / ".lmstudio" / "mcp.json", "mcpServers", dry_run)
+    return _remove_from_json("LM Studio", Path.home() / ".lmstudio" / "mcp.json", "mcpServers", dry_run, owner)
 
-def unregister_codex(dry_run: bool) -> Registration:
-    """Take this server's section out of the Codex config, which the ChatGPT desktop app shares."""
+def _codex_section_name(section: str) -> "re.Match[str]":
+    """The server a Codex section belongs to (group 1), and whether it is a sub-table (group 2)."""
+    return re.match(r'\[mcp_servers\."?([^."\]]+)"?(\.)?', section)
+
+def unregister_codex(dry_run: bool, owner: Optional[List[str]] = None) -> Registration:
+    """Take this server's section out of the Codex config, which the ChatGPT desktop app shares.
+
+    A server's sub-tables (`.env`) go or stay with it, by the `command` in its
+    main section.
+    """
     path = Path(os.environ.get("CODEX_HOME") or Path.home() / ".codex") / "config.toml"
     if not path.exists():
         return Registration("Codex", "absent", str(path))
     text = path.read_text(encoding="utf-8")
-    kept = _codex_sections().sub("", text)
+    pattern = _codex_sections()
+    others: Dict[str, str] = {}
+    for section in pattern.finditer(text):
+        name = _codex_section_name(section.group(0))
+        if name.group(2):
+            continue
+        command = re.search(r'^command\s*=\s*(".*")\s*$', section.group(0), re.MULTILINE)
+        try:
+            program = json.loads(command.group(1)) if command else None
+        except ValueError:
+            program = None
+        if not _same_command(program, owner):
+            others[name.group(1)] = str(program)
+    kept = pattern.sub(
+        lambda section: section.group(0) if _codex_section_name(section.group(0)).group(1) in others else "", text)
     if kept == text:
+        if others:
+            return Registration("Codex", "kept", f"{path}: starts another copy, {', '.join(sorted(set(others.values())))}")
         return Registration("Codex", "absent", str(path))
     if dry_run:
         return Registration("Codex", "would remove", str(path))
@@ -510,7 +576,7 @@ def unregister_codex(dry_run: bool) -> Registration:
         return Registration("Codex", "failed", f"{path}: {error}")
     return Registration("Codex", "removed", str(path))
 
-def unregister_claude_code(dry_run: bool) -> Registration:
+def unregister_claude_code(dry_run: bool, owner: Optional[List[str]] = None) -> Registration:
     """Take this server out of Claude Code, through its own command."""
     claude = shutil.which("claude")
     if claude is None:
@@ -519,6 +585,10 @@ def unregister_claude_code(dry_run: bool) -> Registration:
                             encoding="utf-8", errors="replace", timeout=60)
     if listed.returncode != 0:
         return Registration("Claude Code", "absent", "user scope")
+    program = re.search(r"^\s*Command:\s*(.+?)\s*$", listed.stdout, re.MULTILINE)
+    program = program.group(1) if program else None
+    if not _same_command(program, owner):
+        return Registration("Claude Code", "kept", f"starts another copy, {program or 'unknown'}")
     if dry_run:
         return Registration("Claude Code", "would remove", "user scope")
     removed = subprocess.run([claude, "mcp", "remove", "--scope", "user", SERVER_NAME],
@@ -527,14 +597,14 @@ def unregister_claude_code(dry_run: bool) -> Registration:
         return Registration("Claude Code", "failed", (removed.stderr or removed.stdout).strip()[-300:])
     return Registration("Claude Code", "removed", "user scope")
 
-def unregister_cherry_studio(dry_run: bool) -> Registration:
+def unregister_cherry_studio(dry_run: bool, owner: Optional[List[str]] = None) -> Registration:
     """Say how to take this server out of Cherry Studio, which keeps it where nothing else can reach."""
     found = register_cherry_studio(["clip-mcp"], dry_run=True)
     if found.status == "skipped":
         return Registration("Cherry Studio", "absent", "not installed")
     return Registration("Cherry Studio", "manual", "remove clip-mcp in Cherry Studio: Settings → MCP Servers")
 
-UNREGISTER: Dict[str, Callable[[bool], Registration]] = {
+UNREGISTER: Dict[str, Callable[[bool, Optional[List[str]]], Registration]] = {
     "claude-code": unregister_claude_code,
     "claude-desktop": unregister_claude_desktop,
     "codex": unregister_codex,
@@ -544,12 +614,16 @@ UNREGISTER: Dict[str, Callable[[bool], Registration]] = {
     "cherry-studio": unregister_cherry_studio,
 }
 
-def unregister(only: Optional[List[str]] = None, dry_run: bool = False) -> List[Registration]:
+def unregister(
+    only: Optional[List[str]] = None, dry_run: bool = False, owner: Optional[List[str]] = None,
+) -> List[Registration]:
     """Take this server out of every client, or the ones named.
 
     Args:
         only: Client keys; all of them when not given.
         dry_run: Say what would change without changing anything.
+        owner: Take out only entries that start this command, so another
+            copy of clip-mcp on this machine stays connected; any, when None.
 
     Returns:
         One result per client.
@@ -557,7 +631,7 @@ def unregister(only: Optional[List[str]] = None, dry_run: bool = False) -> List[
     results = []
     for key in only or list(UNREGISTER):
         try:
-            results.append(UNREGISTER[key](dry_run))
+            results.append(UNREGISTER[key](dry_run, owner))
         except (OSError, subprocess.SubprocessError) as error:
             results.append(Registration(key, "failed", str(error)))
     return results

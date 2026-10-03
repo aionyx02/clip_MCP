@@ -254,7 +254,7 @@ def test_the_page_connects_and_disconnects_only_the_client_it_names(client: Test
                         lambda command, only=None, dry_run=False: done.append(("connect", only, dry_run))
                         or [editor.clients.Registration("x", "unchanged", "")] * len(only or editor.clients.CLIENTS))
     monkeypatch.setattr(editor.clients, "unregister",
-                        lambda only=None, dry_run=False: done.append(("disconnect", only, dry_run))
+                        lambda only=None, dry_run=False, owner=None: done.append(("disconnect", only, dry_run))
                         or [editor.clients.Registration("x", "removed", "")])
     assert client.post("/api/clients", json={}).status_code == 404
     assert client.post("/api/clients", json={"key": "cherry-studio"}).status_code == 404

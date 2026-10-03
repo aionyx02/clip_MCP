@@ -176,7 +176,8 @@ def setup(
 def uninstall(dry_run: bool, delete_data: bool) -> int:
     """Take clip-mcp out of everything it was put into, before the program itself is removed.
 
-    Every AI client's entry, the shortcuts, and the pointer file go. The
+    This copy's entry in every AI client (one that starts another copy of
+    clip-mcp is left connected), the shortcuts, and the pointer file go. The
     workspace — projects, analyses, models — goes only when the user says so,
     and then to the recycle bin. Finished videos are never touched.
 
@@ -191,7 +192,8 @@ def uninstall(dry_run: bool, delete_data: bool) -> int:
     data = workspace.resolve().path
     failed = False
     print("AI clients:")
-    for result in clients.unregister(dry_run=dry_run):
+    # Only this copy's entries: another copy on this machine, a developer's say, stays connected.
+    for result in clients.unregister(dry_run=dry_run, owner=clients.server_command()):
         failed |= result.status == "failed"
         print(f"  {result.client:<15} {result.status} - {result.detail}")
     from app.ui import shortcut
