@@ -546,3 +546,27 @@ def test_footage_can_be_read_through_one_line_a_clip(media: Path) -> None:
     first = query_clips(timeline_id=built, kinds=["speech"], brief=True, limit=1)
     second = query_clips(timeline_id=built, kinds=["speech"], brief=True, limit=1, offset=1)
     assert first["truncated"] and first["lines"] + second["lines"] == lines
+
+def test_an_older_copy_opening_a_newer_database_leaves_its_version_alone(tmp_path: Path, monkeypatch) -> None:
+    database = str(tmp_path / "shared.db")
+    Repository(database)
+    monkeypatch.setattr(repo_module, "_MIGRATIONS", repo_module._MIGRATIONS[:6])
+    monkeypatch.setattr(repo_module, "SCHEMA_VERSION", 6)
+    Repository(database)
+    monkeypatch.undo()
+    newer = Repository(database)
+    assert newer._query("PRAGMA user_version")[0][0] == repo_module.SCHEMA_VERSION
+    assert newer.list_folders("assets") == []
+
+def test_a_database_an_older_release_set_back_still_opens(tmp_path: Path) -> None:
+    database = str(tmp_path / "set-back.db")
+    Repository(database).create_folder("f", "assets", "留著")
+    # What 0.1.0 and 0.1.1 did on opening it: wrote their own schema version over it.
+    import sqlite3
+
+    connection = sqlite3.connect(database)
+    connection.execute("PRAGMA user_version = 6")
+    connection.close()
+    reopened = Repository(database)
+    assert [folder["name"] for folder in reopened.list_folders("assets")] == ["留著"]
+    assert reopened._query("PRAGMA user_version")[0][0] == repo_module.SCHEMA_VERSION

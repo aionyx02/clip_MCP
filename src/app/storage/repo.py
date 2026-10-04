@@ -72,17 +72,19 @@ _MIGRATIONS: List[List[str]] = [
         # the files on disk never move, so no project loses a file to a tidy-up. One table
         # of folders for both kinds, and which folder each thing is in, apart from the
         # things themselves, so filing a project away does not count as editing it.
-        "CREATE TABLE folders (id TEXT PRIMARY KEY, kind TEXT NOT NULL, parent_id TEXT, name TEXT NOT NULL)",
-        "CREATE TABLE folder_items (kind TEXT NOT NULL, item_id TEXT NOT NULL, folder_id TEXT NOT NULL, "
+        # IF NOT EXISTS here and below: 0.1.0 and 0.1.1 wrote their own, lower schema version
+        # over a newer database they opened, so a later start may find these tables already there.
+        "CREATE TABLE IF NOT EXISTS folders (id TEXT PRIMARY KEY, kind TEXT NOT NULL, parent_id TEXT, name TEXT NOT NULL)",
+        "CREATE TABLE IF NOT EXISTS folder_items (kind TEXT NOT NULL, item_id TEXT NOT NULL, folder_id TEXT NOT NULL, "
         "PRIMARY KEY (kind, item_id))",
     ],
     [
         # What each clip is about, as the local search model put it, so a search by meaning
         # embeds only the clips that are new or whose words changed since the last one.
         # `digest` covers the model and the text the vector was made from.
-        "CREATE TABLE clip_vectors (clip_id TEXT PRIMARY KEY, timeline_id TEXT NOT NULL, "
+        "CREATE TABLE IF NOT EXISTS clip_vectors (clip_id TEXT PRIMARY KEY, timeline_id TEXT NOT NULL, "
         "digest TEXT NOT NULL, vector BLOB NOT NULL)",
-        "CREATE INDEX clip_vectors_timeline ON clip_vectors (timeline_id)",
+        "CREATE INDEX IF NOT EXISTS clip_vectors_timeline ON clip_vectors (timeline_id)",
     ],
 ]
 FOLDER_KINDS = ("assets", "projects")
@@ -121,7 +123,10 @@ class Repository:
             for statements in _MIGRATIONS[current:]:
                 for statement in statements:
                     conn.execute(statement)
-            conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
+            # Never lowered: an older copy opening a database a newer one has upgraded leaves the
+            # version alone, so the newer copy does not apply its migrations a second time.
+            if current < SCHEMA_VERSION:
+                conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
 
     @contextmanager
     def _transaction(self) -> Iterator[sqlite3.Connection]:
