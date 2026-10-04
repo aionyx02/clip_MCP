@@ -101,3 +101,21 @@ def test_a_filter_graph_in_a_file_is_handed_over_the_way_that_ffmpeg_reads_it(
     moved = ffmpeg.graph_from_file(["ffmpeg-under-test", "-filter_complex", "[0:v]null[v]"], str(tmp_path / "graph.txt"))
     ffmpeg._graph_file_option.cache_clear()
     assert moved[1] == option and moved[2] == str(tmp_path / "graph.txt")
+
+def test_the_installer_holds_every_package_to_the_tested_versions() -> None:
+    root = Path(__file__).resolve().parent.parent
+    workflow = (root / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
+    script = (root / "installer" / "install.ps1").read_text(encoding="utf-8")
+    setup = (root / "installer" / "clip-mcp.iss").read_text(encoding="utf-8")
+    # The lockfile's versions, exported where the installer picks them up...
+    assert "uv export --locked" in workflow and r"installer\build\constraints.txt" in workflow
+    assert r'Source: "build\constraints.txt"' in setup and "-Constraints" in setup
+    # ...and the install held to them, not left to take whatever is newest that day.
+    assert '"--constraints", $Constraints' in script
+
+def test_pyav_is_held_below_the_release_that_breaks_transcription() -> None:
+    import tomllib
+
+    root = Path(__file__).resolve().parent.parent
+    dependencies = tomllib.loads((root / "pyproject.toml").read_text(encoding="utf-8"))["project"]["dependencies"]
+    assert any(entry.replace(" ", "").startswith("av") and "<19" in entry for entry in dependencies)

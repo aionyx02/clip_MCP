@@ -67,6 +67,11 @@ jobs:
         run: |
           uv build --wheel -o dist
           "name=$((Get-ChildItem dist\*.whl).Name)" | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
+          # The exact versions the tests passed with. Without them the installer takes the newest
+          # release of everything, and one (PyAV 19) broke transcription in installs the tests never saw.
+          New-Item -ItemType Directory -Force installer\build | Out-Null
+          uv export --locked --no-dev --no-emit-project --no-hashes --format requirements-txt -o installer\build\constraints.txt
+          if ($LASTEXITCODE -ne 0) { throw "uv export failed" }
       - name: uv, FFmpeg checksum, language file
         id: parts
         shell: pwsh

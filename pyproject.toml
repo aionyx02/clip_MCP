@@ -5,6 +5,9 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
+    # faster-whisper decodes audio through PyAV and passes it `metadata_errors`, which PyAV 19
+    # removed: every transcription fails. Held below 19 until faster-whisper stops passing it.
+    "av>=11,<19",
     "faster-whisper>=1.2.1",
     "fastmcp>=4.0.4",
     # Chinese word splitting, so a caption broken into lines is not broken inside a word:

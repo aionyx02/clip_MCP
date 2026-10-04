@@ -76,6 +76,8 @@ Type: files; Name: "{app}\wheels\*.whl"
 [Files]
 Source: "build\uv.exe"; DestDir: "{app}\uv"; Flags: ignoreversion
 Source: "..\dist\{#Wheel}"; DestDir: "{app}\wheels"; Flags: ignoreversion
+; The versions of every package the release was tested with; install.ps1 holds the install to them.
+Source: "build\constraints.txt"; DestDir: "{app}\wheels"; Flags: ignoreversion
 Source: "install.ps1"; DestDir: "{app}"; Flags: ignoreversion
 Source: "build\FFMPEG-NOTICE.txt"; DestDir: "{app}\ffmpeg"; Flags: ignoreversion
 Source: "..\src\app\ui\static\icon.ico"; DestDir: "{app}"; Flags: ignoreversion
@@ -139,6 +141,7 @@ begin
     '-NoProfile -ExecutionPolicy Bypass -File "' + ExpandConstant('{app}\install.ps1') + '"'
       + ' -App "' + ExpandConstant('{app}') + '"'
       + ' -Wheel "' + ExpandConstant('{app}\wheels\{#Wheel}') + '"'
+      + ' -Constraints "' + ExpandConstant('{app}\wheels\constraints.txt') + '"'
       + ' -FfmpegUrl "{#FfmpegUrl}" -FfmpegSha256 "{#FfmpegSha256}" -FfmpegFolder "{#FfmpegFolder}"',
     '', SW_HIDE, ewWaitUntilTerminated, Code, @OnInstallOutput) and (Code = 0);
   WizardForm.ProgressGauge.Style := npbstNormal;

@@ -2,7 +2,7 @@
 # clip-mcp's packages inside clip-mcp's own folder, so nothing lands anywhere uninstalling would
 # not reach.
 #
-#   install.ps1 -App <install folder> -Wheel <clip-mcp wheel>
+#   install.ps1 -App <install folder> -Wheel <clip-mcp wheel> -Constraints <tested versions>
 #               -FfmpegUrl <zip> -FfmpegSha256 <checksum> -FfmpegFolder <folder in the zip>
 #
 # Each step prints a line "STEP <name>" that the wizard shows in words; everything else it
@@ -11,6 +11,7 @@
 param(
     [Parameter(Mandatory = $true)][string]$App,
     [Parameter(Mandatory = $true)][string]$Wheel,
+    [Parameter(Mandatory = $true)][string]$Constraints,
     [Parameter(Mandatory = $true)][string]$FfmpegUrl,
     [Parameter(Mandatory = $true)][string]$FfmpegSha256,
     [Parameter(Mandatory = $true)][string]$FfmpegFolder
@@ -75,7 +76,8 @@ $env:UV_NO_MODIFY_PATH = "1"
 $uv = Join-Path $App "uv\uv.exe"
 
 Say "STEP packages"
-$code = Run $uv @("tool", "install", "--force", "--python", "3.14", $Wheel)
+# Every package at the version the release was tested with, not whatever is newest today.
+$code = Run $uv @("tool", "install", "--force", "--python", "3.14", "--constraints", $Constraints, $Wheel)
 if ($code -ne 0) { Say "uv tool install failed: $code"; exit 1 }
 
 # Point clip-mcp at its workspace and at the FFmpeg above. It connects no AI client: that is
