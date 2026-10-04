@@ -13,6 +13,10 @@ dependencies = [
     # Beat tracking on music. Already here through opencv; named because the beat
     # tracker imports it directly.
     "numpy>=2.5.3",
+    # Search by meaning runs a small ONNX model with its tokenizer. Both already come
+    # with faster-whisper; named because the search imports them directly.
+    "onnxruntime>=1.30.0",
+    "tokenizers>=0.23.2",
     "opencc>=1.4.2",
     # Face detection, for its YuNet wrapper. The headless build leaves out the GUI
     # windowing a server has no use for and cannot open anyway.

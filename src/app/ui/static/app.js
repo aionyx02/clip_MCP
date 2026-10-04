@@ -516,7 +516,8 @@ function removeAssets(ids, assets) {
 
 function showInUse(data) {
   const used = data.in_use.length ? `<p>${esc(T.media.inUseBody)}</p><ul class="used-list">${data.in_use.map((item) =>
-    `<li>${esc(item.name)}<br><small>${esc(item.projects.join("、"))}</small></li>`).join("")}</ul>` : "";
+    `<li>${esc(item.name)}${item.projects.length ? `<br><small>${esc(item.projects.join("、"))}</small>` : ""}
+      ${item.plans?.length ? `<br><small>${esc(T.media.inPlans(item.plans.join("、")))}</small>` : ""}</li>`).join("")}</ul>` : "";
   const busy = data.busy.length ? `<p>${esc(T.media.busyBody(data.busy.join("、")))}</p>` : "";
   modal(`<h2>${esc(T.media.inUseTitle)}</h2>${used}${busy}
     <div class="foot"><button class="btn primary" data-ok>${esc(T.common.close)}</button></div>`, (box, close) => {
@@ -529,7 +530,8 @@ function showInUse(data) {
 async function aiPage(page) {
   page.innerHTML = head(T.ai.title, T.ai.subtitle,
     `<button class="btn" data-refresh>${icon("refresh")}${esc(T.ai.refresh)}</button>`)
-    + `<div data-clients class="list">${'<div class="row skeleton" style="height:64px"></div>'.repeat(3)}</div>
+    + `<div class="callout">${icon("info")}<div><strong style="color:var(--text)">${esc(T.ai.dataTitle)}</strong><br>${esc(T.ai.dataBody)}</div></div>
+       <div data-clients class="list">${'<div class="row skeleton" style="height:64px"></div>'.repeat(3)}</div>
        <div class="section-title">${esc(T.ai.examplesTitle)}</div>
        <div class="list">${T.ai.examples.map((text, index) => `<div class="prompt"><span>${esc(text)}</span>
          <button class="btn small" data-example="${index}">${icon("copy", 16)}${esc(T.ai.copy)}</button></div>`).join("")}</div>`;

@@ -48,6 +48,7 @@ MODEL_LABELS = {
     "whisper": "AI 模型：語音辨識",
     "diarization": "AI 模型：分辨說話的人",
     "faces": "AI 模型：人臉偵測",
+    "search": "AI 模型：依意思搜尋片段",
     "tts": "AI 模型：配音（未啟用）",
 }
 

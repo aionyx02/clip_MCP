@@ -76,12 +76,23 @@ _MIGRATIONS: List[List[str]] = [
         "CREATE TABLE folder_items (kind TEXT NOT NULL, item_id TEXT NOT NULL, folder_id TEXT NOT NULL, "
         "PRIMARY KEY (kind, item_id))",
     ],
+    [
+        # What each clip is about, as the local search model put it, so a search by meaning
+        # embeds only the clips that are new or whose words changed since the last one.
+        # `digest` covers the model and the text the vector was made from.
+        "CREATE TABLE clip_vectors (clip_id TEXT PRIMARY KEY, timeline_id TEXT NOT NULL, "
+        "digest TEXT NOT NULL, vector BLOB NOT NULL)",
+        "CREATE INDEX clip_vectors_timeline ON clip_vectors (timeline_id)",
+    ],
 ]
 FOLDER_KINDS = ("assets", "projects")
 SCHEMA_VERSION = len(_MIGRATIONS)
 
 class VersionConflictError(ValueError):
     """Raised when a project was modified since the caller last read it."""
+
+class FolderNotFoundError(LookupError):
+    """Raised when a folder named by its ID does not exist, or holds the other kind of thing."""
 
 class Repository:
     """SQLite-backed store for assets, analyses, projects, and background jobs.
@@ -456,6 +467,47 @@ class Repository:
                     for clip in clips
                 ],
             )
+            # Vectors of clips this build no longer has; the rest are checked by digest when read.
+            conn.execute(
+                "DELETE FROM clip_vectors WHERE timeline_id = ? "
+                "AND clip_id NOT IN (SELECT id FROM semantic_clips WHERE timeline_id = ?)",
+                (timeline.id, timeline.id),
+            )
+
+    def clip_vectors(self, clip_ids: Iterable[str]) -> Dict[str, tuple]:
+        """Read stored search vectors.
+
+        Args:
+            clip_ids: Clips to read them for.
+
+        Returns:
+            `(digest, vector bytes)` by clip ID, for the clips that have one.
+        """
+        ids = list(clip_ids)
+        found: Dict[str, tuple] = {}
+        # SQLite caps the number of bound values in one statement.
+        for first in range(0, len(ids), 500):
+            chunk = ids[first:first + 500]
+            rows = self._query(
+                f"SELECT clip_id, digest, vector FROM clip_vectors WHERE clip_id IN ({','.join('?' * len(chunk))})",
+                chunk,
+            )
+            found.update({row[0]: (row[1], row[2]) for row in rows})
+        return found
+
+    def save_clip_vectors(self, rows: Iterable[tuple]) -> None:
+        """Store search vectors.
+
+        Args:
+            rows: `(clip_id, timeline_id, digest, vector bytes)` each.
+        """
+        with self._transaction() as conn:
+            conn.executemany(
+                "INSERT INTO clip_vectors (clip_id, timeline_id, digest, vector) VALUES (?, ?, ?, ?) "
+                "ON CONFLICT(clip_id) DO UPDATE SET timeline_id = excluded.timeline_id, "
+                "digest = excluded.digest, vector = excluded.vector",
+                list(rows),
+            )
 
     def update_semantic_clips(self, clips: Iterable[SemanticClip]) -> None:
         """Write changes to clips that already exist, in one transaction.
@@ -793,14 +845,14 @@ class Repository:
             The folder.
 
         Raises:
-            ValueError: For an unknown kind, a parent that is missing or of the
-                other kind, or a name that is empty or already taken beside it.
+            FolderNotFoundError: If the parent is missing or holds the other kind.
+            ValueError: For an unknown kind, or a name that is empty or already taken beside it.
         """
         if kind not in FOLDER_KINDS:
             raise ValueError(f"folders hold {' or '.join(FOLDER_KINDS)}")
         with self._transaction() as conn:
             if parent_id is not None and self._folder_kind(conn, parent_id) != kind:
-                raise ValueError(f"folder {parent_id} not found")
+                raise FolderNotFoundError(f"folder {parent_id} not found")
             name = self._check_name(conn, kind, parent_id, name)
             conn.execute("INSERT INTO folders (id, kind, parent_id, name) VALUES (?, ?, ?, ?)",
                          (folder_id, kind, parent_id, name))
@@ -809,13 +861,18 @@ class Repository:
     def rename_folder(self, folder_id: str, name: str) -> None:
         """Rename a folder.
 
+        Args:
+            folder_id: The folder.
+            name: Its new name.
+
         Raises:
-            ValueError: If there is no such folder, or the name is empty or taken.
+            FolderNotFoundError: If there is no such folder.
+            ValueError: If the name is empty, too long, or taken beside it.
         """
         with self._transaction() as conn:
             row = conn.execute("SELECT kind, parent_id FROM folders WHERE id = ?", (folder_id,)).fetchone()
             if not row:
-                raise ValueError(f"folder {folder_id} not found")
+                raise FolderNotFoundError(f"folder {folder_id} not found")
             conn.execute("UPDATE folders SET name = ? WHERE id = ?",
                          (self._check_name(conn, row[0], row[1], name, folder_id), folder_id))
 
@@ -824,14 +881,17 @@ class Repository:
 
         Nothing in it is deleted, so removing a folder can never cost a file or a project.
 
+        Args:
+            folder_id: The folder.
+
         Raises:
-            ValueError: If there is no such folder, or a folder moving up has
-                the name of one already there.
+            FolderNotFoundError: If there is no such folder.
+            ValueError: If a folder moving up has the name of one already there.
         """
         with self._transaction() as conn:
             row = conn.execute("SELECT kind, parent_id FROM folders WHERE id = ?", (folder_id,)).fetchone()
             if not row:
-                raise ValueError(f"folder {folder_id} not found")
+                raise FolderNotFoundError(f"folder {folder_id} not found")
             kind, parent_id = row
             for child_id, child_name in conn.execute(
                 "SELECT id, name FROM folders WHERE parent_id = ?", (folder_id,)
@@ -847,14 +907,18 @@ class Repository:
     def move_folder(self, folder_id: str, parent_id: Optional[str]) -> None:
         """Put a folder inside another, or at the top.
 
+        Args:
+            folder_id: The folder to move.
+            parent_id: The folder to put it in; the top when None.
+
         Raises:
-            ValueError: If either folder is unknown or of another kind, the
-                folder would end up inside itself, or its name is taken there.
+            FolderNotFoundError: If either folder is unknown, or they hold different kinds.
+            ValueError: If the folder would end up inside itself, or its name is taken there.
         """
         with self._transaction() as conn:
             row = conn.execute("SELECT kind, name FROM folders WHERE id = ?", (folder_id,)).fetchone()
             if not row:
-                raise ValueError(f"folder {folder_id} not found")
+                raise FolderNotFoundError(f"folder {folder_id} not found")
             kind, name = row
             ancestor = parent_id
             while ancestor is not None:
@@ -862,26 +926,39 @@ class Repository:
                     raise ValueError("a folder cannot go inside itself")
                 found = conn.execute("SELECT kind, parent_id FROM folders WHERE id = ?", (ancestor,)).fetchone()
                 if not found or found[0] != kind:
-                    raise ValueError(f"folder {ancestor} not found")
+                    raise FolderNotFoundError(f"folder {ancestor} not found")
                 ancestor = found[1]
             self._check_name(conn, kind, parent_id, name, folder_id)
             conn.execute("UPDATE folders SET parent_id = ? WHERE id = ?", (parent_id, folder_id))
 
     def folder_of(self, kind: str) -> Dict[str, str]:
-        """Which folder each filed item of one kind is in; an item not listed is at the top."""
+        """Say which folder each filed item of one kind is in.
+
+        Args:
+            kind: `assets` or `projects`.
+
+        Returns:
+            Folder ID by item ID; an item not listed is at the top.
+        """
         return dict(self._query("SELECT item_id, folder_id FROM folder_items WHERE kind = ?", (kind,)))
 
     def file_items(self, kind: str, item_ids: Iterable[str], folder_id: Optional[str]) -> None:
-        """Put assets or projects in a folder, or back at the top when `folder_id` is None.
+        """Put assets or projects in a folder, or back at the top.
+
+        Args:
+            kind: `assets` or `projects`.
+            item_ids: The assets or projects.
+            folder_id: The folder; the top when None.
 
         Raises:
-            ValueError: If the folder is unknown or holds the other kind.
+            ValueError: For an unknown kind.
+            FolderNotFoundError: If the folder is unknown or holds the other kind.
         """
         if kind not in FOLDER_KINDS:
             raise ValueError(f"folders hold {' or '.join(FOLDER_KINDS)}")
         with self._transaction() as conn:
             if folder_id is not None and self._folder_kind(conn, folder_id) != kind:
-                raise ValueError(f"folder {folder_id} not found")
+                raise FolderNotFoundError(f"folder {folder_id} not found")
             for item_id in item_ids:
                 if folder_id is None:
                     conn.execute("DELETE FROM folder_items WHERE kind = ? AND item_id = ?", (kind, item_id))
@@ -894,25 +971,105 @@ class Repository:
 
     # ------------------------------------------------------------------ taking a file out of the library
 
-    def delete_asset(self, asset_id: str) -> None:
-        """Take a file out of the library, with everything worked out from it.
+    def delete_unused_assets(self, asset_ids: Iterable[str]) -> Dict[str, Dict[str, List[str]]]:
+        """Take files out of the library, unless anything still uses one of them.
 
-        Its analysis, its corrected captions, its clips in any semantic
-        timeline, and its place in a folder go. A timeline that also covered
-        other files keeps them. The file on disk is not touched here.
+        A file is in use while a project has a clip of it, the AI's current
+        plan for a cut uses it (a selection, a cutaway or music), or an
+        analysis of it is running. Looking and deleting happen in one write
+        transaction, so nothing can start using a file between the two.
+
+        What goes with a file: its analysis, its corrected captions, its clips
+        and their search vectors, and its place in a folder. A timeline that
+        covered other files too keeps them; one left with no file, and no
+        plan, goes. The file on disk is not touched here.
 
         Args:
-            asset_id: The asset.
+            asset_ids: The assets.
+
+        Returns:
+            What uses each file that is in use, as `{"projects": [names],
+            "plans": [goals], "busy": ["analysis"]}` by asset ID. When this is
+            not empty nothing was deleted.
         """
+        wanted = set(asset_ids)
         with self._transaction() as conn:
-            for statement in ("DELETE FROM assets WHERE id = ?", "DELETE FROM analyses WHERE asset_id = ?",
-                              "DELETE FROM reviewed_captions WHERE asset_id = ?",
-                              "DELETE FROM semantic_clips WHERE asset_id = ?"):
-                conn.execute(statement, (asset_id,))
-            conn.execute("DELETE FROM folder_items WHERE kind = 'assets' AND item_id = ?", (asset_id,))
-            for timeline_id, data in conn.execute("SELECT id, data FROM semantic_timelines").fetchall():
-                timeline = SemanticTimeline.model_validate_json(data)
-                if asset_id in timeline.asset_ids:
-                    timeline.asset_ids = [kept for kept in timeline.asset_ids if kept != asset_id]
-                    conn.execute("UPDATE semantic_timelines SET data = ? WHERE id = ?",
-                                 (timeline.model_dump_json(), timeline_id))
+            using: Dict[str, Dict[str, List[str]]] = {}
+
+            def note(asset_id: str, kind: str, what: str) -> None:
+                found = using.setdefault(asset_id, {"projects": [], "plans": [], "busy": []})[kind]
+                if what not in found:
+                    found.append(what)
+
+            for (data,) in conn.execute("SELECT data FROM projects").fetchall():
+                project = Project.model_validate_json(data)
+                for asset_id in wanted & {clip.asset_id for track in project.tracks for clip in track.clips}:
+                    note(asset_id, "projects", project.name or project.id)
+            for (data,) in conn.execute("SELECT data FROM plans").fetchall():
+                plan = json.loads(data)
+                assets, clips = set(), set()
+                _plan_references(plan, assets, clips)
+                for first in range(0, len(clips), 500):
+                    chunk = sorted(clips)[first:first + 500]
+                    assets.update(row[0] for row in conn.execute(
+                        f"SELECT asset_id FROM semantic_clips WHERE id IN ({','.join('?' * len(chunk))})", chunk))
+                for asset_id in wanted & assets:
+                    note(asset_id, "plans", plan.get("goal") or plan.get("id", ""))
+            for (data,) in conn.execute("SELECT data FROM jobs").fetchall():
+                job = Job.model_validate_json(data)
+                if job.asset_id in wanted and job.status.is_active:
+                    note(job.asset_id, "busy", "analysis")
+            if using:
+                return using
+            for asset_id in wanted:
+                self._delete_asset(conn, asset_id)
+        return {}
+
+    @staticmethod
+    def _delete_asset(conn: sqlite3.Connection, asset_id: str) -> None:
+        """Delete one asset and everything worked out from it, inside the caller's transaction."""
+        conn.execute("DELETE FROM clip_vectors WHERE clip_id IN (SELECT id FROM semantic_clips WHERE asset_id = ?)",
+                     (asset_id,))
+        for statement in ("DELETE FROM assets WHERE id = ?", "DELETE FROM analyses WHERE asset_id = ?",
+                          "DELETE FROM reviewed_captions WHERE asset_id = ?",
+                          "DELETE FROM semantic_clips WHERE asset_id = ?"):
+            conn.execute(statement, (asset_id,))
+        conn.execute("DELETE FROM folder_items WHERE kind = 'assets' AND item_id = ?", (asset_id,))
+        planned = {row[0] for row in conn.execute("SELECT timeline_id FROM plans")}
+        for timeline_id, data in conn.execute("SELECT id, data FROM semantic_timelines").fetchall():
+            timeline = SemanticTimeline.model_validate_json(data)
+            if asset_id not in timeline.asset_ids:
+                continue
+            timeline.asset_ids = [kept for kept in timeline.asset_ids if kept != asset_id]
+            if not timeline.asset_ids and timeline_id not in planned:
+                conn.execute("DELETE FROM clip_vectors WHERE timeline_id = ?", (timeline_id,))
+                conn.execute("DELETE FROM semantic_clips WHERE timeline_id = ?", (timeline_id,))
+                conn.execute("DELETE FROM semantic_timelines WHERE id = ?", (timeline_id,))
+            else:
+                conn.execute("UPDATE semantic_timelines SET data = ? WHERE id = ?",
+                             (timeline.model_dump_json(), timeline_id))
+
+def _plan_references(value: object, assets: Set[str], clips: Set[str]) -> None:
+    """Collect the asset IDs and semantic clip IDs anywhere in a plan's JSON.
+
+    Read from the JSON rather than the model so that every place a plan names
+    footage counts — selections, cutaways, music — including ones added later.
+
+    Args:
+        value: The plan, or a part of it.
+        assets: Receives `asset_id` values.
+        clips: Receives `clip_id`, `over_clip_id` and `keep_clip_ids` values.
+    """
+    if isinstance(value, dict):
+        for key, item in value.items():
+            if key == "asset_id" and isinstance(item, str):
+                assets.add(item)
+            elif key in ("clip_id", "over_clip_id") and isinstance(item, str):
+                clips.add(item)
+            elif key == "keep_clip_ids" and isinstance(item, list):
+                clips.update(entry for entry in item if isinstance(entry, str))
+            else:
+                _plan_references(item, assets, clips)
+    elif isinstance(value, list):
+        for item in value:
+            _plan_references(item, assets, clips)

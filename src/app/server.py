@@ -9,6 +9,7 @@ from fractions import Fraction
 from pathlib import Path
 from typing import Annotated, Callable, Dict, List, Literal, Mapping, Optional, Sequence, Tuple
 
+import numpy as np
 from fastmcp import FastMCP
 from fastmcp.server.providers.skills import SkillsDirectoryProvider
 from fastmcp.server.transforms import ResourcesAsTools
@@ -34,7 +35,7 @@ from app.models.timeline import (
     validate_project,
 )
 from app.models.job import Job, JobKind, JobStatus
-from app.engine import loudness, resources
+from app.engine import loudness, meaning, resources
 from app.engine.analysis import current_recipe, sound_note, whisper_model_name
 from app.engine.diarize import speaker_model_name
 from app.engine.rhythm import rhythm_model_name
@@ -777,6 +778,7 @@ def query_clips(
     limit: Annotated[int, Field(ge=1, le=MAX_CLIP_RESULTS)] = 50,
     offset: Annotated[int, Field(ge=0)] = 0,
     brief: bool = False,
+    about: Optional[str] = None,
 ) -> dict:
     """Search the semantic timeline for the clips worth looking at.
 
@@ -784,6 +786,22 @@ def query_clips(
     transcript end to end. Conditions combine, so "the parts of this file
     where someone speaks for more than four seconds and the picture is not
     black" is one call.
+
+    `about` finds clips by what they mean rather than the words in them:
+    "where the product is introduced" finds the sentence that says what it
+    does, though nobody said "introduce". It is answered on this machine by a
+    small local model, and the results come back closest first, each with its
+    `relevance`, so a question about the whole footage costs a short list
+    rather than the transcript. Prefer it to reading everything with `brief`
+    when looking for something in particular; use `text` when the exact word
+    is known. Each sentence is read with the ones either side of it, since
+    speech on camera comes in fragments; a fragment of a few characters is
+    left out, and so is a clip with neither words nor a description. The
+    ranking is a shortlist to read, not a verdict: `relevance` orders one
+    search's results, packed close together, and is not comparable between
+    searches. The first search by meaning downloads the model, about 130 MB,
+    and embeds every clip once, about a second per thousand clips; later
+    searches reuse that.
 
     Results are summaries. Each carries enough to decide whether a clip is
     wanted — what is said, how long it runs, how much room its edges have —
@@ -860,7 +878,10 @@ def query_clips(
             was shot: one line per clip, reading
             `<id> <file> <start>-<end> <kind> [<speaker>] [<topic>] <text>`,
             with the whole of what is said. The ID there is the part after
-            the timeline's, so `u0125` is `<timeline_id>:u0125`.
+            the timeline's, so `u0125` is `<timeline_id>:u0125`. With `about`,
+            the lines follow relevance rather than the order of shooting.
+        about: Rank the matching clips by how close they are in meaning to
+            this, in any language, closest first.
 
     Returns:
         A dictionary with the `timeline_id` searched and the matching `clips`,
@@ -889,9 +910,32 @@ def query_clips(
         max_duration=max_duration,
         min_scores=min_scores,
         max_scores=max_scores,
-        # Read through in the order it was shot, which needs every match to sort.
-        limit=MAX_TIMELINE_CLIPS if brief else offset + limit,
+        # Read through in the order it was shot, or ranked by meaning: either needs every match to sort.
+        limit=MAX_TIMELINE_CLIPS if brief or about else offset + limit,
     )
+    relevance: Dict[str, float] = {}
+    if about and about.strip():
+        ranked = _rank_by_meaning(clips, about.strip())
+        by_id = {clip.id: clip for clip in clips}
+        clips = [by_id[clip_id] for clip_id, _ in ranked]
+        relevance = {clip_id: round(score, 3) for clip_id, score in ranked}
+        page = clips[offset:offset + limit]
+        if brief:
+            assets = repo.get_assets({clip.asset_id for clip in page})
+            return {
+                "timeline_id": timeline.id,
+                "lines": [
+                    f"{relevance[clip.id]:.3f} " + _clip_line(
+                        clip, os.path.basename(assets[clip.asset_id].path) if clip.asset_id in assets else clip.asset_id)
+                    for clip in page
+                ],
+                "truncated": offset + limit < len(clips),
+            }
+        return {
+            "timeline_id": timeline.id,
+            "clips": [{**_clip_summary(clip), "relevance": relevance[clip.id]} for clip in page],
+            "truncated": offset + limit < len(clips),
+        }
     if brief:
         assets = _dated(repo.get_assets({clip.asset_id for clip in clips}))
         never = datetime.max.replace(tzinfo=timezone.utc)
@@ -920,6 +964,85 @@ def query_clips(
         "clips": [_clip_summary(clip) for clip in clips],
         "truncated": truncated,
     }
+
+def _meaning_text(clip: SemanticClip) -> str:
+    """What a clip is about, in words: its section name and topic, what is said, and what is seen."""
+    return "\n".join(part for part in (clip.name, clip.topic, clip.text, clip.description) if part and part.strip())
+
+# Fewer characters than this say too little to be placed by meaning ("各位我", "去"); left
+# to search by `text`, they would otherwise sit close to every question.
+MIN_MEANING_CHARACTERS = 4
+# Sentences either side read with each one: what is said on camera comes in fragments,
+# and "放在這裡" means something only next to what was being put there.
+MEANING_NEIGHBOURS = 1
+
+def _meaning_context(clips: List[SemanticClip]) -> Dict[str, str]:
+    """What each clip is read as for a search by meaning: its own words, then its neighbours'.
+
+    Neighbours are the clips beside it in its file at the same level, from the
+    whole timeline rather than from what this search matched, so the text, and
+    the stored vector made from it, do not change with the search's conditions.
+
+    Args:
+        clips: The clips to read.
+
+    Returns:
+        The text by clip ID, for clips with enough of their own to read.
+    """
+    found: Dict[str, str] = {}
+    for timeline_id, level in {(clip.timeline_id, clip.level) for clip in clips}:
+        everything = [clip for clip in repo.query_semantic_clips(timeline_id, level=level, limit=MAX_TIMELINE_CLIPS)
+                      if _meaning_text(clip)]
+        everything.sort(key=lambda clip: (clip.asset_id, clip.source_range.start))
+        for index, clip in enumerate(everything):
+            own = _meaning_text(clip)
+            if len("".join(own.split())) < MIN_MEANING_CHARACTERS:
+                continue
+            around = [other for other in everything[max(index - MEANING_NEIGHBOURS, 0):index + MEANING_NEIGHBOURS + 1]
+                      if other is not clip and other.asset_id == clip.asset_id]
+            found[clip.id] = "\n".join([own] + [_meaning_text(other) for other in around])
+    wanted = {clip.id for clip in clips}
+    return {clip_id: text for clip_id, text in found.items() if clip_id in wanted}
+
+def _rank_by_meaning(clips: List[SemanticClip], question: str) -> List[Tuple[str, float]]:
+    """Rank clips by how close they are in meaning to a question, embedding any not yet embedded.
+
+    Args:
+        clips: The clips to rank.
+        question: What is being looked for.
+
+    Returns:
+        `(clip_id, similarity)` pairs, closest first. Clips with nothing to
+        read are left out.
+    """
+    context = _meaning_context(clips)
+    wanted = {clip.id: (clip, context[clip.id]) for clip in clips if clip.id in context}
+    stored = repo.clip_vectors(wanted)
+    vectors: Dict[str, np.ndarray] = {}
+    missing = []
+    for clip_id, (clip, words) in wanted.items():
+        made_from = meaning.digest(words)
+        kept = stored.get(clip_id)
+        if kept and kept[0] == made_from:
+            vectors[clip_id] = np.frombuffer(kept[1], dtype=np.float32)
+        else:
+            missing.append((clip, words, made_from))
+    if missing:
+        needed = meaning.download_size()
+        try:
+            made = meaning.embed([words for _, words, _ in missing])
+        except RuntimeError as error:
+            # The first search fetches the model; without it, say so and point at the search that needs none.
+            raise ValueError(
+                f"search by meaning needs its model ({needed // meaning.models.MEGABYTE} MB to download once), "
+                f"which could not be fetched: {error}. Search with `text` meanwhile, and try `about` again later."
+            ) from error
+        repo.save_clip_vectors(
+            (clip.id, clip.timeline_id, made_from, vector.tobytes())
+            for (clip, _, made_from), vector in zip(missing, made)
+        )
+        vectors.update({clip.id: vector for (clip, _, _), vector in zip(missing, made)})
+    return meaning.rank(question, vectors)
 
 def _clip_line(clip: SemanticClip, file_name: str) -> str:
     """Describe a semantic clip in one line, for reading footage through.

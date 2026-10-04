@@ -30,6 +30,13 @@ saying what to make of it. It is referenced from SKILL.md.
    When the story is not known yet — a folder with no plan — read it through
    once with `brief: true`: one line per clip, a page at a time (`offset`),
    which is what a whole day of footage fits in. Then search.
+   To find something the user described rather than quoted — "the part where
+   she explains the price", "anything about the food" — ask with `about`: a
+   local model ranks the clips by meaning, closest first, so a short list
+   comes back instead of the whole transcript. Read the top few rather than
+   trusting the order blindly, and fall back to `text` when the word itself
+   is known. A search like this keeps the user's footage on their machine;
+   reading everything with `brief` sends all of it to you.
    Ask for what you need and let the search narrow it: a kind, a phrase, a
    minimum length, a stretch of the file, a bound on the scores. The scores
    cover how well a shot was shot as well as what is in it — exposure, blur,
@@ -107,7 +114,7 @@ through `frames_for_clips`.
 | 「這支影片在講什麼」 / what is this video about | `analyze_asset`, `build_semantic_timeline`, then summarize what `query_clips` returns with times, and `view_frames` for the visuals |
 | 「剪掉講錯／重講的地方」 / remove flubbed takes | In a plan the compiler already keeps only the last complete go at a repeated line. By hand: from the transcript, keep only the last complete version of each repeated sentence |
 | 「去掉停頓／氣口」 / remove pauses | In a plan it is done for you. By hand: `query_clips` for `kind: speech`, then place them as consecutive clips, each widened by its own `safe_in` / `safe_out` |
-| 「只留有講到 X 的段落」 / keep only parts about X | `query_clips` with `text`, keep those sections plus enough context to make sense |
+| 「只留有講到 X 的段落」 / keep only parts about X | `query_clips` with `about: "X"` (or `text` for the exact word), keep those sections plus enough context to make sense |
 | 「剪掉黑畫面／畫面卡住的地方」 / remove black or frozen parts | Keep the time outside `black_frames` / `frozen_frames`; a plan does this at every cut on its own |
 | 「找出精華剪成 60 秒」 / a 60 s highlight reel | Choose segments by transcript and frames until about 60 s; confirm the list before rendering |
 | 「第 3 分鐘那個畫面是什麼」 / what is on screen at 3:00 | `view_frames` with one `asset_ids` entry, `start: 175`, `end: 185`, `count: 4` |

@@ -207,11 +207,13 @@ dependencies = [
     { name = "fastmcp" },
     { name = "jieba" },
     { name = "numpy" },
+    { name = "onnxruntime" },
     { name = "opencc" },
     { name = "opencv-python-headless" },
     { name = "pillow" },
     { name = "pydantic" },
     { name = "sherpa-onnx" },
+    { name = "tokenizers" },
     { name = "typing-extensions" },
 ]
 
@@ -226,11 +228,13 @@ requires-dist = [
     { name = "fastmcp", specifier = ">=4.0.4" },
     { name = "jieba", specifier = ">=0.42.1" },
     { name = "numpy", specifier = ">=2.5.3" },
+    { name = "onnxruntime", specifier = ">=1.30.0" },
     { name = "opencc", specifier = ">=1.4.2" },
     { name = "opencv-python-headless", specifier = ">=4.10" },
     { name = "pillow", specifier = ">=12" },
     { name = "pydantic", specifier = ">=2.13.5" },
     { name = "sherpa-onnx", specifier = ">=1.13" },
+    { name = "tokenizers", specifier = ">=0.23.2" },
     { name = "typing-extensions", specifier = ">=4.16.0" },
 ]
 

@@ -35,7 +35,7 @@ from app.engine.frames import extract_frame
 from app.engine.subtitles import captioned_clips, place_cues
 from app.models.timeline import Project
 from app.storage import housekeeping
-from app.storage.repo import FOLDER_KINDS
+from app.storage.repo import FOLDER_KINDS, FolderNotFoundError
 from app.ui import dialogs, updates
 
 STATIC_DIR = Path(__file__).parent / "static"
@@ -337,37 +337,31 @@ async def assets(request: Request) -> Response:
     listed.sort(key=lambda asset: asset["name"].lower())
     return JSONResponse({"assets": listed})
 
-def _projects_using(asset_ids: List[str]) -> Dict[str, List[str]]:
-    """The projects that have a clip of each file on their timeline, by name."""
-    wanted, using = set(asset_ids), {}
-    for project in server.repo.list_projects():
-        for asset_id in wanted & {clip.asset_id for track in project.tracks for clip in track.clips}:
-            using.setdefault(asset_id, []).append(project.name or project.id)
-    return using
-
 def _remove_assets(asset_ids: List[str], recycle: bool) -> dict:
     """Take files out of the library, and their originals to the recycle bin when asked.
 
     Refused as a whole, with nothing removed, when any of them is still in a
-    project or being analyzed: a project that loses its footage cannot be
-    played or exported, and the user may not know which projects use what.
+    project, in the AI's plan for a cut, or being analyzed: a project that
+    loses its footage cannot be played or exported, and the user may not know
+    which projects use what.
     """
     found = server.repo.get_assets(asset_ids)
     unknown = sorted(set(asset_ids) - set(found))
     if unknown:
         raise LookupError(f"asset {unknown[0]} not found")
-    using = _projects_using(list(found))
-    busy = {job.asset_id for job in (server.repo.get_job(job_id) for job_id in server.repo.active_job_ids())
-            if job and job.asset_id in found}
-    if using or busy:
-        name = lambda asset_id: os.path.basename(found[asset_id].path)
-        return {"removed": [], "in_use": [{"name": name(asset_id), "projects": projects} for asset_id, projects in using.items()],
-                "busy": sorted(name(asset_id) for asset_id in busy)}
-    recycled = []
-    for asset_id, asset in found.items():
-        server.repo.delete_asset(asset_id)
-        if recycle and os.path.exists(asset.path):
-            recycled.append(asset.path)
+    using = server.repo.delete_unused_assets(found)
+
+    def name(asset_id: str) -> str:
+        return os.path.basename(found[asset_id].path)
+
+    if using:
+        return {
+            "removed": [],
+            "in_use": [{"name": name(asset_id), "projects": uses["projects"], "plans": uses["plans"]}
+                       for asset_id, uses in using.items() if uses["projects"] or uses["plans"]],
+            "busy": sorted(name(asset_id) for asset_id, uses in using.items() if uses["busy"]),
+        }
+    recycled = [asset.path for asset in found.values() if recycle and os.path.exists(asset.path)]
     # One trip to the recycle bin for them all; the library entries are gone either way.
     not_recycled = [] if not recycled or housekeeping.to_recycle_bin(recycled) else [os.path.basename(path) for path in recycled]
     return {"removed": sorted(found), "in_use": [], "busy": [], "not_recycled": not_recycled}
@@ -410,8 +404,10 @@ async def folders(request: Request) -> Response:
             server.repo.delete_folder(str(folder_id))
         else:
             return _error("action is create, rename, move or delete")
+    except FolderNotFoundError as error:
+        return _error(str(error), 404)
     except ValueError as error:
-        return _error(str(error), 404 if "not found" in str(error) else 400)
+        return _error(str(error))
     return JSONResponse({"ok": True})
 
 async def file_items(request: Request) -> Response:
@@ -427,7 +423,7 @@ async def file_items(request: Request) -> Response:
         return _error("nothing to file, or something that is not there", 404)
     try:
         server.repo.file_items(kind, ids, body.get("folder_id") or None)
-    except ValueError as error:
+    except FolderNotFoundError as error:
         return _error(str(error), 404)
     return JSONResponse({"ok": True})
 
@@ -610,7 +606,8 @@ async def pick(request: Request) -> Response:
     if folder_id and ids:
         try:
             server.repo.file_items("assets", ids, str(folder_id))
-        except ValueError:
+        except FolderNotFoundError:
+            # The folder went while the window was open; the files are in the library all the same.
             pass
     return JSONResponse({"chosen": len(chosen), "imported": imported, "failed": failed, "assets": ids})
 

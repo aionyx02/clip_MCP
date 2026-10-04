@@ -1,5 +1,6 @@
 """Tests for the editor's web surface: what it shows, and what it refuses to do."""
 
+import json
 import os
 from pathlib import Path
 
@@ -336,7 +337,7 @@ def test_a_file_a_project_uses_cannot_be_taken_out_and_the_project_is_named(clie
     _project_using(client, asset, "用著它的專案")
     answer = client.post("/api/assets/delete", json={"ids": [asset], "recycle": True})
     assert answer.status_code == 409
-    assert answer.json()["in_use"] == [{"name": "還在用.mp4", "projects": ["用著它的專案"]}]
+    assert answer.json()["in_use"] == [{"name": "還在用.mp4", "projects": ["用著它的專案"], "plans": []}]
     assert server.repo.get_assets([asset]) and (tmp_path / "還在用.mp4").exists()
 
 def test_taking_a_file_out_keeps_the_original_unless_asked(client: TestClient, media: Path, tmp_path: Path, monkeypatch) -> None:
@@ -373,7 +374,40 @@ def test_a_file_taken_out_leaves_the_rest_of_a_timeline_that_covered_it(tmp_path
     store.save_semantic_timeline(SemanticTimeline(id="t", asset_ids=["a", "b"], input_hash="h", derivation_version=1), [])
     folder = store.create_folder("f", "assets", "放這")["id"]
     store.file_items("assets", ["a", "b"], folder)
-    store.delete_asset("a")
+    assert store.delete_unused_assets(["a"]) == {}
     assert set(store.get_assets(["a", "b"])) == {"b"}
     assert store.get_semantic_timeline("t").asset_ids == ["b"]
     assert store.folder_of("assets") == {"b": folder}
+
+def test_a_file_the_ais_plan_uses_cannot_be_taken_out(tmp_path: Path) -> None:
+    from app.models.media import Asset, Span
+    from app.models.semantic import ClipKind, ClipLevel, SemanticClip, SemanticTimeline
+    from app.storage.repo import Repository
+
+    store = Repository(str(tmp_path / "planned.db"))
+    for asset_id in ("picture", "song", "spare"):
+        store.save_asset(Asset(id=asset_id, path=str(tmp_path / f"{asset_id}.mp4"), has_video=True, has_audio=True))
+    store.save_semantic_timeline(
+        SemanticTimeline(id="t", asset_ids=["picture", "spare"], input_hash="h", derivation_version=1),
+        [SemanticClip(id="t:u0000", timeline_id="t", asset_id="picture", level=ClipLevel.UTTERANCE,
+                      source_range=Span(start=0, end=2), kind=ClipKind.SPEECH, text="開場")])
+    with store._transaction() as conn:
+        conn.execute("INSERT INTO plans (id, timeline_id, version, data) VALUES (?, ?, ?, ?)", ("p", "t", 1, json.dumps(
+            {"id": "p", "goal": "台南旅行 60 秒", "beats": [{"selections": [{"clip_id": "t:u0000"}]}],
+             "music": {"cues": [{"asset_id": "song"}]}})))
+    using = store.delete_unused_assets(["picture", "song", "spare"])
+    assert using == {"picture": {"projects": [], "plans": ["台南旅行 60 秒"], "busy": []},
+                     "song": {"projects": [], "plans": ["台南旅行 60 秒"], "busy": []}}
+    # Refused as a whole: the one nothing uses is still there too.
+    assert set(store.get_assets(["picture", "song", "spare"])) == {"picture", "song", "spare"}
+
+def test_a_timeline_left_with_no_file_goes_with_the_last_one(tmp_path: Path) -> None:
+    from app.models.media import Asset
+    from app.models.semantic import SemanticTimeline
+    from app.storage.repo import Repository
+
+    store = Repository(str(tmp_path / "alone.db"))
+    store.save_asset(Asset(id="only", path=str(tmp_path / "only.mp4"), has_video=True, has_audio=True))
+    store.save_semantic_timeline(SemanticTimeline(id="t", asset_ids=["only"], input_hash="h", derivation_version=1), [])
+    assert store.delete_unused_assets(["only"]) == {}
+    assert store.get_semantic_timeline("t") is None
