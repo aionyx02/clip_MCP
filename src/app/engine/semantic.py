@@ -846,6 +846,13 @@ class CleanCuts:
         breath the window was given rather than a pause in the middle of it,
         and trimming that is the head and tail trim's job, not this one.
 
+        In a transcribed file, a silence is dead air only where somebody stops
+        talking before it and starts again after it, inside the window. Quiet
+        in a shot nobody talks in — a hand reaching for a cup — is the action
+        itself, and so is quiet after the last thing said: taking either out
+        cuts away what the shot was chosen to show. A file nobody transcribed
+        cannot be told apart that way, so every long silence in it counts.
+
         Args:
             start: Where the window opens, in source seconds.
             end: Where it closes.
@@ -854,9 +861,15 @@ class CleanCuts:
         Returns:
             The qualifying silences, in order.
         """
+        def talked_around(quiet: float, loud: float) -> bool:
+            before = any(begins < quiet and ends > start for begins, ends in self.sentences)
+            after = any(ends > loud and begins < end for begins, ends in self.sentences)
+            return before and after
+
         return tuple(
             (quiet, loud) for quiet, loud in self.pauses
             if quiet > start and loud < end and loud - quiet > longer_than
+            and (not self.transcribed or talked_around(quiet, loud))
         )
 
     def sound_before(self, seconds: float) -> Optional[float]:

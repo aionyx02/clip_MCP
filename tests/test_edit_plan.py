@@ -523,6 +523,28 @@ def test_a_pause_somebody_is_talking_across_is_left_in_and_said() -> None:
     assert any("talking across them" in note for note in notes)
     assert not any("were taken out" in note for note in notes)
 
+def test_a_shot_nobody_talks_in_keeps_its_quiet_stretches() -> None:
+    # A hand reaching for a cup is quiet the whole way through, and the quiet is the
+    # action, not the edit waiting: taking it out cut the pull itself out of the video.
+    made = analysis(duration=12.0, silences=[(0.0, 0.4), (2.0, 5.0), (7.0, 10.0)])
+    made.transcript = Transcript(language="zh", model="test", segments=[])
+    pieces, notes = compiled(made, which="quiet")
+    assert [(piece.start, piece.end) for piece in pieces] == [(0.0, 12.0)]
+    assert not any("were taken out" in note for note in notes)
+
+def test_quiet_after_the_last_thing_said_is_not_dead_air() -> None:
+    # Talking has to stop before a pause and start again after it for the pause to be the
+    # edit waiting; quiet that runs on to the end of the window is what was being shown.
+    made = analysis(duration=12.0, segments=[(0.5, 1.5, "這邊")], silences=[(1.5, 2.0), (4.0, 8.0)])
+    whole = Selection(clip_id="", beat_id="b1")
+    one = sourced(seconds=made.duration)
+    _, clips = build_timeline({ASSET_ID: one}, {ASSET_ID: made})
+    plan = plan_for([whole.model_copy(update={"clip_id": clip.id}) for clip in clips])
+    pieces, notes = compile_pieces(plan, {clip.id: clip for clip in clips}, {}, {ASSET_ID: one},
+                                   {ASSET_ID: clean_cuts(made)})
+    assert not any("were taken out" in note for note in notes)
+    assert not any(4.0 < piece.start < 8.0 for piece in pieces)
+
 def test_taking_a_pause_out_has_to_outlast_the_merge_that_would_undo_it() -> None:
     # Both halves keep a breath, so what is left between them is the pause less two of
     # them. Any shorter than the merge gap and they are joined straight back together
