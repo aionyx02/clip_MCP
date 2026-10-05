@@ -351,6 +351,7 @@ def _remove_assets(asset_ids: List[str], recycle: bool) -> dict:
     unknown = sorted(set(asset_ids) - set(found))
     if unknown:
         raise LookupError(f"asset {unknown[0]} not found")
+    server.job_manager.forget_abandoned()
     using = server.repo.delete_unused_assets(found)
 
     def name(asset_id: str) -> str:
@@ -688,6 +689,7 @@ async def update(request: Request) -> Response:
     """
     if request.method == "GET":
         return JSONResponse(await run_in_threadpool(updates.latest))
+    server.job_manager.forget_abandoned()
     if server.repo.active_job_ids():
         return _error("busy", 409)
     try:

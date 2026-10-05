@@ -36,6 +36,25 @@ def _detached_process_options() -> Dict[str, Any]:
         return {"creationflags": subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP}
     return {"start_new_session": True}
 
+ABANDONED = "worker stopped reporting; it may have been terminated"
+
+def _abandoned(job: Job, now: datetime) -> bool:
+    """Whether a job's worker is gone: it was running, or let in to run, and has gone quiet.
+
+    A job still waiting for a slot has no worker, and is never abandoned for
+    being quiet. Running without `admitted_at` is a job written before jobs
+    were admitted; it has a worker like any other, and loses it the same way.
+
+    Args:
+        job: The job.
+        now: The time to judge by.
+
+    Returns:
+        True when nothing has written to it for longer than `STALE_AFTER`.
+    """
+    started = job.status == JobStatus.RUNNING or (job.status.is_active and job.admitted_at is not None)
+    return started and now - job.updated_at > STALE_AFTER
+
 def _fail_if_active(message: str) -> Callable[[Job], None]:
     """Build a job change that marks an unfinished job as failed.
 
@@ -114,7 +133,8 @@ class JobManager:
         Returns:
             The jobs that were admitted and had a worker launched for them.
         """
-        admitted = [job for job in self.repo.update_active_jobs(self._plan) if job.admitted_at is not None]
+        admitted = [job for job in self.repo.update_active_jobs(self._plan)
+                    if job.status == JobStatus.QUEUED and job.admitted_at is not None]
         for job in admitted:
             self._launch_worker(job)
         return admitted
@@ -133,12 +153,16 @@ class JobManager:
             The IDs of the jobs that were changed.
         """
         now = datetime.now(timezone.utc)
-        # A job whose worker stopped reporting has lost its memory back to the machine,
-        # so it no longer holds a slot; `get_job` fails it the next time it is asked for.
+        # A job whose worker stopped reporting has given its memory back to the machine:
+        # it is failed here, and holds no slot.
+        changed = []
+        for job in jobs:
+            if _abandoned(job, now):
+                _fail_if_active(ABANDONED)(job)
+                changed.append(job.job_id)
         running = [
             job for job in jobs
-            if (job.status == JobStatus.RUNNING or job.admitted_at is not None)
-            and now - job.updated_at <= STALE_AFTER
+            if job.status.is_active and (job.status == JobStatus.RUNNING or job.admitted_at is not None)
         ]
         slots = resources.max_concurrent_jobs() - len(running)
         spare = resources.spare_bytes()
@@ -148,7 +172,7 @@ class JobManager:
                 if job.admitted_at is not None and now - job.admitted_at < WARMUP
             )
 
-        changed, busy, behind = [], len(running), 0
+        busy, behind = len(running), 0
         for job in jobs:
             if job.admitted_at is not None or job.status != JobStatus.QUEUED or job.cancel_requested:
                 continue
@@ -194,6 +218,23 @@ class JobManager:
         except OSError as exc:
             self.repo.update_job(job.job_id, _fail_if_active(f"could not start worker: {exc}"))
 
+    def forget_abandoned(self) -> None:
+        """Fail every job whose worker is gone, so nothing waits on it.
+
+        Called before deciding anything on whether a job is still running —
+        updating, clearing storage, removing a file — since a job whose
+        worker was killed stays `running` until something says otherwise.
+        """
+        now = datetime.now(timezone.utc)
+
+        def fail(jobs: List[Job]) -> List[str]:
+            gone = [job for job in jobs if _abandoned(job, now)]
+            for job in gone:
+                _fail_if_active(ABANDONED)(job)
+            return [job.job_id for job in gone]
+
+        self.repo.update_active_jobs(fail)
+
     def get_job(self, job_id: str) -> Optional[Job]:
         """Fetch a job, first failing it if its worker has stopped reporting.
 
@@ -215,8 +256,8 @@ class JobManager:
         job = self.repo.get_job(job_id)
         if job is None:
             return None
-        if job.status.is_active and job.admitted_at is not None and datetime.now(timezone.utc) - job.updated_at > STALE_AFTER:
-            self.repo.update_job(job_id, _fail_if_active("worker stopped reporting; it may have been terminated"))
+        if _abandoned(job, datetime.now(timezone.utc)):
+            self.repo.update_job(job_id, _fail_if_active(ABANDONED))
         self.launch_ready()
         return self.repo.get_job(job_id)
 

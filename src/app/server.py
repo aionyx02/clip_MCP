@@ -3843,6 +3843,7 @@ def clean_storage(kinds: List[Literal["previews", "thumbnails", "work"]]) -> dic
     Returns:
         `freed_megabytes`.
     """
+    job_manager.forget_abandoned()
     freed = housekeeping.clean(WORKSPACE_DIR, kinds, repo.active_job_ids())
     return {"freed_megabytes": round(freed / 1e6, 1)}
 

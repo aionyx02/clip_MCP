@@ -47,6 +47,22 @@ def queue(manager: JobManager, memory: int = 0, **fields) -> Job:
     manager.repo.add_job(job)
     return job
 
+def age(manager: JobManager, job: Job, days: int = 16) -> Job:
+    """Make a stored job look as if nothing had written to it for `days` days.
+
+    Args:
+        manager: Manager holding the job.
+        job: Job to age.
+        days: How long ago it was last written.
+
+    Returns:
+        The job as stored.
+    """
+    when = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat().replace("+00:00", "Z")
+    manager.repo._conn.execute("UPDATE jobs SET data = json_set(data, '$.updated_at', ?) WHERE id = ?",
+                               (when, job.job_id))
+    return manager.repo.get_job(job.job_id)
+
 def plan(manager: JobManager, spare: Optional[int], limit: int = 2, monkeypatch=None) -> List[Job]:
     """Run the gate once and report which jobs it admitted.
 
@@ -62,7 +78,8 @@ def plan(manager: JobManager, spare: Optional[int], limit: int = 2, monkeypatch=
     """
     monkeypatch.setattr(resources, "spare_bytes", lambda: spare)
     monkeypatch.setattr(resources, "max_concurrent_jobs", lambda: limit)
-    return [job for job in manager.repo.update_active_jobs(manager._plan) if job.admitted_at is not None]
+    return [job for job in manager.repo.update_active_jobs(manager._plan)
+            if job.status == JobStatus.QUEUED and job.admitted_at is not None]
 
 def stage_of(manager: JobManager, job: Job) -> Optional[str]:
     """Read back what a job says it is waiting for.
@@ -132,6 +149,28 @@ def test_a_job_waiting_for_a_slot_is_not_failed_for_being_quiet(manager: JobMana
     monkeypatch.setattr(renderer, "STALE_AFTER", timedelta(seconds=-1))
     monkeypatch.setattr(resources, "max_concurrent_jobs", lambda: 0)
     assert manager.get_job(waiting.job_id).status == JobStatus.QUEUED
+
+def test_a_running_job_from_before_jobs_were_admitted_is_failed_once_its_worker_is_gone(
+    manager: JobManager, monkeypatch,
+) -> None:
+    # Versions before the queue wrote running jobs with no `admitted_at`. One whose worker died
+    # was never failed, and counted as running for ever: the editor refused every update.
+    ghost = age(manager, queue(manager, status=JobStatus.RUNNING))
+    assert manager.repo.active_job_ids() == {ghost.job_id}
+    manager.forget_abandoned()
+    assert manager.repo.get_job(ghost.job_id).status == JobStatus.FAILED
+    assert manager.repo.active_job_ids() == set()
+
+def test_the_queue_fails_abandoned_jobs_as_it_plans(manager: JobManager, monkeypatch) -> None:
+    ghost = age(manager, queue(manager, status=JobStatus.RUNNING))
+    waiting = queue(manager)
+    plan(manager, spare=8 * GIGABYTE, limit=1, monkeypatch=monkeypatch)
+    assert manager.repo.get_job(ghost.job_id).status == JobStatus.FAILED
+    assert manager.repo.get_job(waiting.job_id).admitted_at is not None
+
+def test_asking_for_an_abandoned_job_without_admission_fails_it(manager: JobManager) -> None:
+    ghost = age(manager, queue(manager, status=JobStatus.RUNNING))
+    assert manager.get_job(ghost.job_id).status == JobStatus.FAILED
 
 def test_a_cancelled_job_does_not_take_a_slot(manager: JobManager, monkeypatch) -> None:
     queue(manager, cancel_requested=True)
