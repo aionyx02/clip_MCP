@@ -10,7 +10,7 @@ import subprocess
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
-from app.engine import faces, models, resources
+from app.engine import faces, machine, models, resources
 from app.engine.diarize import (
     MIN_PAUSE_SECONDS as SPEAKER_MIN_PAUSE_SECONDS,
     MIN_SPEECH_SECONDS as SPEAKER_MIN_SPEECH_SECONDS,
@@ -747,20 +747,8 @@ def whisper_model_name() -> str:
     return os.environ.get("CLIP_MCP_WHISPER_MODEL", DEFAULT_WHISPER_MODEL)
 
 def _whisper_device() -> str:
-    """Choose the device for speech recognition.
-
-    The `CLIP_MCP_WHISPER_DEVICE` environment variable selects `cuda` or
-    `cpu`; the default, `auto`, uses CUDA when a GPU is available.
-
-    Returns:
-        `"cuda"` or `"cpu"`.
-    """
-    requested = os.environ.get("CLIP_MCP_WHISPER_DEVICE", "auto").lower()
-    if requested != "auto":
-        return requested
-    import ctranslate2
-
-    return "cuda" if ctranslate2.get_cuda_device_count() > 0 else "cpu"
+    """Choose the device for speech recognition; `machine` decides, so what the AI is told matches what runs."""
+    return machine.whisper_device()
 
 def _run_whisper(
     device: str,

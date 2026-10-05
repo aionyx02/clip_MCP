@@ -35,7 +35,7 @@ from app.models.timeline import (
     validate_project,
 )
 from app.models.job import Job, JobKind, JobStatus
-from app.engine import loudness, meaning, resources
+from app.engine import loudness, machine, meaning, resources
 from app.engine.analysis import current_recipe, sound_note, whisper_model_name
 from app.engine.diarize import speaker_model_name
 from app.engine.rhythm import rhythm_model_name
@@ -125,7 +125,9 @@ mcp = FastMCP(
         "added, since they see the library in the editor app and can take "
         "files out of it there; a file taken out is no longer usable until it "
         "is added again. Projects, assets, "
-        "analyses, and jobs are saved on disk and survive server restarts."
+        "analyses, and jobs are saved on disk and survive server restarts. "
+        # Looked at once, at start: the AI has to know before it sends footage off how long that will take here.
+        + machine.describe(machine.profile())
     ),
 )
 # "resources" lists the supporting files alongside SKILL.md, so a client sees them

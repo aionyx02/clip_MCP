@@ -10,6 +10,9 @@ while being wrong the other way freezes the user's computer.
 
 import ctypes
 import os
+import re
+import subprocess
+import sys
 import threading
 from contextlib import contextmanager
 from typing import Iterator, Optional, Tuple
@@ -117,6 +120,49 @@ def _sysconf_memory() -> Optional[Tuple[int, int]]:
     except (AttributeError, ValueError, OSError):
         return None
 
+def _sysctl_int(name: str) -> Optional[int]:
+    """Read a whole-number value from the BSD kernel by name, as `sysctl` would.
+
+    Args:
+        name: The value's name, such as `hw.memsize`.
+
+    Returns:
+        The value, or `None` where there is no such value or no such call.
+    """
+    try:
+        libc = ctypes.CDLL(None)
+        value = ctypes.c_uint64(0)
+        size = ctypes.c_size_t(ctypes.sizeof(value))
+        if libc.sysctlbyname(name.encode("ascii"), ctypes.byref(value), ctypes.byref(size), None, 0) != 0:
+            return None
+    except (AttributeError, OSError):
+        return None
+    return int(value.value)
+
+def _mac_memory() -> Optional[Tuple[int, int]]:
+    """Read physical memory on macOS, which reports no free pages through `sysconf`.
+
+    Free pages alone would say a Mac is always full, since macOS keeps
+    reclaimable file cache in inactive pages rather than freeing it; so free,
+    inactive and speculative pages together are what a new process can take.
+
+    Returns:
+        `(available, total)` in bytes, or `None` if either cannot be read.
+    """
+    total = _sysctl_int("hw.memsize")
+    try:
+        listed = subprocess.run(["vm_stat"], capture_output=True, text=True, timeout=10)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if not total or listed.returncode != 0:
+        return None
+    page = re.search(r"page size of (\d+) bytes", listed.stdout)
+    pages = {key: int(count) for key, count in re.findall(r"^Pages (\w+):\s+(\d+)\.", listed.stdout, re.MULTILINE)}
+    if not page or "free" not in pages:
+        return None
+    available = sum(pages.get(key, 0) for key in ("free", "inactive", "speculative")) * int(page.group(1))
+    return available, total
+
 def memory_status() -> Optional[Tuple[int, int]]:
     """Measure physical memory on this machine.
 
@@ -127,6 +173,8 @@ def memory_status() -> Optional[Tuple[int, int]]:
     """
     if os.name == "nt":
         return _windows_memory()
+    if sys.platform == "darwin":
+        return _mac_memory()
     return _meminfo_memory() or _sysconf_memory()
 
 def _setting(name: str, default: int) -> int:
