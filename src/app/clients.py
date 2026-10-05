@@ -30,6 +30,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Dict, List, Optional, Set
 
+from app.engine.ffmpeg import hidden_window_flags
+
 SERVER_NAME = "clip-mcp"
 # Names an earlier hand-written entry may have used for this server, replaced rather than
 # left beside the new one so a client does not start two copies.
@@ -234,6 +236,24 @@ def register_opencode(command: List[str], dry_run: bool) -> Registration:
     note = " (comments in it are not kept; a backup is)" if status == "registered" and path.suffix == ".jsonc" else ""
     return Registration("opencode", status, f"{path}{note}")
 
+def _claude_desktop_folder() -> Path:
+    """The folder the Claude desktop app reads its settings from.
+
+    On Windows the Microsoft Store copy is a package, and Windows gives it a
+    `LocalCache\\Roaming` of its own inside the package folder in place of
+    APPDATA: a file under APPDATA\\Claude is one that copy never reads. So the
+    package's folder comes first when it is there.
+    """
+    if sys.platform == "win32":
+        packages = Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local") / "Packages"
+        packaged = sorted(packages.glob("Claude_*/LocalCache/Roaming/Claude")) if packages.is_dir() else []
+        if packaged:
+            return packaged[0]
+        return Path(os.environ.get("APPDATA") or Path.home() / "AppData" / "Roaming") / "Claude"
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Application Support" / "Claude"
+    return Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "Claude"
+
 def register_claude_desktop(command: List[str], dry_run: bool) -> Registration:
     """Register with the Claude desktop app.
 
@@ -244,12 +264,7 @@ def register_claude_desktop(command: List[str], dry_run: bool) -> Registration:
     Returns:
         What happened.
     """
-    if sys.platform == "win32":
-        folder = Path(os.environ.get("APPDATA") or Path.home() / "AppData" / "Roaming") / "Claude"
-    elif sys.platform == "darwin":
-        folder = Path.home() / "Library" / "Application Support" / "Claude"
-    else:
-        folder = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "Claude"
+    folder = _claude_desktop_folder()
     if not folder.is_dir():
         return Registration("Claude Desktop", "skipped", "not installed")
     path = folder / "claude_desktop_config.json"
@@ -425,6 +440,42 @@ def register_cherry_studio(command: List[str], dry_run: bool) -> Registration:
         return Registration("Cherry Studio", "skipped", "not installed")
     return Registration("Cherry Studio", "confirm", cherry_studio_link(command))
 
+def claude_code_program() -> Optional[str]:
+    """Find the `claude` command, on PATH or where its installers put it.
+
+    PATH alone is not enough: the editor is started from File Explorer, which
+    keeps the PATH it had when the user signed in, so a Claude Code installed
+    since then is on it only after signing out and in again.
+
+    Returns:
+        The program's path, or None when Claude Code is not installed.
+    """
+    found = shutil.which("claude")
+    if found:
+        return found
+    if sys.platform == "win32":
+        places = [Path.home() / ".local" / "bin" / "claude.exe",
+                  Path(os.environ.get("APPDATA") or Path.home() / "AppData" / "Roaming") / "npm" / "claude.cmd"]
+    else:
+        places = [Path.home() / ".local" / "bin" / "claude", Path.home() / ".claude" / "local" / "claude"]
+    return next((str(place) for place in places if place.is_file()), None)
+
+def _run_claude(claude: str, *arguments: str) -> "subprocess.CompletedProcess[str]":
+    """Run one `claude mcp` command and read what it says, out of sight.
+
+    The editor has no console of its own, so without hiding it each command
+    would open a black window the user never asked for.
+
+    Args:
+        claude: The `claude` program.
+        *arguments: What to run it with.
+
+    Returns:
+        The finished command, its output as text.
+    """
+    return subprocess.run([claude, *arguments], stdin=subprocess.DEVNULL, capture_output=True, text=True,
+                          encoding="utf-8", errors="replace", timeout=60, creationflags=hidden_window_flags())
+
 def register_claude_code(command: List[str], dry_run: bool) -> Registration:
     """Register with Claude Code, for this user in every folder.
 
@@ -438,18 +489,16 @@ def register_claude_code(command: List[str], dry_run: bool) -> Registration:
     Returns:
         What happened.
     """
-    claude = shutil.which("claude")
+    claude = claude_code_program()
     if claude is None:
         return Registration("Claude Code", "skipped", "not installed")
-    listed = subprocess.run([claude, "mcp", "get", SERVER_NAME], capture_output=True, text=True,
-                            encoding="utf-8", errors="replace", timeout=60)
+    listed = _run_claude(claude, "mcp", "get", SERVER_NAME)
     if listed.returncode == 0 and "Scope: User" in listed.stdout and command[0] in listed.stdout:
         return Registration("Claude Code", "unchanged", "user scope")
     if dry_run:
         return Registration("Claude Code", "would register", "user scope")
-    subprocess.run([claude, "mcp", "remove", "--scope", "user", SERVER_NAME], capture_output=True, timeout=60)
-    added = subprocess.run([claude, "mcp", "add", "--scope", "user", SERVER_NAME, "--", *command],
-                           capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60)
+    _run_claude(claude, "mcp", "remove", "--scope", "user", SERVER_NAME)
+    added = _run_claude(claude, "mcp", "add", "--scope", "user", SERVER_NAME, "--", *command)
     if added.returncode != 0:
         return Registration("Claude Code", "failed", (added.stderr or added.stdout).strip()[-300:])
     return Registration("Claude Code", "registered", "user scope")
@@ -536,13 +585,8 @@ def _remove_from_json(
 
 def unregister_claude_desktop(dry_run: bool, owner: Optional[List[str]] = None) -> Registration:
     """Take this server out of the Claude desktop app's settings."""
-    if sys.platform == "win32":
-        folder = Path(os.environ.get("APPDATA") or Path.home() / "AppData" / "Roaming") / "Claude"
-    elif sys.platform == "darwin":
-        folder = Path.home() / "Library" / "Application Support" / "Claude"
-    else:
-        folder = Path(os.environ.get("XDG_CONFIG_HOME") or Path.home() / ".config") / "Claude"
-    return _remove_from_json("Claude Desktop", folder / "claude_desktop_config.json", "mcpServers", dry_run, owner)
+    return _remove_from_json("Claude Desktop", _claude_desktop_folder() / "claude_desktop_config.json", "mcpServers",
+                             dry_run, owner)
 
 def unregister_opencode(dry_run: bool, owner: Optional[List[str]] = None) -> Registration:
     """Take this server out of opencode's global config."""
@@ -603,11 +647,10 @@ def unregister_codex(dry_run: bool, owner: Optional[List[str]] = None) -> Regist
 
 def unregister_claude_code(dry_run: bool, owner: Optional[List[str]] = None) -> Registration:
     """Take this server out of Claude Code, through its own command."""
-    claude = shutil.which("claude")
+    claude = claude_code_program()
     if claude is None:
         return Registration("Claude Code", "absent", "not installed")
-    listed = subprocess.run([claude, "mcp", "get", SERVER_NAME], capture_output=True, text=True,
-                            encoding="utf-8", errors="replace", timeout=60)
+    listed = _run_claude(claude, "mcp", "get", SERVER_NAME)
     if listed.returncode != 0:
         return Registration("Claude Code", "absent", "user scope")
     program = re.search(r"^\s*Command:\s*(.+?)\s*$", listed.stdout, re.MULTILINE)
@@ -616,8 +659,7 @@ def unregister_claude_code(dry_run: bool, owner: Optional[List[str]] = None) -> 
         return Registration("Claude Code", "kept", f"starts another copy, {program or 'unknown'}")
     if dry_run:
         return Registration("Claude Code", "would remove", "user scope")
-    removed = subprocess.run([claude, "mcp", "remove", "--scope", "user", SERVER_NAME],
-                             capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60)
+    removed = _run_claude(claude, "mcp", "remove", "--scope", "user", SERVER_NAME)
     if removed.returncode != 0:
         return Registration("Claude Code", "failed", (removed.stderr or removed.stdout).strip()[-300:])
     return Registration("Claude Code", "removed", "user scope")

@@ -123,6 +123,29 @@ def test_claude_desktop_is_registered_only_where_it_is_installed(home: Path) -> 
     written = json.loads((folder / "claude_desktop_config.json").read_text(encoding="utf-8"))
     assert written["mcpServers"]["clip-mcp"] == {"command": COMMAND[0], "args": []}
 
+def test_the_store_copy_of_claude_desktop_is_registered_in_its_own_package_folder(home: Path) -> None:
+    # The Microsoft Store copy never sees APPDATA\Claude: Windows hands it a folder inside its package instead.
+    if clients.sys.platform != "win32":
+        pytest.skip("Store packages are a Windows thing")
+    folder = home / "local" / "Packages" / "Claude_pzs8sxrjxfjjc" / "LocalCache" / "Roaming" / "Claude"
+    folder.mkdir(parents=True)
+    assert clients.register_claude_desktop(COMMAND, dry_run=False).status == "registered"
+    written = json.loads((folder / "claude_desktop_config.json").read_text(encoding="utf-8"))
+    assert written["mcpServers"]["clip-mcp"] == {"command": COMMAND[0], "args": []}
+    assert not (home / "roaming" / "Claude").exists()
+    assert clients.unregister_claude_desktop(dry_run=False).status == "removed"
+
+def test_claude_code_is_found_where_its_installer_puts_it_when_path_has_not_caught_up(
+    home: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The editor is started by File Explorer, whose PATH can predate Claude Code's install.
+    not_on_path(monkeypatch)
+    assert clients.claude_code_program() is None
+    program = home / "home" / ".local" / "bin" / ("claude.exe" if clients.sys.platform == "win32" else "claude")
+    program.parent.mkdir(parents=True)
+    program.write_text("", encoding="utf-8")
+    assert clients.claude_code_program() == str(program)
+
 
 def not_on_path(monkeypatch: pytest.MonkeyPatch) -> None:
     """Make every command look uninstalled, whatever is on this machine."""
@@ -257,6 +280,23 @@ def test_claude_code_entry_of_another_copy_stays(monkeypatch: pytest.MonkeyPatch
     assert ["mcp", "remove"] not in calls
     assert clients.unregister_claude_code(dry_run=False, owner=COMMAND).status == "removed"
     assert ["mcp", "remove"] in calls
+
+def test_asking_claude_code_never_flashes_a_console_window(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The editor has no console of its own, so each `claude` it starts would open a black window.
+    options = []
+
+    def run(arguments, **keywords):
+        options.append(keywords)
+        return clients.subprocess.CompletedProcess(arguments, 1, "", "")
+
+    monkeypatch.setattr(clients.shutil, "which", lambda name: "claude")
+    monkeypatch.setattr(clients.subprocess, "run", run)
+    clients.register_claude_code(COMMAND, dry_run=False)
+    clients.unregister_claude_code(dry_run=False)
+    assert len(options) == 4
+    for keywords in options:
+        assert keywords["creationflags"] == clients.hidden_window_flags()
+        assert keywords["stdin"] == clients.subprocess.DEVNULL
 
 def test_uninstall_leaves_another_copys_entry_connected(
     home: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
