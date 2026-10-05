@@ -116,10 +116,17 @@ def _nvidia_card() -> Optional[Tuple[str, int]]:
     tool = shutil.which("nvidia-smi")
     if tool is None:
         return None
+    # An MCP client starts this server with only a few variables, and on Windows
+    # nvidia-smi cannot load its library without ProgramFiles: it fails, and a card
+    # that is there reads as unknown.
+    environment = dict(os.environ)
+    if sys.platform == "win32" and not any(name.lower() == "programfiles" for name in environment):
+        environment["ProgramFiles"] = (environment.get("ProgramW6432")
+                                       or os.path.join((environment.get("SystemDrive") or "C:") + "\\", "Program Files"))
     try:
         listed = subprocess.run([tool, "--query-gpu=name,memory.total", "--format=csv,noheader,nounits"],
                                 stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=10,
-                                creationflags=hidden_window_flags())
+                                creationflags=hidden_window_flags(), env=environment)
     except (OSError, subprocess.SubprocessError):
         return None
     first = listed.stdout.strip().splitlines()[0] if listed.returncode == 0 and listed.stdout.strip() else ""

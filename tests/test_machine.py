@@ -72,6 +72,25 @@ def test_the_card_is_read_from_nvidia_smi(monkeypatch: pytest.MonkeyPatch) -> No
     monkeypatch.setattr(machine.subprocess, "run", run)
     assert machine._nvidia_card() == ("NVIDIA GeForce RTX 4060 Laptop GPU", 8188 * 1024 ** 2)
 
+def test_nvidia_smi_gets_program_files_even_when_the_client_left_it_out(monkeypatch: pytest.MonkeyPatch) -> None:
+    # An MCP client starts the server with a handful of variables; without ProgramFiles,
+    # nvidia-smi fails with "Failed to initialize NVML" and an RTX card read as unknown.
+    if machine.sys.platform != "win32":
+        pytest.skip("ProgramFiles is a Windows variable")
+    seen = {}
+
+    def run(arguments, **keywords):
+        seen.update(keywords["env"])
+        return SimpleNamespace(returncode=0, stdout="NVIDIA GeForce RTX 4060 Laptop GPU, 8188\n")
+
+    for name in ("ProgramFiles", "ProgramW6432", "PROGRAMFILES"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("SystemDrive", "C:")
+    monkeypatch.setattr(machine.shutil, "which", lambda name: "nvidia-smi")
+    monkeypatch.setattr(machine.subprocess, "run", run)
+    assert machine._nvidia_card() is not None
+    assert {key.lower(): value for key, value in seen.items()}["programfiles"] == "C:\\Program Files"
+
 def test_no_nvidia_smi_means_no_card_memory(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(machine.shutil, "which", lambda name: None)
     assert machine._nvidia_card() is None
