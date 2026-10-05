@@ -89,8 +89,8 @@ Name: "{userdesktop}\{#AppName}"; Filename: "{app}\bin\clip-mcp-editor.exe"; Ico
 
 [Run]
 Filename: "{app}\bin\clip-mcp-editor.exe"; Description: "{cm:LaunchApp}"; Flags: postinstall nowait skipifsilent; Check: ComponentsInstalled
-; An update started from the editor runs silently and opens the editor again when it is done.
-Filename: "{app}\bin\clip-mcp-editor.exe"; Flags: nowait; Check: Relaunch
+; An update started from the editor opens the editor again from CurStepChanged, not from here:
+; [Run] entries without postinstall are checked before ssPostInstall, when nothing is installed yet.
 
 [UninstallDelete]
 ; uv, Python and the packages were made by the install step, so the installer does not know
@@ -148,6 +148,9 @@ begin
   if not Installed then
     SuppressibleMsgBox(FmtMessage(CustomMessage('InstallFailed'), [ExpandConstant('{app}\install.log')]),
       mbError, MB_OK, IDOK);
+  { An update started from the editor runs silently and opens the editor again when it is done. }
+  if Relaunch then
+    Exec(ExpandConstant('{app}\bin\clip-mcp-editor.exe'), '', '', SW_SHOWNORMAL, ewNoWait, Code);
 end;
 
 procedure CurPageChanged(CurPageID: Integer);
