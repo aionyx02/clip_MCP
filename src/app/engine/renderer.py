@@ -7,8 +7,8 @@ import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, Optional
 
-from app.engine import loudness, resources
-from app.engine.analysis import analyze_media
+from app.engine import loudness, machine, resources, speed
+from app.engine.analysis import analyze_media, whisper_model_for
 from app.engine.ffmpeg import OperationCancelled, run_ffmpeg
 from app.models.job import Job, JobKind, JobStatus
 from app.storage import housekeeping
@@ -401,8 +401,8 @@ def _run_analysis(repo: Repository, job: Job, spec: Dict[str, Any], context: Job
     Args:
         repo: Repository holding the asset and receiving the analysis.
         job: Analyze job being run.
-        spec: Job specification with `transcribe`, `language`, `prompt`,
-            `chinese_variant`, `diarize`, and `speakers`.
+        spec: Job specification with `transcribe`, `transcription`,
+            `language`, `prompt`, `chinese_variant`, `diarize`, and `speakers`.
         context: Progress and cancellation for the job.
 
     Raises:
@@ -413,6 +413,7 @@ def _run_analysis(repo: Repository, job: Job, spec: Dict[str, Any], context: Job
     asset = repo.get_assets([job.asset_id]).get(job.asset_id)
     if asset is None:
         raise ValueError(f"asset {job.asset_id} not found")
+    runs: List[speed.Measured] = []
     analysis = analyze_media(
         asset,
         job.work_dir,
@@ -424,8 +425,12 @@ def _run_analysis(repo: Repository, job: Job, spec: Dict[str, Any], context: Job
         is_cancelled=context.is_cancelled,
         diarize=spec.get("diarize", True),
         speakers=spec.get("speakers"),
+        on_measured=lambda *run: runs.append(speed.Measured(*run)),
+        speech_model=whisper_model_for(spec.get("transcription", "accurate")),
     )
     repo.save_analysis(analysis)
+    # Only once the analysis is kept: a cancelled or failed run says nothing about the next.
+    speed.record(repo, runs, float(asset.duration or 0), machine.identity())
 
 def run_worker(repo: Repository, job_id: str) -> None:
     """Run a queued job to completion and record its outcome.

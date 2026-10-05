@@ -35,8 +35,10 @@ from app.models.timeline import (
     validate_project,
 )
 from app.models.job import Job, JobKind, JobStatus
-from app.engine import loudness, machine, meaning, resources
-from app.engine.analysis import current_recipe, sound_note, whisper_model_name
+from app.engine import loudness, machine, meaning, resources, speed
+from app.engine.analysis import (
+    current_recipe, doubtful_spots, marked_text, sound_note, transcription_of, whisper_model_for, whisper_model_name,
+)
 from app.engine.diarize import speaker_model_name
 from app.engine.rhythm import rhythm_model_name
 from app.engine.faces import framing_note
@@ -97,6 +99,9 @@ MEDIA_EXTENSIONS = frozenset({
     ".mp3", ".m4a", ".wav", ".aac", ".flac", ".ogg", ".opus", ".wma", ".aiff",
 })
 
+# Opened before the server is described: what it says about this computer's speed comes from runs kept here.
+repo = Repository(os.path.join(WORKSPACE_DIR, "clip_mcp.db"))
+
 mcp = FastMCP(
     "VideoEditingCore",
     instructions=(
@@ -127,7 +132,7 @@ mcp = FastMCP(
         "is added again. Projects, assets, "
         "analyses, and jobs are saved on disk and survive server restarts. "
         # Looked at once, at start: the AI has to know before it sends footage off how long that will take here.
-        + machine.describe(machine.profile())
+        + machine.describe(machine.profile(), speed.estimate(repo, machine.profile(), {"accurate": 3600}, False))
     ),
 )
 # "resources" lists the supporting files alongside SKILL.md, so a client sees them
@@ -139,7 +144,6 @@ mcp.add_transform(ResourcesAsTools(mcp))
 # the timeline through a door the tool surface does not have.
 _OPERATIONS = TypeAdapter(List[EditOperation])
 
-repo = Repository(os.path.join(WORKSPACE_DIR, "clip_mcp.db"))
 job_manager = JobManager(repo)
 renderer = FFmpegRenderer()
 
@@ -356,7 +360,9 @@ def list_assets() -> dict:
 
     Returns:
         A dictionary with an `assets` list, each item in the format
-        `import_asset` returns plus `analyzed` and `stale`. `stale` is true
+        `import_asset` returns plus `analyzed`, `transcription` (`fast`,
+        `accurate`, or null when speech was not transcribed) and `stale`.
+        `stale` is true
         for an asset analyzed with detection settings or a speech model the
         server no longer uses: its analysis still works, but it was measured
         with different instruments from a fresh one, so analyze those assets
@@ -369,6 +375,7 @@ def list_assets() -> dict:
             **asset.model_dump(),
             "analyzed": analysis is not None,
             "stale": analysis is not None and _is_stale(analysis),
+            "transcription": _transcription(analysis),
         })
     return {"assets": assets}
 
@@ -434,9 +441,69 @@ def _is_stale(analysis: MediaAnalysis) -> bool:
         it just answers a slightly different question from a fresh one, which
         matters most when two assets are being compared with each other.
     """
+    # A fast transcript is one the user chose, not one made with a model since replaced.
+    speech_model = analysis.recipe.speech_model
+    current = speech_model if transcription_of(speech_model) == "fast" else whisper_model_name()
     return analysis.recipe.differs_from(current_recipe(
-        whisper_model_name(), speaker_model=speaker_model_name(), rhythm_model=rhythm_model_name(),
+        current, speaker_model=speaker_model_name(), rhythm_model=rhythm_model_name(),
     ))
+
+def _transcription(analysis: Optional[MediaAnalysis]) -> Optional[str]:
+    """Say how an asset's speech was transcribed: `fast`, `accurate`, or None when it was not."""
+    return transcription_of(None if analysis is None or analysis.transcript is None else analysis.transcript.model)
+
+def _plan_analyses(
+    assets: Sequence[Asset], transcribe: bool, transcription: str, again: bool,
+) -> Tuple[List[Tuple[Asset, str]], List[str], List[str]]:
+    """Decide which files an analysis starts, and with which transcription.
+
+    A file whose transcript is accurate is never made fast: asked for fast,
+    it is skipped while current, and analyzed accurately again when it is
+    out of date or `again` is given. A fast transcript asked for accurate is
+    redone without `again`.
+
+    Args:
+        assets: The files asked for.
+        transcribe: Whether speech is transcribed.
+        transcription: `accurate` or `fast`, as asked.
+        again: Redo files whose analysis is current.
+
+    Returns:
+        `(to_start, skipped, upgrading)`: each file to start with the
+        transcription it gets, the files left alone, and the files whose fast
+        transcript is being replaced.
+    """
+    to_start: List[Tuple[Asset, str]] = []
+    skipped: List[str] = []
+    upgrading: List[str] = []
+    for asset in assets:
+        existing = repo.get_analysis(asset.id)
+        had = _transcription(existing)
+        upgrade = transcribe and asset.has_audio and transcription == "accurate" and had == "fast"
+        if not again and not upgrade and existing is not None and not _is_stale(existing):
+            skipped.append(asset.id)
+            continue
+        if upgrade:
+            upgrading.append(asset.id)
+        to_start.append((asset, "accurate" if had == "accurate" else transcription))
+    return to_start, skipped, upgrading
+
+def _estimate(to_start: Sequence[Tuple[Asset, str]], transcribe: bool, diarize: bool,
+              upgrading: Sequence[str]) -> Optional[dict]:
+    """How long the files about to be analyzed take here, or None when nothing in them is transcribed."""
+    footage: Dict[str, float] = {"accurate": 0.0, "fast": 0.0}
+    for asset, transcription in to_start:
+        if transcribe and asset.has_audio:
+            footage[transcription] += float(asset.duration)
+    if not any(footage.values()):
+        return None
+    here = machine.profile()
+    found = {"tier": here.tier, "footage_minutes": round(sum(footage.values()) / 60, 1),
+             **speed.estimate(repo, here, footage, diarize)}
+    if upgrading:
+        found["note"] = ("files being upgraded to an accurate transcript are analyzed whole again, so reading"
+                         " their picture and sound adds a little on top")
+    return found
 
 @mcp.tool()
 def analyze_asset(
@@ -448,6 +515,8 @@ def analyze_asset(
     diarize: bool = True,
     speakers: Annotated[Optional[int], Field(ge=1, le=20)] = None,
     again: bool = False,
+    transcription: Literal["accurate", "fast"] = "accurate",
+    dry_run: bool = False,
 ) -> dict:
     """Start analyzing what assets contain, in the background.
 
@@ -502,6 +571,19 @@ def analyze_asset(
         again: Analyze files that already have a current analysis too,
             replacing it — for example with a `prompt` or `speakers` the first
             run did not have.
+        transcription: "accurate", the default, or "fast": about twice as
+            quick on a computer without an NVIDIA card, but with noticeably
+            more misheard words and looser word timings, so cuts land less
+            exactly. It is the user's trade to make: on a low-tier computer,
+            or a mid-tier one with more than about an hour of footage, call
+            with `dry_run` first and ask them with both times; use it unasked
+            only when they said they want it quick. A file with a fast
+            transcript asked for "accurate" is transcribed again without
+            `again` — the whole analysis is redone — and an accurate
+            transcript is never replaced with a fast one.
+        dry_run: Start nothing; say what would start and how long it would
+            take, as `estimates` with one estimate for "accurate" and one for
+            "fast", so the user can choose before waiting on either.
 
     Returns:
         A dictionary with `jobs`, one `asset_id`, `job_id`, `status` and
@@ -510,6 +592,18 @@ def analyze_asset(
         several of them cannot exhaust the machine's memory between them;
         `stage` says what a job that has not started yet is waiting for.
         Waiting costs nothing and needs no action: keep polling `get_job`.
+        `upgrading` lists the files whose fast transcript is being replaced
+        with an accurate one. With `dry_run`, `would_start` lists the files
+        in place of `jobs`.
+
+        When anything started is transcribed, `estimate` says how long that
+        takes here for all of it together: `footage_minutes`,
+        `transcription_minutes` and `speakers_minutes` as `[low, high]` (high
+        null when there is no telling; `speakers_minutes` null when voices are
+        not told apart), the computer's `tier`, and `basis` — this computer's
+        own past runs, or a rough figure from its hardware — and a `note`
+        when upgraded files are analyzed whole. Tell the user in a sentence
+        when it runs past a few minutes.
 
     Raises:
         ValueError: If an asset does not exist or has no known duration;
@@ -520,25 +614,31 @@ def analyze_asset(
         if asset.duration is None:
             raise ValueError(f"asset {asset.id} has no known duration and cannot be analyzed")
 
+    if dry_run:
+        choices = {}
+        for choice in ("accurate", "fast"):
+            to_start, skipped, upgrading = _plan_analyses(assets, transcribe, choice, again)
+            choices[choice] = _estimate(to_start, transcribe, diarize, upgrading)
+        to_start, skipped, upgrading = _plan_analyses(assets, transcribe, transcription, again)
+        return {"would_start": [asset.id for asset, _ in to_start], "skipped": skipped, "upgrading": upgrading,
+                "estimates": choices}
+
     started: List[dict] = []
-    skipped: List[str] = []
-    for asset in assets:
-        existing = repo.get_analysis(asset.id)
-        if not again and existing is not None and not _is_stale(existing):
-            skipped.append(asset.id)
-            continue
+    to_start, skipped, upgrading = _plan_analyses(assets, transcribe, transcription, again)
+    for asset, chosen in to_start:
         job = Job(kind=JobKind.ANALYZE, asset_id=asset.id)
         job.work_dir = os.path.join(WORKSPACE_DIR, "jobs", job.job_id)
         with_speech = transcribe and asset.has_audio
         job.memory_estimate = resources.analysis_memory_bytes(
             with_speech,
-            whisper_model_name(),
+            whisper_model_for(chosen),
             duration=float(asset.duration),
             diarize=with_speech and diarize,
             detect_faces=asset.has_video,
         )
         job = job_manager.start_job(job, {
             "transcribe": transcribe,
+            "transcription": chosen,
             "language": language,
             "prompt": prompt,
             "chinese_variant": chinese_variant,
@@ -546,7 +646,11 @@ def analyze_asset(
             "speakers": speakers,
         })
         started.append({"asset_id": asset.id, "job_id": job.job_id, "status": job.status.value, "stage": job.stage})
-    return {"jobs": started, "skipped": skipped}
+    result: dict = {"jobs": started, "skipped": skipped, "upgrading": upgrading}
+    found = _estimate(to_start, transcribe, diarize, upgrading)
+    if found is not None:
+        result["estimate"] = found
+    return result
 
 @mcp.tool()
 def get_analysis(
@@ -571,11 +675,23 @@ def get_analysis(
             save space.
 
     Returns:
-        A dictionary with the asset `duration`, `analyzed_at`, and the
+        A dictionary with the asset `duration`, `analyzed_at`,
+        `transcription` (`fast` — expect misheard words, check them before
+        trusting a cut to a word — `accurate`, or null), `doubtful_spots`
+        (how many stretches in the whole file the speech model was unsure
+        of; null for a transcript made before that was kept), and the
         overlapping `scenes`, `black_frames`, `frozen_frames`, `silences`,
         `shots`, and `transcript` (`language`, `model`, `chinese_variant`, and
         `segments` with `start`, `end`, and `text`), or null for `transcript`
         if speech was not transcribed.
+
+        In `text`, words the speech model was unsure of are wrapped in ⟦ ⟧.
+        The marks are only here: captions and the video never carry them, so
+        never copy them into anything the user will see. Read the marked
+        stretches with what the footage is about in mind — names and terms
+        are what it mishears — and fix what is wrong through
+        `generate_subtitles`' `fix_words` or by correcting the caption; check
+        by listening before trusting a cut to a marked word.
 
         `shots` carries one record per shot in the range — `exposure`,
         `contrast`, `blur`, `motion` and `shake` — while `sound` and `faces`
@@ -615,7 +731,7 @@ def get_analysis(
             "model": analysis.transcript.model,
             "chinese_variant": analysis.transcript.chinese_variant,
             "segments": [
-                segment.model_dump(exclude=exclude)
+                {**segment.model_dump(exclude=exclude), "text": marked_text(segment)}
                 for segment in analysis.transcript.segments
                 if segment.end > start and segment.start < end
             ],
@@ -626,6 +742,8 @@ def get_analysis(
         "analyzed_at": analysis.analyzed_at.isoformat(),
         "recipe": analysis.recipe.model_dump(),
         "stale": _is_stale(analysis),
+        "transcription": _transcription(analysis),
+        "doubtful_spots": None if analysis.transcript is None else doubtful_spots(analysis.transcript.segments),
         "range": {"start": start, "end": end},
         "scenes": _overlapping(analysis.scenes, start, end),
         "black_frames": _overlapping(analysis.black_frames, start, end),

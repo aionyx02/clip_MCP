@@ -16,6 +16,7 @@ better-known ones.
 
 import array
 import subprocess
+import time
 from typing import Callable, Dict, List, Optional, Tuple
 
 from app.engine import models
@@ -171,6 +172,7 @@ def find_speakers(
     is_cancelled: Callable[[], bool],
     speakers: Optional[int] = None,
     ffmpeg_bin: str = "ffmpeg",
+    on_measured: Optional[Callable[[float], None]] = None,
 ) -> Tuple[List[SpeakerTurn], List[Voice]]:
     """Work out how many voices are in a recording and when each one is talking.
 
@@ -183,6 +185,8 @@ def find_speakers(
             the clustering has to find exactly that many, and cannot split one
             person who moved closer to the microphone into two.
         ffmpeg_bin: Path to, or name of, the FFmpeg executable.
+        on_measured: Told the seconds the work took once it is done, from
+            after the models were loaded, as transcription is measured.
 
     Returns:
         `(turns, voices)`. The turns are in time order, labelled `S1`, `S2` and
@@ -197,6 +201,7 @@ def find_speakers(
             decoded.
     """
     engine = _engine(speakers)
+    began = time.monotonic()
     samples = read_samples(path, ffmpeg_bin)
     if not samples:
         return [], []
@@ -224,4 +229,7 @@ def find_speakers(
         SpeakerTurn(start=round(segment.start, 3), end=round(segment.end, 3), speaker=f"S{segment.speaker + 1}")
         for segment in result.sort_by_start_time()
     ]
-    return turns, _voices(samples, turns)
+    voices = _voices(samples, turns)
+    if on_measured is not None:
+        on_measured(time.monotonic() - began)
+    return turns, voices

@@ -49,6 +49,8 @@ window.T = {
     audioOnly: "聲音",
     gone: "找不到原始檔",
     goneHint: "原始檔案被移動或刪除了。不需要的話可以從素材庫移除。",
+    fastTranscript: "快速聽打",
+    fastTranscriptHint: "這個檔案是用快速模式聽打的，錯字和字的時間點可能比較不準。檢查字幕時請多留意；需要時可以請 AI 改用精準模式重新聽打。",
     remove: "移除",
     removeTitle: (what) => `從素材庫移除${what}？`,
     removeOne: (name) => `「${name}」`,

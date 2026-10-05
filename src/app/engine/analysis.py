@@ -7,6 +7,7 @@ import os
 import re
 import statistics
 import subprocess
+import time
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
@@ -74,6 +75,14 @@ SNAP_TOLERANCE_SECONDS = 0.5
 SENTENCE_PAUSE_SECONDS = 0.6
 SENTENCE_END_PUNCTUATION = "。！？!?…"
 DEFAULT_WHISPER_MODEL = "large-v3-turbo"
+# What a fast transcription runs: about twice as quick on a processor, at the price of
+# more misheard words and looser word timings. Chosen by the AI after asking
+# the user on a slow computer, never by the server on its own.
+FAST_WHISPER_MODEL = "small"
+# Provisional (roadmap §13): below this probability the speech model was guessing at a
+# word, and the AI is pointed at it to check.
+LOW_CONFIDENCE = 0.5
+DOUBT_OPEN, DOUBT_CLOSE = "⟦", "⟧"
 # OpenCC configurations by BCP 47 tag. zh-TW and zh-HK also convert vocabulary to regional usage.
 CHINESE_VARIANT_CONFIGS = {"zh-TW": "s2twp", "zh-HK": "s2hk", "zh-Hant": "s2t", "zh-Hans": "t2s"}
 CHINESE_LANGUAGES = {"zh", "yue"}
@@ -746,9 +755,90 @@ def whisper_model_name() -> str:
     """
     return os.environ.get("CLIP_MCP_WHISPER_MODEL", DEFAULT_WHISPER_MODEL)
 
-def _whisper_device() -> str:
-    """Choose the device for speech recognition; `machine` decides, so what the AI is told matches what runs."""
-    return machine.whisper_device()
+def _doubtful(word: TranscriptWord) -> bool:
+    """Whether the speech model was guessing at this word."""
+    return word.probability is not None and word.probability < LOW_CONFIDENCE
+
+def marked_text(segment: TranscriptSegment) -> str:
+    """A line of transcript with the words the speech model was unsure of in `⟦…⟧`.
+
+    Only ever for the AI to read: the stored transcript, captions and anything
+    rendered keep the plain text. Words in a row share one pair of marks, and
+    the spaces between English words stay outside them.
+
+    Args:
+        segment: The line.
+
+    Returns:
+        The marked text, or the plain text when no word has a probability.
+    """
+    if not any(word.probability is not None for word in segment.words):
+        return segment.text
+    pieces: List[str] = []
+    run: List[str] = []
+
+    def close() -> None:
+        if run:
+            joined = "".join(run)
+            inner = joined.strip()
+            lead = joined[:len(joined) - len(joined.lstrip())]
+            trail = joined[len(joined.rstrip()):]
+            pieces.append(f"{lead}{DOUBT_OPEN}{inner}{DOUBT_CLOSE}{trail}" if inner else joined)
+            run.clear()
+
+    for word in segment.words:
+        if _doubtful(word):
+            run.append(word.text)
+        else:
+            close()
+            pieces.append(word.text)
+    close()
+    return "".join(pieces).strip()
+
+def doubtful_spots(segments: Sequence[TranscriptSegment]) -> Optional[int]:
+    """Count the stretches of words the speech model was unsure of.
+
+    Args:
+        segments: The transcript's lines.
+
+    Returns:
+        How many stretches, or `None` when the transcript was made before
+        probabilities were kept and there is no telling.
+    """
+    words = [word for segment in segments for word in segment.words]
+    if not any(word.probability is not None for word in words):
+        return None
+    return sum(1 for index, word in enumerate(words)
+               if _doubtful(word) and (index == 0 or not _doubtful(words[index - 1])))
+
+def whisper_model_for(transcription: str) -> str:
+    """The speech model a transcription of this kind runs.
+
+    Args:
+        transcription: `accurate`, the configured model, or `fast`.
+
+    Returns:
+        The model name.
+    """
+    return FAST_WHISPER_MODEL if transcription == "fast" else whisper_model_name()
+
+def transcription_of(model: Optional[str]) -> Optional[str]:
+    """Say which kind of transcription a transcript made with `model` is.
+
+    The one place that tells them apart. A transcript is fast only when it
+    was made with the fast model and that is not also the configured one: on
+    a computer set up to transcribe with `small` anyway, every transcript is
+    as accurate as it gets there, and none is offered an upgrade.
+
+    Args:
+        model: The model a transcript was made with, or None for no transcript.
+
+    Returns:
+        `fast`, `accurate`, or None when there is no transcript.
+    """
+    if model is None:
+        return None
+    return "fast" if model == FAST_WHISPER_MODEL != whisper_model_name() else "accurate"
 
 def _run_whisper(
     device: str,
@@ -758,6 +848,8 @@ def _run_whisper(
     prompt: Optional[str],
     on_progress: Callable[[float], None],
     is_cancelled: Callable[[], bool],
+    on_measured: Optional[Callable[[str, str, str, float], None]] = None,
+    model_name: Optional[str] = None,
 ) -> Transcript:
     """Transcribe a file with faster-whisper on one device, without post-processing.
 
@@ -769,6 +861,10 @@ def _run_whisper(
         prompt: Optional text that guides vocabulary and writing style.
         on_progress: Called with the completed fraction.
         is_cancelled: Polled between segments to stop early.
+        on_measured: Told the stage, device, model and seconds decoding took,
+            once it has finished; loading the model is left out, since the
+            first load is a download.
+        model_name: The speech model; the configured one when not given.
 
     Returns:
         A transcript with one segment per decoded chunk and raw word timings.
@@ -780,7 +876,7 @@ def _run_whisper(
     """
     from faster_whisper import BatchedInferencePipeline, WhisperModel
 
-    model_name = whisper_model_name()
+    model_name = model_name or whisper_model_name()
     # Only on the CPU do the weights sit in system memory; on the GPU they are in VRAM,
     # and a card that is too small raises its own error and falls back here.
     needed = resources.whisper_memory_bytes(model_name)
@@ -799,6 +895,7 @@ def _run_whisper(
         compute_type="float16" if device == "cuda" else "int8",
         download_root=models.whisper_dir(),
     )
+    began = time.monotonic()
     # Batched decoding on CPU overflows CTranslate2's native stack on Windows, so the CPU decodes one chunk at a time.
     segments, info = BatchedInferencePipeline(model).transcribe(
         path,
@@ -811,12 +908,15 @@ def _run_whisper(
     for segment in segments:
         if is_cancelled():
             raise OperationCancelled()
-        words = [TranscriptWord(start=round(w.start, 3), end=round(w.end, 3), text=w.word) for w in segment.words or []]
+        words = [TranscriptWord(start=round(w.start, 3), end=round(w.end, 3), text=w.word,
+                                probability=round(float(w.probability), 3)) for w in segment.words or []]
         result.append(TranscriptSegment(start=round(segment.start, 3), end=round(segment.end, 3), text=segment.text, words=words))
         if duration > 0:
             # float(), because what the decoder reports is not always an ordinary one and
             # this number is stored on the job.
             on_progress(min(float(segment.end) / duration, 1.0))
+    if on_measured is not None:
+        on_measured("transcription", device, model_name, time.monotonic() - began)
     return Transcript(language=info.language, model=model_name, segments=result)
 
 def transcribe_speech(
@@ -828,6 +928,8 @@ def transcribe_speech(
     silences: List[Span],
     on_progress: Callable[[float], None],
     is_cancelled: Callable[[], bool],
+    on_measured: Optional[Callable[[str, str, str, float], None]] = None,
+    model_name: Optional[str] = None,
 ) -> Transcript:
     """Transcribe speech with word-level timestamps that stay accurate on long recordings.
 
@@ -855,6 +957,9 @@ def transcribe_speech(
         silences: Silences detected in the same file.
         on_progress: Called with the completed fraction.
         is_cancelled: Polled to stop early.
+        on_measured: Told how long decoding took, on the device it ran on.
+        model_name: The speech model, such as `FAST_WHISPER_MODEL`; the
+            configured one when not given.
 
     Returns:
         The transcript.
@@ -862,13 +967,15 @@ def transcribe_speech(
     Raises:
         OperationCancelled: If cancellation was requested.
     """
-    device = _whisper_device()
+    device = machine.whisper_device()
     try:
-        raw = _run_whisper(device, path, duration, language, prompt, on_progress, is_cancelled)
+        raw = _run_whisper(device, path, duration, language, prompt, on_progress, is_cancelled, on_measured,
+                           model_name)
     except RuntimeError as exc:
         if device != "cuda" or not any(name in str(exc).lower() for name in ("cuda", "cublas", "cudnn")):
             raise
-        raw = _run_whisper("cpu", path, duration, language, prompt, on_progress, is_cancelled)
+        raw = _run_whisper("cpu", path, duration, language, prompt, on_progress, is_cancelled, on_measured,
+                           model_name)
 
     words = [word for segment in raw.segments for word in segment.words]
     snap_words_to_silences(words, silences)
@@ -976,6 +1083,8 @@ def analyze_media(
     ffmpeg_bin: str = "ffmpeg",
     diarize: bool = True,
     speakers: Optional[int] = None,
+    on_measured: Optional[Callable[[str, str, str, float], None]] = None,
+    speech_model: Optional[str] = None,
 ) -> MediaAnalysis:
     """Describe an asset's content so that edits can be planned from it.
 
@@ -997,6 +1106,11 @@ def analyze_media(
             transcript, since a speaker label with nothing said under it has
             nowhere to go.
         speakers: How many people are talking, when that is known.
+        on_measured: Told the stage, device, model and seconds of each slow
+            stage that ran — transcription and telling the voices apart — so
+            the next estimate can be this computer's own.
+        speech_model: The speech model to transcribe with; the configured
+            one when not given.
 
     Returns:
         The analysis: scenes, black and frozen frames, silences, how each shot
@@ -1070,10 +1184,14 @@ def analyze_media(
             scan.silences,
             report("speech", "transcribing speech"),
             is_cancelled,
+            on_measured,
+            speech_model,
         )
     if with_speakers:
         turns, voices = find_speakers(
-            asset.path, report("speakers", "telling the voices apart"), is_cancelled, speakers, ffmpeg_bin
+            asset.path, report("speakers", "telling the voices apart"), is_cancelled, speakers, ffmpeg_bin,
+            on_measured=None if on_measured is None else (
+                lambda seconds: on_measured("speakers", "cpu", speaker_model_name(), seconds)),
         )
     rhythm: Optional[Rhythm] = None
     if with_rhythm:

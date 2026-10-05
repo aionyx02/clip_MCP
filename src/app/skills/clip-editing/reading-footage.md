@@ -107,6 +107,43 @@ results, though, so if you are not running on that machine they have left
 it. Say so plainly if the user asks, and before putting private footage
 through `frames_for_clips`.
 
+## How long it takes on this computer
+
+The server's instructions name this computer's speed tier — high with an
+NVIDIA card, otherwise mid or low — and roughly how long an hour of footage
+takes here.
+Transcription only ever uses an NVIDIA card: on a Mac, Apple chips included,
+and with AMD or Intel graphics it runs on the processor, so do not promise
+speed from a graphics chip. Every `analyze_asset` reply carries an `estimate`
+for what it started.
+
+- **High tier:** analyze with the default, accurate transcription; no need to
+  ask about speed.
+- **Low tier, or mid tier with more than about an hour of footage:** call
+  `analyze_asset` with `dry_run: true` — it starts nothing and returns both
+  choices' times for these files — and ask once. The fast choice is about
+  twice as quick and mishears noticeably more, and its word timings are
+  looser, so a cut lands less exactly:
+  「這台電腦沒有可用的 NVIDIA 顯示卡，這批 2 小時的影片精準聽打大約要 20 到 80 分鐘；快速聽打大約一半時間，但錯字比較多、剪接點比較不準。要用哪一種？」
+  Pass `transcription: "fast"` only on their answer, or unasked when they
+  already said they want it quick.
+- **One person talking on a low-tier computer** (a vlog, a talking head): also
+  suggest `diarize: false`, which saves the minutes spent telling voices
+  apart when there is only one voice.
+- A file with a fast transcript is upgraded by asking for accurate again —
+  offer that when the user wants a cut exact to the word or captions they
+  will not proofread.
+
+### Words the speech model was unsure of
+
+`get_analysis` wraps words the speech model was unsure of in ⟦ ⟧, and
+`doubtful_spots` counts them. They point at where to look, not at
+every mistake: function words like 的 or 呢 are often marked, and a misheard
+word the model was sure of is not. Read the marked stretches against what the
+footage is about — names, products and terms are what it gets wrong — fix
+them through `fix_words` or the caption, and never copy the marks into
+anything the user sees. A fast transcript has about twice as many.
+
 ## Requests about content
 
 | Request | Operations |

@@ -86,6 +86,15 @@ _MIGRATIONS: List[List[str]] = [
         "digest TEXT NOT NULL, vector BLOB NOT NULL)",
         "CREATE INDEX IF NOT EXISTS clip_vectors_timeline ON clip_vectors (timeline_id)",
     ],
+    [
+        # How long transcription and diarization took over how much footage, so the next
+        # estimate is this computer's own rather than a table's. Kept by computer: a
+        # workspace on an external drive moves between machines.
+        "CREATE TABLE IF NOT EXISTS speed_samples (id INTEGER PRIMARY KEY AUTOINCREMENT, computer TEXT NOT NULL, "
+        "stage TEXT NOT NULL, device TEXT NOT NULL, model TEXT NOT NULL, seconds REAL NOT NULL, "
+        "media_seconds REAL NOT NULL)",
+        "CREATE INDEX IF NOT EXISTS speed_samples_key ON speed_samples (computer, stage, device, model)",
+    ],
 ]
 FOLDER_KINDS = ("assets", "projects")
 SCHEMA_VERSION = len(_MIGRATIONS)
@@ -231,6 +240,16 @@ class Repository:
         rows = self._query("SELECT data FROM analyses WHERE asset_id = ?", (asset_id,))
         return MediaAnalysis.model_validate_json(rows[0][0]) if rows else None
 
+    def transcript_model(self, asset_id: str) -> Optional[str]:
+        """The speech model an asset's transcript was made with, read without loading the transcript.
+
+        Returns:
+            The model name, or `None` when the asset has no analysis or no transcript.
+        """
+        rows = self._query("SELECT json_extract(data, '$.transcript.model') FROM analyses WHERE asset_id = ?",
+                           (asset_id,))
+        return rows[0][0] if rows else None
+
     def remember_captions(self, cues: Iterable[SubtitleCue]) -> None:
         """Keep captions somebody wrote or corrected against the files they belong to.
 
@@ -299,6 +318,47 @@ class Repository:
             What the transcriber writes, mapped to what was meant.
         """
         return dict(self._query("SELECT heard, meant FROM glossary ORDER BY heard"))
+
+    def add_speed_sample(self, computer: str, stage: str, device: str, model: str, seconds: float,
+                         media_seconds: float, keep: int) -> None:
+        """Keep how long one stage took, dropping the oldest beyond `keep` for the same computer, stage, device and model.
+
+        Args:
+            computer: The computer it ran on.
+            stage: `transcription` or `speakers`.
+            device: `cuda` or `cpu`.
+            model: The model it ran.
+            seconds: Time it took.
+            media_seconds: Length of the footage it ran over.
+            keep: How many to keep for this combination.
+        """
+        key = (computer, stage, device, model)
+        with self._transaction() as conn:
+            conn.execute("INSERT INTO speed_samples (computer, stage, device, model, seconds, media_seconds) "
+                         "VALUES (?, ?, ?, ?, ?, ?)", (*key, seconds, media_seconds))
+            conn.execute(
+                "DELETE FROM speed_samples WHERE computer = ? AND stage = ? AND device = ? AND model = ? AND id NOT IN "
+                "(SELECT id FROM speed_samples WHERE computer = ? AND stage = ? AND device = ? AND model = ? "
+                "ORDER BY id DESC LIMIT ?)",
+                (*key, *key, keep),
+            )
+
+    def speed_samples(self, computer: str, stage: str, device: str, model: str, limit: int) -> List[float]:
+        """Read how fast one stage ran recently on one computer, newest first.
+
+        Args:
+            computer: The computer it ran on.
+            stage: `transcription` or `speakers`.
+            device: `cuda` or `cpu`.
+            model: The model it ran.
+            limit: How many of the latest runs to read.
+
+        Returns:
+            Seconds taken per second of footage.
+        """
+        return [row[0] for row in self._query(
+            "SELECT seconds / media_seconds FROM speed_samples WHERE computer = ? AND stage = ? AND device = ? "
+            "AND model = ? ORDER BY id DESC LIMIT ?", (computer, stage, device, model, limit))]
 
     def add_project(self, project: Project) -> None:
         """Store a new project.

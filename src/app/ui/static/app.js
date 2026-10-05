@@ -454,9 +454,10 @@ async function mediaPage(page, folderId) {
         : icon(asset.has_video ? "film" : "music", 30);
       const kind = asset.has_video ? (asset.has_audio ? "" : `<span class="dot-sep">${esc(T.media.noSound)}</span>`) : `<span class="dot-sep">${esc(T.media.audioOnly)}</span>`;
       const gone = asset.missing ? `<span class="badge warn" title="${esc(T.media.goneHint)}">${icon("alert", 13)}${esc(T.media.gone)}</span>` : "";
+      const fast = asset.fast_transcript ? `<span class="badge" title="${esc(T.media.fastTranscriptHint)}">${esc(T.media.fastTranscript)}</span>` : "";
       return `<div class="card${asset.missing ? " gone" : ""}" title="${esc(asset.path)}" data-drag="item" data-id="${esc(asset.id)}">${extras}<div class="thumb">${picture}
         <span class="badge">${clock(asset.duration)}</span></div>
-        <div class="card-body"><div class="card-title">${esc(asset.name)}</div><div class="card-meta"><span>${asset.width ? `${asset.width}×${asset.height}` : ""}</span>${kind}${gone}</div></div></div>`;
+        <div class="card-body"><div class="card-title">${esc(asset.name)}</div><div class="card-meta"><span>${asset.width ? `${asset.width}×${asset.height}` : ""}</span>${kind}${fast}${gone}</div></div></div>`;
     },
     remove: removeAssets,
   });

@@ -120,7 +120,7 @@ def _sysconf_memory() -> Optional[Tuple[int, int]]:
     except (AttributeError, ValueError, OSError):
         return None
 
-def _sysctl_int(name: str) -> Optional[int]:
+def sysctl_int(name: str) -> Optional[int]:
     """Read a whole-number value from the BSD kernel by name, as `sysctl` would.
 
     Args:
@@ -149,7 +149,7 @@ def _mac_memory() -> Optional[Tuple[int, int]]:
     Returns:
         `(available, total)` in bytes, or `None` if either cannot be read.
     """
-    total = _sysctl_int("hw.memsize")
+    total = sysctl_int("hw.memsize")
     try:
         listed = subprocess.run(["vm_stat"], capture_output=True, text=True, timeout=10)
     except (OSError, subprocess.SubprocessError):

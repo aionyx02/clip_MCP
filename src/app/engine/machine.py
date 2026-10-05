@@ -34,10 +34,6 @@ HIGH_GPU_MEMORY_BYTES = int(3.5 * GIB)
 MID_MEMORY_BYTES = 15 * GIB
 MID_LOGICAL_CORES = 8
 
-# Provisional (roadmap §13): minutes an hour of footage takes to transcribe accurately,
-# by tier, before anything has been measured on this computer. `None` is no upper bound.
-HOUR_MINUTES = {"high": (3, 8), "mid": (20, 45), "low": (45, None)}
-
 @dataclass(frozen=True)
 class Machine:
     """What this computer brings to the local models.
@@ -62,6 +58,11 @@ class Machine:
     mac: bool
     identity: str
 
+    @property
+    def device(self) -> str:
+        """Where speech recognition runs here: `cuda` or `cpu`."""
+        return "cuda" if self.gpu else "cpu"
+
 def classify(
     gpu: Optional[str], gpu_memory_bytes: Optional[int], memory_bytes: Optional[int],
     logical_cores: int, apple_silicon: bool, mac: bool,
@@ -71,6 +72,14 @@ def classify(
     A card whose memory cannot be read is not trusted to hold the model, and
     memory that cannot be read counts as too little: guessing high is the
     mistake that leaves a user waiting hours without having been asked.
+
+    Args:
+        gpu: The NVIDIA card speech recognition will use, or None.
+        gpu_memory_bytes: That card's memory, or None when unknown.
+        memory_bytes: Physical memory, or None when unknown.
+        logical_cores: Logical processors.
+        apple_silicon: An Apple M-series Mac.
+        mac: Any Mac.
 
     Returns:
         `high`, `mid` or `low`.
@@ -162,7 +171,12 @@ def _cpu_name() -> str:
 
 def _apple_silicon() -> bool:
     """Whether this is an M-series Mac, even when Python itself runs translated for Intel."""
-    return sys.platform == "darwin" and (platform.machine() == "arm64" or resources._sysctl_int("hw.optional.arm64") == 1)
+    return sys.platform == "darwin" and (platform.machine() == "arm64" or resources.sysctl_int("hw.optional.arm64") == 1)
+
+@functools.lru_cache(maxsize=1)
+def identity() -> str:
+    """Name this computer, so speeds measured on it are not used on another; cheap, unlike `profile`."""
+    return f"{platform.node()} / {_cpu_name()}"
 
 @functools.lru_cache(maxsize=1)
 def profile() -> Machine:
@@ -177,25 +191,27 @@ def profile() -> Machine:
         apple_silicon=_apple_silicon(),
         mac=sys.platform == "darwin",
     )
-    return Machine(tier=classify(**found), identity=f"{platform.node()} / {_cpu_name()}", **found)
+    return Machine(tier=classify(**found), identity=identity(), **found)
 
 def _gibibytes(count: Optional[int]) -> str:
     """Bytes as whole gigabytes, the way a computer's memory is usually stated."""
     return "unknown" if count is None else f"{round(count / GIB)} GB"
 
-def hour_estimate(tier: str) -> str:
-    """How long an hour of footage takes to transcribe accurately in a tier, in words."""
-    low, high = HOUR_MINUTES[tier]
+def _minutes_in_words(minutes: list) -> str:
+    """A `[low, high]` range of minutes in words; high may be None for no upper bound."""
+    low, high = minutes
     return f"{low} to {high} minutes" if high is not None else f"over {low} minutes, possibly much longer"
 
-def describe(found: Machine) -> str:
+def describe(found: Machine, hour: dict) -> str:
     """Say what this computer means for the local models, in a few sentences for the AI.
 
     Args:
         found: The computer.
+        hour: `speed.estimate` for an hour of footage transcribed
+            accurately, measured here or from the hardware.
 
     Returns:
-        The tier, what it rests on, and a rough time for an hour of footage.
+        The tier, what it rests on, and how long an hour of footage takes.
     """
     if found.gpu:
         runs_on = f"an NVIDIA card ({found.gpu}, {_gibibytes(found.gpu_memory_bytes)})"
@@ -208,6 +224,7 @@ def describe(found: Machine) -> str:
     return (
         f"This computer's speed tier for the local models is {found.tier}. Speech recognition runs on {runs_on};"
         f" {_gibibytes(found.memory_bytes)} memory, {found.logical_cores} logical cores. Transcribing an hour of"
-        f" footage accurately takes about {hour_estimate(found.tier)} here (a rough figure from the hardware,"
-        " not yet measured on this computer)."
+        f" footage accurately takes about {_minutes_in_words(hour['transcription_minutes'])} here"
+        f" ({hour['basis']}). Before analyzing, `analyze_asset` with `dry_run` gives both choices' times for"
+        " the files at hand."
     )

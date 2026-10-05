@@ -16,7 +16,7 @@ question comes up, not before; `list_resources` shows everything published.
 
 | Read | When |
 |---|---|
-| `skill://clip-editing/reading-footage.md` | The request depends on what is said or shown, or the user hands you footage with no plan |
+| `skill://clip-editing/reading-footage.md` | The request depends on what is said or shown, or the user hands you footage with no plan — and before any `analyze_asset`, since how long it takes, and whether to ask the user first, depends on this computer |
 | `skill://clip-editing/editing-intelligence.md` | You are choosing which footage goes in, in what order, what covers it, and what music goes under it — writing a plan |
 | `skill://clip-editing/pacing-and-structure.md` | You are about to propose a length, an opening, or how fast to cut |
 | `skill://clip-editing/platform-conventions.md` | The user names a platform, asks for captions in a style, several shapes, chapters, a cover, or an export, asks where a file went or how much space this takes — and before any final render |

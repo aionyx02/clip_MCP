@@ -8,6 +8,7 @@ import pytest
 from app.engine import machine, resources
 
 GIB = 1024 ** 3
+HOUR = {"transcription_minutes": [10, 40], "basis": "rough, from the hardware; not yet measured on this computer"}
 
 def computer(**changes) -> machine.Machine:
     """A computer with nothing special about it, changed where a test says."""
@@ -49,15 +50,15 @@ def test_every_intel_mac_is_low() -> None:
 # --- what the AI is told -----------------------------------------------------------------
 
 def test_the_ai_is_told_a_mac_transcribes_on_the_processor_only() -> None:
-    told = machine.describe(computer(mac=True, apple_silicon=True, memory_bytes=16 * GIB, logical_cores=8))
+    told = machine.describe(computer(mac=True, apple_silicon=True, memory_bytes=16 * GIB, logical_cores=8), HOUR)
     assert "mid" in told and "processor only" in told and "Apple" in told
 
 def test_the_ai_is_told_other_graphics_do_not_help() -> None:
-    told = machine.describe(computer(memory_bytes=8 * GIB))
+    told = machine.describe(computer(memory_bytes=8 * GIB), HOUR)
     assert "low" in told and "AMD" in told and "rough" in told
 
 def test_the_ai_is_told_which_card_is_used() -> None:
-    told = machine.describe(computer(gpu="NVIDIA GeForce RTX 4060", gpu_memory_bytes=8 * GIB))
+    told = machine.describe(computer(gpu="NVIDIA GeForce RTX 4060", gpu_memory_bytes=8 * GIB), HOUR)
     assert "high" in told and "RTX 4060" in told
 
 # --- looking at the hardware -------------------------------------------------------------
@@ -102,13 +103,13 @@ Pages wired down:                        100000.
 """
 
 def test_a_mac_counts_free_inactive_and_speculative_pages_as_available(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(resources, "_sysctl_int", lambda name: 16 * GIB if name == "hw.memsize" else None)
+    monkeypatch.setattr(resources, "sysctl_int", lambda name: 16 * GIB if name == "hw.memsize" else None)
     monkeypatch.setattr(resources.subprocess, "run",
                         lambda arguments, **keywords: SimpleNamespace(returncode=0, stdout=VM_STAT))
     assert resources._mac_memory() == ((10000 + 200000 + 5000) * 16384, 16 * GIB)
 
 def test_a_mac_whose_vm_stat_fails_is_unknown(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(resources, "_sysctl_int", lambda name: 16 * GIB)
+    monkeypatch.setattr(resources, "sysctl_int", lambda name: 16 * GIB)
     monkeypatch.setattr(resources.subprocess, "run",
                         lambda arguments, **keywords: SimpleNamespace(returncode=1, stdout=""))
     assert resources._mac_memory() is None
@@ -116,4 +117,6 @@ def test_a_mac_whose_vm_stat_fails_is_unknown(monkeypatch: pytest.MonkeyPatch) -
 def test_the_ai_hears_the_tier_as_soon_as_it_connects() -> None:
     from app import server
 
-    assert machine.describe(machine.profile()) in server.mcp.instructions
+    here = machine.profile()
+    assert f"speed tier for the local models is {here.tier}" in server.mcp.instructions
+    assert "dry_run" in server.mcp.instructions

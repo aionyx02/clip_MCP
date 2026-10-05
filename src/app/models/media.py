@@ -35,6 +35,10 @@ class TranscriptWord(BaseModel):
     start: float
     end: float
     text: str
+    probability: Optional[float] = Field(
+        default=None,
+        description="How sure the speech model was of this word, 0 to 1; missing from transcripts made before it was kept",
+    )
 
 class TranscriptSegment(BaseModel):
     """A transcribed sentence or phrase with its timing."""

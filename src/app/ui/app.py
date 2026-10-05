@@ -67,7 +67,7 @@ def _error(message: str, status: int = 400) -> JSONResponse:
     return JSONResponse({"error": message}, status_code=status)
 
 def _asset_summary(asset) -> dict:
-    """What the page needs to show a file: its name, length and kind."""
+    """What the page needs to show a file: its name, length and kind, and whether its transcript is a fast one."""
     return {
         "id": asset.id,
         "name": os.path.basename(asset.path),
@@ -77,6 +77,8 @@ def _asset_summary(asset) -> dict:
         "has_audio": asset.has_audio,
         "width": asset.width,
         "height": asset.height,
+        # Shown on the file, so the user checking captions later knows to expect misheard words.
+        "fast_transcript": server.transcription_of(server.repo.transcript_model(asset.id)) == "fast",
     }
 
 async def projects(request: Request) -> Response:
