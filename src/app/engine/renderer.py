@@ -177,7 +177,8 @@ class JobManager:
             )
 
         busy, behind = len(running), 0
-        for job in jobs:
+        # Oldest first within a priority: preparing playback waits behind the work somebody asked for.
+        for job in sorted(jobs, key=lambda queued: queued.priority):
             if job.admitted_at is not None or job.status != JobStatus.QUEUED or job.cancel_requested:
                 continue
             if behind:
@@ -447,6 +448,51 @@ def _run_render(job: Job, spec: Dict[str, Any], context: JobContext) -> None:
         context.report(1.0, "saving to the videos folder")
         spec["delivered"] = housekeeping.deliver(spec["render_path"], spec["deliver"])
 
+def _run_prepare(job: Job, spec: Dict[str, Any], context: JobContext) -> None:
+    """Make what the browser needs to play a cut: each file in `steps`, written whole or not at all.
+
+    A step is a command writing `part`, which is moved to `path` once it is
+    whole; a step with `measure` instead renders the mix to `part` and keeps
+    the gain to `target` loudness in `path`, as JSON.
+
+    Args:
+        job: The job.
+        spec: Its `steps`, each with `command`, `part`, `path`, `seconds`
+            and `stage`, and for a measurement `measure` and `target`.
+        context: Progress and cancellation for the job.
+
+    Raises:
+        OperationCancelled: If cancellation was requested.
+        RuntimeError: If FFmpeg fails.
+    """
+    log = os.path.join(job.work_dir, FFMPEG_LOG_FILE_NAME)
+    steps = spec.get("steps", [])
+    total = sum(float(step["seconds"]) for step in steps) or 1.0
+    done = 0.0
+    for step in steps:
+        if os.path.exists(step["path"]):
+            done += float(step["seconds"])
+            continue
+        start, share = done / total, float(step["seconds"]) / total
+        context.report(start, step["stage"])
+        try:
+            run_ffmpeg(step["command"], log, float(step["seconds"]),
+                       lambda fraction, start=start, share=share: context.report(start + fraction * share),
+                       context.is_cancelled)
+            if step.get("measure"):
+                lufs, _ = loudness.measure(step["part"])
+                gain = 0.0 if lufs <= loudness.SILENT_LUFS else round(float(step["target"]) - lufs, 2)
+                part = step["path"] + ".part"
+                with open(part, "w", encoding="utf-8") as kept:
+                    json.dump({"gain_db": gain, "lufs": lufs}, kept)
+                os.replace(part, step["path"])
+            else:
+                os.replace(step["part"], step["path"])
+        finally:
+            if os.path.exists(step["part"]):
+                os.remove(step["part"])
+        done += float(step["seconds"])
+
 def _run_analysis(repo: Repository, job: Job, spec: Dict[str, Any], context: JobContext) -> None:
     """Analyze an asset and store the result.
 
@@ -519,6 +565,8 @@ def run_worker(repo: Repository, job_id: str) -> None:
         try:
             if job.kind == JobKind.RENDER:
                 _run_render(job, spec, context)
+            elif job.kind == JobKind.PREPARE:
+                _run_prepare(job, spec, context)
             else:
                 _run_analysis(repo, job, spec, context)
         except OperationCancelled:

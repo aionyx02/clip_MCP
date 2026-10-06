@@ -1,3 +1,4 @@
+import json
 import os
 from datetime import datetime, timezone
 import re
@@ -62,6 +63,7 @@ from app.engine.semantic import (
 from app.engine.ffmpeg import graph_from_file, hidden_window_flags
 from app.engine.probe import picture_size, probe_file, recorded_at, speech_loudness, timecode_start
 from app.engine.reframe import Framing, centre_at, frame_project
+from app.engine import playback
 from app.engine.builder import DEFAULT_LOUDNESS_TARGET, FFmpegRenderer, Talking, voice_keys
 from app.engine.levels import song_level, talking_in
 from app.engine.delivery import CHECKS, chapter_metadata, chapters, check_delivery, clock, cover_candidates
@@ -2369,6 +2371,7 @@ def apply_edits(project_id: str, expected_version: int, operations: list[EditOpe
     """
     before = repo.get_project(project_id)
     saved = _apply(project_id, expected_version, operations)
+    prepare_playback(saved)
     result = {"status": "success", "new_version": saved.version}
     touched = _touched_captions(before, saved, operations)
     if touched:
@@ -2968,6 +2971,7 @@ def compile_plan(project_id: str, expected_version: int, plan_id: Optional[str] 
                     clip.pinned = origin["pinned"]
 
     saved = _apply(project_id, expected_version, operations, stamp=record)
+    prepare_playback(saved)
     return {
         "plan_id": plan.id,
         "project_id": project_id,
@@ -4452,6 +4456,139 @@ def export_timeline(
         handle.write(text)
     return {"output_path": path, "left_behind": behind}
 
+# Whether edits start making what the browser needs to play them. Off where nobody will
+# watch, such as a test run.
+PREPARE_PLAYBACK = True
+# What a preparation job is expected to hold in memory: one FFmpeg encoding a small picture.
+PREPARE_MEMORY_BYTES = 300 * 1024 * 1024
+
+def _being_prepared() -> set:
+    """The files preparation jobs still waiting or running will write, so none is asked for twice."""
+    paths = set()
+    for job in repo.jobs_to_show(datetime.now(timezone.utc))[0]:
+        if job.kind != JobKind.PREPARE or not job.work_dir:
+            continue
+        try:
+            with open(os.path.join(job.work_dir, "job.json"), encoding="utf-8") as spec:
+                paths.update(step["path"] for step in json.load(spec).get("steps", []))
+        except (OSError, ValueError):
+            continue
+    return paths
+
+def _frame_rate(asset: Asset) -> float:
+    """A file's frame rate as its first picture stream says, or 0 when it does not."""
+    try:
+        streams = probe_file(asset.path).get("streams", [])
+    except (OSError, RuntimeError):
+        return 0.0
+    for stream in streams:
+        if stream.get("codec_type") == "video":
+            try:
+                return float(Fraction(stream.get("avg_frame_rate") or stream.get("r_frame_rate") or "0"))
+            except (ValueError, ZeroDivisionError):
+                return 0.0
+    return 0.0
+
+def _start_preparing(steps: List[dict], urgent: bool, asset_id: Optional[str] = None,
+                     project_id: Optional[str] = None) -> Optional[str]:
+    """Queue one preparation job over its steps; returns its ID, or None when there was nothing to do."""
+    if not steps:
+        return None
+    job = Job(kind=JobKind.PREPARE, asset_id=asset_id, project_id=project_id, priority=-1 if urgent else 1,
+              memory_estimate=PREPARE_MEMORY_BYTES)
+    job.work_dir = os.path.join(WORKSPACE_DIR, "jobs", job.job_id)
+    return job_manager.start_job(job, {"steps": steps}).job_id
+
+def prepare_playback(project: Project, urgent: bool = False) -> List[str]:
+    """Start making what the browser still needs to play a cut: proxies, repaired sound, its loudness.
+
+    Each is made once and kept by what went into it, so this costs nothing
+    for what is already there or already being made.
+
+    Args:
+        project: The cut.
+        urgent: Somebody is waiting to watch it, so it goes ahead of the
+            other work waiting; otherwise it waits behind it.
+
+    Returns:
+        The IDs of the jobs started.
+    """
+    if not PREPARE_PLAYBACK:
+        return []
+    assets = _referenced_assets(project)
+    busy = _being_prepared()
+    proxies = playback.proxy_dir(WORKSPACE_DIR)
+    started = []
+    for asset_id in playback.missing(project, assets, os.listdir(proxies)):
+        asset = assets[asset_id]
+        path = os.path.join(proxies, playback.proxy_name(asset))
+        if path in busy:
+            continue
+        step = {"command": playback.proxy_command(asset, path + ".part", _frame_rate(asset)), "part": path + ".part",
+                "path": path, "seconds": float(asset.duration or 1), "stage": "making a copy to play from"}
+        started.append(_start_preparing([step], urgent, asset_id=asset_id))
+    sound = playback.sound_dir(WORKSPACE_DIR)
+    steps = []
+    for track in project.tracks:
+        for clip in track.clips:
+            asset = assets.get(clip.asset_id)
+            name = playback.repair_name(clip, asset) if asset is not None and playback.needs_repair(clip) else None
+            path = os.path.join(sound, name) if name else None
+            if path and not os.path.exists(path) and path not in busy:
+                steps.append({"command": playback.repair_command(clip, asset, path + ".part"), "part": path + ".part",
+                              "path": path, "seconds": float(clip.source_range.end - clip.source_range.start),
+                              "stage": "repairing a voice"})
+    gain = os.path.join(sound, playback.mix_key(project) + ".json")
+    if project.tracks and float(project.duration) > 0 and not os.path.exists(gain) and gain not in busy:
+        voices = _voices(project)
+        mix = gain + ".wav"
+        steps.append({"command": renderer.build_mix(project, assets, mix, voices, _talking(project, voices)),
+                      "part": mix, "path": gain, "seconds": float(project.duration), "measure": True,
+                      "target": playback.LOUDNESS_TARGET, "stage": "measuring loudness"})
+    started.append(_start_preparing(steps, urgent, project_id=project.id))
+    return [job_id for job_id in started if job_id]
+
+def playback_of(project: Project, urgent: bool = True) -> dict:
+    """Describe a cut for the browser to play, and start making whatever it still lacks.
+
+    Args:
+        project: The cut, as it is now or as it was at a version.
+        urgent: Whether somebody is waiting to watch it.
+
+    Returns:
+        What `playback.describe` returns.
+    """
+    assets = _referenced_assets(project)
+    proxies = playback.proxy_dir(WORKSPACE_DIR)
+    sound = playback.sound_dir(WORKSPACE_DIR)
+    have = {}
+    for asset_id, asset in assets.items():
+        name = playback.proxy_name(asset)
+        if name and os.path.exists(os.path.join(proxies, name)):
+            have[asset_id] = f"/proxy/{name}"
+    repaired = {}
+    for track in project.tracks:
+        for clip in track.clips:
+            asset = assets.get(clip.asset_id)
+            if asset is None or not playback.needs_repair(clip):
+                continue
+            name = playback.repair_name(clip, asset)
+            if name and os.path.exists(os.path.join(sound, name)):
+                repaired[clip.id] = f"/sound/{name}"
+    gain = None
+    measured = os.path.join(sound, playback.mix_key(project) + ".json")
+    if os.path.exists(measured):
+        with open(measured, encoding="utf-8") as kept:
+            gain = json.load(kept).get("gain_db")
+    voices = _voices(project)
+    described = playback.describe(
+        project, assets, playback.Prepared(have, repaired, gain), _talking(project, voices), voices,
+        _framing(project, assets),
+    )
+    if described["waiting"] or gain is None:
+        prepare_playback(project, urgent=urgent)
+    return described
+
 def _version_record(version: Version) -> dict:
     """One version of a project as the AI reads it."""
     return {
@@ -4695,8 +4832,9 @@ def queue_positions(active: Sequence[Job]) -> Dict[str, int]:
     Returns:
         Each queued job's place, 0 for the next to start.
     """
-    waiting = [job for job in active
-               if job.status == JobStatus.QUEUED and job.admitted_at is None and not job.cancel_requested]
+    waiting = sorted((job for job in active
+                      if job.status == JobStatus.QUEUED and job.admitted_at is None and not job.cancel_requested),
+                     key=lambda job: job.priority)
     return {job.job_id: place for place, job in enumerate(waiting)}
 
 def _job_states(job_ids: List[str]) -> List[dict]:

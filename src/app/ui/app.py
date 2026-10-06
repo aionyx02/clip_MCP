@@ -12,6 +12,7 @@ import io
 import json
 import mimetypes
 import os
+import re
 from datetime import datetime, timedelta, timezone
 import shutil
 import subprocess
@@ -33,6 +34,7 @@ from starlette.staticfiles import StaticFiles
 from app import clients, server
 from app.engine.ffmpeg import hidden_window_flags
 from app.engine import models
+from app.engine import playback as playback_module
 from app.engine.frames import extract_frame
 from app.engine.subtitles import captioned_clips, place_cues
 from app.models.timeline import Project
@@ -389,6 +391,45 @@ async def assets(request: Request) -> Response:
             listed.append({**_asset_summary(asset), "folder_id": filed.get(asset.id), "missing": not present})
     listed.sort(key=lambda asset: asset["name"].lower())
     return JSONResponse({"assets": listed})
+
+async def playback(request: Request) -> Response:
+    """What the browser needs to play a cut as it is, or as it was at one version.
+
+    Asking is also how what it still lacks gets made first: somebody is
+    watching, so the copies it plays from go ahead of the other work waiting.
+    """
+    project_id = request.path_params["project_id"]
+    commit = request.query_params.get("commit")
+    try:
+        project = (server._project_at(project_id, commit) if commit
+                   else server.repo.get_project(project_id))
+    except ValueError as error:
+        return _error(str(error), 404)
+    if project is None:
+        return _error(f"project {project_id} not found", 404)
+    return JSONResponse(await run_in_threadpool(server.playback_of, project))
+
+# What a cached file may be called: what the server names them, and nothing that leaves the folder.
+_CACHED_NAME = re.compile(r"^[0-9a-f-]{8,80}\.(mp4|m4a)$")
+
+def _cached(folder: str, name: str, kind: str) -> Response:
+    """Serve one prepared file, with ranges so the browser can seek in it."""
+    if not _CACHED_NAME.match(name):
+        return _error("not found", 404)
+    path = os.path.join(folder, name)
+    if not os.path.exists(path):
+        return _error("not ready", 404)
+    return FileResponse(path, media_type=kind, headers={"Cache-Control": "max-age=31536000, immutable"})
+
+async def proxy(request: Request) -> Response:
+    """A file's small copy, for the browser to play the cut from."""
+    name = request.path_params["name"]
+    return _cached(playback_module.proxy_dir(server.WORKSPACE_DIR), name,
+                   "video/mp4" if name.endswith(".mp4") else "audio/mp4")
+
+async def sound(request: Request) -> Response:
+    """A clip's repaired sound, for the browser to play in place of its own."""
+    return _cached(playback_module.sound_dir(server.WORKSPACE_DIR), request.path_params["name"], "audio/mp4")
 
 async def asset_notes(request: Request) -> Response:
     """Write the notes on how a file may be used, the ones the AI reads wherever it reads about the file.
@@ -855,6 +896,7 @@ def create_app() -> Starlette:
         Route("/api/reveal", reveal, methods=["POST"]),
         Route("/api/projects/{project_id}/preview", preview, methods=["GET", "POST"]),
         Route("/api/projects/{project_id}/version", version),
+        Route("/api/projects/{project_id}/playback", playback),
         Route("/api/words/{asset_id}", words),
         Route("/api/projects/{project_id}/captions", captions),
         Route("/api/projects/{project_id}/captions/make", make_captions, methods=["POST"]),
@@ -875,6 +917,8 @@ def create_app() -> Starlette:
         Route("/api/update", update, methods=["GET", "POST"]),
         Route("/api/jobs/{job_id}", job),
         Route("/media/{asset_id}", media),
+        Route("/proxy/{name}", proxy),
+        Route("/sound/{name}", sound),
         Route("/thumb/{asset_id}", thumb),
         Route("/wave/{asset_id}", wave),
         Route("/output/{job_id}", output),

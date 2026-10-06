@@ -8,6 +8,7 @@ window.T = {
     analyze: "分析素材",
     render: "輸出影片",
     preview: "產生預覽",
+    prepare: "準備播放",
     unnamed: "未命名",
     queued: "排隊中",
     queuedBehind: (n) => `排隊中，前面還有 ${n} 個`,

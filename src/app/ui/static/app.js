@@ -773,7 +773,8 @@ function placeJobs(panel) {
   panel.style.bottom = `${Math.max(8, window.innerHeight - top + 8)}px`;
 }
 
-const jobKind = (job) => job.kind === "analyze" ? T.jobs.analyze : job.preview ? T.jobs.preview : T.jobs.render;
+const jobKind = (job) => job.kind === "analyze" ? T.jobs.analyze : job.kind === "prepare" ? T.jobs.prepare
+  : job.preview ? T.jobs.preview : T.jobs.render;
 
 function jobLine(job) {
   let state;
@@ -792,7 +793,8 @@ function jobLine(job) {
 // The cards on the library and projects pages say what is happening to them, too.
 function markCards(jobs) {
   document.querySelectorAll(".job-badge").forEach((badge) => badge.remove());
-  for (const job of jobs) {
+  // Getting a cut ready to play is background work; a card is not busy because of it.
+  for (const job of jobs.filter((item) => item.kind !== "prepare")) {
     const id = job.kind === "analyze" ? job.asset_id : job.project_id;
     const meta = id && document.querySelector(`.card[data-id="${CSS.escape(id)}"] .card-meta`);
     if (!meta) continue;
@@ -804,6 +806,8 @@ function markCards(jobs) {
 }
 
 function announce(job) {
+  // Copies made to play from finish all the time and nobody asked for them; only a failure is news.
+  if (job.kind === "prepare" && job.status !== "failed") return;
   if (job.status === "completed") {
     const element = document.createElement("div");
     element.className = "toast ok";

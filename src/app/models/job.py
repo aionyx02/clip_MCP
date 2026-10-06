@@ -19,6 +19,8 @@ class JobKind(str, Enum):
 
     RENDER = "render"
     ANALYZE = "analyze"
+    # Proxies, repaired sound and a measured loudness, so the browser can play a cut.
+    PREPARE = "prepare"
 
 class JobStatus(str, Enum):
     """Lifecycle states of a background job."""
@@ -57,6 +59,11 @@ class Job(BaseModel):
     error_message: Optional[str] = None
     cancel_requested: bool = False
     memory_estimate: int = Field(default=0, ge=0, description="Peak memory the job is expected to need, in bytes")
+    priority: int = Field(
+        default=0,
+        description="Lower goes first; jobs of one priority go oldest first. Preparing playback waits behind "
+                    "renders and analyses unless somebody is waiting to watch",
+    )
     created_at: datetime = Field(default_factory=_utc_now)
     admitted_at: Optional[datetime] = Field(
         default=None,
