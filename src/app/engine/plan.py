@@ -1136,15 +1136,19 @@ def _joined_beats(
             reach = 0.5 if wanted.kind == "dip" else 1.0
             fits = math.floor(min(wanted.seconds, room / reach, before.played) * 1000) / 1000
             if fits < MIN_TRANSITION_SECONDS:
+                # `check_plan` refuses this with the ways to fix it; a preview built
+                # without checking still says what happened.
                 notes.append(
                     f"beat {beat.id}: its {wanted.kind} was left out — its first shot starts "
                     f"{piece.start:.2f}s into its file, with no picture before it to run in from"
                 )
             else:
                 if fits < wanted.seconds:
+                    short = wanted.seconds * reach * piece.speed - piece.start
                     notes.append(
                         f"beat {beat.id}: its {wanted.kind} was shortened from {wanted.seconds:g}s to {fits:g}s, "
-                        "all the picture its file has before the shot"
+                        f"all the picture its file has before the shot; for the whole {wanted.seconds:g}s, start "
+                        f"that shot {short:.2f}s later (`set_trim` with a later `from_seconds`)"
                     )
                 changes["transition"] = (wanted.kind, fits, wanted.through, wanted.direction)
         if beat.sound_lead is not None:
@@ -1634,6 +1638,45 @@ def _cut_notes(
         )
     return said
 
+def _unfit_transitions(plan: EditPlan, pieces: Sequence[Piece]) -> List[str]:
+    """Name each beat whose transition has no picture before its first shot to run in from.
+
+    A transition ends on the cut, so the incoming shot plays under it from
+    before its own start, and a shot that begins at the top of its file has
+    nothing there. Left out with a note, it went unnoticed in a cut where every
+    part began at the top of a file. Refused instead, with what each way out
+    costs: starting the shot later cuts that much of its opening, which is the
+    planner's call to make, not the compiler's.
+
+    Args:
+        plan: The plan.
+        pieces: Its windows, as compiled.
+
+    Returns:
+        One problem per beat whose transition could not be made.
+    """
+    first = _beginnings(pieces)
+    problems: List[str] = []
+    for position, beat in enumerate(plan.beats):
+        wanted = beat.transition_in
+        at = first.get(beat.id)
+        if position == 0 or wanted is None or not at or pieces[at].transition is not None:
+            continue
+        piece = pieces[at]
+        reach = 0.5 if wanted.kind == "dip" else 1.0
+        need = wanted.seconds * reach * piece.speed
+        later = need - piece.start
+        other = (f"a shorter {wanted.kind}" if wanted.kind == "dip"
+                 else f"a dip instead, which only needs half as much ({need / 2:.2f}s)")
+        problems.append(
+            f"beat {beat.id}: its {wanted.seconds:g}s {wanted.kind} has no picture to run in from — its first "
+            f"shot, {piece.from_clip_ids[0]}, starts {piece.start:.2f}s into its file and the {wanted.kind} "
+            f"needs {need:.2f}s before it. Start that shot at least {later:.2f}s later (`set_trim` with a "
+            f"`from_seconds` that much later, which cuts that much of its opening), use {other}, or take the "
+            "transition off with `set_beat_join`"
+        )
+    return problems
+
 def _cue_problems(plan: EditPlan, pieces: Sequence[Piece]) -> List[str]:
     """Check that every music cue has somewhere to come in, in the order given.
 
@@ -1947,6 +1990,7 @@ def check_plan(
         ))
         notes.extend(cleaned)
         problems.extend(_cue_problems(plan, pieces))
+        problems.extend(_unfit_transitions(plan, pieces))
         for position, cue in enumerate(cues, start=1):
             entry = song_entry(cue, (cuts or {}).get(cue.asset_id) if cue.asset_id is not None else None)
             if entry != cue.start:
@@ -2282,12 +2326,22 @@ def music_beds(
         entry = song_entry(cue, cuts.get(cue.asset_id) if cuts else None)
         # A song cross-fading in over the one before starts early, and from earlier in
         # itself by the same amount — so at the cut it is exactly where the cue said, on
-        # its beat when it cuts on the beat. Never from before the top of the song.
+        # its beat when it cuts on the beat. Never from before the top of the song: what
+        # that leaves short is made up after the cut instead, by the song going out running
+        # on past it, so a song coming in from its top still cross-fades.
         lead = min(crossfade, entry, at) if crossfade and sounding else 0.0
-        if lead:
+        tail = 0.0
+        if crossfade and sounding and lead < crossfade:
+            going = beds[-1]
+            room = _song_length(assets.get(going.asset_id))
+            tail = round(max(0.0, min(crossfade - lead, until - at,
+                                      (room - going.end) if room is not None else crossfade - lead)), 3)
+            if tail:
+                beds[-1] = replace(going, end=round(going.end + tail, 3))
+        if lead or tail:
             lane = 1 - lane
             # The song going out fades over exactly the stretch the one coming in rises.
-            beds[-1] = replace(beds[-1], fade_out=round(min(lead, beds[-1].end - beds[-1].start), 3))
+            beds[-1] = replace(beds[-1], fade_out=round(min(lead + tail, beds[-1].end - beds[-1].start), 3))
         else:
             lane = 0
         # Everything settled to the millisecond the timeline keeps before it is added up,
@@ -2308,7 +2362,7 @@ def music_beds(
             continue
         sounding = True
         lengths = [end - start for start, end, _ in parts]
-        fade_in = lead if lead else min(cue.fade_in, lengths[0])
+        fade_in = lead + tail if lead or tail else min(cue.fade_in, lengths[0])
         fade_out = min(cue.fade_out, lengths[-1])
         if len(parts) == 1 and fade_in + fade_out > lengths[0]:
             # One short stretch with both fades on it: shrink them in proportion rather

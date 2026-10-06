@@ -519,8 +519,8 @@ def test_a_pause_somebody_is_talking_across_is_left_in_and_said() -> None:
         silences=[(0.0, 1.0), (2.0, 4.0), (5.0, 7.0), (8.0, 10.0), (11.0, 12.0)],
     )
     pieces, notes = compiled(made)
+    # Being inside a sentence is already reason enough to leave it in.
     assert (pieces[1].start, pieces[1].end) == (3.9, 8.1)
-    assert any("talking across them" in note for note in notes)
     assert not any("were taken out" in note for note in notes)
 
 def test_a_shot_nobody_talks_in_keeps_its_quiet_stretches() -> None:
@@ -531,6 +531,20 @@ def test_a_shot_nobody_talks_in_keeps_its_quiet_stretches() -> None:
     pieces, notes = compiled(made, which="quiet")
     assert [(piece.start, piece.end) for piece in pieces] == [(0.0, 12.0)]
     assert not any("were taken out" in note for note in notes)
+
+def test_a_pause_inside_one_sentence_is_kept() -> None:
+    # Taking it out jumps inside the sentence, which the check before a render calls a cut in
+    # the middle of somebody talking: the compiler made the cut and its own check refused it.
+    made = analysis(duration=12.0, silences=[(0.0, 1.0), (3.0, 5.0), (9.0, 12.0)])
+    made.transcript = Transcript(language="zh", model="test", segments=[
+        TranscriptSegment(start=1.0, end=9.0, text="這個要很小心", words=[
+            TranscriptWord(start=1.0, end=3.0, text="這個"), TranscriptWord(start=5.0, end=9.0, text="要很小心"),
+        ]),
+    ])
+    pieces, notes = compiled(made)
+    assert len(pieces) == 1 and pieces[0].start <= 1.0 and pieces[0].end >= 9.0
+    assert not any("were taken out" in note for note in notes)
+    assert not any("stop before the sentence ends" in note for note in notes)
 
 def test_quiet_after_the_last_thing_said_is_not_dead_air() -> None:
     # Talking has to stop before a pause and start again after it for the pause to be the
@@ -1924,6 +1938,23 @@ def test_two_songs_cross_fade_on_two_tracks_when_the_plan_asks() -> None:
     assert first.timeline_in + first.end - first.start == pytest.approx(cut)
     assert first.fade_out == 1.0 and second.fade_in == 1.0
 
+def test_a_song_coming_in_from_its_top_cross_fades_over_the_end_of_the_one_going_out() -> None:
+    # It has nothing before its first second to come in early with, and the cross-fade used to
+    # be dropped without a word. The song going out runs on past the cut instead.
+    plan, by_id, assets = parts()
+    plan = plan.model_copy(update={"music": MusicPlan(crossfade_seconds=1.0, cues=[
+        MusicCue(asset_id=SONG), MusicCue(beat_id="b3", asset_id="other"),
+    ])})
+    pieces = plan_pieces(plan, by_id, {}, assets)
+    cut = cut_points(pieces)[1]
+    first, second = music_beds(plan, pieces, assets)
+    assert (first.track_id, second.track_id) == ("music", "music_b")
+    # The one coming in is exactly where the cue said at the cut: the top of the song.
+    assert second.timeline_in == pytest.approx(cut) and second.start == 0.0
+    assert first.timeline_in + first.end - first.start == pytest.approx(cut + 1.0)
+    # The last stretch is short, so its fades share it in proportion; both are still there.
+    assert first.fade_out == 1.0 and second.fade_in > 0.5
+
 def test_without_a_cross_fade_the_songs_meet_end_to_end_on_one_track() -> None:
     plan, by_id, assets = parts()
     plan = plan.model_copy(update={"music": MusicPlan(cues=[
@@ -2163,19 +2194,29 @@ def joined(transition: Optional[BeatTransition], lead: Optional[float], opening:
     Returns:
         `(pieces, notes)`.
     """
+    plan, by_id, children, assets = joined_plan(transition, lead, opening)
+    return compile_pieces(plan, by_id, children, assets)
+
+def joined_plan(transition: Optional[BeatTransition], lead: Optional[float], opening: float) -> tuple:
+    """The plan `joined` compiles, with what compiling or checking it needs.
+
+    Returns:
+        `(plan, clips by ID, children, assets)`.
+    """
     by_id, children, assets, clips = covered()
     talk = speech_of(clips)[0]
     walk = next(clip for clip in clips if clip.asset_id == BROLL_ASSET)
     plan = EditPlan(
         timeline_id="tl_test", timeline_input_hash="hash",
-        beats=[Beat(id="b1", name="講"), Beat(id="b2", name="走", transition_in=transition, sound_lead=lead)],
+        beats=[Beat(id="b1", name="講", role="turn"),
+               Beat(id="b2", name="走", role="payoff", transition_in=transition, sound_lead=lead)],
         selections=[
             Selection(clip_id=talk.id, beat_id="b1"),
             Selection(clip_id=walk.id, beat_id="b2",
                       trim=Trim(kind=TrimKind.RANGE, from_seconds=opening, to_seconds=opening + 3.0)),
         ],
     )
-    return compile_pieces(plan, by_id, children, assets)
+    return plan, by_id, children, assets
 
 def test_a_beat_comes_in_on_its_transition_and_its_sound_early() -> None:
     pieces, notes = joined(BeatTransition(kind="dip", seconds=0.6, through="white"), 0.4, opening=5.0)
@@ -2190,10 +2231,22 @@ def test_a_transition_is_shortened_to_the_picture_its_file_has() -> None:
     assert pieces[1].transition == ("dissolve", 0.3, "black", "left")
     assert pieces[1].sound_lead == 0.3
     assert any("shortened from 1s to 0.3s" in note for note in notes)
-    # At the very start of the file there is nothing to run in from, which is said rather than refused.
-    pieces, notes = joined(BeatTransition(kind="wipe", seconds=0.5), None, opening=0.0)
-    assert pieces[1].transition is None
-    assert any("was left out" in note for note in notes)
+    assert any("from_seconds" in note for note in notes)
+
+def test_a_transition_with_no_picture_before_its_shot_is_refused_with_the_ways_to_fix_it() -> None:
+    # It used to be left out with one line saying so, and every beat's transition went missing
+    # in a cut whose parts each began at the top of a file.
+    plan, by_id, children, assets = joined_plan(BeatTransition(kind="wipe", seconds=0.5), None, opening=0.0)
+    timeline = SemanticTimeline(id="tl_test", asset_ids=[], input_hash="hash", derivation_version=6)
+    problems, _ = check_plan(plan, timeline, by_id, children, assets)
+    refused = [problem for problem in problems if "wipe" in problem]
+    assert len(refused) == 1
+    assert "from_seconds" in refused[0] and "0.5" in refused[0]
+    assert "dip" in refused[0] and "set_beat_join" in refused[0]
+    # A dip only reaches back half its length, so the same shot needs a quarter second for a 0.5s one.
+    plan, by_id, children, assets = joined_plan(BeatTransition(kind="dip", seconds=0.5), None, opening=0.0)
+    problems, _ = check_plan(plan, timeline, by_id, children, assets)
+    assert any("0.25" in problem for problem in problems if "dip" in problem)
 
 def test_a_clip_lengthened_by_hand_over_the_next_one_is_not_played_twice(planned: dict) -> None:
     project = compiled_project(planned)

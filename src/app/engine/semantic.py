@@ -850,8 +850,12 @@ class CleanCuts:
         talking before it and starts again after it, inside the window. Quiet
         in a shot nobody talks in — a hand reaching for a cup — is the action
         itself, and so is quiet after the last thing said: taking either out
-        cuts away what the shot was chosen to show. A file nobody transcribed
-        cannot be told apart that way, so every long silence in it counts.
+        cuts away what the shot was chosen to show. And it has to fall between
+        two sentences: a pause in the middle of one is how somebody talks, and
+        taking it out jumps inside the sentence, which the check before a
+        render rightly calls a cut in the middle of somebody talking. A file
+        nobody transcribed cannot be told apart that way, so every long
+        silence in it counts.
 
         Args:
             start: Where the window opens, in source seconds.
@@ -864,7 +868,9 @@ class CleanCuts:
         def talked_around(quiet: float, loud: float) -> bool:
             before = any(begins < quiet and ends > start for begins, ends in self.sentences)
             after = any(ends > loud and begins < end for begins, ends in self.sentences)
-            return before and after
+            middle = (quiet + loud) / 2
+            between = not any(begins < middle < ends for begins, ends in self.sentences)
+            return before and after and between
 
         return tuple(
             (quiet, loud) for quiet, loud in self.pauses
