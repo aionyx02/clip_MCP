@@ -703,7 +703,11 @@ def analyze_asset(
         result["estimate"] = found
     return result
 
+# Provisional (roadmap §13): the longest stretch heard again at once, short enough to come back
+# inside the time most AI clients allow a tool call.
 LISTEN_AGAIN_SECONDS = 30.0
+# Provisional (roadmap §13): the longest `get_job` waits, under the same allowance.
+MAX_JOB_WAIT_SECONDS = 50.0
 
 def _bare_words(text: str) -> str:
     """Text reduced to what is said, for comparing two hearings: no spaces or punctuation."""
@@ -1505,7 +1509,7 @@ def get_semantic_clip(clip_id: str, include_words: bool = False) -> dict:
             for word in segment.words
             if word.end > clip.source_range.start and word.start < clip.source_range.end
         ]
-    return record
+    return _plain(record)
 
 @mcp.tool()
 def frames_for_clips(
@@ -1732,7 +1736,7 @@ def create_project(
         width=width, height=height, fps_num=fps_num, fps_den=fps_den,
     )
     repo.add_project(project)
-    return project.model_dump()
+    return _plain(project.model_dump())
 
 @mcp.tool()
 def list_projects() -> dict:
@@ -1895,10 +1899,13 @@ def apply_edits(project_id: str, expected_version: int, operations: list[EditOpe
         if shared:
             repo.remember_captions(shared)
         result["captions"] = [_caption_line(saved, cue) for cue in touched]
-        result["captions_kept"] = (
-            "remembered against their footage: every project that captions it starts from them"
-            if shared else "in this project only"
-        )
+        if not shared:
+            result["captions_kept"] = "in this project only"
+        elif len(shared) < len(touched):
+            result["captions_kept"] = ("remembered against their footage, so every project that captions it starts "
+                                       "from them — except the ones marked (this project only)")
+        else:
+            result["captions_kept"] = "remembered against their footage: every project that captions it starts from them"
     return result
 
 def _touched_captions(before: Optional[Project], project: Project, operations: Sequence) -> List[SubtitleCue]:
@@ -3065,7 +3072,10 @@ def generate_subtitles(
     # What this project kept to itself comes first, then what was corrected on the footage
     # for every project, then the transcript: each fills only what the ones before left.
     local = [cue.model_copy(update={"id": ""}) for cue in project.subtitles if cue.local]
-    taken = lambda cue, over: any(cue.asset_id == known.asset_id and _overlaps(cue, known) for known in over)
+
+    def taken(cue: SubtitleCue, over: Sequence[SubtitleCue]) -> bool:
+        return any(cue.asset_id == known.asset_id and _overlaps(cue, known) for known in over)
+
     kept = [
         cue for cue in proposed
         if not any(_overlaps(cue, known) for known in reviewed.get(cue.asset_id, ())) and not taken(cue, local)
@@ -3873,7 +3883,9 @@ def export_timeline(
     return {"output_path": path, "left_behind": behind}
 
 @mcp.tool()
-def get_job(job_ids: List[str], wait_seconds: Annotated[float, Field(ge=0, le=50)] = 0) -> dict:
+def get_job(
+    job_ids: List[str], wait_seconds: Annotated[float, Field(ge=0, le=MAX_JOB_WAIT_SECONDS)] = 0,
+) -> dict:
     """Return the current state of background jobs, waiting for one to end if asked.
 
     Pass every job of a batch at once — all the analyses of a folder, or a

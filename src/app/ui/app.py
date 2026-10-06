@@ -325,7 +325,8 @@ async def jobs(request: Request) -> Response:
     except ValueError as error:
         return _error(str(error), 404)
 
-# How long a finished job is still reported, so the page can say it finished.
+# Provisional (roadmap §13): how long a finished job is still reported, so the page can say it
+# finished — longer than a window is usually left in the background.
 ENDED_SHOWN_FOR = timedelta(seconds=90)
 
 def _job_card(job, names: dict, ahead: int, now: datetime) -> dict:

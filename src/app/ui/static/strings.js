@@ -26,11 +26,12 @@ window.T = {
   },
   projects: {
     delete: "刪除",
+    deleteOne: (name) => `「${name}」`,
     deleteMany: (n) => `這 ${n} 個專案`,
     deleteTitle: (what) => `刪除${what}？`,
     deleteBody: "刪除後無法復原。已經輸出到「影片\\clip-mcp」的成品不會被刪除；剪輯計畫和校對過的字幕也會留著，之後可以請 AI 用它們重新做出這支影片。",
     deleted: (n) => `已刪除 ${n} 個專案`,
-    deleteBusy: (names) => `這些專案正在輸出，請等輸出完成或停止後再刪除：${names}`,
+    deleteBusy: (names) => `這些專案正在輸出，請等輸出完成或停止後再刪除：${names.join("、")}`,
     title: "專案",
     subtitle: "AI 剪好的影片都在這裡。點開就能檢查、微調、輸出。",
     create: "新專案",

@@ -402,14 +402,14 @@ async function projectsPage(page, folderId) {
 // Deleting a project is the user's to do, here, and never the AI's: it has no tool for it.
 async function deleteProjects(ids, projects) {
   const named = projects.filter((project) => ids.includes(project.id));
-  const what = named.length === 1 ? `「${named[0].name || T.projects.untitled}」` : T.projects.deleteMany(named.length);
+  const what = named.length === 1 ? T.projects.deleteOne(named[0].name || T.projects.untitled) : T.projects.deleteMany(named.length);
   if (!(await confirmBox(T.projects.deleteTitle(what), T.projects.deleteBody, T.projects.delete, true))) return false;
   try {
     const result = await api("/api/projects/delete", { ids });
     toast(T.projects.deleted(result.deleted.length));
     return true;
   } catch (error) {
-    toast(error.status === 409 && error.data?.busy ? T.projects.deleteBusy(error.data.busy.join("、")) : error.message, "error");
+    toast(error.status === 409 && error.data?.busy ? T.projects.deleteBusy(error.data.busy) : error.message, "error");
     return false;
   }
 }
@@ -731,6 +731,7 @@ async function checkForUpdate() {
 
 // Every job, whoever started it — mostly the AI, in the background — floating over the
 // bottom of the sidebar, above 「有新版」 and 「儲存空間」 so neither is ever covered.
+// Provisional (roadmap §13): how often the panel asks what is going on.
 const JOB_POLL_MS = 2500;
 const SHOWN_JOBS = 5;
 
@@ -791,8 +792,8 @@ function watchJobs() {
   panel.hidden = true;
   document.body.append(panel);
   let told = null;
+  // Asked even while the window is in the background, so a job that ends then is still announced.
   const poll = async () => {
-    if (document.hidden) return;
     let found;
     try { found = await api("/api/jobs/active"); } catch { return; }
     // What ended before this page opened was not news to anybody here.

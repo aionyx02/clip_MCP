@@ -284,16 +284,21 @@ def check_delivery(
             )))
         # Placing already held every short caption on as long as its shot allowed; one still
         # short is one there was no room for, which only a change to the cut can give.
-        shortest = (style or project.caption_style).min_seconds
+        # The same minimum they were placed with, which is the project's own style.
+        shortest = project.caption_style.min_seconds
+        starts = sorted(float(cue.start) for cue in captions)
         for cue in captions:
             shown = float(cue.end - cue.start)
-            if shown < shortest - 0.0005:
-                findings.append(Finding("captions", (
-                    f"the caption at {clock(float(cue.start))} ({cue.text[:16]}) is on screen {shown:.2f}s, under "
-                    f"the {shortest:g}s it takes to read, and its shot ends before it can be held longer. Let the "
-                    "shot run on (a later end on its trim), take the caption out with `edit_subtitle` and "
-                    f"`delete`, or lower `min_seconds` in the caption style if the user reads that fast"
-                )))
+            if shown >= shortest - 0.0005:
+                continue
+            crowded = any(float(cue.end) - 0.001 <= start <= float(cue.end) + 0.001 for start in starts)
+            why = ("the next caption follows straight on. Join the two with `edit_subtitle`" if crowded
+                   else "its shot ends before it can be held longer. Let the shot run on (a later end on its trim)")
+            findings.append(Finding("captions", (
+                f"the caption at {clock(float(cue.start))} ({cue.text[:16]}) is on screen {shown:.2f}s, under the "
+                f"{shortest:g}s it takes to read, and {why}, take the caption out with `edit_subtitle` and "
+                "`delete`, or lower `min_seconds` in the caption style if the user reads that fast"
+            )))
 
     if target_seconds and abs(duration - target_seconds) / target_seconds > LENGTH_TOLERANCE:
         findings.append(Finding("length", (

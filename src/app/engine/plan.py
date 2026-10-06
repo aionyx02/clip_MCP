@@ -1091,6 +1091,15 @@ def compile_pieces(
     pieces, said = _joined_beats(plan, pieces, assets)
     return pieces, notes + said
 
+def _reach(kind: str) -> float:
+    """How much of its length a transition reaches back before the cut: a dip only half,
+    since the colour covers its first half; a dissolve or a wipe all of it."""
+    return 0.5 if kind == "dip" else 1.0
+
+def _picture_needed(wanted, piece: Piece) -> float:
+    """Seconds of the file a transition needs before the shot it brings in, at that shot's speed."""
+    return wanted.seconds * _reach(wanted.kind) * piece.speed
+
 def _joined_beats(
     plan: EditPlan,
     pieces: Sequence[Piece],
@@ -1132,8 +1141,7 @@ def _joined_beats(
         changes: Dict[str, object] = {}
         wanted = beat.transition_in
         if wanted is not None:
-            # A dip only reaches back for half its length: the colour covers the first half.
-            reach = 0.5 if wanted.kind == "dip" else 1.0
+            reach = _reach(wanted.kind)
             fits = math.floor(min(wanted.seconds, room / reach, before.played) * 1000) / 1000
             if fits < MIN_TRANSITION_SECONDS:
                 # `check_plan` refuses this with the ways to fix it; a preview built
@@ -1144,7 +1152,7 @@ def _joined_beats(
                 )
             else:
                 if fits < wanted.seconds:
-                    short = wanted.seconds * reach * piece.speed - piece.start
+                    short = _picture_needed(wanted, piece) - piece.start
                     notes.append(
                         f"beat {beat.id}: its {wanted.kind} was shortened from {wanted.seconds:g}s to {fits:g}s, "
                         f"all the picture its file has before the shot; for the whole {wanted.seconds:g}s, start "
@@ -1662,9 +1670,16 @@ def _unfit_transitions(plan: EditPlan, pieces: Sequence[Piece]) -> List[str]:
         at = first.get(beat.id)
         if position == 0 or wanted is None or not at or pieces[at].transition is not None:
             continue
-        piece = pieces[at]
-        reach = 0.5 if wanted.kind == "dip" else 1.0
-        need = wanted.seconds * reach * piece.speed
+        piece, before = pieces[at], pieces[at - 1]
+        if before.played < MIN_TRANSITION_SECONDS:
+            # The shot going out is what is too short to run it over; moving this one would not help.
+            problems.append(
+                f"beat {beat.id}: its {wanted.kind} has nothing to run over — the shot before it, "
+                f"{before.from_clip_ids[0]}, plays only {before.played:.2f}s. Give that shot more of its footage, "
+                "or take the transition off with `set_beat_join`"
+            )
+            continue
+        need = _picture_needed(wanted, piece)
         later = need - piece.start
         other = (f"a shorter {wanted.kind}" if wanted.kind == "dip"
                  else f"a dip instead, which only needs half as much ({need / 2:.2f}s)")

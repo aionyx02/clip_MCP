@@ -2243,6 +2243,14 @@ def test_a_transition_with_no_picture_before_its_shot_is_refused_with_the_ways_t
     assert len(refused) == 1
     assert "from_seconds" in refused[0] and "0.5" in refused[0]
     assert "dip" in refused[0] and "set_beat_join" in refused[0]
+    # When the shot before is what is too short, moving this one later would not help: say so.
+    from app.engine import plan as compiler
+
+    short = [problem for problem in compiler._unfit_transitions(plan, [
+        Piece(asset_id="x", start=0.0, end=0.03, from_clip_ids=("a",), beat_id="b1"),
+        Piece(asset_id="y", start=5.0, end=8.0, from_clip_ids=("b",), beat_id="b2"),
+    ])]
+    assert short and "before it" in short[0] and "from_seconds" not in short[0]
     # A dip only reaches back half its length, so the same shot needs a quarter second for a 0.5s one.
     plan, by_id, children, assets = joined_plan(BeatTransition(kind="dip", seconds=0.5), None, opening=0.0)
     problems, _ = check_plan(plan, timeline, by_id, children, assets)

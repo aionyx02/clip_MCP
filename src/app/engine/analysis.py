@@ -959,16 +959,20 @@ def listen_again(
     )
     if cut.returncode != 0:
         raise RuntimeError(f"could not read that stretch of sound: {cut.stderr.strip()[-300:]}")
+    def hear(on: str) -> Transcript:
+        return _run_whisper(on, keep_as, end - start, language, None, lambda fraction: None, lambda: False,
+                            None, whisper_model_name())
+
+    def moved(seconds: float) -> float:
+        return round(seconds + start, 3)
+
     device = machine.whisper_device()
-    hear = lambda on: _run_whisper(on, keep_as, end - start, language, None, lambda fraction: None, lambda: False,
-                                   None, whisper_model_name())
     try:
         raw = hear(device)
     except RuntimeError as exc:
         if device != "cuda" or not any(name in str(exc).lower() for name in ("cuda", "cublas", "cudnn")):
             raise
         raw = hear("cpu")
-    moved = lambda seconds: round(seconds + start, 3)
     segments = [
         TranscriptSegment(
             start=moved(segment.start), end=moved(segment.end), text=segment.text.strip(),

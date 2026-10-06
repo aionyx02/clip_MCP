@@ -543,6 +543,16 @@ def test_a_caption_that_cannot_be_held_long_enough_is_found_with_the_ways_out() 
     assert len(short) == 1
     assert "0.36s" in short[0].message and "0.7s" in short[0].message and "min_seconds" in short[0].message
 
+def test_a_caption_held_short_by_the_next_one_is_found_with_that_way_out() -> None:
+    from app.engine.subtitles import place_cues
+
+    project = project_of(clip("a", "x", 10, 20, 0))
+    placed = place_cues(project, [cue("c1", 12.0, 12.3), cue("c2", 12.3, 13.5, "下一句")])
+    found = [f for f in check_delivery(project, {}, captions=placed, style=CaptionStyle(min_seconds=0.1))
+             if f.check == "captions"]
+    # Measured against the minimum it was placed with, the project's own — not the render's style.
+    assert len(found) == 1 and "next caption" in found[0].message and "shot ends" not in found[0].message
+
 def test_how_long_a_caption_has_to_stay_is_the_users_to_change() -> None:
     from app.engine.subtitles import place_cues
 

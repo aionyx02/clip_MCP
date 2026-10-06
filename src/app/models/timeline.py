@@ -1054,7 +1054,10 @@ def _in_the_file(
             f"{clip.timeline_in}s to {clip.timeline_out}s of the cut"
         )
     speed = Decimal(str(clip.speed))
-    to_source = lambda moment: clip.source_range.start + (moment - clip.timeline_in) * speed
+
+    def to_source(moment: Decimal) -> Decimal:
+        return clip.source_range.start + (moment - clip.timeline_in) * speed
+
     return clip.asset_id, to_source(start), to_source(end)
 
 def _cut_span(project: "Project", cue: SubtitleCue) -> Tuple[Decimal, Decimal]:
