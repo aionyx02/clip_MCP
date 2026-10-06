@@ -26,13 +26,18 @@ def probe_file(filepath: str, ffprobe_bin: str = "ffprobe") -> Dict[str, Any]:
         FileNotFoundError: If `filepath` does not exist.
         RuntimeError: If ffprobe exits with a non-zero status.
     """
+    from app.engine.ffmpeg import hidden_window_flags
+
     if not os.path.isfile(filepath):
         raise FileNotFoundError(f"media file {filepath} not found")
 
+    # Without the flag, the editor — a window with no console of its own — opens a console
+    # window for every file it reads.
     result = subprocess.run(
         [ffprobe_bin, "-v", "error", "-print_format", "json", "-show_format", "-show_streams", filepath],
         stdin=subprocess.DEVNULL,
         capture_output=True,
+        creationflags=hidden_window_flags(),
     )
     if result.returncode != 0:
         raise RuntimeError(f"ffprobe failed: {result.stderr.decode('utf-8', errors='replace').strip()}")
