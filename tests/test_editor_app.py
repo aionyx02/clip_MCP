@@ -411,3 +411,75 @@ def test_a_timeline_left_with_no_file_goes_with_the_last_one(tmp_path: Path) -> 
     store.save_semantic_timeline(SemanticTimeline(id="t", asset_ids=["only"], input_hash="h", derivation_version=1), [])
     assert store.delete_unused_assets(["only"]) == {}
     assert store.get_semantic_timeline("t") is None
+
+# --- deleting projects -------------------------------------------------------------------
+
+def test_deleting_projects_takes_them_and_their_previews_and_keeps_what_was_delivered(
+    client: TestClient, tmp_path: Path,
+) -> None:
+    from app.storage import housekeeping
+
+    first, second = (server.create_project(name=f"要刪掉的{n}") for n in (1, 2))
+    folder = _folder(client, "projects", "舊專案")
+    server.repo.file_items("projects", [first["id"]], folder)
+    previews = Path(housekeeping.preview_dir(server.WORKSPACE_DIR, first["id"])) / "old"
+    previews.mkdir(parents=True)
+    (previews / "preview.mp4").write_bytes(b"x")
+    delivered = Path(server.output_dir()) / "要刪掉的1.mp4"
+    delivered.parent.mkdir(parents=True, exist_ok=True)
+    delivered.write_bytes(b"finished")
+
+    answer = client.post("/api/projects/delete", json={"ids": [first["id"], second["id"]]})
+    assert answer.status_code == 200 and sorted(answer.json()["deleted"]) == sorted([first["id"], second["id"]])
+    assert server.repo.get_project(first["id"]) is None and server.repo.get_project(second["id"]) is None
+    assert first["id"] not in server.repo.folder_of("projects")
+    assert not previews.parent.exists()
+    assert delivered.exists()
+
+def test_a_project_being_rendered_is_not_deleted(client: TestClient, ended_after: list) -> None:
+    from app.models.job import Job, JobKind, JobStatus
+
+    project = server.create_project(name="輸出中")
+    rendering = Job(kind=JobKind.RENDER, status=JobStatus.RUNNING, project_id=project["id"])
+    server.repo.add_job(rendering)
+    ended_after.append(rendering.job_id)
+    answer = client.post("/api/projects/delete", json={"ids": [project["id"]]})
+    assert answer.status_code == 409 and answer.json()["busy"] == ["輸出中"]
+    assert server.repo.get_project(project["id"]) is not None
+
+def test_the_ai_has_no_way_to_delete_a_project() -> None:
+    import asyncio
+
+    names = {tool.name for tool in asyncio.run(server.mcp.list_tools())}
+    assert not any("delete" in name and "project" in name for name in names)
+
+# --- every job, whoever started it -------------------------------------------------------
+
+def test_the_editor_sees_jobs_the_ai_started_with_what_they_are_for(
+    client: TestClient, tmp_path: Path, ended_after: list,
+) -> None:
+    from app.models.job import Job, JobKind, JobStatus
+    from app.models.media import Asset
+
+    asset = Asset(id="job-asset", path=str(tmp_path / "訪談.mp4"), has_video=True, has_audio=True)
+    server.repo.save_asset(asset)
+    project = server.create_project(name="抽杯架 v3")
+    analysing = Job(kind=JobKind.ANALYZE, status=JobStatus.RUNNING, asset_id=asset.id, progress=0.4)
+    rendering = Job(kind=JobKind.RENDER, project_id=project["id"])
+    for job in (analysing, rendering):
+        server.repo.add_job(job)
+        ended_after.append(job.job_id)
+    listed = {job["job_id"]: job for job in client.get("/api/jobs/active").json()["jobs"]}
+    assert listed[analysing.job_id]["name"] == "訪談.mp4" and listed[analysing.job_id]["progress"] == 0.4
+    assert listed[rendering.job_id]["name"] == "抽杯架 v3" and listed[rendering.job_id]["status"] == "queued"
+
+def test_a_job_can_be_stopped_from_the_editor(client: TestClient, ended_after: list) -> None:
+    from app.models.job import Job, JobKind
+
+    waiting = Job(kind=JobKind.RENDER, project_id=server.create_project(name="不要了")["id"])
+    server.repo.add_job(waiting)
+    ended_after.append(waiting.job_id)
+    assert client.post("/api/jobs/cancel", json={"job_id": waiting.job_id}).status_code == 200
+    assert server.repo.get_job(waiting.job_id).status.value == "cancelled"
+    ended = {job["job_id"]: job for job in client.get("/api/jobs/active").json()["ended"]}
+    assert ended[waiting.job_id]["status"] == "cancelled"

@@ -173,3 +173,25 @@ def audio_media(tmp_path_factory: pytest.TempPathFactory) -> Path:
     ])
     _run_ffmpeg(["-f", "lavfi", "-i", "sine=frequency=200:duration=20", "-c:a", "libmp3lame", str(folder / "music.mp3")])
     return folder
+
+@pytest.fixture
+def ended_after() -> Iterator[list]:
+    """Collect jobs a test puts in the shared workspace by hand, and end them after it.
+
+    A job left `running` holds one of the few slots the queue allows, and the next
+    test's real analysis would wait behind it.
+
+    Yields:
+        A list to append job IDs to.
+    """
+    started: list = []
+    yield started
+    from app import server
+    from app.models.job import JobStatus
+
+    def end(job) -> None:
+        if job.status.is_active:
+            job.status = JobStatus.CANCELLED
+
+    for job_id in started:
+        server.repo.update_job(job_id, end)

@@ -5,7 +5,7 @@ import sqlite3
 import threading
 from contextlib import contextmanager
 from datetime import datetime, timezone
-from typing import Callable, Dict, Iterable, Iterator, List, Mapping, Optional, Set
+from typing import Callable, Dict, Iterable, Iterator, List, Mapping, Optional, Set, Tuple
 
 from app.models.job import Job
 from app.models.media import Asset, MediaAnalysis
@@ -426,6 +426,25 @@ class Repository:
                 "INSERT INTO jobs (id, data) VALUES (?, ?)",
                 (job.job_id, job.model_dump_json()),
             )
+
+    def jobs_to_show(self, ended_since: datetime) -> Tuple[List[Job], List[Job]]:
+        """Read the jobs worth showing: every unfinished one, and those that ended lately.
+
+        Args:
+            ended_since: How far back a finished, failed or cancelled job still counts.
+
+        Returns:
+            `(active, ended)`, each oldest first.
+        """
+        active, ended = [], []
+        for (data,) in self._query(
+            "SELECT data FROM jobs WHERE json_extract(data, '$.status') IN ('queued', 'running') "
+            "OR json_extract(data, '$.updated_at') >= ?",
+            (ended_since.isoformat().replace("+00:00", "Z"),),
+        ):
+            job = Job.model_validate_json(data)
+            (active if job.status.is_active else ended).append(job)
+        return sorted(active, key=lambda job: job.created_at), sorted(ended, key=lambda job: job.created_at)
 
     def get_job(self, job_id: str) -> Optional[Job]:
         """Fetch a background job by ID.
@@ -1035,6 +1054,41 @@ class Repository:
                     )
 
     # ------------------------------------------------------------------ taking a file out of the library
+
+    def delete_projects(self, project_ids: Iterable[str]) -> Tuple[List[str], List[str]]:
+        """Delete projects, unless one of them is being rendered.
+
+        Only the project and its place in a folder go. The plans it was compiled
+        from are about the footage, not the project, and can make it again; the
+        captions corrected in it belong to the footage too; and a finished video
+        was saved for the user and is theirs. Looking and deleting happen in one
+        write transaction, so a render cannot start in between.
+
+        Args:
+            project_ids: The projects.
+
+        Returns:
+            `(deleted, busy)`: the IDs deleted, and the names of those being
+            rendered. When `busy` is not empty nothing was deleted.
+        """
+        wanted = set(project_ids)
+        with self._transaction() as conn:
+            found = {
+                row[0]: Project.model_validate_json(row[1])
+                for row in conn.execute("SELECT id, data FROM projects").fetchall() if row[0] in wanted
+            }
+            rendering = {
+                json.loads(data).get("project_id")
+                for (data,) in conn.execute(
+                    "SELECT data FROM jobs WHERE json_extract(data, '$.status') IN ('queued', 'running')").fetchall()
+            }
+            busy = [found[project_id].name or project_id for project_id in found if project_id in rendering]
+            if busy:
+                return [], busy
+            for project_id in found:
+                conn.execute("DELETE FROM projects WHERE id = ?", (project_id,))
+                conn.execute("DELETE FROM folder_items WHERE kind = 'projects' AND item_id = ?", (project_id,))
+        return sorted(found), []
 
     def delete_unused_assets(self, asset_ids: Iterable[str]) -> Dict[str, Dict[str, List[str]]]:
         """Take files out of the library, unless anything still uses one of them.

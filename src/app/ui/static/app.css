@@ -273,3 +273,21 @@ a.card:hover, button.card:hover { border-color: var(--line-2); background: var(-
 .used-list { margin: 8px 0 0; padding-left: 18px; color: var(--text); }
 .used-list li { margin: 3px 0; }
 .used-list small { color: var(--muted); }
+
+/* work going on: floats over the bottom of the sidebar, above the update link and storage */
+.jobs-float {
+  position: fixed; left: 8px; width: 180px; z-index: 55; padding: 8px 10px; display: flex; flex-direction: column; gap: 8px;
+  background: var(--panel-2); border: 1px solid var(--line-2); border-radius: var(--radius); box-shadow: 0 6px 18px rgba(0, 0, 0, .35);
+}
+.jobs-float[hidden] { display: none; }
+.jobs-title { font-size: 11.5px; color: var(--muted); }
+.job { display: flex; flex-direction: column; gap: 3px; }
+.job-head { display: flex; align-items: center; gap: 6px; font-size: 12px; }
+.job-kind { color: var(--muted); flex: none; }
+.job-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.job-head .tool { flex: none; padding: 2px; }
+.job-bar { height: 3px; border-radius: 1px; background: var(--line); overflow: hidden; }
+.job-bar i { display: block; height: 100%; background: var(--accent); transition: width .3s; }
+.job-state { font: 500 11px/1.4 var(--mono); color: var(--muted); }
+.job-badge .spinner { width: 9px; height: 9px; }
+.toast .btn { margin-left: 8px; }

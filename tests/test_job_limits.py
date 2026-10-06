@@ -237,13 +237,14 @@ def test_a_timeline_too_long_for_a_command_line_still_renders(media: Path, tmp_p
     assert output.stat().st_size > 0
     assert len(" ".join(graph_from_file(command, str(tmp_path / "graph.txt")))) < 32767
 
-def test_get_job_can_wait_for_a_job_to_end_and_comes_back_as_soon_as_one_does() -> None:
+def test_get_job_can_wait_for_a_job_to_end_and_comes_back_as_soon_as_one_does(ended_after: list) -> None:
     import threading
     import time as clock
     from app import server
 
     running = Job(kind=JobKind.RENDER, status=JobStatus.RUNNING)
     server.repo.add_job(running)
+    ended_after.append(running.job_id)
 
     def finish() -> None:
         clock.sleep(1.0)
@@ -255,12 +256,13 @@ def test_get_job_can_wait_for_a_job_to_end_and_comes_back_as_soon_as_one_does() 
     assert found["jobs"][0]["status"] == "completed"
     assert clock.monotonic() - began < 10
 
-def test_waiting_on_a_job_that_does_not_end_gives_up_when_the_time_is_up() -> None:
+def test_waiting_on_a_job_that_does_not_end_gives_up_when_the_time_is_up(ended_after: list) -> None:
     import time as clock
     from app import server
 
     running = Job(kind=JobKind.RENDER, status=JobStatus.RUNNING)
     server.repo.add_job(running)
+    ended_after.append(running.job_id)
     began = clock.monotonic()
     found = server.get_job([running.job_id], wait_seconds=1.5)
     assert found["jobs"][0]["status"] == "running" and 1.4 < clock.monotonic() - began < 6

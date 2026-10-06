@@ -19,6 +19,7 @@ const ICONS = {
   refresh: '<path d="M20 11a8 8 0 1 0-2.3 5.7M20 4v7h-7"/>',
   open: '<path d="M14 4h6v6M20 4l-9 9M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/>',
   trash: '<path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/>',
+  stop: '<rect x="7" y="7" width="10" height="10" rx="1.5"/>',
   back: '<path d="M15 6l-6 6 6 6"/>',
   link: '<path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"/>',
   download: '<path d="M12 4v11M7 10l5 5 5-5M5 20h14"/>',
@@ -182,6 +183,7 @@ function chooseFolder(folders, title, current, blocked = new Set()) {
 //   card(item, extras) one thing as a card, with `extras` (its select box and tools) inside it
 //   opens      a card is a link, so a click opens it unless things are being chosen
 //   remove(ids, items) takes things out for good; resolves to whether it did
+//   removeLabel what the button that does it says (「移除」 for files, 「刪除」 for projects)
 //   empty      what to show when there are no things and no folders at all
 async function folderPage(page, folderId, config) {
   const { kind } = config;
@@ -232,13 +234,13 @@ async function folderPage(page, folderId, config) {
     const cards = shown.map((item) => {
       const extras = `<button class="select-box" data-select="${esc(item.id)}" title="${esc(T.folders.choose)}">${icon("check")}</button>
         <div class="card-tools"><button class="tool" data-move-item="${esc(item.id)}" title="${esc(T.folders.moveTo)}">${icon("moveTo")}</button>
-        ${config.remove ? `<button class="tool danger" data-remove-item="${esc(item.id)}" title="${esc(T.media.remove)}">${icon("trash")}</button>` : ""}</div>`;
+        ${config.remove ? `<button class="tool danger" data-remove-item="${esc(item.id)}" title="${esc(config.removeLabel || T.media.remove)}">${icon("trash")}</button>` : ""}</div>`;
       return config.card(item, extras);
     }).join("");
     const bar = chosen.size ? `<div class="selection-bar"><span class="grow">${esc(T.folders.chosen(chosen.size))}</span>
       <button class="btn small" data-choose-all>${esc(T.folders.chooseAll)}</button>
       <button class="btn small" data-move-chosen>${icon("moveTo", 15)}${esc(T.folders.moveTo)}</button>
-      ${config.remove ? `<button class="btn small danger" data-remove-chosen>${icon("trash", 15)}${esc(T.media.remove)}</button>` : ""}
+      ${config.remove ? `<button class="btn small danger" data-remove-chosen>${icon("trash", 15)}${esc(config.removeLabel || T.media.remove)}</button>` : ""}
       <button class="btn small" data-clear>${esc(T.folders.clear)}</button></div>` : "";
     page.innerHTML = config.head(here) + config.notes + trailHtml
       + (tiles ? `<div class="grid folders">${tiles}</div>` : "")
@@ -377,6 +379,8 @@ async function projectsPage(page, folderId) {
     },
     notes: "",
     lead: `<button class="new-card" data-new>${icon("plus", 26)}${esc(T.projects.create)}</button>`,
+    remove: deleteProjects,
+    removeLabel: T.projects.delete,
     empty: `<div class="empty">
       <div class="icon-ring">${icon("sparkle", 28)}</div>
       <h2>${esc(T.projects.emptyTitle)}</h2><p>${esc(T.projects.emptyBody)}</p>
@@ -393,6 +397,21 @@ async function projectsPage(page, folderId) {
         <div class="card-meta"><span>${esc(T.projects.shapes[shape])}</span><span class="dot-sep">${esc(T.projects.clips(project.clips))}</span>${missing}</div></div></a>`;
     },
   });
+}
+
+// Deleting a project is the user's to do, here, and never the AI's: it has no tool for it.
+async function deleteProjects(ids, projects) {
+  const named = projects.filter((project) => ids.includes(project.id));
+  const what = named.length === 1 ? `「${named[0].name || T.projects.untitled}」` : T.projects.deleteMany(named.length);
+  if (!(await confirmBox(T.projects.deleteTitle(what), T.projects.deleteBody, T.projects.delete, true))) return false;
+  try {
+    const result = await api("/api/projects/delete", { ids });
+    toast(T.projects.deleted(result.deleted.length));
+    return true;
+  } catch (error) {
+    toast(error.status === 409 && error.data?.busy ? T.projects.deleteBusy(error.data.busy.join("、")) : error.message, "error");
+    return false;
+  }
 }
 
 function newProject() {
@@ -708,6 +727,104 @@ async function checkForUpdate() {
   });
 }
 
+// ---------------------------------------------------------------- work going on
+
+// Every job, whoever started it — mostly the AI, in the background — floating over the
+// bottom of the sidebar, above 「有新版」 and 「儲存空間」 so neither is ever covered.
+const JOB_POLL_MS = 2500;
+const SHOWN_JOBS = 5;
+
+function placeJobs(panel) {
+  const update = $("#update");
+  const below = update && !update.hidden ? update : $('.nav-item[data-page="storage"]');
+  const top = below ? below.getBoundingClientRect().top : window.innerHeight;
+  panel.style.bottom = `${Math.max(8, window.innerHeight - top + 8)}px`;
+}
+
+const jobKind = (job) => job.kind === "analyze" ? T.jobs.analyze : job.preview ? T.jobs.preview : T.jobs.render;
+
+function jobLine(job) {
+  let state;
+  if (job.status === "queued") state = job.ahead ? T.jobs.queuedBehind(job.ahead) : T.jobs.queued;
+  else {
+    state = T.jobs.progress(Math.round(job.progress * 100));
+    if (job.remaining_seconds) state += ` · ${T.jobs.remaining(Math.max(1, Math.round(job.remaining_seconds / 60)))}`;
+  }
+  return `<div class="job"><div class="job-head"><span class="job-kind">${esc(jobKind(job))}</span>
+      <span class="job-name" title="${esc(job.name)}">${esc(job.name || T.jobs.unnamed)}</span>
+      <button class="tool" data-stop="${esc(job.job_id)}" title="${esc(T.jobs.stop)}">${icon("stop", 14)}</button></div>
+    <div class="job-bar"><i style="width:${Math.round(job.progress * 100)}%"></i></div>
+    <div class="job-state">${esc(state)}</div></div>`;
+}
+
+// The cards on the library and projects pages say what is happening to them, too.
+function markCards(jobs) {
+  document.querySelectorAll(".job-badge").forEach((badge) => badge.remove());
+  for (const job of jobs) {
+    const id = job.kind === "analyze" ? job.asset_id : job.project_id;
+    const meta = id && document.querySelector(`.card[data-id="${CSS.escape(id)}"] .card-meta`);
+    if (!meta) continue;
+    const percent = Math.round(job.progress * 100);
+    const text = job.status === "queued" ? T.jobs.queued
+      : job.kind === "analyze" ? T.jobs.badgeAnalyzing(percent) : T.jobs.badgeRendering(percent);
+    meta.insertAdjacentHTML("beforeend", `<span class="badge job-badge"><span class="spinner"></span>${esc(text)}</span>`);
+  }
+}
+
+function announce(job) {
+  if (job.status === "completed") {
+    const element = document.createElement("div");
+    element.className = "toast ok";
+    element.innerHTML = `${icon("check")}<span>${esc(T.jobs.done(jobKind(job), job.name || T.jobs.unnamed))}</span>`
+      + (job.delivered ? `<button class="btn small" data-reveal>${esc(T.jobs.reveal)}</button>` : "");
+    $("#toasts").append(element);
+    $("[data-reveal]", element)?.addEventListener("click", () => api("/api/reveal", { job_id: job.job_id }).catch(() => {}));
+    setTimeout(() => element.remove(), 9000);
+  } else if (job.status === "failed") {
+    toast(T.jobs.failed(jobKind(job), job.name || T.jobs.unnamed), "error");
+  }
+}
+
+function watchJobs() {
+  const panel = document.createElement("div");
+  panel.className = "jobs-float";
+  panel.hidden = true;
+  document.body.append(panel);
+  let told = null;
+  const poll = async () => {
+    if (document.hidden) return;
+    let found;
+    try { found = await api("/api/jobs/active"); } catch { return; }
+    // What ended before this page opened was not news to anybody here.
+    if (told === null) told = new Set(found.ended.map((job) => job.job_id));
+    for (const job of found.ended) {
+      if (!told.has(job.job_id)) { told.add(job.job_id); announce(job); }
+    }
+    markCards(found.jobs);
+    panel.hidden = !found.jobs.length;
+    if (!found.jobs.length) return;
+    const more = found.jobs.length - SHOWN_JOBS;
+    panel.innerHTML = `<div class="jobs-title">${esc(T.jobs.title(found.jobs.length))}</div>`
+      + found.jobs.slice(0, SHOWN_JOBS).map(jobLine).join("")
+      + (more > 0 ? `<div class="job-state">${esc(T.jobs.more(more))}</div>` : "");
+    placeJobs(panel);
+    panel.querySelectorAll("[data-stop]").forEach((button) => {
+      button.onclick = async () => {
+        const job = found.jobs.find((item) => item.job_id === button.dataset.stop);
+        if (!(await confirmBox(T.jobs.stopTitle(jobKind(job), job.name || T.jobs.unnamed), T.jobs.stopBody, T.jobs.stop, true))) return;
+        try {
+          await api("/api/jobs/cancel", { job_id: job.job_id });
+          toast(T.jobs.stopped);
+          poll();
+        } catch (error) { toast(error.message, "error"); }
+      };
+    });
+  };
+  window.addEventListener("resize", () => { if (!panel.hidden) placeJobs(panel); });
+  poll();
+  setInterval(poll, JOB_POLL_MS);
+}
+
 function start() {
   document.title = T.appName;
   $("#brand-name").textContent = T.appName;
@@ -729,7 +846,9 @@ function start() {
     setTimeout(() => { drop.hidden = true; }, 2600);
   });
 
-  checkForUpdate();
+  // The update link can appear after the panel has been placed; place it again then.
+  checkForUpdate().then(() => { const panel = $(".jobs-float"); if (panel && !panel.hidden) placeJobs(panel); });
+  watchJobs();
 
   // The server stops once the window stops checking in.
   setInterval(() => fetch("/api/ping").catch(() => {}), 10000);

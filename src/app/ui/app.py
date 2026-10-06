@@ -12,6 +12,8 @@ import io
 import json
 import mimetypes
 import os
+from datetime import datetime, timedelta, timezone
+import shutil
 import subprocess
 import threading
 import time
@@ -323,6 +325,57 @@ async def jobs(request: Request) -> Response:
     except ValueError as error:
         return _error(str(error), 404)
 
+# How long a finished job is still reported, so the page can say it finished.
+ENDED_SHOWN_FOR = timedelta(seconds=90)
+
+def _job_card(job, names: dict, ahead: int, now: datetime) -> dict:
+    """One job as the floating panel shows it: what it is for, how far along, how long is left."""
+    preview = bool(job.output_path and os.sep + "previews" + os.sep in job.output_path)
+    card = {
+        "job_id": job.job_id, "kind": job.kind.value, "preview": preview, "status": job.status.value,
+        "progress": round(job.progress, 3), "stage": job.stage,
+        "name": names.get(job.asset_id or job.project_id or "", ""),
+        "asset_id": job.asset_id, "project_id": job.project_id, "ahead": ahead, "remaining_seconds": None,
+        "delivered": bool(job.kind.value == "render" and not preview and job.status.value == "completed"
+                          and job.output_path and os.path.exists(job.output_path)),
+    }
+    began = job.admitted_at or job.created_at
+    if job.status.value == "running" and job.progress >= 0.05:
+        # From how fast it has gone so far: honest once it has gone some way, so not before.
+        spent = (now - began).total_seconds()
+        card["remaining_seconds"] = round(spent * (1 - job.progress) / job.progress)
+    return card
+
+def _jobs_to_show() -> dict:
+    """Every job that is queued or running, whoever started it, and the ones that just ended."""
+    server.job_manager.forget_abandoned()
+    now = datetime.now(timezone.utc)
+    active, ended = server.repo.jobs_to_show(now - ENDED_SHOWN_FOR)
+    wanted = [job.asset_id for job in active + ended if job.asset_id]
+    names = {asset_id: os.path.basename(asset.path) for asset_id, asset in server.repo.get_assets(wanted).items()}
+    for project_id in {job.project_id for job in active + ended if job.project_id}:
+        project = server.repo.get_project(project_id)
+        if project is not None:
+            names[project_id] = project.name or ""
+    waiting = [job for job in active if job.status.value == "queued"]
+    return {
+        "jobs": [_job_card(job, names, waiting.index(job) if job in waiting else 0, now) for job in active],
+        "ended": [_job_card(job, names, 0, now) for job in ended],
+    }
+
+async def active_jobs(request: Request) -> Response:
+    """The floating panel's view of the work going on: every source, not only this page's own."""
+    return JSONResponse(await run_in_threadpool(_jobs_to_show))
+
+async def cancel_job(request: Request) -> Response:
+    """Stop a job the user chose to stop; the AI sees it cancelled when it next asks."""
+    body = await request.json()
+    try:
+        found = await run_in_threadpool(server.cancel_job, str(body.get("job_id", "")))
+    except ValueError as error:
+        return _error(str(error), 404)
+    return JSONResponse(found)
+
 async def assets(request: Request) -> Response:
     """Every imported file the page can put on the timeline, and the folder each is filed in.
 
@@ -380,6 +433,25 @@ async def delete_assets(request: Request) -> Response:
     except LookupError as error:
         return _error(str(error), 404)
     return JSONResponse(result, status_code=409 if result["in_use"] or result["busy"] else 200)
+
+def _delete_projects(project_ids: List[str]) -> dict:
+    """Delete projects and the previews made of them; finished videos stay where they were saved."""
+    server.job_manager.forget_abandoned()
+    deleted, busy = server.repo.delete_projects(project_ids)
+    for project_id in deleted:
+        for folder in (housekeeping.preview_dir(server.WORKSPACE_DIR, project_id),
+                       housekeeping.sound_dir(server.WORKSPACE_DIR, project_id)):
+            shutil.rmtree(folder, ignore_errors=True)
+    return {"deleted": deleted, "busy": busy}
+
+async def delete_projects(request: Request) -> Response:
+    """Delete projects for good. Only from here: deleting is the user's to do, never the AI's."""
+    body = await request.json()
+    ids = [str(project_id) for project_id in body.get("ids", []) if project_id]
+    if not ids:
+        return _error("no projects chosen")
+    result = await run_in_threadpool(_delete_projects, ids)
+    return JSONResponse(result, status_code=409 if result["busy"] else 200)
 
 async def folders(request: Request) -> Response:
     """The folders of the library or of the projects (GET), or make, rename, move or remove one (POST).
@@ -743,6 +815,8 @@ def create_app() -> Starlette:
     return Starlette(middleware=[Middleware(_Stamp)], routes=[
         Route("/", index),
         Route("/api/projects", projects, methods=["GET", "POST"]),
+        # Before the route that takes a project's ID, or "delete" would be read as one.
+        Route("/api/projects/delete", delete_projects, methods=["POST"]),
         Route("/api/projects/{project_id}", project),
         Route("/api/projects/{project_id}/edits", edits, methods=["POST"]),
         Route("/api/projects/{project_id}/undo", undo, methods=["POST"]),
@@ -755,6 +829,8 @@ def create_app() -> Starlette:
         Route("/api/projects/{project_id}/captions", captions),
         Route("/api/projects/{project_id}/captions/make", make_captions, methods=["POST"]),
         Route("/api/jobs", jobs),
+        Route("/api/jobs/active", active_jobs),
+        Route("/api/jobs/cancel", cancel_job, methods=["POST"]),
         Route("/api/assets", assets),
         Route("/api/assets/delete", delete_assets, methods=["POST"]),
         Route("/api/folders", folders, methods=["GET", "POST"]),
