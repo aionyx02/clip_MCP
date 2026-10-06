@@ -96,6 +96,12 @@ _MIGRATIONS: List[List[str]] = [
         "media_seconds REAL NOT NULL)",
         "CREATE INDEX IF NOT EXISTS speed_samples_key ON speed_samples (computer, stage, device, model)",
     ],
+    [
+        # What the user marked a version as: a favourite, or the one that went out. A version is
+        # a commit in the history, which never changes, so the marks are kept beside it here.
+        "CREATE TABLE IF NOT EXISTS version_marks (project_id TEXT NOT NULL, commit_id TEXT NOT NULL, "
+        "mark TEXT NOT NULL, PRIMARY KEY (project_id, commit_id, mark))",
+    ],
 ]
 FOLDER_KINDS = ("assets", "projects")
 SCHEMA_VERSION = len(_MIGRATIONS)
@@ -529,6 +535,55 @@ class Repository:
             job = Job.model_validate_json(data)
             (active if job.status.is_active else ended).append(job)
         return sorted(active, key=lambda job: job.created_at), sorted(ended, key=lambda job: job.created_at)
+
+    def renders_of(self, project_id: str) -> List[Job]:
+        """Read every render of a project that finished, previews included.
+
+        Args:
+            project_id: The project.
+
+        Returns:
+            The jobs, oldest first.
+        """
+        rows = self._query(
+            "SELECT data FROM jobs WHERE json_extract(data, '$.project_id') = ? "
+            "AND json_extract(data, '$.kind') = 'render' AND json_extract(data, '$.status') = 'completed'",
+            (project_id,),
+        )
+        return sorted((Job.model_validate_json(data) for (data,) in rows), key=lambda job: job.created_at)
+
+    def version_marks(self, project_id: str) -> Dict[str, Set[str]]:
+        """Read how the versions of a project are marked.
+
+        Args:
+            project_id: The project.
+
+        Returns:
+            The marks of each marked version, by commit ID.
+        """
+        marks: Dict[str, Set[str]] = {}
+        for commit, mark in self._query(
+            "SELECT commit_id, mark FROM version_marks WHERE project_id = ?", (project_id,),
+        ):
+            marks.setdefault(commit, set()).add(mark)
+        return marks
+
+    def set_version_mark(self, project_id: str, commit: str, mark: str, on: bool) -> None:
+        """Put a mark on a version, or take it off.
+
+        Args:
+            project_id: The project.
+            commit: The version's full commit ID.
+            mark: The mark.
+            on: Whether it is put on or taken off.
+        """
+        with self._transaction() as conn:
+            if on:
+                conn.execute("INSERT OR IGNORE INTO version_marks (project_id, commit_id, mark) VALUES (?, ?, ?)",
+                             (project_id, commit, mark))
+            else:
+                conn.execute("DELETE FROM version_marks WHERE project_id = ? AND commit_id = ? AND mark = ?",
+                             (project_id, commit, mark))
 
     def get_job(self, job_id: str) -> Optional[Job]:
         """Fetch a background job by ID.

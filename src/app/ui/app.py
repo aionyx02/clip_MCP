@@ -392,6 +392,46 @@ async def assets(request: Request) -> Response:
     listed.sort(key=lambda asset: asset["name"].lower())
     return JSONResponse({"assets": listed})
 
+async def versions(request: Request) -> Response:
+    """The version panel: a video's versions grouped into dots, and the branches started from it."""
+    try:
+        graph = await run_in_threadpool(server.version_graph, request.path_params["project_id"])
+    except ValueError as error:
+        return _error(str(error), 404)
+    return JSONResponse(graph)
+
+async def restore(request: Request) -> Response:
+    """Make the video what it was at one version, as a new version on top."""
+    body = await request.json()
+    try:
+        result = await run_in_threadpool(server.restore_version, request.path_params["project_id"],
+                                          str(body["commit"]), int(body["expected_version"]))
+    except (ValueError, KeyError, TypeError) as error:
+        return _error(str(error), 409 if "version conflict" in str(error) else 400)
+    return JSONResponse(result)
+
+async def branch(request: Request) -> Response:
+    """Start a branch of the video from one of its versions."""
+    body = await request.json()
+    try:
+        result = await run_in_threadpool(server.branch_project, request.path_params["project_id"],
+                                          str(body["name"]), body.get("commit"))
+    except (ValueError, KeyError, TypeError) as error:
+        return _error(str(error), 400)
+    return JSONResponse(result)
+
+async def mark(request: Request) -> Response:
+    """Put a star or the published mark on a version, or take it off."""
+    body = await request.json()
+    if body.get("mark") not in server.VERSION_MARKS:
+        return _error("a version is marked starred or published", 400)
+    try:
+        result = await run_in_threadpool(server.mark_version, request.path_params["project_id"],
+                                          str(body["commit"]), body["mark"], bool(body.get("on", True)))
+    except (ValueError, KeyError) as error:
+        return _error(str(error), 400)
+    return JSONResponse(result)
+
 async def playback(request: Request) -> Response:
     """What the browser needs to play a cut as it is, or as it was at one version.
 
@@ -847,7 +887,7 @@ EDITOR_DOING = (
     ("/edits", "在編輯器修改"), ("/undo", "復原上一步"), ("/captions/make", "產生字幕"),
     ("/api/projects/delete", "刪除專案"), ("/api/projects", "新增專案"), ("/api/assets/notes", "寫素材備註"),
     ("/api/assets/delete", "從素材庫拿掉"), ("/api/folders", "整理資料夾"), ("/api/file", "整理位置"),
-    ("/api/pick", "加入素材"),
+    ("/api/pick", "加入素材"), ("/versions/restore", "回到舊版本"), ("/versions/branch", "開分支"),
 )
 
 class _Stamp:
@@ -897,6 +937,10 @@ def create_app() -> Starlette:
         Route("/api/projects/{project_id}/preview", preview, methods=["GET", "POST"]),
         Route("/api/projects/{project_id}/version", version),
         Route("/api/projects/{project_id}/playback", playback),
+        Route("/api/projects/{project_id}/versions", versions),
+        Route("/api/projects/{project_id}/versions/restore", restore, methods=["POST"]),
+        Route("/api/projects/{project_id}/versions/branch", branch, methods=["POST"]),
+        Route("/api/projects/{project_id}/versions/mark", mark, methods=["POST"]),
         Route("/api/words/{asset_id}", words),
         Route("/api/projects/{project_id}/captions", captions),
         Route("/api/projects/{project_id}/captions/make", make_captions, methods=["POST"]),

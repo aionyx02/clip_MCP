@@ -46,6 +46,10 @@
   const playing = () => Boolean(E) && !clock().paused;
 
   function lockedWhilePlaying() {
+    if (E.viewing) {
+      toast(T.versions.viewingLocked, "error");
+      return true;
+    }
     if (!playing()) return false;
     const now = Date.now();
     if (!E.lockToastAt || now - E.lockToastAt > 2500) {
@@ -156,6 +160,161 @@
     }, { once: true });
   }
 
+  // ------------------------------------------------------------------ versions
+
+  // The graph is read again when the cut has moved on, or when it is older than this.
+  const GRAPH_FRESH_MS = 15000;
+
+  async function loadGraph(force) {
+    const stale = !E.graph || E.graph.project.version !== E.project.version || Date.now() - E.graphAt > GRAPH_FRESH_MS;
+    if (!force && !stale) return E.graph;
+    E.graph = await api(`/api/projects/${encodeURIComponent(E.id)}/versions`);
+    E.graphAt = Date.now();
+    return E.graph;
+  }
+
+  const markIcons = (marks) => marks.map((mark) => `<span class="vmark" title="${esc(T.versions.marks[mark])}">${T.versions.markIcons[mark]}</span>`).join("");
+
+  function nodeHtml(node, { current, branch } = {}) {
+    const chosen = E.chosenVersion?.commit && node.versions.some((version) => version.commit === E.chosenVersion.commit);
+    const thumb = node.thumb ? `<img class="vthumb" loading="lazy" src="${thumbUrl(node.thumb.asset_id, node.thumb.t, 96)}" alt="">` : '<span class="vthumb"></span>';
+    const many = node.versions.length > 1 ? ` · ${esc(T.versions.changes(node.versions.length))}` : "";
+    return `<li class="vnode${chosen ? " sel" : ""}${current ? " current" : ""}" data-node="${esc(node.commit)}"${branch ? ` data-branch="${esc(branch)}"` : ""}>
+      <span class="rail"><i></i></span>${thumb}
+      <div class="vtext"><b>${markIcons(node.marks)}${esc(node.what)}</b>
+        <span>${esc(node.by)} · ${esc(node.when)}${many}${current ? ` · ${esc(T.versions.now)}` : ""}</span></div></li>`;
+  }
+
+  async function drawVersions(panel) {
+    panel.innerHTML = `<p class="hint">${esc(T.versions.loading)}</p>`;
+    let graph;
+    try { graph = await loadGraph(false); } catch (error) { panel.innerHTML = `<p class="hint">${esc(error.message)}</p>`; return; }
+    if (!E || E.tab !== "versions" || !panel.isConnected) return;
+    const nodes = graph.nodes;
+    const parent = graph.branched_from;
+    let list = "";
+    nodes.forEach((node, index) => {
+      list += nodeHtml(node, { current: index === 0 });
+      // A branch runs beside the line from the dot it started at.
+      for (const branch of graph.branches.filter((item) => node.versions.some((version) => version.commit === item.from))) {
+        list += `<li class="vbranch"><span class="rail"><i></i></span><div class="vlane">
+          <a href="#/project/${encodeURIComponent(branch.project_id)}" class="vbranch-name">${esc(T.versions.branchOf(branch.name || ""))}</a>
+          <ol>${branch.nodes.slice(0, 3).map((item, at) => nodeHtml(item, { current: at === 0, branch: branch.project_id })).join("")}</ol>
+          ${branch.nodes.length > 3 ? `<span class="hint">${esc(T.versions.more(branch.nodes.length - 3))}</span>` : ""}</div></li>`;
+      }
+    });
+    panel.innerHTML = `${parent ? `<p class="hint">${esc(T.versions.branchedFrom(parent.name || "", parent.what || ""))}
+        <a href="#/project/${encodeURIComponent(parent.project_id)}">${esc(T.versions.openParent)}</a></p>` : ""}
+      ${E.viewing ? `<div class="vviewing"><span>${esc(T.versions.viewing(E.viewing.what))}</span><button class="btn small" data-now>${esc(T.versions.backToNow)}</button></div>` : ""}
+      <ol class="vgraph">${list || `<p class="hint">${esc(T.versions.none)}</p>`}</ol>
+      <div class="vdetail" data-detail></div>`;
+    panel.querySelectorAll("[data-node]").forEach((item) => {
+      item.onclick = () => chooseVersion(item.dataset.branch || E.id, item.dataset.node);
+    });
+    const now = $("[data-now]", panel);
+    if (now) now.onclick = () => viewVersion(null);
+    drawVersionDetail($("[data-detail]", panel));
+  }
+
+  function findNode(projectId, commit) {
+    const graph = E.graph;
+    const nodes = projectId === E.id ? graph.nodes : graph.branches.find((branch) => branch.project_id === projectId)?.nodes || [];
+    return nodes.find((node) => node.versions.some((version) => version.commit === commit));
+  }
+
+  function chooseVersion(projectId, commit) {
+    if (projectId !== E.id) { location.hash = `#/project/${encodeURIComponent(projectId)}`; return; }
+    const node = findNode(projectId, commit);
+    E.chosenVersion = { commit, node };
+    // The newest version is the cut as it is; anything older is watched in its place.
+    viewVersion(commit === E.graph.nodes[0]?.commit ? null : { commit, what: node.versions.find((version) => version.commit === commit).what });
+  }
+
+  function viewVersion(version) {
+    clock().pause();
+    E.viewing = version;
+    if (!version && E.chosenVersion?.commit !== E.graph?.nodes[0]?.commit) E.chosenVersion = null;
+    $(".editor", E.root).classList.toggle("viewing-old", Boolean(version));
+    refreshPlayback();
+    drawInspector();
+  }
+
+  function drawVersionDetail(box) {
+    const chosen = E.chosenVersion;
+    if (!chosen?.node) { box.innerHTML = `<p class="hint">${esc(T.versions.pick)}</p>`; return; }
+    const { node, commit } = chosen;
+    const version = node.versions.find((item) => item.commit === commit) || node.versions[0];
+    const newest = commit === E.graph.nodes[0]?.commit;
+    const isMarked = (mark) => commit === node.commit && node.marks.includes(mark);
+    box.innerHTML = `<h2>${esc(version.what)}</h2>
+      <p class="hint">${esc(node.by)} · ${esc(version.when)}</p>
+      ${node.versions.length > 1 ? `<ol class="vmembers">${node.versions.map((item) =>
+        `<li class="${item.commit === commit ? "on" : ""}" data-member="${esc(item.commit)}"><span>${esc(item.when)}</span>${esc(item.what)}</li>`).join("")}</ol>` : ""}
+      <div class="group stack-buttons">
+        ${newest ? `<p class="hint">${esc(T.versions.isNow)}</p>` : `<button class="btn primary" data-restore>${esc(T.versions.restore)}</button>`}
+        <button class="btn" data-branch-from>${esc(T.versions.branch)}</button>
+        ${commit === node.commit ? `<div class="vmarks">
+          <button class="btn small${isMarked("starred") ? " on" : ""}" data-mark="starred">${T.versions.markIcons.starred} ${esc(T.versions.marks.starred)}</button>
+          <button class="btn small${isMarked("published") ? " on" : ""}" data-mark="published">${T.versions.markIcons.published} ${esc(T.versions.marks.published)}</button></div>` : ""}
+      </div>`;
+    box.querySelectorAll("[data-member]").forEach((item) => { item.onclick = () => chooseVersion(E.id, item.dataset.member); });
+    const restore = $("[data-restore]", box);
+    if (restore) restore.onclick = () => restoreVersion(commit, version.what);
+    $("[data-branch-from]", box).onclick = () => branchFrom(commit);
+    box.querySelectorAll("[data-mark]").forEach((button) => {
+      button.onclick = async () => {
+        try {
+          await api(`/api/projects/${encodeURIComponent(E.id)}/versions/mark`,
+            { commit, mark: button.dataset.mark, on: !button.classList.contains("on") });
+          await loadGraph(true);
+          E.chosenVersion = { commit, node: findNode(E.id, commit) };
+          drawInspector();
+        } catch (error) { toast(error.message, "error"); }
+      };
+    });
+  }
+
+  async function restoreVersion(commit, what) {
+    try {
+      await api(`/api/projects/${encodeURIComponent(E.id)}/versions/restore`, { commit, expected_version: E.project.version });
+    } catch (error) {
+      toast(/version conflict/.test(error.message) ? T.editor.conflict : error.message, "error");
+      return;
+    }
+    E.viewing = null;
+    E.chosenVersion = null;
+    $(".editor", E.root).classList.remove("viewing-old");
+    await loadProject();
+    await loadGraph(true);
+    drawAll();
+    refreshPlayback();
+    toast(T.versions.restored(what));
+  }
+
+  function branchFrom(commit) {
+    modal(`<h2>${esc(T.versions.branchTitle)}</h2><p>${esc(T.versions.branchBody)}</p>
+      <div class="field"><input class="input" data-name maxlength="120" value="${esc(T.versions.branchName(E.project.name || ""))}"></div>
+      <div class="foot"><button class="btn" data-cancel>${esc(T.newProject.cancel)}</button><button class="btn primary" data-save>${esc(T.versions.branch)}</button></div>`,
+    (box, close) => {
+      const name = $("[data-name]", box);
+      name.focus();
+      name.select();
+      $("[data-cancel]", box).onclick = close;
+      const save = async () => {
+        if (!name.value.trim()) { toast(T.newProject.nameRequired, "error"); return; }
+        try {
+          const made = await api(`/api/projects/${encodeURIComponent(E.id)}/versions/branch`, { commit, name: name.value.trim() });
+          close();
+          await loadGraph(true);
+          drawInspector();
+          toast(T.versions.branched(made.name));
+        } catch (error) { toast(error.message, "error"); }
+      };
+      $("[data-save]", box).onclick = save;
+      name.addEventListener("keydown", (event) => { if (event.key === "Enter") save(); });
+    });
+  }
+
   // ------------------------------------------------------------------ live playback, or the exact render
 
   // What is playing: the cut put together live, or the render asked for with the button.
@@ -164,7 +323,8 @@
   async function refreshPlayback() {
     clearTimeout(E.describeTimer);
     try {
-      const described = await api(`/api/projects/${encodeURIComponent(E.id)}/playback`);
+      const at = E.viewing ? `?commit=${encodeURIComponent(E.viewing.commit)}` : "";
+      const described = await api(`/api/projects/${encodeURIComponent(E.id)}/playback${at}`);
       if (!E) return;
       E.described = described;
       E.player.load(described);
@@ -527,16 +687,17 @@
     const root = $("[data-inspector]", E.root);
     const clip = E.selected && findClip(E.selected.track, E.selected.clip);
     const track = clip && E.project.tracks.find((entry) => entry.id === E.selected.track);
-    const available = E.selectedCaption ? ["captions"] : !clip ? [] : track.track_type === "audio" ? ["sound"]
-      : (E.project.assets[clip.asset_id]?.has_audio === false ? ["picture"] : ["picture", "sound"]);
-    if (!available.includes(E.tab)) E.tab = available[0];
-    root.innerHTML = `<div class="tabs">${["picture", "sound", "captions"].map((tab) =>
+    const available = [...(E.selectedCaption ? ["captions"] : !clip ? [] : track.track_type === "audio" ? ["sound"]
+      : (E.project.assets[clip.asset_id]?.has_audio === false ? ["picture"] : ["picture", "sound"])), "versions"];
+    if (!available.includes(E.tab)) E.tab = available.length > 1 ? available[0] : null;
+    root.innerHTML = `<div class="tabs">${["picture", "sound", "captions", "versions"].map((tab) =>
       `<button type="button" data-tab="${tab}" class="${tab === E.tab ? "on" : ""}" ${available.includes(tab) ? "" : "disabled"}>${esc(T.editor.tabs[tab])}</button>`).join("")}</div>
       <div class="props" data-props></div>`;
     root.querySelectorAll("[data-tab]").forEach((button) => {
       button.onclick = () => { E.tab = button.dataset.tab; drawInspector(); };
     });
     const panel = $("[data-props]", root);
+    if (E.tab === "versions") return drawVersions(panel);
     if (E.selectedCaption) return drawCaptionInspector(panel);
     if (clip && track.track_type === "audio") return drawSoundInspector(panel, clip, track);
     if (clip && E.tab === "sound") return drawClipSound(panel, clip);
@@ -636,6 +797,7 @@
 
   function selectCaption(cueId, jump) {
     E.selectedCaption = cueId;
+    if (E.tab === "versions") E.tab = null;
     E.selected = null;
     const cue = E.captions.find((entry) => entry.cue_id === cueId);
     if (jump && cue) {
@@ -950,7 +1112,8 @@
   // ------------------------------------------------------------------ playback
 
   function seek(seconds) {
-    E.time = Math.max(0, Math.min(seconds, E.project.duration));
+    const length = E.mode === "live" && E.described ? E.described.duration : E.project.duration;
+    E.time = Math.max(0, Math.min(seconds, length));
     clock().seek(E.time);
     drawPlayhead();
     drawTime();
@@ -1055,6 +1218,7 @@
       const trackId = clipElement.dataset.track, clipId = clipElement.dataset.clip;
       const clip = findClip(trackId, clipId);
       E.selected = { track: trackId, clip: clipId };
+      if (E.tab === "versions") E.tab = null;
       E.selectedCaption = null;
       if (lockedWhilePlaying()) {
         drawLanes();

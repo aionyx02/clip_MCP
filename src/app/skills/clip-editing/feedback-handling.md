@@ -60,6 +60,11 @@ one gets its own copy, and `plan_copied` says so — tell the user.
 version to start at, with a name in the user's words. It is a project of its
 own beside the first, which is left alone.
 
+A version can carry marks: `starred` and `published`, which the user sets in
+the editor's version panel or asks for (「把這版標起來」「這版發到 IG 了」 is
+`mark_version`), and `exported`, which a version rendered out wears by itself.
+「回到我標星號那版」 or 「回到發出去那版」 is the version with that mark.
+
 Pass the user's words for every change as `note` — on `apply_edits`,
 `compile_plan`, `generate_subtitles`, `amend_plan` — since that is what the
 version says in the history the user reads. A plan's own versions are still

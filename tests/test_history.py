@@ -147,3 +147,35 @@ def test_going_back_leaves_another_video_compiled_from_the_same_plan_alone(kept_
     assert server.repo.get_plan(planned["plan_id"]).goal == "改過的目標"
     assert all(clip.from_plan_id == planned["plan_id"]
                for track in server.repo.get_project(landscape).tracks for clip in track.clips if clip.from_plan_id)
+
+
+def test_the_version_panel_folds_one_sitting_into_one_dot(kept_history, media: Path) -> None:
+    from app.models.job import Job, JobKind, JobStatus
+
+    asset = server.import_asset(str(media / "wide.mp4"))["id"]
+    project = build_project([video_track(), insert("a", asset, 0, 3)], name="版本面板")
+    for name in ("第二版", "第三版"):
+        edit(project, [{"action": "rename_project", "name": name}])
+    nodes = server.version_graph(project)["nodes"]
+    # Creating it and every change after by the same AI, nothing rendered between: one dot.
+    assert len(nodes) == 1 and len(nodes[0]["versions"]) > 3
+    assert nodes[0]["thumb"]["asset_id"] == asset
+
+    # Rendering one out marks it, and starts a new dot after it.
+    rendered = server.repo.get_project(project).version
+    server.repo.add_job(Job(kind=JobKind.RENDER, project_id=project, project_version=rendered,
+                            status=JobStatus.COMPLETED, output_path=str(media / "out.mp4")))
+    edit(project, [{"action": "rename_project", "name": "第四版"}])
+    nodes = server.version_graph(project)["nodes"]
+    assert [node["marks"] for node in nodes] == [[], ["exported"]]
+    listed = call("project_history", {"project_id": project})["versions"]
+    assert [version["marks"] for version in listed[:len(nodes[0]["versions"]) + 1]][-1] == ["exported"]
+
+    # A star is the user's own, and a branch grows from the dot it started at.
+    starred = call("mark_version", {"project_id": project, "commit": nodes[1]["commit"][:10], "mark": "starred"})
+    assert starred["marks"] == ["exported", "starred"]
+    branch = call("branch_project", {"project_id": project, "name": "版本面板短版", "commit": nodes[1]["commit"]})
+    graph = server.version_graph(project)
+    assert graph["branches"][0]["project_id"] == branch["project_id"]
+    assert graph["branches"][0]["from"] == nodes[1]["commit"]
+    assert server.version_graph(branch["project_id"])["branched_from"]["name"] == "第四版"

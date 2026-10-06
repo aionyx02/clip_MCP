@@ -206,3 +206,32 @@ body.editing .page { padding: 0; overflow: hidden; }
 .finding .times { display: flex; flex-wrap: wrap; gap: 4px; }
 .finding .times .btn { font-family: var(--mono); }
 ul.points { margin: 0 0 10px; padding-left: 18px; color: var(--muted); display: flex; flex-direction: column; gap: 6px; }
+
+/* The version panel: one dot per sitting, down a line; a branch runs beside it from where it started. */
+.vgraph, .vgraph ol { list-style: none; margin: 0; padding: 0; }
+.vnode { display: grid; grid-template-columns: 14px 48px 1fr; gap: 8px; align-items: center; padding: 6px 4px; border-radius: 6px; cursor: pointer; }
+.vnode:hover { background: var(--line); }
+.vnode.sel { background: color-mix(in srgb, var(--accent) 18%, transparent); }
+.rail { align-self: stretch; position: relative; }
+.rail::before { content: ""; position: absolute; left: 6px; top: -6px; bottom: -6px; width: 2px; background: var(--line-2); }
+.vnode .rail i { position: absolute; left: 2px; top: 50%; width: 10px; height: 10px; margin-top: -5px; border-radius: 50%; background: var(--muted); }
+.vnode.current .rail i { background: var(--accent); }
+.vthumb { width: 48px; height: 48px; object-fit: cover; border-radius: 4px; background: #111; display: block; }
+.vtext { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.vtext b { font-size: 12px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.vtext span { color: var(--faint); font-size: 11px; }
+.vmark { margin-right: 3px; }
+.vbranch { display: grid; grid-template-columns: 14px 1fr; gap: 8px; }
+.vbranch .rail i { position: absolute; left: 7px; top: 14px; width: 14px; height: 2px; background: var(--line-2); }
+.vlane { border-left: 2px solid var(--accent); padding-left: 6px; margin: 4px 0 4px 8px; }
+.vlane .vnode .rail::before { display: none; }
+.vbranch-name { font-size: 11.5px; color: var(--muted); }
+.vdetail { border-top: 1px solid var(--line); padding-top: 12px; display: flex; flex-direction: column; gap: 8px; }
+.vmembers { list-style: none; margin: 0; padding: 0; max-height: 160px; overflow-y: auto; font-size: 11.5px; }
+.vmembers li { padding: 3px 4px; border-radius: 4px; cursor: pointer; color: var(--muted); }
+.vmembers li span { color: var(--faint); margin-right: 6px; }
+.vmembers li.on { color: var(--text); background: var(--line); }
+.vmarks { display: flex; gap: 6px; }
+.vmarks .btn.on { border-color: var(--accent); color: var(--text); }
+.vviewing { display: flex; gap: 8px; align-items: center; justify-content: space-between; padding: 6px 8px; border-radius: 6px; background: color-mix(in srgb, var(--warn) 18%, transparent); font-size: 12px; }
+.editor.viewing-old .ed-viewer { box-shadow: inset 0 0 0 2px var(--warn); }

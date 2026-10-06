@@ -4589,13 +4589,132 @@ def playback_of(project: Project, urgent: bool = True) -> dict:
         prepare_playback(project, urgent=urgent)
     return described
 
-def _version_record(version: Version) -> dict:
+# What the user can mark a version as. `exported` is a third mark, never set by hand: a
+# version that was rendered out, not as a preview, wears it by itself.
+VERSION_MARKS = ("starred", "published")
+
+def _version_record(version: Version, marks: Iterable[str] = ()) -> dict:
     """One version of a project as the AI reads it."""
     return {
         "commit": version.commit[:10],
         "when": version.when.astimezone().strftime("%Y-%m-%d %H:%M"),
         "by": version.author,
         "what": version.subject,
+        "marks": sorted(marks),
+    }
+
+def _project_versions(project_id: str, limit: int) -> List[Tuple[Version, Optional[dict], set]]:
+    """A project's versions, newest first, each with the project as it was then and its marks.
+
+    Returns:
+        `(version, project, marks)`, the project None where the version took
+        it away.
+    """
+    marks = repo.version_marks(project_id)
+    previews = os.path.abspath(housekeeping.preview_dir(WORKSPACE_DIR, project_id))
+    delivered = {job.project_version for job in repo.renders_of(project_id)
+                 if job.output_path and not os.path.abspath(job.output_path).startswith(previews)}
+    found = []
+    for version in history.versions_of("projects/", f"{project_id}.json", limit):
+        path = history.find("projects/", f"{project_id}.json", version.commit)
+        content = history.read(path, version.commit) if path else None
+        data = json.loads(content) if content else None
+        marked = set(marks.get(version.commit, ()))
+        if data is not None and data.get("version") in delivered:
+            marked.add("exported")
+        found.append((version, data, marked))
+    return found
+
+def _thumb_of(data: Optional[dict]) -> Optional[dict]:
+    """Which frame stands for a version: the sequence a third of the way in."""
+    if not data:
+        return None
+    base = next((track for track in data.get("tracks", []) if track.get("track_type") == "video"), None)
+    clips = sorted(base.get("clips", []) if base else [], key=lambda clip: float(clip["timeline_in"]))
+    if not clips:
+        return None
+    length = sum((float(clip["source_range"]["end"]) - float(clip["source_range"]["start"])) / float(clip.get("speed") or 1)
+                 for clip in clips)
+    at, chosen = length / 3, clips[-1]
+    for clip in clips:
+        span = (float(clip["source_range"]["end"]) - float(clip["source_range"]["start"])) / float(clip.get("speed") or 1)
+        if float(clip["timeline_in"]) + span > at:
+            chosen = clip
+            break
+    into = max(0.0, at - float(chosen["timeline_in"])) * float(chosen.get("speed") or 1)
+    end = float(chosen["source_range"]["end"])
+    return {"asset_id": chosen["asset_id"], "t": round(min(float(chosen["source_range"]["start"]) + into, end - 0.05), 2)}
+
+def _version_nodes(entries: List[Tuple[Version, Optional[dict], set]], apart: set) -> List[dict]:
+    """Group versions into what the version panel shows as one dot each.
+
+    A run of changes by one author with nothing rendered out between them is
+    one dot: twenty nudges in the editor are one sitting, not twenty
+    versions. A version with a mark, or one a branch started from, always
+    gets its own.
+
+    Args:
+        entries: From `_project_versions`, newest first.
+        apart: Commits that must not be folded into another's dot.
+
+    Returns:
+        The dots, newest first, each named by its newest version.
+    """
+    nodes: List[dict] = []
+    for version, data, marked in entries:
+        record = {"commit": version.commit, "what": version.subject,
+                  "when": version.when.astimezone().strftime("%m/%d %H:%M")}
+        last = nodes[-1] if nodes else None
+        if (last is not None and last["by"] == version.author and not marked
+                and version.commit not in apart and last["versions"][-1]["commit"] not in apart):
+            last["versions"].append(record)
+            continue
+        nodes.append({
+            "commit": version.commit, "when": record["when"], "by": version.author, "what": version.subject,
+            "body": version.body, "marks": sorted(marked), "gone": data is None,
+            "project_version": data.get("version") if data else None, "thumb": _thumb_of(data),
+            "versions": [record],
+        })
+    return nodes
+
+def version_graph(project_id: str, limit: int = 200) -> dict:
+    """Everything the editor's version panel draws for one video.
+
+    Args:
+        project_id: The video.
+        limit: Most versions to read.
+
+    Returns:
+        The `project`; its `nodes`, newest first; the `branches` started from
+        it, each with the commit it started `from` and its own nodes; and
+        `branched_from` when it is itself a branch.
+
+    Raises:
+        ValueError: If there is no such project.
+    """
+    project = repo.get_project(project_id)
+    if project is None:
+        raise ValueError(f"project {project_id} not found")
+    branches = [other for other in repo.list_projects()
+                if other.branched_from is not None and other.branched_from.project_id == project_id]
+    starts = {branch.branched_from.commit for branch in branches}
+    parent = None
+    if project.branched_from is not None:
+        source = repo.get_project(project.branched_from.project_id)
+        start = next((version for version in history.versions_of(
+            "projects/", f"{project.branched_from.project_id}.json", 500)
+            if version.commit == project.branched_from.commit), None)
+        parent = {"project_id": project.branched_from.project_id, "commit": project.branched_from.commit,
+                  "name": source.name if source else None, "what": start.subject if start else None}
+    return {
+        "project": {"id": project.id, "name": project.name, "version": project.version},
+        "nodes": _version_nodes(_project_versions(project_id, limit), starts),
+        "branches": [
+            {"project_id": branch.id, "name": branch.name, "from": branch.branched_from.commit,
+             "nodes": _version_nodes(_project_versions(branch.id, 30), set())}
+            for branch in sorted(branches, key=lambda item: item.name or "")
+        ],
+        "branched_from": parent,
     }
 
 @mcp.tool()
@@ -4615,8 +4734,10 @@ def project_history(project_id: str, limit: Annotated[int, Field(ge=1, le=200)] 
 
     Returns:
         `versions`, each with its `commit`, `when`, `by` (the AI program or
-        the editor) and `what` changed in words; and `branched_from`, the
-        project and version a branch started as, or null.
+        the editor), `what` changed in words, and its `marks`: `starred`
+        (the user's favourite), `published` (the one that went out) and
+        `exported` (rendered out); and `branched_from`, the project and
+        version a branch started as, or null.
 
     Raises:
         ValueError: If there is no such project.
@@ -4625,7 +4746,7 @@ def project_history(project_id: str, limit: Annotated[int, Field(ge=1, le=200)] 
     if project is None:
         raise ValueError(f"project {project_id} not found")
     return {
-        "versions": [_version_record(version) for version in history.versions_of("projects/", f"{project_id}.json", limit)],
+        "versions": [_version_record(version, marks) for version, _, marks in _project_versions(project_id, limit)],
         "branched_from": project.branched_from.model_dump() if project.branched_from else None,
     }
 
@@ -4774,6 +4895,36 @@ def branch_project(project_id: str, name: str, commit: Optional[str] = None, not
     if folder:
         repo.file_items("projects", [branch.id], folder)
     return {"project_id": branch.id, "name": branch.name, "branched_from": branch.branched_from.model_dump()}
+
+@mcp.tool()
+def mark_version(project_id: str, commit: str, mark: Literal["starred", "published"], on: bool = True) -> dict:
+    """Star a version of a video, or mark it as the one that was published; or take the mark off.
+
+    For 「把這版標起來」 or 「這版已經發到 IG 了」. The marks show in the editor's
+    version panel and in `project_history`, so 「回到我標星號那版」 can be
+    found later.
+
+    Args:
+        project_id: The video.
+        commit: The version, from `project_history`.
+        mark: `starred` or `published`.
+        on: False takes the mark off.
+
+    Returns:
+        The version's `commit` and its `marks` now.
+
+    Raises:
+        ValueError: If the project or version does not exist.
+    """
+    if repo.get_project(project_id) is None:
+        raise ValueError(f"project {project_id} not found")
+    chosen = next((version for version in history.versions_of("projects/", f"{project_id}.json", 500)
+                   if version.commit.startswith(commit.strip().lower())), None)
+    if chosen is None:
+        raise ValueError(f"project {project_id} has no version {commit}")
+    repo.set_version_mark(project_id, chosen.commit, mark, on)
+    marks = next(marked for version, _, marked in _project_versions(project_id, 500) if version.commit == chosen.commit)
+    return {"commit": chosen.commit[:10], "marks": sorted(marks)}
 
 @mcp.tool()
 def get_job(
