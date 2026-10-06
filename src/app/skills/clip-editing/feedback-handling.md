@@ -26,7 +26,8 @@ retyped to do it, and those reasons are the part that cannot be rebuilt.
 - Between two parts: `set_beat_join` puts a transition or a J-cut on the
   beat that comes in.
 - The whole video: `set_pacing` makes every cut tighter or looser at once —
-  a lower `pause_seconds` takes out more dead air, a lower `breath_seconds`
+  a lower `pause_seconds` takes out more dead air between sentences — a
+  pause inside a sentence is how somebody talks, and stays — a lower `breath_seconds`
   leaves less around every cut, and `speed` plays the whole sequence faster
   with voices at their own pitch (1.1 is rarely noticed as speed). `set_music_level` turns the music by a
   `scale`, everywhere or from one `beat_id`. `set_target` changes the length

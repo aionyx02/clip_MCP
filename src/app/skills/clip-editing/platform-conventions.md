@@ -24,7 +24,8 @@ of pacing: `skill://clip-editing/pacing-and-structure.md`.
 ## Caption style
 
 `set_caption_style` decides how burned-in captions are drawn. Start from the
-platform the video is going to — `youtube`, `reels`, `tiktok`, or `plain` —
+platform the video is going to — `youtube`, `reels`, `tiktok`, `vertical`
+(a vertical video minutes long), or `plain` —
 because each sets the safe area that platform's own buttons and captions take
 up, along with the text size and outline. Anything given alongside the preset
 wins, so `{"preset": "tiktok", "style": {"karaoke": false}}` is that safe area
@@ -42,6 +43,11 @@ without the word-by-word lighting.
   keeps them; one that changes how many there are drops them. For a vertical
   video minutes long, use the `vertical` preset: the same safe area without
   the lighting.
+- **Long enough to read** (`min_seconds`, 0.7 by default): a caption on screen
+  for less is held on while its shot has room. One that cannot be — the last
+  words of a video, with the cut ending right after them — is found by the
+  check before a render, with the ways out: let that shot run on, drop the
+  caption, or, if the user reads that fast, lower `min_seconds`.
 - **Bilingual**: put the second language in a caption's `secondary`, either in
   `edit_subtitle`, or in `add_subtitle` for a new one. It is drawn smaller
   under the first line. Nothing here translates anything — the words are yours.

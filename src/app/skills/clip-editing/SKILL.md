@@ -171,10 +171,10 @@ user corrects what is wrong before a render is wasted.
 6. If the user asked for captions, set the caption style first (the platform
    file), because each caption is proposed one line wide for that style. Then
    call `generate_subtitles` and read every line it returns — transcripts
-   mishear names. Correct a line with `edit_subtitle` and its `cue_id`, add a
-   missing one or text for a shot nobody speaks over with `add_subtitle`, and
-   read back the `captions` the edit returns; never resend the whole set to
-   change one word. A word wrong everywhere goes in `fix_words` once.
+   mishear names. Correct a line with `edit_subtitle` (`cue_id`; times in the
+   cut with `timeline_start`/`timeline_end`), add one with `add_subtitle`, and
+   read back what the edit returns. A correction of what was said serves every
+   project; words for this cut only take `this_project_only`.
    `set_subtitles` replaces every caption at once, for a set written
    elsewhere — a translation, a script. Lower
    `max_characters` or `max_seconds` for shorter lines on screen.
@@ -186,9 +186,9 @@ user corrects what is wrong before a render is wasted.
    refused until they have heard. See the platform file.
 9. Call `render_project` with `is_preview: true` unless the user asked for
    the final file, and with `burn_subtitles: true` if captions were stored.
-   Do not even out clip volumes by hand: the render normalizes the mix. Poll
-   `get_job` every few seconds until the status is `completed`, `failed`, or
-   `cancelled`. Report the output path and length.
+   Do not even out clip volumes by hand: the render normalizes the mix. Call
+   `get_job` with `wait_seconds: 50` until the status is `completed`, `failed`,
+   or `cancelled`. Report the output path and length.
 10. Render with `is_preview: false` once the user is happy, or at once if they
     asked for the final file.
 
@@ -205,7 +205,7 @@ restart, so a conversation can be continued days later.
   a new project just because this conversation has not seen one.
 - Every `render_project` and `analyze_asset` returns job IDs. Hold on to them
   until each reaches `completed`, `failed`, or `cancelled`; `get_job` takes
-  them all at once.
+  them all at once, and with `wait_seconds` waits for one to end.
 - Jobs queue: only one or two run at a time. A job at `queued` with a `stage`
   such as `waiting for 1 running job(s) to finish` is working as intended —
   keep polling `get_job`, and tell the user how many are in line rather than

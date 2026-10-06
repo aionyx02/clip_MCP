@@ -35,8 +35,11 @@ without the whole thing being redone from memory.
    a J-cut, where the next place is heard before it is seen. Put them here
    rather than on the timeline afterwards: music, markers and covering
    picture are laid out against the plan's lengths, and a transition the
-   footage has too little picture for is shortened with a note instead of
-   failing.
+   footage has too little picture for is shortened with a note. A beat whose
+   first shot starts at the top of its file has no picture before it at all:
+   the plan is refused, with how much later to start that shot, the dip that
+   needs half as much, or taking the transition off — the choice is yours,
+   since starting later cuts that much of the shot.
 3. `validate_plan` before compiling. It costs nothing and catches a clip that
    is not there, a beat nothing belongs to, a trim longer than its clip, and
    footage marked `unusable` slipping in. `problems` stop the plan; `notes`
@@ -174,7 +177,9 @@ shorter than its part loops back to there. The fades are per cue, so two songs
 meet end to end, one fading out as the other fades up. For the next song to
 overlap the last, set `crossfade_seconds` on the music: it comes in that much
 early and rises while the other fades, and is still exactly where its cue
-says at the cut. How long is taste, so ask rather than choosing.
+says at the cut. A song coming in from its very top has nothing earlier to
+come in with, so there the one going out runs on past the cut instead. How
+long is taste, so ask rather than choosing.
 
 `cut_on_beat` on a cue moves every picture cut under it onto the song's beat.
 It is a style, not a fix: right for a montage or a fast short, wrong for an
