@@ -266,3 +266,52 @@ def test_waiting_on_a_job_that_does_not_end_gives_up_when_the_time_is_up(ended_a
     began = clock.monotonic()
     found = server.get_job([running.job_id], wait_seconds=1.5)
     assert found["jobs"][0]["status"] == "running" and 1.4 < clock.monotonic() - began < 6
+
+
+class Reported:
+    """Stands in for a job's context and keeps every progress report it is given."""
+
+    def __init__(self) -> None:
+        self.reports: List[tuple] = []
+
+    def report(self, progress: float, stage: Optional[str] = None) -> None:
+        self.reports.append((round(progress, 3), stage))
+
+    def is_cancelled(self) -> bool:
+        return False
+
+
+def test_measuring_loudness_moves_the_bar(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    def ffmpeg(command, log, seconds, on_progress, is_cancelled) -> None:
+        # Without a length to measure against, FFmpeg's progress cannot become a fraction.
+        assert seconds > 0
+        on_progress(0.5)
+
+    monkeypatch.setattr(renderer, "run_ffmpeg", ffmpeg)
+    monkeypatch.setattr(renderer.loudness, "settle_gain", lambda path, target: 0.0)
+    context = Reported()
+    renderer._run_render(Job(work_dir=str(tmp_path)), {
+        "pieces": [], "duration_seconds": 60.0, "command": ["ffmpeg"],
+        "loudness": {"mix_command": ["ffmpeg"], "mix_path": str(tmp_path / "mix.wav"), "target": -14.0},
+    }, context)
+    measuring = [progress for progress, stage in context.reports if stage is None]
+    # Half way through the measuring, the bar is half way through its share, not where it started.
+    assert measuring[0] == pytest.approx(renderer.LOUDNESS_SHARE / (1 + renderer.LOUDNESS_SHARE) / 2, abs=0.01)
+    assert ("measuring loudness" in {stage for _, stage in context.reports})
+
+
+def test_how_long_is_left_comes_from_the_pace_so_far() -> None:
+    now = datetime.now(timezone.utc)
+    running = Job(status=JobStatus.RUNNING, progress=0.25, admitted_at=now - timedelta(seconds=30))
+    assert running.remaining_seconds(now) == 90
+    # Too early for the pace to mean anything, and nothing to say about a job not running.
+    assert Job(status=JobStatus.RUNNING, progress=0.01, admitted_at=now).remaining_seconds(now) is None
+    assert Job(status=JobStatus.QUEUED).remaining_seconds(now) is None
+
+
+def test_a_queued_job_says_how_many_go_before_it() -> None:
+    from app.server import queue_positions
+
+    first, second = Job(status=JobStatus.QUEUED), Job(status=JobStatus.QUEUED)
+    going = Job(status=JobStatus.RUNNING)
+    assert queue_positions([going, first, second]) == {first.job_id: 0, second.job_id: 1}

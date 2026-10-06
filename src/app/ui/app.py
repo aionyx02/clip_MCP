@@ -336,15 +336,11 @@ def _job_card(job, names: dict, ahead: int, now: datetime) -> dict:
         "job_id": job.job_id, "kind": job.kind.value, "preview": preview, "status": job.status.value,
         "progress": round(job.progress, 3), "stage": job.stage,
         "name": names.get(job.asset_id or job.project_id or "", ""),
-        "asset_id": job.asset_id, "project_id": job.project_id, "ahead": ahead, "remaining_seconds": None,
+        "asset_id": job.asset_id, "project_id": job.project_id, "ahead": ahead,
+        "remaining_seconds": job.remaining_seconds(now),
         "delivered": bool(job.kind.value == "render" and not preview and job.status.value == "completed"
                           and job.output_path and os.path.exists(job.output_path)),
     }
-    began = job.admitted_at or job.created_at
-    if job.status.value == "running" and job.progress >= 0.05:
-        # From how fast it has gone so far: honest once it has gone some way, so not before.
-        spent = (now - began).total_seconds()
-        card["remaining_seconds"] = round(spent * (1 - job.progress) / job.progress)
     return card
 
 def _jobs_to_show() -> dict:
@@ -358,9 +354,9 @@ def _jobs_to_show() -> dict:
         project = server.repo.get_project(project_id)
         if project is not None:
             names[project_id] = project.name or ""
-    waiting = [job for job in active if job.status.value == "queued"]
+    ahead = server.queue_positions(active)
     return {
-        "jobs": [_job_card(job, names, waiting.index(job) if job in waiting else 0, now) for job in active],
+        "jobs": [_job_card(job, names, ahead.get(job.job_id, 0), now) for job in active],
         "ended": [_job_card(job, names, 0, now) for job in ended],
     }
 

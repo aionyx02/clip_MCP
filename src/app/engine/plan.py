@@ -20,7 +20,7 @@ import math
 from dataclasses import dataclass, replace
 from datetime import timedelta
 from difflib import SequenceMatcher
-from typing import Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from app.engine.continuity import Shot, strays
 from app.models.media import Asset
@@ -116,6 +116,66 @@ def pace_of(plan: EditPlan) -> Pace:
         pause=PAUSE_SECONDS if plan.pacing.pause_seconds is None else plan.pacing.pause_seconds,
         speed=1.0 if plan.pacing.speed is None else plan.pacing.speed,
     )
+
+class Note(str):
+    """Something worth knowing about a plan, said and labelled.
+
+    Still a sentence, so everything that reads notes as text reads these. The
+    labels are for the AI: which clips and which part a note is about without
+    reading the sentence for them, and whether it only says what was done or
+    asks for a look.
+
+    Attributes:
+        kind: What sort of note, such as `pauses_taken_out`.
+        beat_id: The part of the video it is about, when it is about one.
+        clip_ids: The clips it is about.
+        seconds: How much: seconds taken out, short, or too long.
+        look: Whether it is worth weighing — something the plan did not ask
+            for, or something left that may sound wrong — rather than only
+            said. What to do about it is in the sentence.
+    """
+
+    kind: str
+    beat_id: Optional[str]
+    clip_ids: Tuple[str, ...]
+    seconds: Optional[float]
+    look: bool
+
+    def __new__(
+        cls, message: str, kind: str, *, beat_id: Optional[str] = None, clip_ids: Iterable[str] = (),
+        seconds: Optional[float] = None, look: bool = False,
+    ) -> "Note":
+        note = super().__new__(cls, message)
+        note.kind, note.beat_id, note.look = kind, beat_id, look
+        note.clip_ids = tuple(dict.fromkeys(clip_ids))
+        note.seconds = None if seconds is None else round(seconds, 3)
+        return note
+
+def note_record(note: str) -> dict:
+    """Write a note out for the AI.
+
+    Args:
+        note: A `Note`, or a plain sentence from somewhere that has no labels
+            to give, which is taken as worth a look.
+
+    Returns:
+        `kind`, `message` and `look`, with `beat_id`, `clip_ids` and `seconds`
+        where the note has them.
+    """
+    if not isinstance(note, Note):
+        return {"kind": "note", "message": str(note), "look": True}
+    return {
+        "kind": note.kind,
+        "message": str(note),
+        **({"beat_id": note.beat_id} if note.beat_id else {}),
+        **({"clip_ids": list(note.clip_ids)} if note.clip_ids else {}),
+        **({"seconds": note.seconds} if note.seconds is not None else {}),
+        "look": note.look,
+    }
+
+def _first_clips(pieces: Iterable["Piece"]) -> List[str]:
+    """Name windows by the first clip each is made of, as the plan names them."""
+    return [piece.from_clip_ids[0] for piece in pieces if piece.from_clip_ids]
 
 @dataclass(frozen=True)
 class Piece:
@@ -477,6 +537,7 @@ def _on_the_sound(
         return list(pieces), []
     out: List[Piece] = []
     moved = 0
+    shifted: List[Piece] = []
     for piece in pieces:
         known = cuts.get(piece.asset_id)
         if known is None:
@@ -493,15 +554,17 @@ def _on_the_sound(
             end = round(min(fall + pace.breath, loud), 3)
         if (start, end) != (piece.start, piece.end):
             moved += (start != piece.start) + (end != piece.end)
+            shifted.append(piece)
             out.append(replace(piece, start=start, end=end))
         else:
             out.append(piece)
     notes = []
     if moved:
-        notes.append(
+        notes.append(Note(
             f"{moved} cut(s) moved out to where the sound really starts or stops: the transcript placed a word "
-            "inside the talking, and cutting there would take the start or end of it off"
-        )
+            "inside the talking, and cutting there would take the start or end of it off",
+            "cuts_moved_to_the_sound", clip_ids=_first_clips(shifted),
+        ))
     return out, notes
 
 def _without_retakes(
@@ -560,11 +623,12 @@ def _without_retakes(
     notes: List[str] = []
     if dropped:
         seconds = sum(piece.duration for piece in dropped)
-        notes.append(
+        notes.append(Note(
             f"{len(dropped)} window(s) say a line that is said again straight after, and were dropped, "
-            f"{seconds:.1f}s in all: {', '.join(piece.from_clip_ids[0] for piece in dropped)}. "
-            "The last complete go at each was kept"
-        )
+            f"{seconds:.1f}s in all: {', '.join(_first_clips(dropped))}. "
+            "The last complete go at each was kept",
+            "retakes_dropped", clip_ids=_first_clips(dropped), seconds=seconds, look=True,
+        ))
     return kept, notes
 
 def _somewhere_clean(seconds: float, known: CleanCuts, opens: bool) -> float:
@@ -611,6 +675,8 @@ def _without_pauses(
     out: List[Piece] = []
     taken: List[float] = []
     talked_through = 0
+    split: List[Piece] = []
+    spoken_over: List[Piece] = []
     for piece in pieces:
         known = cuts.get(piece.asset_id)
         dead = known.pauses_inside(piece.start, piece.end, pace.pause) if known is not None else ()
@@ -641,23 +707,27 @@ def _without_pauses(
                 # word, which is worse than the pause it saves, so it stays and the
                 # disagreement is reported rather than papered over.
                 talked_through += 1
+                spoken_over.append(piece)
                 continue
             out.append(replace(piece, start=opened, end=closing))
             taken.append(round(opening - closing, 3))
+            split.append(piece)
             opened = opening
         out.append(replace(piece, start=opened))
 
     notes: List[str] = []
     if taken:
-        notes.append(
+        notes.append(Note(
             f"{len(taken)} pause(s) longer than {pace.pause:g}s were taken out of the middle of a shot, "
-            f"{sum(taken):.1f}s in all"
-        )
+            f"{sum(taken):.1f}s in all",
+            "pauses_taken_out", clip_ids=_first_clips(split), seconds=sum(taken),
+        ))
     if talked_through:
-        notes.append(
+        notes.append(Note(
             f"{talked_through} pause(s) were left in: they were measured as quiet, but the transcript "
-            "has somebody talking across them, and cutting there would go through a word"
-        )
+            "has somebody talking across them, and cutting there would go through a word",
+            "pauses_left_in", clip_ids=_first_clips(spoken_over),
+        ))
     return out, notes
 
 def _trimmed_ends(
@@ -685,7 +755,7 @@ def _trimmed_ends(
     out = list(pieces)
     notes: List[str] = []
 
-    def say(where: str, taken: float, left: float, limit: float) -> None:
+    def say(where: str, taken: float, left: float, limit: float, piece: Piece) -> None:
         """Say what was trimmed, and what the limit would not let go of.
 
         Args:
@@ -693,6 +763,7 @@ def _trimmed_ends(
             taken: Seconds removed.
             left: Seconds of the run-up or wind-down still there.
             limit: The trim that stopped it going further.
+            piece: The window it was trimmed off.
         """
         said = f"{taken:.1f}s {where} was trimmed off"
         if left > 0:
@@ -700,7 +771,8 @@ def _trimmed_ends(
                 f", and {left:.1f}s of it is still there: the trim goes no further than "
                 f"{limit:g}s in case the shot is being held on purpose"
             )
-        notes.append(said)
+        notes.append(Note(said, "ends_trimmed", beat_id=piece.beat_id or None, clip_ids=_first_clips([piece]),
+                          seconds=taken))
 
     head = out[0]
     known = cuts.get(head.asset_id)
@@ -711,7 +783,7 @@ def _trimmed_ends(
         wanted = round(first_word - pace.breath, 3)
         opening = round(min(wanted, head.start + HEAD_TRIM_SECONDS), 3)
         if opening > head.start:
-            say("before the first word", opening - head.start, round(wanted - opening, 3), HEAD_TRIM_SECONDS)
+            say("before the first word", opening - head.start, round(wanted - opening, 3), HEAD_TRIM_SECONDS, head)
             out[0] = replace(head, start=opening)
 
     tail = out[-1]
@@ -722,7 +794,7 @@ def _trimmed_ends(
         wanted = round(last_word + pace.breath, 3)
         closing = round(max(wanted, tail.end - TAIL_TRIM_SECONDS), 3)
         if closing < tail.end:
-            say("after the last word", tail.end - closing, round(closing - wanted, 3), TAIL_TRIM_SECONDS)
+            say("after the last word", tail.end - closing, round(closing - wanted, 3), TAIL_TRIM_SECONDS, tail)
             out[-1] = replace(tail, end=closing)
 
     return out, notes
@@ -750,6 +822,8 @@ def _off_bad_frames(
         return list(pieces), []
     out: List[Piece] = []
     moved, stuck = 0, 0
+    moved_in: List[Piece] = []
+    stuck_in: List[Piece] = []
     for piece in pieces:
         known = cuts.get(piece.asset_id)
         if known is None:
@@ -768,21 +842,29 @@ def _off_bad_frames(
             # Moving both ends has closed the window. A bad frame is a smaller loss
             # than a shot, so it goes back as it was and is counted as stuck.
             stuck += objected
+            if objected:
+                stuck_in.append(piece)
             out.append(piece)
             continue
         shifted = sum(1 for now, before in zip(settled, (piece.start, piece.end)) if now != before)
         moved += shifted
         stuck += objected - shifted
+        if shifted:
+            moved_in.append(piece)
+        if objected > shifted:
+            stuck_in.append(piece)
         out.append(replace(piece, start=opening, end=closing))
 
     notes: List[str] = []
     if moved:
-        notes.append(f"{moved} cut(s) moved off black or frozen picture")
+        notes.append(Note(f"{moved} cut(s) moved off black or frozen picture", "cuts_moved_off_bad_picture",
+                          clip_ids=_first_clips(moved_in)))
     if stuck:
-        notes.append(
+        notes.append(Note(
             f"{stuck} cut(s) still land on black or frozen picture: no clean frame is within "
-            f"{SNAP_SECONDS:g}s of them, so they were left as asked"
-        )
+            f"{SNAP_SECONDS:g}s of them, so they were left as asked",
+            "cuts_on_bad_picture", clip_ids=_first_clips(stuck_in), look=True,
+        ))
     return out, notes
 
 def _beginnings(pieces: Sequence[Piece]) -> Dict[str, int]:
@@ -983,6 +1065,9 @@ def _on_the_beat(
     out = list(pieces)
     moved: List[float] = []
     stuck, unknown = 0, 0
+    moved_in: List[Piece] = []
+    stuck_in: List[Piece] = []
+    unknown_in: List[Piece] = []
     playing: Optional[MusicCue] = None
     song: Optional[CleanCuts] = None
     length: Optional[float] = None
@@ -1007,6 +1092,7 @@ def _on_the_beat(
                 pass
             elif known is None or not known.transcribed:
                 unknown += 1
+                unknown_in.append(piece)
             else:
                 reachable = [
                     shift for shift in shifts
@@ -1019,23 +1105,28 @@ def _on_the_beat(
                     end = round(piece.end + reachable[0] * piece.speed, 3)
                     out[index] = replace(piece, end=end)
                     moved.append(abs(reachable[0]))
+                    moved_in.append(piece)
                 else:
                     stuck += 1
+                    stuck_in.append(piece)
         position += out[index].played
 
     notes: List[str] = []
     if moved:
-        notes.append(f"{len(moved)} cut(s) moved onto the beat of the music, {max(moved):.2f}s at most")
+        notes.append(Note(f"{len(moved)} cut(s) moved onto the beat of the music, {max(moved):.2f}s at most",
+                          "cuts_moved_onto_the_beat", clip_ids=_first_clips(moved_in), seconds=max(moved)))
     if stuck:
-        notes.append(
+        notes.append(Note(
             f"{stuck} cut(s) are off the beat: reaching it would cut into a word, show a bad frame, or move "
-            f"further than {BEAT_SNAP_SECONDS:g}s, so they were left where they were"
-        )
+            f"further than {BEAT_SNAP_SECONDS:g}s, so they were left where they were",
+            "cuts_off_the_beat", clip_ids=_first_clips(stuck_in), look=True,
+        ))
     if unknown:
-        notes.append(
+        notes.append(Note(
             f"{unknown} cut(s) are off the beat because their footage was never transcribed, so there is no "
-            "knowing whether moving them would cut into a word"
-        )
+            "knowing whether moving them would cut into a word",
+            "cuts_off_the_beat", clip_ids=_first_clips(unknown_in), look=True,
+        ))
     return out, notes
 
 def compile_pieces(
@@ -1130,10 +1221,11 @@ def _joined_beats(
             continue
         at = first.get(beat.id)
         if at is None or at == 0:
-            notes.append(
+            notes.append(Note(
                 f"beat {beat.id} has no shot of its own to begin with — its first one was joined to the shot "
-                "before it — so it comes in on a straight cut"
-            )
+                "before it — so it comes in on a straight cut",
+                "join_left_out", beat_id=beat.id, look=True,
+            ))
             continue
         piece, before = out[at], out[at - 1]
         # Seconds of the timeline the file can supply before this window, at its speed.
@@ -1146,30 +1238,34 @@ def _joined_beats(
             if fits < MIN_TRANSITION_SECONDS:
                 # `check_plan` refuses this with the ways to fix it; a preview built
                 # without checking still says what happened.
-                notes.append(
+                notes.append(Note(
                     f"beat {beat.id}: its {wanted.kind} was left out — its first shot starts "
-                    f"{piece.start:.2f}s into its file, with no picture before it to run in from"
-                )
+                    f"{piece.start:.2f}s into its file, with no picture before it to run in from",
+                    "join_left_out", beat_id=beat.id, clip_ids=_first_clips([piece]), look=True,
+                ))
             else:
                 if fits < wanted.seconds:
                     short = _picture_needed(wanted, piece) - piece.start
-                    notes.append(
+                    notes.append(Note(
                         f"beat {beat.id}: its {wanted.kind} was shortened from {wanted.seconds:g}s to {fits:g}s, "
                         f"all the picture its file has before the shot; for the whole {wanted.seconds:g}s, start "
-                        f"that shot {short:.2f}s later (`set_trim` with a later `from_seconds`)"
-                    )
+                        f"that shot {short:.2f}s later (`set_trim` with a later `from_seconds`)",
+                        "join_shortened", beat_id=beat.id, clip_ids=_first_clips([piece]), seconds=fits, look=True,
+                    ))
                 changes["transition"] = (wanted.kind, fits, wanted.through, wanted.direction)
         if beat.sound_lead is not None:
             asset = assets.get(piece.asset_id)
             if asset is not None and not asset.has_audio:
-                notes.append(f"beat {beat.id}: its first shot has no sound to lead with, so it leads with none")
+                notes.append(Note(f"beat {beat.id}: its first shot has no sound to lead with, so it leads with none",
+                                  "join_left_out", beat_id=beat.id, clip_ids=_first_clips([piece]), look=True))
             else:
                 fits = math.floor(min(beat.sound_lead, room, before.played) * 1000) / 1000
                 if fits < beat.sound_lead:
-                    notes.append(
+                    notes.append(Note(
                         f"beat {beat.id}: its sound comes in {fits:g}s early rather than {beat.sound_lead:g}s, "
-                        "all the sound its file has before the shot"
-                    )
+                        "all the sound its file has before the shot",
+                        "join_shortened", beat_id=beat.id, clip_ids=_first_clips([piece]), seconds=fits, look=True,
+                    ))
                 if fits > 0:
                     changes["sound_lead"] = fits
         if changes:
@@ -1461,10 +1557,11 @@ def broll_covers(
             over_clip_id=shot.over_clip_id,
         ))
         if not over.text:
-            notes.append(
+            notes.append(Note(
                 f"{where}: nobody is talking under it, so this swaps one picture for another rather than "
-                "showing what is being said"
-            )
+                "showing what is being said",
+                "broll_over_silence", clip_ids=(shot.over_clip_id, shot.clip_id), look=True,
+            ))
 
     if cuts:
         interrupted = []
@@ -1473,11 +1570,12 @@ def broll_covers(
             if under is not None and _splits_a_sentence(under, cover.timeline_out, cuts):
                 interrupted.append(cover.over_clip_id)
         if interrupted:
-            notes.append(
+            notes.append(Note(
                 f"{len(interrupted)} B-roll shot(s) cut back partway through a sentence: "
                 f"{', '.join(interrupted)}. Lengthening them would change how long the video runs, "
-                "so it is left to whoever chose the length"
-            )
+                "so it is left to whoever chose the length",
+                "broll_ends_mid_sentence", clip_ids=interrupted, look=True,
+            ))
     return covers, problems, notes
 
 def broll_slots(
@@ -1615,9 +1713,10 @@ def _cut_notes(
         if new_edge != old_edge
     ]
     if moved:
-        said.append(
-            f"{len(moved)} cut(s) moved off the middle of a word, by up to {max(moved):.2f}s"
-        )
+        said.append(Note(
+            f"{len(moved)} cut(s) moved off the middle of a word, by up to {max(moved):.2f}s",
+            "cuts_moved_off_words", seconds=max(moved),
+        ))
 
     stuck = [
         piece for piece in pieces
@@ -1625,10 +1724,11 @@ def _cut_notes(
         and any(known.splits_a_word(edge) for edge in (piece.start, piece.end))
     ]
     if stuck:
-        said.append(
-            f"{len(stuck)} cut(s) still land inside a word: {', '.join(p.from_clip_ids[0] for p in stuck)}. "
-            f"No clean point is within {SNAP_SECONDS:g}s of them, so they were left as asked"
-        )
+        said.append(Note(
+            f"{len(stuck)} cut(s) still land inside a word: {', '.join(_first_clips(stuck))}. "
+            f"No clean point is within {SNAP_SECONDS:g}s of them, so they were left as asked",
+            "cuts_inside_words", clip_ids=_first_clips(stuck), look=True,
+        ))
 
     owed = [
         (known.rest_of_sentence(piece.end), piece)
@@ -1639,11 +1739,15 @@ def _cut_notes(
         total = sum(seconds for seconds, _ in owed)
         worst, piece = max(owed, key=lambda item: item[0])
         share = f", {total / duration:.0%} of the cut" if duration else ""
-        said.append(
-            f"{len(owed)} window(s) stop before the sentence ends. Finishing them all would add "
-            f"{total:.1f}s{share}; the longest is {piece.from_clip_ids[0]}, {worst:.1f}s short. "
-            "Give those seconds to the ones that sound abrupt, or leave them"
-        )
+        short = [f"{first} {seconds:.1f}s" for seconds, first in
+                 ((seconds, _first_clips([cut])[0]) for seconds, cut in owed if cut.from_clip_ids)]
+        said.append(Note(
+            f"{len(owed)} window(s) stop before the sentence ends: {', '.join(short)} short. Finishing them all "
+            f"would add {total:.1f}s{share}; the longest is {piece.from_clip_ids[0]}, {worst:.1f}s short. "
+            "Give those seconds to the ones that sound abrupt, or leave them",
+            "stops_before_the_sentence_ends", clip_ids=_first_clips(cut for _, cut in owed), seconds=total,
+            look=True,
+        ))
     return said
 
 def _unfit_transitions(plan: EditPlan, pieces: Sequence[Piece]) -> List[str]:
@@ -1937,7 +2041,8 @@ def check_plan(
 
     for rejection in plan.rejected:
         if rejection.clip_id not in clips:
-            notes.append(f"the rejected clip {rejection.clip_id} is not in this timeline")
+            notes.append(Note(f"the rejected clip {rejection.clip_id} is not in this timeline",
+                              "rejected_clip_missing", clip_ids=[rejection.clip_id]))
     for stray in strays(_shots(plan, clips, assets)):
         problems.append(
             f"continuity: {stray}. Move it next to what it belongs with, drop it, or say in its `jump_reason` "
@@ -2009,20 +2114,22 @@ def check_plan(
         for position, cue in enumerate(cues, start=1):
             entry = song_entry(cue, (cuts or {}).get(cue.asset_id) if cue.asset_id is not None else None)
             if entry != cue.start:
-                notes.append(
+                notes.append(Note(
                     f"music cue {position} comes in at {entry:g}s of {cue.asset_id}, the first beat after "
-                    f"the {cue.start:g}s asked for, so the cuts it sets the beat for are counted from a beat"
-                )
+                    f"the {cue.start:g}s asked for, so the cuts it sets the beat for are counted from a beat",
+                    "music_enters_on_a_beat", beat_id=cue.beat_id, seconds=entry,
+                ))
         _, covering, said = broll_covers(plan, pieces, clips, assets, cuts)
         problems.extend(covering)
         notes.extend(said)
         if plan.target.seconds:
             drift = abs(duration - plan.target.seconds) / plan.target.seconds
             if drift > LENGTH_TOLERANCE:
-                notes.append(
+                notes.append(Note(
                     f"the cut comes out {duration:.1f}s against a target of {plan.target.seconds:g}s, "
-                    f"{drift:.0%} out"
-                )
+                    f"{drift:.0%} out",
+                    "length_off_target", seconds=duration, look=True,
+                ))
         for beat in plan.beats:
             if beat.target_seconds is None:
                 continue
@@ -2031,7 +2138,8 @@ def check_plan(
                 plan.model_copy(update={"selections": chosen}), clips, children, assets, cuts,
             ))
             if abs(in_beat - beat.target_seconds) / beat.target_seconds > LENGTH_TOLERANCE:
-                notes.append(f"beat {beat.id} ({beat.name}) runs {in_beat:.1f}s against {beat.target_seconds:g}s")
+                notes.append(Note(f"beat {beat.id} ({beat.name}) runs {in_beat:.1f}s against {beat.target_seconds:g}s",
+                                  "length_off_target", beat_id=beat.id, seconds=in_beat, look=True))
     return problems, notes
 
 def _compiled_clips(project: Optional[Project]) -> List[Tuple[str, Clip]]:
@@ -2103,10 +2211,11 @@ def as_left(pieces: Sequence[Piece], project: Optional[Project]) -> Tuple[List[P
     gone = [piece for piece, by_hand in zip(laid, hand) if not by_hand and taken_in(piece)]
     notes = []
     if gone:
-        notes.append(
+        notes.append(Note(
             f"{len(gone)} window(s) were left out because a clip lengthened by hand already plays them: "
-            f"{', '.join(piece.from_clip_ids[0] for piece in gone)}"
-        )
+            f"{', '.join(_first_clips(gone))}",
+            "left_out_for_a_hand_edit", clip_ids=_first_clips(gone), look=True,
+        ))
     return out, notes
 
 def _shots(

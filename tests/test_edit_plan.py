@@ -36,6 +36,7 @@ from app.engine.plan import (
     compiled_duration,
     diff_plans,
     music_beds,
+    note_record,
     plan_pieces,
 )
 from app.engine.sections import build_sections
@@ -360,6 +361,14 @@ def test_a_cut_that_still_stops_mid_sentence_is_reported_not_repaired() -> None:
     assert any("2.0s" in note for note in notes)
     # One line however many windows it covers: fifteen near-identical notes is not a report.
     assert sum(1 for note in notes if "sentence ends" in note) == 1
+    # But it names every one, with how short each is, so nobody has to work out which.
+    record = next(note_record(note) for note in notes if "sentence ends" in note)
+    assert record["kind"] == "stops_before_the_sentence_ends" and record["look"]
+    assert record["clip_ids"] == [spoken.id] and record["seconds"] == 2.0
+    assert f"{spoken.id} 2.0s" in record["message"]
+
+def test_a_note_from_outside_the_compiler_is_taken_as_worth_a_look() -> None:
+    assert note_record("something") == {"kind": "note", "message": "something", "look": True}
 
 def test_pieces_that_nearly_touch_become_one_clip() -> None:
     by_id, children, assets, clips = footage()
@@ -1819,7 +1828,8 @@ def test_the_music_changes_where_the_part_of_the_video_does(planned: dict, tmp_p
         ]),
     }))
     assert saved["problems"] == [], saved["problems"]
-    assert any("moved onto the beat" in note for note in saved["notes"])
+    moved = next(note for note in saved["notes"] if note["kind"] == "cuts_moved_onto_the_beat")
+    assert "moved onto the beat" in moved["message"] and not moved["look"]
 
     project = create_project(name="測試", width=640, height=360)["id"]
     compile_plan(project_id=project, expected_version=1, plan_id=saved["plan_id"])
@@ -2268,7 +2278,8 @@ def test_a_clip_lengthened_by_hand_over_the_next_one_is_not_played_twice(planned
     result = compile_plan(project_id=project, expected_version=get_project(project)["version"],
                           plan_id=planned["plan_id"])
     assert len(main_clips(project)) == 1
-    assert any("already plays them" in note for note in result["notes"])
+    left = next(note for note in result["notes"] if note["kind"] == "left_out_for_a_hand_edit")
+    assert "already plays them" in left["message"] and left["clip_ids"] and left["look"]
 
 def test_what_is_laid_over_the_cut_follows_a_clip_sped_up_by_hand() -> None:
     by_id, children, assets, clips = footage()

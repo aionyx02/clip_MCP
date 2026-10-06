@@ -21,6 +21,10 @@ STALE_AFTER = timedelta(seconds=30)
 WARMUP = timedelta(seconds=60)
 SPEC_FILE_NAME = "job.json"
 FFMPEG_LOG_FILE_NAME = "ffmpeg.log"
+# Provisional (roadmap §13): how much of the bar measuring loudness takes, against the
+# final pass's share. It mixes the whole cut's sound once without drawing any picture, so
+# less than that pass; until it was given a share the bar sat still through it.
+LOUDNESS_SHARE = 0.5
 WORKER_LOG_FILE_NAME = "worker.log"
 
 def _detached_process_options() -> Dict[str, Any]:
@@ -390,7 +394,9 @@ def _run_render(job: Job, spec: Dict[str, Any], context: JobContext) -> None:
     # The bar is shared out by seconds of picture: the pieces are rendered at full cost,
     # the final pass only puts them together, so it is weighted at a third of its length.
     weights = [float(piece["duration_seconds"]) for piece in pieces] + [float(spec["duration_seconds"]) / 3]
-    total = sum(weights) or 1.0
+    level = spec.get("loudness")
+    measuring = weights[-1] * LOUDNESS_SHARE if level is not None else 0.0
+    total = (sum(weights) + measuring) or 1.0
     done = 0.0
     for number, piece in enumerate(pieces, start=1):
         start, share = done / total, weights[number - 1] / total
@@ -411,16 +417,21 @@ def _run_render(job: Job, spec: Dict[str, Any], context: JobContext) -> None:
         os.replace(piece["part"], piece["path"])
         done += weights[number - 1]
     command = spec["command"]
-    level = spec.get("loudness")
     if level is not None:
-        context.report(done / total, "measuring loudness")
+        start, share = done / total, measuring / total
+        context.report(start, "measuring loudness")
         try:
-            run_ffmpeg(level["mix_command"], log, 0.0, lambda fraction: None, context.is_cancelled)
+            run_ffmpeg(
+                level["mix_command"], log, float(spec["duration_seconds"]),
+                lambda fraction, start=start, share=share: context.report(start + fraction * share),
+                context.is_cancelled,
+            )
             gain = loudness.settle_gain(level["mix_path"], float(level["target"]))
         finally:
             if os.path.exists(level["mix_path"]):
                 os.remove(level["mix_path"])
         command = loudness.with_gain(command, gain)
+        done += measuring
     start, share = done / total, weights[-1] / total
     context.report(start, "rendering")
     run_ffmpeg(

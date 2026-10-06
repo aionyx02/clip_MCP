@@ -3,6 +3,7 @@ from enum import Enum
 from typing import Annotated, Dict, List, Literal, Mapping, Optional, Tuple, Union
 
 from pydantic import BaseModel, Field, computed_field, field_validator, model_validator
+from pydantic.json_schema import SkipJsonSchema
 
 from app.models.media import Asset
 
@@ -759,7 +760,15 @@ class AddTrackOp(BaseModel):
                     "ducks under speech; audio tracks only")
 
 class _NewClipSpec(BaseModel):
-    """Fields shared by operations that create a clip."""
+    """Fields shared by operations that create a clip.
+
+    A new clip's look and repairs — transition, colour, layout, J and L cuts,
+    voice cleanup — are set by `set_clip_look` and `set_clip_audio` later in
+    the same batch, so the schema describes each of them once. They are still
+    taken here, unlisted, because `compile_plan` rebuilds a pinned clip by
+    inserting it again: leaving them off silently dropped a hand-made J cut or
+    transition on the next compile, the one thing pinning promises not to do.
+    """
 
     track_id: str
     clip_id: str = Field(..., description="ID of the new clip; must be unique within the track")
@@ -770,32 +779,32 @@ class _NewClipSpec(BaseModel):
     volume: float = Field(default=1.0, ge=0, description="Audio gain; 1.0 keeps the original level, 0.5 halves it")
     audio_fade_in: Decimal = Field(default=Decimal(0), ge=0, description="Audio fade-in length at the clip start (seconds)")
     audio_fade_out: Decimal = Field(default=Decimal(0), ge=0, description="Audio fade-out length at the clip end (seconds)")
-    # These three are on the spec because `compile_plan` rebuilds a pinned clip by
-    # inserting it again. Leaving them off silently dropped a hand-made J cut or
-    # transition on the next compile, which is the one thing pinning promises not to do.
-    audio_lead: Decimal = Field(default=Decimal(0), ge=0, description="Seconds the sound starts before the picture (J cut)")
-    audio_lag: Decimal = Field(default=Decimal(0), ge=0, description="Seconds the sound runs on after the picture (L cut)")
-    cleanup: VoiceCleanup = Field(default_factory=VoiceCleanup, description="Repairs applied to the voice")
-    keep_level: bool = Field(default=False, description=KEEP_LEVEL)
-    transition_in: Optional[Transition] = Field(
-        default=None, description="How the picture arrives over the clip before it; null is a straight cut",
-    )
-    video_fade_in: Decimal = Field(default=Decimal(0), ge=0, description="Fade in from black at the clip start (seconds)")
-    video_fade_out: Decimal = Field(default=Decimal(0), ge=0, description="Fade out to black at the clip end (seconds)")
-    color: Optional[ColorAdjust] = Field(default=None, description="Picture adjustments; null leaves the picture as shot")
-    layout: Optional[ClipLayout] = Field(
-        default=None,
-        description="Where the clip is drawn, for clips on a video track above the first; null fills the frame",
-    )
+    audio_lead: SkipJsonSchema[Decimal] = Field(default=Decimal(0), ge=0)
+    audio_lag: SkipJsonSchema[Decimal] = Field(default=Decimal(0), ge=0)
+    cleanup: SkipJsonSchema[VoiceCleanup] = Field(default_factory=VoiceCleanup)
+    keep_level: SkipJsonSchema[bool] = False
+    transition_in: SkipJsonSchema[Optional[Transition]] = None
+    video_fade_in: SkipJsonSchema[Decimal] = Field(default=Decimal(0), ge=0)
+    video_fade_out: SkipJsonSchema[Decimal] = Field(default=Decimal(0), ge=0)
+    color: SkipJsonSchema[Optional[ColorAdjust]] = None
+    layout: SkipJsonSchema[Optional[ClipLayout]] = None
 
 class AddClipOp(_NewClipSpec):
-    """Edit operation that places a clip at an absolute timeline position without moving other clips."""
+    """Edit operation that places a clip at an absolute timeline position without moving other clips.
+
+    Its transition, colour, layout and sound repairs are set with
+    `set_clip_look` and `set_clip_audio` in the same batch.
+    """
 
     action: Literal["add_clip"] = "add_clip"
     timeline_in: Decimal = Field(..., ge=0, description="Start time on the timeline (seconds)")
 
 class InsertClipOp(_NewClipSpec):
-    """Edit operation that inserts a clip into the sequence, shifting later clips to make room."""
+    """Edit operation that inserts a clip into the sequence, shifting later clips to make room.
+
+    Its transition, colour, layout and sound repairs are set with
+    `set_clip_look` and `set_clip_audio` in the same batch.
+    """
 
     action: Literal["insert_clip"] = "insert_clip"
     before_clip_id: Optional[str] = Field(
@@ -988,12 +997,7 @@ class AddSubtitleOp(BaseModel):
         description="Where it ends as a time in the finished cut (seconds). Both times have to fall inside one clip of "
                     "the caption's file. Give this or `source_end`, not both",
     )
-    this_project_only: bool = Field(
-        default=False,
-        description="Keep this caption in this project only. Leave it off for a correction of what was said — a "
-                    "misheard word or name — so every project captioning this footage gets it; turn it on for "
-                    "words written for this cut: a title, a part's name, a line reworded to fit this order",
-    )
+    this_project_only: bool = Field(default=False, description="As on `edit_subtitle`")
 
     @model_validator(mode="after")
     def validate_where(self):
@@ -1160,7 +1164,9 @@ class SetCaptionStyleOp(BaseModel):
 class SetClipLookOp(BaseModel):
     """Edit operation that changes a clip's picture: how it comes in, its colour, and where it sits.
 
-    Omitted fields stay unchanged.
+    A transition runs the clip in over the end of the one before it and ends
+    on the cut rather than straddling it, so it never changes how long the
+    sequence runs. Omitted fields stay unchanged.
     """
 
     action: Literal["set_clip_look"] = "set_clip_look"
@@ -1216,7 +1222,12 @@ class RenameProjectOp(BaseModel):
         return value.strip()
 
 class SetTrackAudioOp(BaseModel):
-    """Edit operation that changes a whole track's audio behaviour; omitted fields stay unchanged."""
+    """Edit operation that changes a whole track's audio behaviour; omitted fields stay unchanged.
+
+    A `voice` track is a narration recorded apart from the picture, which the
+    footage's own sound and the music drop under. Left unsaid, a track counts
+    as a voice when its recording was transcribed and is mostly sentences.
+    """
 
     action: Literal["set_track_audio"] = "set_track_audio"
     track_id: str
@@ -1237,7 +1248,10 @@ class SetTrackAudioOp(BaseModel):
 class SetClipAudioOp(BaseModel):
     """Edit operation that changes a clip's audio level, fades, or how far its sound runs outside its picture.
 
-    Omitted fields stay unchanged.
+    A lead brings the next scene's sound in under the end of the shot still on
+    screen (a J cut); a lag lets a line finish over the shot that follows (an
+    L cut). Both take their extra sound from outside the clip's
+    `source_range`. Omitted fields stay unchanged.
     """
 
     action: Literal["set_clip_audio"] = "set_clip_audio"
@@ -1264,10 +1278,12 @@ class SetClipAudioOp(BaseModel):
     keep_level: Optional[bool] = Field(default=None, description=KEEP_LEVEL)
 
 class SetMarkersOp(BaseModel):
-    """Edit operation that replaces the timeline's structure markers.
+    """Edit operation that replaces the timeline's structure markers: where each part of the video begins.
 
     The whole set at once, like captions: a marker means something only
     against the ones either side of it, so they are written together.
+    `compile_plan` writes one per beat; markers added by hand have no beat
+    behind them and survive the next compile.
     """
 
     action: Literal["set_markers"] = "set_markers"

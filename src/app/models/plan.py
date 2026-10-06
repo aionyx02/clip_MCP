@@ -12,16 +12,71 @@ instruction to be interpreted. A trim says `keep these three sentences`, not
 it, and then the plan would no longer determine the cut.
 """
 
+import re
 import uuid
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Annotated, Dict, List, Literal, Optional, Union
+from typing import Annotated, Any, Dict, List, Literal, Optional, Union
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 def _utc_now() -> datetime:
     """Return the current time as a timezone-aware UTC datetime."""
     return datetime.now(timezone.utc)
+
+# A semantic clip's ID is its timeline's followed by its own: `tl_37f37b83:u0034`. The AI is
+# only ever shown the part after the colon, since a plan, a search or a section already
+# says which timeline it is about; it is stored whole, so nothing that reads it has to know.
+CLIP_ID_FIELDS = ("clip_id", "over_clip_id", "before_clip_id", "first_clip_id", "last_clip_id")
+CLIP_ID_LISTS = ("keep_clip_ids", "clip_ids")
+TIMELINE_PREFIX = re.compile(r"\btl_[0-9a-f]{8}:(?=[us]\d{4}\b)")
+
+def whole_clip_id(clip_id: str, timeline_id: str) -> str:
+    """Put a clip ID written without its timeline back together.
+
+    Args:
+        clip_id: `u0034`, or one already whole.
+        timeline_id: The timeline it is about.
+
+    Returns:
+        The whole ID.
+    """
+    return clip_id if ":" in clip_id else f"{timeline_id}:{clip_id}"
+
+def with_whole_clip_ids(data: Any, timeline_id: str) -> Any:
+    """Make every clip ID in some JSON data whole.
+
+    Args:
+        data: A plan, an amendment or anything else as it arrived.
+        timeline_id: The timeline its clips are in.
+
+    Returns:
+        The same data, with the clip IDs in it whole.
+    """
+    if isinstance(data, list):
+        return [with_whole_clip_ids(item, timeline_id) for item in data]
+    if not isinstance(data, dict):
+        return data
+    whole = {}
+    for key, value in data.items():
+        if key in CLIP_ID_FIELDS and isinstance(value, str):
+            whole[key] = whole_clip_id(value, timeline_id)
+        elif key in CLIP_ID_LISTS and isinstance(value, list):
+            whole[key] = [whole_clip_id(item, timeline_id) if isinstance(item, str) else item for item in value]
+        else:
+            whole[key] = with_whole_clip_ids(value, timeline_id)
+    return whole
+
+def short_clip_ids(text: str) -> str:
+    """Take the timeline off every clip ID in some text, as the AI is shown them.
+
+    Args:
+        text: Anything said back to the AI.
+
+    Returns:
+        The text with `tl_37f37b83:u0034` written `u0034`.
+    """
+    return TIMELINE_PREFIX.sub("", text)
 
 class TrimKind(str, Enum):
     """How much of a chosen clip is used.
@@ -409,7 +464,9 @@ class EditPlan(BaseModel):
 
     id: str = Field(default_factory=lambda: str(uuid.uuid4()))
     version: int = Field(default=1, ge=1, description="Raised on every save; `save_plan` takes it to detect a clash")
-    timeline_id: str = Field(..., description="Semantic timeline the clip IDs belong to")
+    timeline_id: str = Field(
+        ..., description="Semantic timeline the clip IDs belong to; name its clips as a search shows them, such as u0034",
+    )
     timeline_input_hash: str = Field(
         default="",
         description=(
@@ -438,6 +495,14 @@ class EditPlan(BaseModel):
     pacing: Pacing = Field(default_factory=Pacing, description="How tight the whole cut is")
     created_at: datetime = Field(default_factory=_utc_now)
     updated_at: datetime = Field(default_factory=_utc_now)
+
+    @model_validator(mode="before")
+    @classmethod
+    def whole_clip_ids(cls, data: Any) -> Any:
+        """Store the clips a plan names whole, however they were written."""
+        if isinstance(data, dict) and isinstance(data.get("timeline_id"), str):
+            return with_whole_clip_ids(data, data["timeline_id"])
+        return data
 
 class SetTrimOp(BaseModel):
     """Amendment that changes how much of one chosen clip is used."""

@@ -11,13 +11,18 @@ from typing import Annotated, Callable, Dict, List, Literal, Mapping, Optional, 
 
 import numpy as np
 from fastmcp import FastMCP
+from fastmcp.exceptions import ToolError
+from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
 from fastmcp.server.providers.skills import SkillsDirectoryProvider
 from fastmcp.server.transforms import ResourcesAsTools
 from fastmcp.tools import ToolResult
 from fastmcp.utilities.types import Image
+from mcp.types import TextContent
 from pydantic import Field, TypeAdapter
 from app.models.media import Asset, Measured, MediaAnalysis, Span, SpeakerTurn
-from app.models.plan import EditPlan, PlanAmendment, apply_amendment, describe_amendment
+from app.models.plan import (
+    EditPlan, PlanAmendment, apply_amendment, describe_amendment, short_clip_ids, whole_clip_id, with_whole_clip_ids,
+)
 from app.models.semantic import (
     ClipDescription, ClipKind, ClipLevel, SectionChoice, SemanticClip, SemanticTimeline, Tag, TagSource,
 )
@@ -45,7 +50,8 @@ from app.engine.rhythm import rhythm_model_name
 from app.engine.faces import framing_note
 from app.engine.plan import (
     BROLL_TRACK_ID, COMPILED_TRACKS, MUSIC_TRACK_ID, VIDEO_TRACK_ID, as_left, broll_covers, broll_slots, check_plan,
-    check_recompile, compile_operations, compiled_duration, diff_plans, music_beds, piece_changes, plan_pieces,
+    check_recompile, compile_operations, compiled_duration, diff_plans, music_beds, Note, note_record, piece_changes,
+    plan_pieces,
 )
 from app.engine.sections import build_sections, candidate_hash, check_sections, propose_candidates
 from app.engine.semantic import (
@@ -103,6 +109,15 @@ MEDIA_EXTENSIONS = frozenset({
 # Opened before the server is described: what it says about this computer's speed comes from runs kept here.
 repo = Repository(os.path.join(WORKSPACE_DIR, "clip_mcp.db"))
 
+# The tools an ordinary edit goes through, in the order they come up. Named in the opening
+# instructions because a client that loads tools on demand has to guess which ones it will
+# need before it has read anything; a test keeps every name here a real tool.
+CORE_TOOLS = (
+    "list_assets", "analyze_asset", "get_job", "build_semantic_timeline", "query_clips", "view_frames",
+    "save_plan", "amend_plan", "create_project", "compile_plan", "preview_project", "render_project",
+    "listen_again", "check_render", "apply_edits", "generate_subtitles",
+)
+
 mcp = FastMCP(
     "VideoEditingCore",
     instructions=(
@@ -132,6 +147,8 @@ mcp = FastMCP(
         "files out of it there; a file taken out is no longer usable until it "
         "is added again. Projects, assets, "
         "analyses, and jobs are saved on disk and survive server restarts. "
+        f"The tools most edits go through, in order: {', '.join(CORE_TOOLS)}. "
+        "Wherever a tool takes an asset ID, the file's exact name works too. "
         # Looked at once, at start: the AI has to know before it sends footage off how long that will take here.
         + machine.describe(machine.profile(), speed.estimate(repo, machine.profile(), {"accurate": 3600}, False))
     ),
@@ -140,6 +157,109 @@ mcp = FastMCP(
 # without having to read the manifest first.
 mcp.add_provider(SkillsDirectoryProvider(roots=SKILLS_DIR, supporting_files="resources"))
 mcp.add_transform(ResourcesAsTools(mcp))
+
+def _shortened(value):
+    """Take the timeline off every clip ID in a result, however deep it sits."""
+    if isinstance(value, str):
+        return short_clip_ids(value)
+    if isinstance(value, list):
+        return [_shortened(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _shortened(item) for key, item in value.items()}
+    return value
+
+class ShortClipIds(Middleware):
+    """Show the AI every clip ID one way: `u0034`, without the timeline in front.
+
+    A clip's whole ID is its timeline's and its own, and the AI used to be shown the
+    whole one in some places and the short one in others, then had to write the whole
+    one into a plan. Everything said back passes through here, errors included, and
+    every tool that takes a clip knows which timeline it means.
+    """
+
+    async def on_call_tool(self, context: MiddlewareContext, call_next: CallNext) -> ToolResult:
+        try:
+            result = await call_next(context)
+        except Exception as exc:
+            said = str(exc)
+            if short_clip_ids(said) != said:
+                raise ToolError(short_clip_ids(said)) from exc
+            raise
+        if not isinstance(result, ToolResult):
+            return result
+        return ToolResult(
+            content=[
+                TextContent(type="text", text=short_clip_ids(block.text)) if isinstance(block, TextContent) else block
+                for block in result.content
+            ],
+            structured_content=_shortened(result.structured_content),
+            meta=result.meta,
+        )
+
+mcp.add_middleware(ShortClipIds())
+
+def asset_id_for(name: str) -> str:
+    """Find the asset a file name means, for a tool given a name where it wants an ID.
+
+    Only an exact name: guessing which of `0828.mp4` and `0828(1).mp4` was
+    meant is worse than one more look at the list.
+
+    Args:
+        name: An asset ID, or a file's name as `list_assets` shows it.
+
+    Returns:
+        The asset's ID, or `name` as it was when it is an ID or no file has
+        that name, so the tool says what it says about an asset it cannot find.
+
+    Raises:
+        ValueError: If more than one file has that name.
+    """
+    if not isinstance(name, str) or repo.get_assets([name]):
+        return name
+    named = [asset for asset in repo.list_assets() if os.path.basename(asset.path) == name]
+    if len(named) > 1:
+        raise ValueError(
+            f"{len(named)} files are called {name}: "
+            + "; ".join(f"{asset.id} ({asset.path})" for asset in named)
+            + ". Give the ID of the one meant"
+        )
+    return named[0].id if named else name
+
+def _with_asset_ids(value):
+    """Put an ID in place of every file name given as an asset, however deep it sits."""
+    if isinstance(value, list):
+        return [_with_asset_ids(item) for item in value]
+    if not isinstance(value, dict):
+        return value
+    named = {}
+    for key, item in value.items():
+        if key == "asset_id":
+            named[key] = asset_id_for(item)
+        elif key == "asset_ids" and isinstance(item, list):
+            named[key] = [asset_id_for(name) for name in item]
+        else:
+            named[key] = _with_asset_ids(item)
+    return named
+
+class AssetNames(Middleware):
+    """Take a file's exact name wherever a tool takes an asset ID.
+
+    The AI reads footage by file name — in a search's lines, in what the user
+    says — and used to look each one up to get the ID a tool wanted. A name
+    that is one file's becomes its ID; anything else goes on as it came.
+    """
+
+    async def on_call_tool(self, context: MiddlewareContext, call_next: CallNext) -> ToolResult:
+        arguments = context.message.arguments
+        if arguments:
+            try:
+                named = _with_asset_ids(arguments)
+            except ValueError as exc:
+                raise ToolError(str(exc)) from exc
+            context = context.copy(message=context.message.model_copy(update={"arguments": named}))
+        return await call_next(context)
+
+mcp.add_middleware(AssetNames())
 
 # Compiled operations are validated the same way a client's are, so a plan cannot reach
 # the timeline through a door the tool surface does not have.
@@ -913,6 +1033,26 @@ def _clip_summary(clip: SemanticClip) -> dict:
         "scores": {name: clip.scores[name] for name in SUMMARY_SCORES if name in clip.scores},
     }
 
+def _semantic_clip(clip_id: str, timeline_id: Optional[str]) -> SemanticClip:
+    """Fetch a semantic clip by the ID the AI was shown.
+
+    Args:
+        clip_id: `u0034`, or a whole ID.
+        timeline_id: The timeline a short one is in; the newest build when
+            left out, as for `query_clips`.
+
+    Returns:
+        The clip.
+
+    Raises:
+        ValueError: If there is no such clip.
+    """
+    whole = clip_id if ":" in clip_id else whole_clip_id(clip_id, _require_timeline(timeline_id).id)
+    clip = repo.get_semantic_clip(whole)
+    if clip is None:
+        raise ValueError(f"semantic clip {clip_id} not found; query_clips lists the ones that exist")
+    return clip
+
 def _require_timeline(timeline_id: Optional[str]) -> SemanticTimeline:
     """Fetch a semantic timeline, or the newest one.
 
@@ -1032,19 +1172,9 @@ def query_clips(
 
     `about` finds clips by what they mean rather than the words in them:
     "where the product is introduced" finds the sentence that says what it
-    does, though nobody said "introduce". It is answered on this machine by a
-    small local model, and the results come back closest first, each with its
-    `relevance`, so a question about the whole footage costs a short list
-    rather than the transcript. Prefer it to reading everything with `brief`
-    when looking for something in particular; use `text` when the exact word
-    is known. Each sentence is read with the ones either side of it, since
-    speech on camera comes in fragments; a fragment of a few characters is
-    left out, and so is a clip with neither words nor a description. The
-    ranking is a shortlist to read, not a verdict: `relevance` orders one
-    search's results, packed close together, and is not comparable between
-    searches. The first search by meaning downloads the model, about 130 MB,
-    and embeds every clip once, about a second per thousand clips; later
-    searches reuse that.
+    does, though nobody said "introduce". Prefer it to reading everything with
+    `brief` when looking for something in particular; use `text` when the
+    exact word is known.
 
     Results are summaries. Each carries enough to decide whether a clip is
     wanted — what is said, how long it runs, how much room its edges have —
@@ -1053,40 +1183,21 @@ def query_clips(
     in order — ask for `brief`: one line per clip, a few hundred of them in
     a single result, with `offset` for the next page.
 
-    The scores each clip carries are measurements, not opinions. A result
-    shows the ones that say whether there is usable content here: `speech` and
-    `silence` are the shares of the clip covered by words and by detected
-    silence, `black` and `frozen` the shares the picture detectors marked, and
-    `words_per_second` its pace. Pace counts whatever the transcript counts as
-    a word, which for Chinese is characters, so compare it within one language
-    rather than across two.
+    A result shows the scores that say whether there is usable content:
+    `speech` and `silence` are the shares of the clip covered by words and by
+    detected silence, `black` and `frozen` the shares the picture detectors
+    marked, and `words_per_second` its pace (characters, for Chinese). Every
+    clip carries more — how well it was shot, who was on screen, what the
+    sound was like — and `min_scores` says what each one means. They are
+    measurements with no threshold behind them: filter on them to shorten a
+    list, then read `get_semantic_clip` for the few that matter.
 
-    A clip from a file whose voices were told apart also carries `speaker`,
-    a label like `V1`, joined across the timeline's files so that `V1` is the
-    same person in every file they appear in. A sentence that straddles a
-    handover carries none at all rather than a guess.
+    A clip from a file whose voices were told apart carries `speaker`, a
+    label like `V1` that is the same person in every file of the timeline; a
+    sentence that straddles a handover carries none rather than a guess.
 
-    Each clip carries more than a result shows — how well it was shot, who was
-    on screen, and what the sound was like — and `min_scores` and `max_scores`
-    filter on those too. `exposure` is mean brightness from 0 to 1 and `contrast` the
-    spread between the dark and bright ends; `blur` rises as the picture goes
-    soft, with a sharp shot near 5; `motion` is how much changes from frame to
-    frame, 0 for a locked-off shot; `shake` is how unsteady the camera itself
-    was, near 0 on a tripod or an even pan and far higher handheld. For the
-    sound, in decibels relative to full scale: `loudness`, `peak`,
-    `noise_floor` — the hiss under everything — and `flatness`, which is high
-    where the waveform is squared off at its peaks, so a `peak` near 0 with a
-    high `flatness` is what a clipped recording looks like. For who is on
-    screen: `faces` is how many were up, averaged over the clip, so 0.5 means
-    somebody was there half the time; `face_share` is how much of the frame
-    the largest one filled, which is the difference between a close-up and a
-    wide; and `face_x` and `face_y` are where it sat, 0 to 1 across and down.
-    Faces are found, not people, so `faces` of 0 means no face was seen and
-    not that the shot is empty.
-
-    None of these has a threshold behind it, because what counts as too dark
-    or too wobbly depends on the shot. Filter on them to shorten a list, then
-    read `get_semantic_clip` for the few that matter — it carries every score.
+    Clip IDs are shown without their timeline, as `u0034`: write them that
+    way in a plan.
 
     Args:
         timeline_id: Timeline to search; omit for the one built most recently.
@@ -1112,7 +1223,20 @@ def query_clips(
         max_duration: Keep only clips at most this many seconds long.
         min_scores: Lower bounds on scores, such as `{"speech": 0.5}`. A clip
             without that score is left out, since a measurement nobody took
-            cannot be said to pass.
+            cannot be said to pass. Besides the ones a result shows:
+            `exposure` is mean brightness from 0 to 1 and `contrast` the
+            spread between the dark and bright ends; `blur` rises as the
+            picture goes soft, a sharp shot near 5; `motion` is how much
+            changes from frame to frame, 0 locked off; `shake` is how unsteady
+            the camera was, near 0 on a tripod or an even pan and far higher
+            handheld. Sound, in dBFS: `loudness`, `peak`, `noise_floor` (the
+            hiss under everything) and `flatness`, high where the waveform is
+            squared off, so a `peak` near 0 with a high `flatness` is a
+            clipped recording. Faces: `faces` is how many were up, averaged
+            over the clip; `face_share` how much of the frame the largest
+            filled (close-up against wide); `face_x` and `face_y` where it
+            sat, 0 to 1 across and down. Faces are found, not people: 0 means
+            no face was seen, not that the shot is empty.
         max_scores: Upper bounds on scores, such as `{"black": 0.1}` or
             `{"shake": 0.01}` for shots steady enough to hold on screen.
         limit: Largest number of clips to return.
@@ -1120,11 +1244,16 @@ def query_clips(
         brief: Return `lines` instead of `clips`, in the order the footage
             was shot: one line per clip, reading
             `<id> <file> <start>-<end> <kind> [<speaker>] [<topic>] <text>`,
-            with the whole of what is said. The ID there is the part after
-            the timeline's, so `u0125` is `<timeline_id>:u0125`. With `about`,
+            with the whole of what is said. With `about`,
             the lines follow relevance rather than the order of shooting.
         about: Rank the matching clips by how close they are in meaning to
-            this, in any language, closest first.
+            this, in any language, closest first, each with its `relevance`.
+            Answered on this machine by a small model; each sentence is read
+            with the ones either side of it, and a fragment of a few
+            characters or a clip with neither words nor a description is left
+            out. `relevance` orders one search's results and is not comparable
+            between searches. The first search downloads the model, about
+            130 MB, and embeds every clip once, about a second per thousand.
 
     Returns:
         A dictionary with the `timeline_id` searched and the matching `clips`,
@@ -1444,6 +1573,8 @@ def set_sections(
     if not sections:
         raise ValueError("give at least one section; to clear them, build the timeline again with rebuild")
     timeline = _require_timeline(timeline_id)
+    sections =[SectionChoice.model_validate(with_whole_clip_ids(choice.model_dump(), timeline.id))
+                for choice in sections]
     clips = _timeline_utterances(timeline)
     candidates = propose_candidates(clips, _timeline_analyses(timeline))
 
@@ -1468,7 +1599,7 @@ def set_sections(
     return {"timeline_id": timeline.id, "sections": len(built), "topics": topics}
 
 @mcp.tool()
-def get_semantic_clip(clip_id: str, include_words: bool = False) -> dict:
+def get_semantic_clip(clip_id: str, include_words: bool = False, timeline_id: Optional[str] = None) -> dict:
     """Read one semantic clip in full.
 
     Use this on the few clips a `query_clips` search turned up that are worth
@@ -1484,6 +1615,7 @@ def get_semantic_clip(clip_id: str, include_words: bool = False) -> dict:
         clip_id: ID of the clip, as `query_clips` returned it.
         include_words: Whether to include each word's timing. Leave it off
             unless cutting inside a sentence.
+        timeline_id: The timeline the clip is in; omit for the newest build.
 
     Returns:
         The clip: its `clip_id`, `timeline_id`, `asset_id`, `level`, `kind`,
@@ -1494,10 +1626,7 @@ def get_semantic_clip(clip_id: str, include_words: bool = False) -> dict:
     Raises:
         ValueError: If no clip has that ID.
     """
-    clip = repo.get_semantic_clip(clip_id)
-    if clip is None:
-        raise ValueError(f"semantic clip {clip_id} not found; query_clips lists the ones that exist")
-
+    clip = _semantic_clip(clip_id, timeline_id)
     record = clip.model_dump(exclude={"id"})
     record["clip_id"] = clip.id
     if include_words:
@@ -1515,6 +1644,7 @@ def get_semantic_clip(clip_id: str, include_words: bool = False) -> dict:
 def frames_for_clips(
     clip_ids: List[str],
     columns: Annotated[int, Field(ge=1, le=8)] = 4,
+    timeline_id: Optional[str] = None,
 ) -> ToolResult:
     """Look at one frame from each of several semantic clips, as a labeled grid.
 
@@ -1531,6 +1661,7 @@ def frames_for_clips(
         clip_ids: Clips to sample, in the order to show them. One frame is
             taken from the middle of each.
         columns: Most tiles per row.
+        timeline_id: The timeline the clips are in; omit for the newest build.
 
     Returns:
         A text block naming each tile's clip and time, followed by the grid as
@@ -1549,9 +1680,7 @@ def frames_for_clips(
     shots: List[tuple[str, float, str]] = []
     listing: List[str] = []
     for position, clip_id in enumerate(clip_ids):
-        clip = repo.get_semantic_clip(clip_id)
-        if clip is None:
-            raise ValueError(f"semantic clip {clip_id} not found; query_clips lists the ones that exist")
+        clip = _semantic_clip(clip_id, timeline_id)
         asset = _get_asset(clip.asset_id)
         if not asset.has_video:
             raise ValueError(f"clip {clip_id} comes from {asset.id}, which has no picture to show")
@@ -1572,6 +1701,7 @@ def set_clip_tags(
     descriptions: List[ClipDescription],
     written_by: str,
     reviewed: bool = False,
+    timeline_id: Optional[str] = None,
 ) -> dict:
     """Write back what you saw in a clip, so it can be searched later.
 
@@ -1595,6 +1725,7 @@ def set_clip_tags(
         written_by: Who or what is writing, such as the model and version that
             read the frames, or the user's name when they dictated a fix.
         reviewed: True once the user has seen these and agreed to them.
+        timeline_id: The timeline the clips are in; omit for the newest build.
 
     Returns:
         A dictionary with how many clips were `updated` and the total `tags`
@@ -1614,9 +1745,7 @@ def set_clip_tags(
 
     written: List[SemanticClip] = []
     for entry in descriptions:
-        clip = repo.get_semantic_clip(entry.clip_id)
-        if clip is None:
-            raise ValueError(f"semantic clip {entry.clip_id} not found; query_clips lists the ones that exist")
+        clip = _semantic_clip(entry.clip_id, timeline_id)
         source = TagSource.USER if written_by == "user" else TagSource.MODEL
         kept = [tag for tag in clip.tags if not (tag.source == source and tag.model_version == written_by)]
         written.append(clip.model_copy(update={
@@ -1813,55 +1942,31 @@ def apply_edits(project_id: str, expected_version: int, operations: list[EditOpe
     Editing behaves like a magnetic timeline: `insert_clip` shifts later
     clips on the same track to make room, and `trim_clip` and `delete_clip`
     shift them to close or open space unless `ripple` is false.
-    `reorder_clip` moves a clip elsewhere in the sequence, closing the space
-    it leaves and opening space where it lands, and it keeps the clip's cut
+    `reorder_clip` moves a clip elsewhere in the sequence, keeping its cut
     and audio settings. `split_clip` cuts one clip into two halves that
     together occupy exactly what the original did, so nothing else moves.
     `add_clip` and `move_clip` use absolute positions and never move other
     clips. Clips on other tracks never move.
 
-    Background music goes on an audio track. The first video track is the
-    base and defines the output length: gaps are rendered as black frames
-    with silence, and audio past its last clip is cut. Further video tracks
-    are drawn on top of the base, each clip inside the box its `layout`
-    gives, or over the whole frame without one. `set_clip_audio` changes a
-    clip's `volume`, its `audio_fade_in` / `audio_fade_out`, and how far its
-    sound runs outside its picture: `audio_lead` brings the sound in early,
-    so the next scene is heard under the end of the shot still on screen (a J
-    cut), and `audio_lag` lets it run on after the picture has gone, so a line
-    finishes over the shot that follows (an L cut). Both are seconds, both
-    take their extra sound from outside the clip's `source_range`, and 0 puts
-    the sound back with its picture. `set_clip_look` sets its `transition_in`
-    — a dissolve, a wipe, or a dip through a colour, running it in over the end
-    of the clip before it — along with its fades through black and its `color`.
-    A transition ends on the cut rather than straddling it, so it never changes
-    how long the sequence runs; `clear_transition` puts a straight cut back.
-    `set_clip_speed` changes how fast a clip plays, and with it how long it
-    runs, and `preserve_pitch` decides whether the sound keeps its pitch or
-    rises and falls with the speed. `set_track_audio` sets a whole track's `duck_under_speech`, and
-    whether it is a `voice` recorded apart from the picture — a narration the
-    footage's own sound and the music drop under. Left unsaid, a track counts
-    as a voice when its recording was transcribed and is mostly sentences.
-    `set_markers` replaces the timeline's structure markers — where each part
-    of the video begins. `compile_plan` writes one per beat, so a cut compiled
-    from a plan arrives with its shape on it; markers added by hand have no
-    beat behind them and survive the next compile. `set_subtitles` replaces the captions
-    `render_project` burns in, and `set_caption_style` says how they are drawn:
-    a platform preset for the safe area its own buttons take up, whether each
-    word lights as it is said, and whether a caption says who is talking.
+    The first video track is the base and defines the output length: gaps
+    are rendered as black frames with silence, and audio past its last clip
+    is cut. Further video tracks are drawn on top of the base, each clip
+    inside the box its `layout` gives. Background music goes on an audio
+    track. Each operation's own description says what it changes: a clip's
+    sound running outside its picture (J and L cuts), its transition, colour
+    and speed, a track's ducking, the structure markers, the captions and how
+    they are drawn.
 
     The resulting timeline must satisfy these rules:
     - Clips stay within their asset's duration and do not overlap on a track.
-      Sound is the exception and deliberately so: a lead or a lag overlaps the
-      neighbouring clip's sound, which is what a J or an L cut is. It still
-      has to come from inside the file and start after the timeline does.
+      Sound is the exception: a lead or a lag overlaps the neighbouring
+      clip's sound, which is what a J or an L cut is, but still comes from
+      inside the file.
     - Audio and video fades fit within their clip.
-    - Only clips above the base video track take a `layout`; base-track clips
-      always fill the frame.
+    - Only clips above the base video track take a `layout`.
     - Only audio tracks duck under speech.
     - Video-track clips use assets with video; audio-track clips use assets
       with audio.
-    - Clips use speed 1.0.
 
     Args:
         project_id: ID of the project to edit.
@@ -2090,7 +2195,10 @@ def save_plan(plan: EditPlan, note: str = "") -> dict:
     Returns:
         A dictionary with the `plan_id`, its new `version`, the `timeline_id`,
         and `problems` and `notes` from checking it. A plan is stored whether
-        or not it checks out, so it can be fixed rather than retyped.
+        or not it checks out, so it can be fixed rather than retyped. Each
+        note has a `kind`, a `message` saying what to do about it, `look` —
+        true when it is worth weighing rather than only said — and the
+        `beat_id`, `clip_ids` and `seconds` it is about where it has them.
 
     Raises:
         ValueError: If the timeline does not exist, or the plan was saved at a
@@ -2105,13 +2213,14 @@ def save_plan(plan: EditPlan, note: str = "") -> dict:
     problems, notes = check_plan(stored, *_plan_context(stored))
     newest = repo.get_semantic_timeline(None)
     if newest is not None and newest.id != timeline.id:
-        notes.append(f"a newer timeline ({newest.id}) has been built since; this plan is about {timeline.id}")
+        notes.append(Note(f"a newer timeline ({newest.id}) has been built since; this plan is about {timeline.id}",
+                          "newer_timeline"))
     return {
         "plan_id": stored.id,
         "version": stored.version,
         "timeline_id": stored.timeline_id,
         "problems": problems,
-        "notes": notes,
+        "notes": [note_record(note) for note in notes],
     }
 
 @mcp.tool()
@@ -2231,6 +2340,8 @@ def amend_plan(plan_id: str, expected_version: int, amendments: list[PlanAmendme
     plan = _require_plan(plan_id)
     if plan.version != expected_version:
         raise ValueError(f"version conflict: plan {plan.id} is at version {plan.version}, not {expected_version}")
+    amendments = [type(amendment).model_validate(with_whole_clip_ids(amendment.model_dump(), plan.timeline_id))
+                  for amendment in amendments]
     amended = plan.model_copy(deep=True)
     for amendment in amendments:
         apply_amendment(amended, amendment)
@@ -2249,7 +2360,7 @@ def amend_plan(plan_id: str, expected_version: int, amendments: list[PlanAmendme
         "version": stored.version,
         "timeline_id": stored.timeline_id,
         "problems": problems,
-        "notes": notes,
+        "notes": [note_record(note) for note in notes],
     }
 
 def _plan_at(plan_id: str, version: Optional[int]) -> EditPlan:
@@ -2341,7 +2452,7 @@ def revert_plan(plan_id: str, to_version: int, expected_version: int, note: str 
         "version": stored.version,
         "timeline_id": stored.timeline_id,
         "problems": problems,
-        "notes": notes,
+        "notes": [note_record(note) for note in notes],
     }
 
 @mcp.tool()
@@ -2403,7 +2514,7 @@ def validate_plan(plan_id: Optional[str] = None) -> dict:
     return {
         "ok": not problems,
         "problems": problems,
-        "notes": notes,
+        "notes": [note_record(note) for note in notes],
         "duration": compiled_duration(pieces),
         "clips": len(pieces),
     }
@@ -2487,7 +2598,7 @@ def compile_plan(project_id: str, expected_version: int, plan_id: Optional[str] 
         "clips": sum(1 for operation in operations if operation.action == "insert_clip"),
         "kept": sum(1 for origin in provenance.values() if origin["pinned"]),
         "duration": float(saved.duration),
-        "notes": notes,
+        "notes": [note_record(note) for note in notes],
     }
 
 @mcp.tool()
@@ -3903,7 +4014,9 @@ def get_job(
     Returns:
         A dictionary with `jobs`, each with its `job_id`, `kind`, `status`,
         `progress` (0.0 to 1.0), the current `stage`, the `asset_id` of an
-        analysis or the `output_path` of a render, and for a failed job its
+        analysis or the `output_path` of a render, `remaining_seconds` once a
+        running job has gone far enough for its pace to say, `ahead` — how
+        many queued jobs go before a queued one — and for a failed job its
         `error_message`; and a summary over all of them: `finished` and
         `total` counts, `failed` counting those that failed or were
         cancelled, and `progress`, the average.
@@ -3928,6 +4041,18 @@ def get_job(
         "progress": round(sum(entry["progress"] for entry in listed) / len(listed), 3) if listed else 1.0,
     }
 
+def queue_positions(active: Sequence[Job]) -> Dict[str, int]:
+    """Say how many queued jobs go before each queued one.
+
+    Args:
+        active: The jobs still queued or running, in the order they will run.
+
+    Returns:
+        Each queued job's place, 0 for the next to start.
+    """
+    waiting = [job for job in active if job.status == JobStatus.QUEUED]
+    return {job.job_id: place for place, job in enumerate(waiting)}
+
 def _job_states(job_ids: List[str]) -> List[dict]:
     """Read each job's state, one record apiece, in the order asked.
 
@@ -3941,6 +4066,8 @@ def _job_states(job_ids: List[str]) -> List[dict]:
         ValueError: If a job does not exist.
     """
     listed: List[dict] = []
+    now = datetime.now(timezone.utc)
+    ahead = queue_positions(repo.jobs_to_show(now)[0])
     for job_id in dict.fromkeys(job_ids):
         job = job_manager.get_job(job_id)
         if not job:
@@ -3953,6 +4080,10 @@ def _job_states(job_ids: List[str]) -> List[dict]:
             entry["asset_id"] = job.asset_id
         if job.output_path:
             entry["output_path"] = job.output_path
+        if job.remaining_seconds(now) is not None:
+            entry["remaining_seconds"] = job.remaining_seconds(now)
+        if job.job_id in ahead:
+            entry["ahead"] = ahead[job.job_id]
         if job.error_message:
             entry["error_message"] = job.error_message
         listed.append(entry)

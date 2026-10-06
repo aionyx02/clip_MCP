@@ -10,6 +10,9 @@ def _utc_now() -> datetime:
     """Return the current time as a timezone-aware UTC datetime."""
     return datetime.now(timezone.utc)
 
+# How far a job has to have gone before its pace says anything about the rest of it.
+ESTIMATE_FROM_PROGRESS = 0.05
+
 class JobKind(str, Enum):
     """Kinds of background work a job can perform."""
 
@@ -55,3 +58,20 @@ class Job(BaseModel):
         description="When a worker was launched for this job; null while it waits for a free slot",
     )
     updated_at: datetime = Field(default_factory=_utc_now, description="Last time the job record was written")
+
+    def remaining_seconds(self, now: datetime) -> Optional[int]:
+        """Say how long a running job has left, from how fast it has gone so far.
+
+        The same figure for the AI and for the editor's panel, so the user is
+        not told two times. Honest once the job has gone some way, so not before.
+
+        Args:
+            now: The time to count from.
+
+        Returns:
+            Seconds, or None while it is not running or has not gone far enough.
+        """
+        if self.status != JobStatus.RUNNING or self.progress < ESTIMATE_FROM_PROGRESS:
+            return None
+        spent = (now - (self.admitted_at or self.created_at)).total_seconds()
+        return round(spent * (1 - self.progress) / self.progress)
