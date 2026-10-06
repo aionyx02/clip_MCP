@@ -316,24 +316,43 @@ def _karaoke_text(cue: PlacedCue, max_units: float) -> str:
         The event text, with a `\\k` per word and the gaps between them.
     """
     parts: List[str] = []
-    width, cursor = 0.0, cue.start
+    cursor = cue.start
+    for number, line in enumerate(_karaoke_lines(cue, max_units)):
+        if number:
+            parts.append("\\N")
+        for text, start, end in line:
+            # The silence before a word is timed too, or every word would light up early by
+            # however long the pause before it ran.
+            gap = round(float(start - cursor) * 100)
+            if gap > 0:
+                parts.append(f"{{\\k{gap}}}")
+            parts.append(f"{{\\k{max(1, round(float(end - start) * 100))}}}{text}")
+            cursor = end
+    return "".join(parts)
+
+def _karaoke_lines(cue: PlacedCue, max_units: float) -> List[List[Tuple[str, Decimal, Decimal]]]:
+    """Break a caption's timed words into the lines they are drawn on.
+
+    Args:
+        cue: The placed caption, with word timings in timeline seconds.
+        max_units: Line width as a multiple of the font size.
+
+    Returns:
+        Each line as its words, each `(text, start, end)` with the text escaped.
+    """
+    lines: List[List[Tuple[str, Decimal, Decimal]]] = []
+    width = 0.0
     for word in cue.words:
         text = escape_ass_inline(word.text)
         if not text.strip():
             continue
         size = sum(_display_width(character) for character in text)
-        if parts and width + size > max_units:
-            parts.append("\\N")
+        if not lines or (lines[-1] and width + size > max_units):
+            lines.append([])
             width = 0.0
-        # The silence before a word is timed too, or every word would light up early by
-        # however long the pause before it ran.
-        gap = round(float(word.start - cursor) * 100)
-        if gap > 0:
-            parts.append(f"{{\\k{gap}}}")
-        parts.append(f"{{\\k{max(1, round(float(word.end - word.start) * 100))}}}{text}")
-        cursor = word.end
+        lines[-1].append((text, word.start, word.end))
         width += size
-    return "".join(parts)
+    return lines
 
 def _wrapped(text: str, max_units: float) -> str:
     """Escape a caption and break it into lines that fit the frame.
@@ -799,6 +818,54 @@ def build_ass(
             f"Dialogue: 0,{format_ass_time(cue.start)},{format_ass_time(cue.end)},Default,,0,0,0,,{text}"
         )
     return "\n".join(lines) + "\n"
+
+def drawn_captions(cues: Sequence[PlacedCue], width: int, height: int, style: CaptionStyle) -> dict:
+    """Describe captions the way `build_ass` draws them, for the editor to draw them the same.
+
+    The lines are broken here, by the same rules, so a caption breaks in the
+    same place in the editor as in the render; the browser only paints them.
+
+    Args:
+        cues: Placed cues, in timeline order.
+        width: Frame width in pixels.
+        height: Frame height in pixels.
+        style: How they are drawn.
+
+    Returns:
+        The font, sizes and margins in frame pixels, and `events`: each with
+        `start` and `end`, the speaker's `prefix`, its `colour` or None, its
+        `lines` as words `[text, start, end]` (the times None unless each word
+        lights as it is said), and the `secondary` lines below.
+    """
+    geometry = caption_geometry(width, height, style)
+    colours = _speaker_colours(cues) if style.speaker_mark in (SpeakerMark.COLOUR, SpeakerMark.BOTH) else {}
+    events = []
+    for cue in (piece for placed in cues for piece in one_line_each(placed, geometry, style)):
+        prefix = _speaker_prefix(cue, style)
+        room = _room(prefix, geometry)
+        if style.karaoke and cue.words:
+            lines = [[[text, float(start), float(end)] for text, start, end in line]
+                     for line in _karaoke_lines(cue, room)]
+        else:
+            text = _wrapped(cue.text, room)
+            lines = [[[line, None, None]] for line in text.split("\\N")] if text else []
+        if not lines:
+            continue
+        second = _wrapped(cue.secondary, geometry.max_units / style.secondary_scale) if cue.secondary else ""
+        colour = colours.get(cue.speaker or "")
+        events.append({
+            "start": float(cue.start), "end": float(cue.end), "prefix": prefix,
+            # ASS writes &HBBGGRR; the browser wants #RRGGBB.
+            "colour": f"#{colour[-2:]}{colour[-4:-2]}{colour[-6:-4]}" if colour else None,
+            "lines": lines, "secondary": second.split("\\N") if second else [],
+        })
+    return {
+        "font": style.font or DEFAULT_FONT, "font_size": geometry.font_size, "margin_h": geometry.margin_h,
+        "margin_v": geometry.margin_v, "outline": geometry.outline,
+        "shadow": max(1, geometry.outline // 2) if geometry.outline else 0,
+        "secondary_size": max(8, round(geometry.font_size * style.secondary_scale)),
+        "line_height": CAPTION_LINE_HEIGHT, "unspoken": "#909090", "events": events,
+    }
 
 def _pieces(
     segment: TranscriptSegment,

@@ -107,3 +107,23 @@ def test_a_proxy_is_named_after_the_file_as_it_is(media: Path, tmp_path: Path) -
     first = playback.proxy_name(asset)
     shutil.copy(media / "tall.mp4", copy)
     assert playback.proxy_name(asset) != first
+
+
+def test_captions_break_in_the_editor_where_they_break_in_a_render() -> None:
+    from decimal import Decimal
+
+    from app.engine.subtitles import build_ass, drawn_captions
+    from app.models.timeline import CaptionStyle, CueWord, PlacedCue
+
+    words = [CueWord(start=Decimal(index) / 2, end=Decimal(index) / 2 + Decimal("0.4"), text=text)
+             for index, text in enumerate(["今天", "我們", "來看", "這台", "抽杯架", "怎麼", "裝"])]
+    cue = PlacedCue(cue_id="c1", start=Decimal(0), end=Decimal("3.5"), text="".join(word.text for word in words),
+                    words=words, speaker="S2")
+    style = CaptionStyle(karaoke=True, single_line=False, speaker_mark="both", size_fraction=0.2)
+    drawn = drawn_captions([cue], 1080, 1920, style)
+    event = drawn["events"][0]
+    # The same lines the render's subtitle file breaks it into, each word with its time.
+    dialogue = build_ass([cue], 1080, 1920, style).splitlines()[-1]
+    assert len(event["lines"]) == dialogue.count(r"\N") + 1 > 1
+    assert event["lines"][0][0] == ["今天", 0.0, 0.4]
+    assert event["prefix"] == "S2：" and event["colour"] == "#FFFFFF"

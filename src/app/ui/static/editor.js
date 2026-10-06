@@ -1,8 +1,9 @@
-// The editor page: watch the finished cut, fix its cuts by hand.
-// What plays is the rendered preview, so what is seen is what will be delivered. Only while a
-// cut is being dragged does the viewer show the source, because that is the one moment the
-// picture outside the cut matters. Every change goes to the server as the same edit the AI
-// would make, then the preview is rendered again for the parts that changed.
+// The editor page: watch the cut, fix its cuts by hand.
+// What plays is the cut as it is now, put together in the browser from small copies of its
+// files (player.js), so an edit can be watched the moment it is made. The exact render is one
+// button away, for when what will be delivered has to be seen to the frame. Only while a cut is
+// being dragged does the viewer show the source, because that is the one moment the picture
+// outside the cut matters. Every change goes to the server as the same edit the AI would make.
 "use strict";
 
 (() => {
@@ -42,7 +43,7 @@
 
   // Nothing changes while the cut is playing: a cut moving under the picture being watched
   // is how a viewer loses track of what they just saw.
-  const playing = () => Boolean(E?.shownUrl) && !E.video.paused;
+  const playing = () => Boolean(E) && !clock().paused;
 
   function lockedWhilePlaying() {
     if (!playing()) return false;
@@ -62,14 +63,14 @@
       E.ownVersion = result.new_version;
       await loadProject();
       drawAll();
-      requestPreview();
+      refreshPlayback();
       return true;
     } catch (error) {
       if (/version conflict/.test(error.message)) {
         toast(T.editor.conflict, "error");
         await loadProject();
         drawAll();
-        requestPreview();
+        refreshPlayback();
       } else {
         toast(error.message, "error");
         drawAll();
@@ -86,7 +87,7 @@
       await api(`/api/projects/${encodeURIComponent(E.id)}/undo`, {});
       await loadProject();
       drawAll();
-      requestPreview();
+      refreshPlayback();
       toast(T.editor.undone);
     } catch {
       toast(T.editor.nothingToUndo, "error");
@@ -119,23 +120,27 @@
   function showPreviewState() {
     const state = E.previewState || {};
     const chip = $("[data-preview-chip]", E.root);
-    const notice = $("[data-notice]", E.root);
     let text = "", kind = "";
-    if (state.empty) { text = T.editor.previewEmpty; }
-    else if (state.status === "queued") { text = T.editor.previewQueued; kind = "busy"; }
-    else if (state.status === "running") { text = T.editor.previewMaking(Math.round((state.progress || 0) * 100)); kind = "busy"; }
-    else if (state.status === "failed" || state.error) { text = T.editor.previewFailed; kind = "warn"; }
-    else if (state.url) { text = T.editor.previewReady; kind = "ok"; }
+    const asked = E.wantExact;
+    if (asked && state.empty) { text = T.editor.previewEmpty; kind = "warn"; }
+    else if (asked && state.status === "queued") { text = T.editor.previewQueued; kind = "busy"; }
+    else if (asked && state.status === "running") { text = T.editor.previewMaking(Math.round((state.progress || 0) * 100)); kind = "busy"; }
+    else if (asked && (state.status === "failed" || state.error)) { text = `${T.editor.previewFailed}${state.error ? `：${state.error}` : ""}`; kind = "warn"; }
+    else if (E.mode === "exact") { text = T.editor.exactShown; kind = "ok"; }
     chip.className = `state ${kind}`;
     chip.hidden = !text;
     chip.innerHTML = kind === "busy"
       ? `<span class="spinner"></span>${esc(text)}<span class="bar"><i style="width:${Math.round((state.progress || 0) * 100)}%"></i></span>`
       : esc(text);
-    if (state.url && state.url !== E.shownUrl) swapPreview(state.url);
-    const stale = E.shownVersion !== undefined && E.shownVersion !== E.project.version;
-    notice.hidden = !(state.empty || (!E.shownUrl && text && kind !== "ok"));
-    notice.textContent = state.empty ? T.editor.previewEmpty : (state.status === "failed" ? `${T.editor.previewFailed}${state.error ? `：${state.error}` : ""}` : text);
-    $("[data-stale]", E.root).hidden = !(stale && kind === "busy");
+    if (asked && state.url && state.version === E.project.version && state.status !== "queued" && state.status !== "running") {
+      E.wantExact = false;
+      swapPreview(state.url);
+      showExact();
+    }
+    if (asked && (state.empty || state.status === "failed" || state.error)) E.wantExact = false;
+    $("[data-exact]", E.root).hidden = E.mode === "exact";
+    $("[data-exact]", E.root).disabled = kind === "busy";
+    $("[data-live]", E.root).hidden = E.mode !== "exact";
   }
 
   function swapPreview(url) {
@@ -149,7 +154,81 @@
       video.currentTime = Math.min(at, video.duration || at);
       if (playing) video.play().catch(() => {});
     }, { once: true });
-    $("[data-play]", E.root).disabled = false;
+  }
+
+  // ------------------------------------------------------------------ live playback, or the exact render
+
+  // What is playing: the cut put together live, or the render asked for with the button.
+  const clock = () => (E.mode === "exact" ? E.exact : E.player);
+
+  async function refreshPlayback() {
+    clearTimeout(E.describeTimer);
+    try {
+      const described = await api(`/api/projects/${encodeURIComponent(E.id)}/playback`);
+      if (!E) return;
+      E.described = described;
+      E.player.load(described);
+      E.describeTries = 0;
+    } catch { /* the next look will try again */ }
+    if (!E) return;
+    // The render shown no longer is this cut: back to what is.
+    if (E.mode === "exact" && E.shownVersion !== E.project.version) showLive();
+    showPlaybackState();
+    const described = E.described;
+    const unfinished = described && (described.waiting.length || (described.gain_db === null && described.duration > 0));
+    if (!described || unfinished) {
+      // Looks again until the copies are made; less often the longer they take.
+      E.describeTries = (E.describeTries || 0) + 1;
+      E.describeTimer = setTimeout(refreshPlayback, Math.min(10000, 1000 + E.describeTries * 500));
+    }
+  }
+
+  function showPlaybackState() {
+    const described = E.described;
+    const chip = $("[data-live-chip]", E.root);
+    const notice = $("[data-notice]", E.root);
+    const empty = !described || described.duration <= 0;
+    notice.hidden = !(E.mode === "live" && empty);
+    notice.textContent = T.editor.previewEmpty;
+    let text = "", kind = "";
+    if (E.mode === "live" && described && !empty) {
+      const files = new Set(described.waiting.filter((item) => !item.startsWith("sound:"))).size;
+      if (files) { text = T.editor.livePreparing(files); kind = "busy"; }
+      else if (described.waiting.length || described.gain_db === null) { text = T.editor.liveSound; kind = "busy"; }
+    }
+    chip.className = `state ${kind}`;
+    chip.hidden = !text;
+    chip.innerHTML = kind === "busy" ? `<span class="spinner"></span>${esc(text)}` : esc(text);
+    const near = described && Object.entries(described.approximate).filter(([, value]) => value).map(([key]) => T.editor.approximate[key]);
+    const tag = $("[data-approximate]", E.root);
+    tag.hidden = !(E.mode === "live" && near && near.length);
+    tag.title = near && near.length ? T.editor.approximateTitle(near.join("、")) : "";
+    setPlayIcon();
+  }
+
+  function askExact() {
+    E.wantExact = true;
+    requestPreview();
+  }
+
+  function showExact() {
+    E.player.show(false);
+    E.mode = "exact";
+    $("[data-stage]", E.root).classList.add("exact");
+    seek(E.time);
+    showPreviewState();
+    showPlaybackState();
+  }
+
+  function showLive() {
+    E.video.pause();
+    E.mode = "live";
+    E.wantExact = false;
+    $("[data-stage]", E.root).classList.remove("exact");
+    E.player.show(true);
+    seek(E.time);
+    showPreviewState();
+    showPlaybackState();
   }
 
   // ------------------------------------------------------------------ layout
@@ -179,12 +258,15 @@
         <span class="state warn" data-stale hidden>${esc(T.editor.previewStale)}</span>
         <span class="state" data-locked hidden>${esc(T.editor.playingLocked)}</span>
         <div class="grow"></div>
+        <span class="state" data-live-chip hidden></span>
         <span class="state" data-preview-chip hidden></span>
+        <button class="btn small" data-exact title="${esc(T.editor.exactTitle)}">${esc(T.editor.exact)}</button>
+        <button class="btn small" data-live hidden>${esc(T.editor.backToLive)}</button>
         <span class="state busy" data-export-chip hidden></span>
         <button class="btn primary small" data-export>${icon("download", 15)}${esc(T.exporting.button)}</button>
       </header>
       <section class="ed-viewer">
-        <div class="viewer-bar"><b>${esc(T.editor.viewerTitle)}</b><span data-format></span></div>
+        <div class="viewer-bar"><b>${esc(T.editor.viewerTitle)}</b><span data-format></span><span class="approx" data-approximate hidden>${esc(T.editor.approximateTag)}</span></div>
         <div class="stage-wrap" data-stage-wrap>
           <div class="stage" data-stage>
             <video data-video playsinline preload="auto"></video>
@@ -557,7 +639,7 @@
     E.selected = null;
     const cue = E.captions.find((entry) => entry.cue_id === cueId);
     if (jump && cue) {
-      E.video.pause();
+      clock().pause();
       seek(cue.start + 0.01);
     }
     drawLanes();
@@ -628,7 +710,7 @@
       if (answer.needs) throw new Error(T.captions.transcribeFailed);
       await loadProject();
       drawAll();
-      requestPreview();
+      refreshPlayback();
       toast(answer.count ? T.captions.made(answer.count) : T.captions.none, answer.count ? "ok" : "error");
     } catch (error) {
       if (/version conflict/.test(error.message)) {
@@ -730,7 +812,7 @@
       <div class="foot"><button class="btn" data-back>${esc(T.exporting.goBack)}</button>
         <button class="btn primary" data-ahead>${esc(T.exporting.goAhead)}</button></div>`, (box, close) => {
       box.querySelectorAll("[data-jump]").forEach((button) => {
-        button.onclick = () => { close(); E.video.pause(); seek(num(button.dataset.jump)); followPlayhead(); };
+        button.onclick = () => { close(); clock().pause(); seek(num(button.dataset.jump)); followPlayhead(); };
       });
       $("[data-back]", box).onclick = close;
       // Going ahead allows exactly the kinds that were shown, nothing the user never saw.
@@ -869,21 +951,22 @@
 
   function seek(seconds) {
     E.time = Math.max(0, Math.min(seconds, E.project.duration));
-    if (E.shownUrl && Math.abs(E.video.currentTime - E.time) > 0.01) E.video.currentTime = E.time;
+    clock().seek(E.time);
     drawPlayhead();
     drawTime();
   }
 
   function togglePlay() {
-    if (!E.shownUrl || E.drag) return;
-    if (E.video.paused) E.video.play().catch(() => {});
-    else E.video.pause();
+    const playback = clock();
+    if (!playback.ready || E.drag) return;
+    if (playback.paused) playback.play();
+    else playback.pause();
   }
 
   function tick() {
     if (!E) return;
-    if (!E.video.paused && !E.drag) {
-      E.time = E.video.currentTime;
+    if (!clock().paused && !E.drag) {
+      E.time = clock().time;
       drawPlayhead();
       drawTime();
       followPlayhead();
@@ -897,16 +980,17 @@
   }
 
   function setPlayIcon() {
-    $("[data-play]", E.root).innerHTML = svg(E.video.paused ? "play" : "pause", 18);
+    $("[data-play]", E.root).innerHTML = svg(clock().paused ? "play" : "pause", 18);
+    $("[data-play]", E.root).disabled = !clock().ready;
     const locked = playing();
     $(".editor", E.root).classList.toggle("playing", locked);
     $("[data-locked]", E.root).hidden = !locked;
   }
 
   function replay() {
-    if (!E.shownUrl) return;
+    if (!clock().ready) return;
     seek(0);
-    E.video.play().catch(() => {});
+    clock().play();
   }
 
   // ------------------------------------------------------------------ source view while dragging a cut
@@ -914,7 +998,7 @@
   function showSource(assetId, at, keptAfter) {
     const stage = $("[data-stage]", E.root);
     stage.classList.add("source-view");
-    E.video.pause();
+    clock().pause();
     clearTimeout(E.sourceTimer);
     E.sourceTimer = setTimeout(() => {
       $("[data-source]", E.root).src = thumbUrl(assetId, at, 360);
@@ -965,7 +1049,7 @@
     const handle = event.target.closest("[data-handle]");
     if (!clipElement) {
       E.drag = { kind: "seek" };
-      E.video.pause();
+      clock().pause();
       seek(timeAt(event));
     } else {
       const trackId = clipElement.dataset.track, clipId = clipElement.dataset.clip;
@@ -1104,8 +1188,8 @@
     if (event.key === "Escape" && E.drag) { cancelDrag(); return; }
     const step = event.shiftKey ? 1 : 1 / 30;
     if (event.key === " ") { event.preventDefault(); togglePlay(); }
-    else if (event.key === "ArrowLeft") { event.preventDefault(); E.video.pause(); seek(E.time - step); }
-    else if (event.key === "ArrowRight") { event.preventDefault(); E.video.pause(); seek(E.time + step); }
+    else if (event.key === "ArrowLeft") { event.preventDefault(); clock().pause(); seek(E.time - step); }
+    else if (event.key === "ArrowRight") { event.preventDefault(); clock().pause(); seek(E.time + step); }
     else if (event.key === "Home") seek(0);
     else if (event.key === "End") seek(E.project.duration);
     else if (event.key.toLowerCase() === "s" && !event.ctrlKey) split();
@@ -1124,7 +1208,7 @@
         if (E && version !== E.project.version && version !== E.ownVersion) {
           await loadProject();
           drawAll();
-          requestPreview();
+          refreshPlayback();
           toast(T.editor.aiUpdated);
         }
       } catch { /* the next look will try again */ }
@@ -1138,7 +1222,9 @@
     if (!E) return;
     cancelAnimationFrame(E.frame);
     clearTimeout(E.previewTimer);
+    clearTimeout(E.describeTimer);
     clearTimeout(E.watchTimer);
+    E.player.destroy();
     clearTimeout(E.exportTimer);
     document.removeEventListener("keydown", onKey);
     window.removeEventListener("resize", E.onResize);
@@ -1155,13 +1241,24 @@
     E = { id, root: page, pps: 40, time: 0, waves: {}, words: {}, selected: null };
     E.video = $("[data-video]", page);
     E.scroll = $("[data-scroll]", page);
+    E.mode = "live";
+    E.player = Player.create($("[data-stage]", page), () => { if (E) setPlayIcon(); });
+    const video = E.video;
+    E.exact = {
+      get ready() { return Boolean(E.shownUrl); },
+      get paused() { return video.paused; },
+      get time() { return video.currentTime; },
+      play() { video.play().catch(() => {}); },
+      pause() { video.pause(); },
+      seek(seconds) { if (E.shownUrl && Math.abs(video.currentTime - seconds) > 0.01) video.currentTime = seconds; },
+    };
     await loadProject();
     if (!E.project.name) renameProject(E.project, async () => { await loadProject(); drawAll(); }, T.project.needsName);
 
     $("[data-play]", page).onclick = togglePlay;
     $("[data-replay]", page).onclick = replay;
     page.querySelectorAll("[data-step]").forEach((button) => {
-      button.onclick = () => { E.video.pause(); seek(E.time + num(button.dataset.step) / 30); };
+      button.onclick = () => { clock().pause(); seek(E.time + num(button.dataset.step) / 30); };
     });
     E.video.addEventListener("play", setPlayIcon);
     E.video.addEventListener("pause", setPlayIcon);
@@ -1172,6 +1269,8 @@
     $("[data-make-captions]", page).onclick = makeCaptions;
     $("[data-add-music]", page).onclick = addMusic;
     $("[data-export]", page).onclick = exportDialog;
+    $("[data-exact]", page).onclick = askExact;
+    $("[data-live]", page).onclick = showLive;
     page.querySelectorAll("[data-zoom]").forEach((button) => { button.onclick = () => setZoom(E.pps * (num(button.dataset.zoom) > 0 ? 1.5 : 1 / 1.5)); });
     $("[data-zoom-range]", page).oninput = (event) => setZoom(2 * Math.pow(200, num(event.target.value) / 100));
     $("[data-fit]", page).onclick = fitZoom;
@@ -1202,7 +1301,7 @@
     drawAll();
     fitZoom();
     setPlayIcon();
-    requestPreview();
+    refreshPlayback();
     api(`/api/projects/${encodeURIComponent(id)}/export`).then((state) => {
       if (!E || !state.job_id) return;
       // One already finished was announced when it finished; only a running one is followed.

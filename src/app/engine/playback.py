@@ -24,7 +24,7 @@ from app.engine.builder import (
     overlay_box,
 )
 from app.engine.reframe import Framing
-from app.engine.subtitles import caption_geometry, place_cues
+from app.engine.subtitles import drawn_captions, place_cues
 from app.models.media import Asset
 from app.models.timeline import Clip, Project, TrackType
 from app.storage.history import fingerprint
@@ -262,8 +262,6 @@ def describe(
             "id": track.id, "type": track.track_type.value, "base": base is not None and track.id == base.id,
             "duck": track.duck_under_speech and track.id not in voices, "voice": track.id in voices, "clips": clips,
         })
-    geometry = caption_geometry(project.width, project.height, project.caption_style)
-    placed = place_cues(project, project.subtitles)
     return {
         "width": project.width, "height": project.height, "fps": float(fps),
         "duration": _seconds(project.duration), "tracks": tracks,
@@ -274,17 +272,8 @@ def describe(
             "depth_db": DUCK_DEPTH_DB, "attack": DUCK_ATTACK_SECONDS, "release": DUCK_RELEASE_SECONDS,
             "hold": DUCK_HOLD_SECONDS,
         },
-        "captions": {
-            "style": project.caption_style.model_dump(mode="json"),
-            "geometry": {"font_size": geometry.font_size, "margin_h": geometry.margin_h,
-                         "margin_v": geometry.margin_v, "outline": geometry.outline},
-            "cues": [
-                {"start": _seconds(cue.start), "end": _seconds(cue.end), "text": cue.text,
-                 "secondary": cue.secondary, "speaker": cue.speaker,
-                 "words": [[_seconds(word.start), _seconds(word.end), word.text] for word in cue.words]}
-                for cue in placed
-            ],
-        },
+        "captions": drawn_captions(place_cues(project, project.subtitles), project.width, project.height,
+                                   project.caption_style),
         "gain_db": prepared.gain_db,
         "loudness_target": LOUDNESS_TARGET,
         "approximate": {
