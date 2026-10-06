@@ -105,3 +105,47 @@ def test_caches_give_room_back_oldest_first_when_the_disk_runs_low(tmp_path: Pat
     assert freed == 1000 and not old.exists() and new.exists()
     # With room to spare nothing goes.
     assert housekeeping.give_cache_back(str(tmp_path), set(), floor=0) == 0 and new.exists()
+
+
+def test_the_ai_files_footage_in_folders_and_deletes_nothing(media: Path) -> None:
+    import asyncio
+    from fastmcp import Client
+
+    asset = server.import_asset(str(media / "tall.mp4"))["id"]
+
+    async def call(arguments):
+        async with Client(server.mcp) as client:
+            return (await client.call_tool("organize_library", arguments)).structured_content
+
+    # By file name, the way the AI reads the library.
+    done = asyncio.run(call({"steps": [{"action": "create_folder", "name": "整理測試直式", "asset_ids": ["tall.mp4"]}]}))
+    folder = next(item for item in done["folders"] if item["name"] == "整理測試直式")
+    assert server.repo.folder_of("assets")[asset] == folder["id"]
+    assert "整理測試直式" in done["done"][0]
+    # There is no way for it to delete a folder or a file.
+    assert not any(step for step in ("delete_folder", "delete") if step in str(server.LibraryStep))
+
+
+def test_files_move_on_disk_only_once_agreed_and_never_over_another(media: Path, tmp_path: Path) -> None:
+    import shutil
+
+    source = tmp_path / "拍攝" / "要搬的.mp4"
+    source.parent.mkdir()
+    shutil.copy(media / "wide.mp4", source)
+    asset = server.import_asset(str(source))["id"]
+    project = build_project([video_track(), insert("a", asset, 0, 2)], name="搬檔")
+    target = tmp_path / "整理好"
+    target.mkdir()
+    (target / "要搬的.mp4").write_bytes(b"already here")
+
+    moves = [server.FileMove(asset_id=asset, to_folder=str(target))]
+    planned = server.move_files(moves)["planned"][0]
+    # Nothing moves without agreement, and the taken name gets a number.
+    assert source.exists() and planned["numbered"] and planned["to"].endswith("要搬的 (2).mp4")
+    assert planned["projects"] == ["搬檔"]
+
+    moved = server.move_files(moves, confirm=True)["moved"][0]
+    assert not source.exists() and (target / "要搬的.mp4").read_bytes() == b"already here"
+    assert server.repo.get_assets([asset])[asset].path == moved["to"] == str(target / "要搬的 (2).mp4")
+    # The project still plays it, from where it went.
+    assert server.playback_of(server.repo.get_project(project))["tracks"][0]["clips"][0]["asset_id"] == asset

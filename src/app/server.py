@@ -9,7 +9,7 @@ import uuid
 from decimal import Decimal
 from fractions import Fraction
 from pathlib import Path
-from typing import Annotated, Callable, Dict, Iterable, List, Literal, Mapping, Optional, Sequence, Tuple
+from typing import Annotated, Callable, Dict, Iterable, List, Literal, Mapping, Optional, Sequence, Tuple, Union
 
 import numpy as np
 from fastmcp import FastMCP
@@ -20,7 +20,7 @@ from fastmcp.server.transforms import ResourcesAsTools
 from fastmcp.tools import ToolResult
 from fastmcp.utilities.types import Image
 from mcp.types import TextContent
-from pydantic import Field, TypeAdapter
+from pydantic import BaseModel, Field, TypeAdapter
 from app.models.media import Asset, Measured, MediaAnalysis, Span, SpeakerTurn, Transcript
 from app.models.plan import (
     EditPlan, PlanAmendment, apply_amendment, describe_amendment, short_clip_ids, whole_clip_id, with_whole_clip_ids,
@@ -317,7 +317,8 @@ DOING = {
     "apply_edits": "修改時間軸", "compile_plan": "依計畫剪接", "save_plan": "存計畫", "amend_plan": "修改計畫",
     "revert_plan": "計畫回到舊版", "copy_plan": "複製計畫", "generate_subtitles": "上字幕",
     "create_project": "建立專案", "import_asset": "加入素材", "import_folder": "加入資料夾", "edit_asset": "寫素材備註",
-    "restore_version": "回到舊版本", "branch_project": "開分支",
+    "restore_version": "回到舊版本", "branch_project": "開分支", "mark_version": "標記版本",
+    "organize_library": "整理素材庫", "move_files": "搬動檔案",
 }
 # What the AI programs call themselves when they connect, as a person would name them.
 CLIENT_NAMES = {
@@ -673,6 +674,195 @@ def edit_asset(asset_id: str, notes: str, note: str = "") -> dict:
     asset = _get_asset(asset_id).model_copy(update={"notes": notes.strip()})
     repo.save_asset(asset)
     return {"id": asset.id, "name": os.path.basename(asset.path), "notes": asset.notes}
+
+class CreateFolder(BaseModel):
+    """Make a folder in the library, and put files in it."""
+
+    action: Literal["create_folder"]
+    name: str = Field(..., description="What to call it, in the user's words")
+    parent_id: Optional[str] = Field(default=None, description="The folder it goes in; omit for the top")
+    asset_ids: List[str] = Field(default_factory=list, description="Files to put in it straight away")
+
+class RenameFolder(BaseModel):
+    """Rename a folder of the library."""
+
+    action: Literal["rename_folder"]
+    folder_id: str
+    name: str
+
+class MoveFolder(BaseModel):
+    """Put a folder inside another, or at the top."""
+
+    action: Literal["move_folder"]
+    folder_id: str
+    parent_id: Optional[str] = Field(default=None, description="The folder to put it in; omit for the top")
+
+class FileAssets(BaseModel):
+    """Put files in a folder, or back at the top."""
+
+    action: Literal["file_assets"]
+    asset_ids: List[str]
+    folder_id: Optional[str] = Field(default=None, description="The folder; omit for the top")
+
+LibraryStep = Annotated[Union[CreateFolder, RenameFolder, MoveFolder, FileAssets], Field(discriminator="action")]
+
+@mcp.tool()
+def organize_library(steps: List[LibraryStep], note: str = "") -> dict:
+    """Sort the library into folders: make, rename and move folders, and file the footage in them.
+
+    Folders live only in clip-mcp — no file on disk moves — so this is yours
+    to do when it helps, without asking first; then tell the user in a
+    sentence what you made and filed. Nothing is ever deleted: footage the
+    user does not want goes in a folder called 歸檔. The steps run in order
+    and are kept as one version of the library. To move the files themselves
+    on disk, see `move_files`.
+
+    Args:
+        steps: What to do, in order. `create_folder` can file footage in the
+            new folder at once, since its ID is not known before.
+        note: The user's words for why, kept in the library's history.
+
+    Returns:
+        `done`, each step in words, and `folders`, every folder now.
+
+    Raises:
+        ValueError: If a folder or file is unknown, or a name is taken.
+    """
+    batch = current_batch()
+    if batch is not None and not batch.note and note:
+        batch.note = note
+    names = {folder["id"]: folder["name"] for folder in repo.list_folders("assets")}
+    done = []
+    for step in steps:
+        try:
+            if isinstance(step, CreateFolder):
+                made = repo.create_folder(uuid.uuid4().hex, "assets", step.name, step.parent_id)
+                names[made["id"]] = made["name"]
+                if step.asset_ids:
+                    repo.file_items("assets", [_get_asset(asset_id).id for asset_id in step.asset_ids], made["id"])
+                done.append(f"新增資料夾「{made['name']}」" + (f"，放進 {len(step.asset_ids)} 個檔案" if step.asset_ids else ""))
+            elif isinstance(step, RenameFolder):
+                old = names.get(step.folder_id, step.folder_id)
+                repo.rename_folder(step.folder_id, step.name)
+                names[step.folder_id] = step.name
+                done.append(f"資料夾「{old}」改名為「{step.name}」")
+            elif isinstance(step, MoveFolder):
+                repo.move_folder(step.folder_id, step.parent_id)
+                done.append(f"把資料夾「{names.get(step.folder_id, step.folder_id)}」移到"
+                            + (f"「{names.get(step.parent_id, step.parent_id)}」裡" if step.parent_id else "最上層"))
+            else:
+                repo.file_items("assets", [_get_asset(asset_id).id for asset_id in step.asset_ids], step.folder_id)
+                done.append(f"把 {len(step.asset_ids)} 個檔案放進"
+                            + (f"「{names.get(step.folder_id, step.folder_id)}」" if step.folder_id else "最上層"))
+        except LookupError as exc:
+            raise ValueError(str(exc).strip("'\"")) from exc
+    if batch is not None and not batch.note and done:
+        batch.note = "；".join(done)[:72]
+    return {"done": done, "folders": repo.list_folders("assets")}
+
+class FileMove(BaseModel):
+    """One file to move on disk."""
+
+    asset_id: str
+    to_folder: str = Field(..., description="The folder on disk to move it to, as a full path; made if missing")
+    name: Optional[str] = Field(default=None, description="A new file name; omit to keep its own. The extension "
+                                                          "is kept when left off")
+
+def _free_target(folder: str, name: str, taken: set) -> str:
+    """Where a file can go without replacing anything: its name, or its name with a number added."""
+    stem, extension = os.path.splitext(name)
+    candidate, number = os.path.join(folder, name), 2
+    while os.path.exists(candidate) or os.path.normcase(candidate) in taken:
+        candidate = os.path.join(folder, f"{stem} ({number}){extension}")
+        number += 1
+    return candidate
+
+def _planned_moves(moves: List[FileMove]) -> List[dict]:
+    """Where each file would go, and what that touches."""
+    own = [os.path.normcase(os.path.abspath(folder)) for folder in (WORKSPACE_DIR, str(output_dir()))]
+    users = {}
+    for project in repo.list_projects():
+        for track in project.tracks:
+            for clip in track.clips:
+                users.setdefault(clip.asset_id, set()).add(project.name or project.id)
+    taken: set = set()
+    planned = []
+    for move in moves:
+        asset = _get_asset(move.asset_id)
+        if not os.path.isabs(move.to_folder):
+            raise ValueError(f"{move.to_folder} is not a full folder path")
+        folder = os.path.abspath(move.to_folder)
+        if any(os.path.normcase(folder).startswith(root) for root in own):
+            raise ValueError("footage is not moved into clip-mcp's own folders")
+        name = (move.name or os.path.basename(asset.path)).strip()
+        if not name or os.path.basename(name) != name:
+            raise ValueError(f"{name!r} is not a file name")
+        if not os.path.splitext(name)[1]:
+            name += os.path.splitext(asset.path)[1]
+        wanted = os.path.join(folder, name)
+        same = os.path.normcase(wanted) == os.path.normcase(asset.path)
+        target = asset.path if same else _free_target(folder, name, taken)
+        taken.add(os.path.normcase(target))
+        planned.append({
+            "asset_id": asset.id, "from": asset.path, "to": target, "missing": not os.path.exists(asset.path),
+            "already_there": same, "numbered": not same and target != wanted,
+            "new_folder": not os.path.isdir(folder),
+            "megabytes": round(os.path.getsize(asset.path) / 1e6, 1) if os.path.exists(asset.path) else 0,
+            "projects": sorted(users.get(asset.id, ())),
+        })
+    return planned
+
+@mcp.tool()
+def move_files(moves: List[FileMove], confirm: bool = False, note: str = "") -> dict:
+    """Move or rename footage on disk, keeping the library and every project pointing at it.
+
+    Moving a user's own files is theirs to agree to. Call without `confirm`
+    first: it moves nothing and says where each file would go. Read that back
+    — how many files, from where to where, any that get a number added — and
+    call again with `confirm` only once they agree. Nothing is overwritten: a
+    name already taken gets ` (2)` added. Nothing is deleted: footage they do
+    not want goes to an 歸檔 folder like any other move. Projects keep
+    working, since the library follows each file to where it went.
+
+    Args:
+        moves: Each file and the folder to move it to, with a new name if wanted.
+        confirm: Carry it out.
+        note: The user's words for why, kept in the library's history.
+
+    Returns:
+        Without `confirm`: `planned`, each with `from`, `to`, `numbered`
+        (a number was added), `new_folder`, `megabytes`, the `projects`
+        using it, and `missing` for a file not found where the library has
+        it. With it: `moved` and `not_moved` with the reason, such as a file
+        open in another program.
+
+    Raises:
+        ValueError: If a file is not in the library, a folder is not a full
+            path or is one of clip-mcp's own.
+    """
+    planned = _planned_moves(moves)
+    if not confirm:
+        return {"planned": planned}
+    batch = current_batch()
+    if batch is not None and not batch.note:
+        batch.note = note or f"搬動了 {len(planned)} 個檔案"
+    moved, not_moved = [], []
+    for plan in planned:
+        if plan["already_there"] or plan["missing"]:
+            not_moved.append({"from": plan["from"], "why": "already there" if plan["already_there"] else "file not found"})
+            continue
+        # Worked out again at the moment of moving: a file may have appeared there since the plan.
+        target = _free_target(os.path.dirname(plan["to"]), os.path.basename(plan["to"]), set())
+        try:
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            shutil.move(plan["from"], target)
+        except OSError as exc:
+            not_moved.append({"from": plan["from"], "why": str(exc)})
+            continue
+        asset = _get_asset(plan["asset_id"])
+        repo.save_asset(asset.model_copy(update={"path": target}))
+        moved.append({"from": plan["from"], "to": target})
+    return {"moved": moved, "not_moved": not_moved}
 
 @mcp.tool()
 def import_folder(folderpath: str, recursive: bool = False) -> dict:

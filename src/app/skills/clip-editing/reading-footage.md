@@ -160,6 +160,17 @@ also write these into file names (`0901(請消音).mp4`); follow those the same
 way, and ask whether to keep them as notes with `edit_asset`, where the
 editor shows them too.
 
+### Keeping the library tidy
+
+The library's folders are clip-mcp's own, so sorting footage into them is
+yours to do when it helps — by shoot, by date, by what is in it — with
+`organize_library`; say afterwards in a sentence what you made and filed.
+Footage they do not want goes in an 歸檔 folder, never out of the library.
+Moving or renaming the files themselves on disk is the user's to agree to:
+`move_files` without `confirm` says where each would go, read that back, and
+confirm only once they agree. Nothing is overwritten or deleted, and every
+project keeps playing the file from where it went.
+
 ## Requests about content
 
 | Request | Operations |

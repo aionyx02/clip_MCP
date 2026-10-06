@@ -749,9 +749,14 @@ def _finished_file(job_id: str) -> Optional[str]:
     return None
 
 async def reveal(request: Request) -> Response:
-    """Show a finished file in File Explorer, selected, or play it in the system's player."""
+    """Show a finished file or a file of the library in File Explorer, selected, or play it in the system's player."""
     body = await request.json()
-    path = _finished_file(str(body.get("job_id", "")))
+    if body.get("asset_id"):
+        # By the library's own record, so the page can only ever open a file the user imported.
+        found = _asset_or_none(str(body["asset_id"]))
+        path = found.path if found is not None else None
+    else:
+        path = _finished_file(str(body.get("job_id", "")))
     if not path:
         return _error("that file is not there", 404)
     if body.get("play"):

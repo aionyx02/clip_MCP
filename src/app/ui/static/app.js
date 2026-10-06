@@ -482,8 +482,9 @@ async function mediaPage(page, folderId) {
     head: () => head(T.media.title, T.media.subtitle,
       `${newFolderButton()}<button class="btn" data-pick="folder">${icon("folder")}${esc(T.media.addFolder)}</button>
        <button class="btn primary" data-pick="files">${icon("plus")}${esc(T.media.addFiles)}</button>`),
-    wire: (root, refresh) => { wireImport(root, refresh, folderId); wireNotes(root, refresh); },
-    tools: (asset) => `<button class="tool" data-notes="${esc(asset.id)}" title="${esc(T.media.notes)}">${icon("edit")}</button>`,
+    wire: (root, refresh) => { wireImport(root, refresh, folderId); wireNotes(root, refresh); wireReveal(root); },
+    tools: (asset) => `<button class="tool" data-notes="${esc(asset.id)}" title="${esc(T.media.notes)}">${icon("edit")}</button>`
+      + (asset.missing ? "" : `<button class="tool" data-reveal="${esc(asset.id)}" title="${esc(T.media.reveal)}">${icon("folder")}</button>`),
     notes: `<div class="callout">${icon("info")}<span>${esc(T.media.libraryOnly)}</span></div>
       <div class="callout warn">${icon("alert")}<span>${esc(T.media.moveWarning)}</span></div>`,
     empty: `<div class="callout">${icon("info")}<span>${esc(T.media.libraryOnly)}</span></div>
@@ -501,6 +502,17 @@ async function mediaPage(page, folderId) {
         ${asset.notes ? `<div class="card-notes" title="${esc(asset.notes)}">${esc(asset.notes)}</div>` : ""}</div></div>`;
     },
     remove: removeAssets,
+  });
+}
+
+// Where a file of the library sits on disk: File Explorer opens on it, selected.
+function wireReveal(page) {
+  page.querySelectorAll("[data-reveal]").forEach((button) => {
+    button.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      api("/api/reveal", { asset_id: button.dataset.reveal }).catch((error) => toast(error.message, "error"));
+    });
   });
 }
 

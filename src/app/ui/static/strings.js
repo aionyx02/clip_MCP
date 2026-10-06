@@ -79,6 +79,7 @@ window.T = {
     notesPlaceholder: "這個檔案該注意的地方",
     notesSave: "儲存",
     notesSaved: "已儲存備註",
+    reveal: "在資料夾中顯示",
     // Said wherever files come in: the AI, too, can only cut what is in the library.
     libraryOnly: "只有素材庫裡的檔案能放進專案，AI 也只能使用素材庫裡的檔案。要用其他影片或音樂，請先按「加入」把它加進素材庫；在 AI 對話中給它檔案路徑時，它也會先把檔案加進素材庫。",
     noSound: "無聲",
