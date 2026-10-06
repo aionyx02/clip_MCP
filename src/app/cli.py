@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import List, Optional
 
 from app import clients, workspace
+from app.engine.ffmpeg import hidden_window_flags
 
 def _version() -> str:
     """Read the installed version.
@@ -41,7 +42,8 @@ def _tool_version(name: str) -> str:
     if path is None:
         return "not found on PATH — install it, or nothing can be analyzed or rendered"
     try:
-        first = subprocess.run([path, "-version"], capture_output=True, text=True, timeout=30).stdout.splitlines()
+        first = subprocess.run([path, "-version"], capture_output=True, text=True, timeout=30,
+                               creationflags=hidden_window_flags()).stdout.splitlines()
     except (OSError, subprocess.SubprocessError):
         return f"{path} (would not run)"
     return f"{path} ({first[0] if first else 'unknown version'})"
