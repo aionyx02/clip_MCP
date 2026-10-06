@@ -153,6 +153,8 @@ class History:
         self.root = os.path.abspath(root)
         self._snapshot = snapshot
         self._lock = FileLock(self.root + ".lock")
+        # What `counts` last found, by folder, with the commit it was found at.
+        self._counted: Dict[str, Tuple[str, Dict[str, int]]] = {}
 
     @contextmanager
     def step(self, author: str, note: str = "", doing: str = "") -> Iterator[Batch]:
@@ -404,6 +406,40 @@ class History:
                 if entry.commit.id.decode("ascii").startswith(wanted):
                     return entry.commit.id
         raise KeyError(f"there is no version {commit}")
+
+    def counts(self, prefix: str) -> Dict[str, int]:
+        """How many versions each file in a folder has, by the ID its name ends with, in one walk.
+
+        Remembered until the next commit, since the projects page asks for every
+        project at once each time it is drawn.
+
+        Args:
+            prefix: The folder, such as `projects/`.
+
+        Returns:
+            The number of commits that changed each, by ID.
+        """
+        head = self.head()
+        if head is None:
+            return {}
+        cached = self._counted.get(prefix)
+        if cached and cached[0] == head:
+            return cached[1]
+        folder = prefix.encode("utf-8")
+        counted: Dict[str, int] = {}
+        with Repo(self.root) as repo:
+            for entry in repo.get_walker(paths=[folder.rstrip(b"/")]):
+                seen = set()
+                for change in entry.changes():
+                    for one in (change if isinstance(change, list) else [change]):
+                        for side in (one.old, one.new):
+                            if side is not None and side.path and side.path.startswith(folder):
+                                stem = side.path.decode("utf-8").rsplit("/", 1)[-1].removesuffix(".json")
+                                seen.add(stem[-36:])
+                for found in seen:
+                    counted[found] = counted.get(found, 0) + 1
+        self._counted[prefix] = (head, counted)
+        return counted
 
     def head(self) -> Optional[str]:
         """The newest commit's ID, or None before anything was kept."""

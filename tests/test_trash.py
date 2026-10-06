@@ -1,0 +1,107 @@
+"""A deleted project waits in the trash, a video's other versions can be let go, and caches give room back."""
+
+import os
+import time
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+import pytest
+from starlette.testclient import TestClient
+
+from app import server
+from app.models.job import Job, JobKind, JobStatus
+from app.storage import housekeeping
+from helpers import build_project, edit, insert, video_track
+
+
+@pytest.fixture
+def client() -> TestClient:
+    from app.ui import app as editor
+
+    return TestClient(editor.create_app())
+
+
+def finished(project_id: str, version: int, name: str) -> Path:
+    """A finished video of one version, as a full render leaves it."""
+    path = Path(server.output_dir()) / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"finished " + name.encode("utf-8"))
+    server.repo.add_job(Job(kind=JobKind.RENDER, project_id=project_id, project_version=version,
+                            status=JobStatus.COMPLETED, output_path=str(path)))
+    return path
+
+
+def test_a_deleted_project_waits_in_the_trash_and_comes_back_where_it_was(client: TestClient) -> None:
+    project = server.create_project(name="垃圾桶裡的")["id"]
+    folder = client.post("/api/folders", json={"action": "create", "kind": "projects", "name": "放回這裡"}).json()
+    client.post("/api/file", json={"kind": "projects", "ids": [project], "folder_id": folder["id"]})
+
+    assert client.post("/api/projects/delete", json={"ids": [project]}).status_code == 200
+    assert server.repo.get_project(project) is None
+    listed = client.get("/api/trash").json()
+    waiting = next(item for item in listed["items"] if item["project_id"] == project)
+    assert waiting["kind"] == "project" and waiting["days_left"] == listed["keep_days"] == 30
+
+    back = client.post("/api/trash", json={"key": waiting["key"]}).json()
+    assert back["project_id"] == project and server.repo.get_project(project).name == "垃圾桶裡的"
+    assert server.repo.folder_of("projects")[project] == folder["id"]
+    assert not any(item["key"] == waiting["key"] for item in client.get("/api/trash").json()["items"])
+
+
+def test_the_trash_lets_go_after_thirty_days(tmp_path: Path) -> None:
+    kept = housekeeping.put_in_trash(str(tmp_path), "project", "a" * 36, "很久以前", {"project.json": b"{}"}, [])
+    housekeeping.empty_old_trash(str(tmp_path), now=datetime.now(timezone.utc) + timedelta(days=29))
+    assert [item.key for item in housekeeping.in_trash(str(tmp_path))] == [kept.key]
+    housekeeping.empty_old_trash(str(tmp_path), now=datetime.now(timezone.utc) + timedelta(days=31))
+    assert housekeeping.in_trash(str(tmp_path)) == []
+
+
+def test_other_versions_go_but_the_current_and_the_starred_stay(client: TestClient, media: Path) -> None:
+    asset = server.import_asset(str(media / "wide.mp4"))["id"]
+    project = build_project([video_track(), insert("a", asset, 0, 3)], name="留下哪些")
+    first = server.repo.get_project(project).version
+    old = finished(project, first, "留下哪些 舊版.mp4")
+    edit(project, [{"action": "rename_project", "name": "留下哪些"}, insert("b", asset, 4, 6)])
+    current = finished(project, server.repo.get_project(project).version, "留下哪些 現在.mp4")
+
+    found = client.get(f"/api/projects/{project}/storage").json()
+    assert found["exported"] == 2 and [item["path"] for item in found["other_outputs"]] == [str(old)]
+
+    # The name has to be typed right; then the old one goes to the trash and the current one stays.
+    assert client.post(f"/api/projects/{project}/storage/trim", json={"name": "留下"}).status_code == 400
+    assert old.exists()
+    trimmed = client.post(f"/api/projects/{project}/storage/trim", json={"name": "留下哪些"}).json()
+    assert trimmed["trashed"] == 1 and not old.exists() and current.exists()
+    # Its version stays in the history, no longer exported.
+    assert client.get(f"/api/projects/{project}/storage").json()["exported"] == 1
+
+    # From the trash it goes back where it was.
+    waiting = next(item for item in client.get("/api/trash").json()["items"]
+                   if item["project_id"] == project and item["kind"] == "outputs")
+    client.post("/api/trash", json={"key": waiting["key"]})
+    assert old.exists()
+
+
+def test_a_starred_version_keeps_its_finished_video(kept_history, client: TestClient, media: Path) -> None:
+    asset = server.import_asset(str(media / "wide.mp4"))["id"]
+    project = build_project([video_track(), insert("a", asset, 0, 3)], name="標星號的")
+    starred = server.project_history(project)["versions"][0]["commit"]
+    finished(project, server.repo.get_project(project).version, "標星號的 星號.mp4")
+    edit(project, [insert("b", asset, 4, 6)])
+    server.mark_version(project, starred, "starred")
+    assert client.get(f"/api/projects/{project}/storage").json()["other_outputs"] == []
+
+
+def test_caches_give_room_back_oldest_first_when_the_disk_runs_low(tmp_path: Path) -> None:
+    proxies = tmp_path / "cache" / "proxies"
+    proxies.mkdir(parents=True)
+    old, new = proxies / "old.mp4", proxies / "new.mp4"
+    for path, age in ((old, 7200), (new, 10)):
+        path.write_bytes(b"x" * 1000)
+        os.utime(path, (time.time() - age, time.time() - age))
+    # A floor just above what is free: one file is enough.
+    free = __import__("shutil").disk_usage(tmp_path).free
+    freed = housekeeping.give_cache_back(str(tmp_path), set(), floor=free + 1, headroom=0)
+    assert freed == 1000 and not old.exists() and new.exists()
+    # With room to spare nothing goes.
+    assert housekeeping.give_cache_back(str(tmp_path), set(), floor=0) == 0 and new.exists()

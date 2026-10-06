@@ -207,13 +207,36 @@
         <a href="#/project/${encodeURIComponent(parent.project_id)}">${esc(T.versions.openParent)}</a></p>` : ""}
       ${E.viewing ? `<div class="vviewing"><span>${esc(T.versions.viewing(E.viewing.what))}</span><button class="btn small" data-now>${esc(T.versions.backToNow)}</button></div>` : ""}
       <ol class="vgraph">${list || `<p class="hint">${esc(T.versions.none)}</p>`}</ol>
-      <div class="vdetail" data-detail></div>`;
+      <div class="vdetail" data-detail></div>
+      <div class="vdisk" data-disk></div>`;
     panel.querySelectorAll("[data-node]").forEach((item) => {
       item.onclick = () => chooseVersion(item.dataset.branch || E.id, item.dataset.node);
     });
     const now = $("[data-now]", panel);
     if (now) now.onclick = () => viewVersion(null);
     drawVersionDetail($("[data-detail]", panel));
+    drawDisk($("[data-disk]", panel));
+  }
+
+  // What this video takes on disk, and the one button that lets its other versions go.
+  async function drawDisk(box) {
+    let disk;
+    try { disk = await api(`/api/projects/${encodeURIComponent(E.id)}/storage`); } catch { return; }
+    if (!E || !box.isConnected) return;
+    const size = (megabytes) => (megabytes >= 1000 ? `${(megabytes / 1000).toFixed(1)} GB` : `${megabytes.toFixed(megabytes < 10 ? 1 : 0)} MB`);
+    box.innerHTML = `<div class="label">${esc(T.versions.diskTitle)}</div>
+      <p class="hint">${esc(T.versions.disk(disk.versions, disk.exported, size(disk.outputs_megabytes), size(disk.cache_megabytes)))}</p>
+      <button class="btn small danger" data-trim ${disk.freeable_megabytes > 0 ? "" : "disabled"}>${esc(T.versions.trim(size(disk.freeable_megabytes)))}</button>`;
+    $("[data-trim]", box).onclick = async () => {
+      const name = await confirmTyped(T.versions.trimTitle, T.versions.trimBody(disk.other_outputs.length), E.project.name || "", T.versions.trimAction);
+      if (name === null) return;
+      try {
+        const done = await api(`/api/projects/${encodeURIComponent(E.id)}/storage/trim`, { name });
+        toast(T.versions.trimmed(size(done.freed_megabytes)));
+        await loadGraph(true);
+        drawInspector();
+      } catch (error) { toast(error.message, "error"); }
+    };
   }
 
   function findNode(projectId, commit) {

@@ -227,6 +227,7 @@ ul.points { margin: 0 0 10px; padding-left: 18px; color: var(--muted); display: 
 .vlane .vnode .rail::before { display: none; }
 .vbranch-name { font-size: 11.5px; color: var(--muted); }
 .vdetail { border-top: 1px solid var(--line); padding-top: 12px; display: flex; flex-direction: column; gap: 8px; }
+.vdisk { border-top: 1px solid var(--line); padding-top: 12px; display: flex; flex-direction: column; gap: 6px; align-items: flex-start; }
 .vmembers { list-style: none; margin: 0; padding: 0; max-height: 160px; overflow-y: auto; font-size: 11.5px; }
 .vmembers li { padding: 3px 4px; border-radius: 4px; cursor: pointer; color: var(--muted); }
 .vmembers li span { color: var(--faint); margin-right: 6px; }

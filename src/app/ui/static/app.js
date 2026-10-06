@@ -21,6 +21,7 @@ const ICONS = {
   trash: '<path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/>',
   stop: '<rect x="7" y="7" width="10" height="10" rx="1.5"/>',
   back: '<path d="M15 6l-6 6 6 6"/>',
+  undo: '<path d="M9 14L4 9l5-5"/><path d="M4 9h10a6 6 0 0 1 0 12h-3"/>',
   link: '<path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"/>',
   download: '<path d="M12 4v11M7 10l5 5 5-5M5 20h14"/>',
   edit: '<path d="M4 20h4L19 9l-4-4L4 16z"/><path d="M13 7l4 4"/>',
@@ -74,6 +75,22 @@ function confirmBox(title, body, action, danger = false) {
       <button class="btn ${danger ? "danger" : "primary"}" data-yes>${esc(action)}</button></div>`, (box, close) => {
       $("[data-no]", box).onclick = () => { close(); resolve(false); };
       $("[data-yes]", box).onclick = () => { close(); resolve(true); };
+    });
+  });
+}
+
+function confirmTyped(title, body, expected, action) {
+  return new Promise((resolve) => {
+    modal(`<h2>${esc(title)}</h2><p>${esc(body)}</p>
+      <div class="field"><label>${esc(T.confirmTyped.label(expected))}</label><input class="input" data-typed autocomplete="off"></div>
+      <div class="foot"><button class="btn" data-no>${esc(T.newProject.cancel)}</button>
+      <button class="btn danger" data-yes disabled>${esc(action)}</button></div>`, (box, close) => {
+      const typed = $("[data-typed]", box), yes = $("[data-yes]", box);
+      typed.focus();
+      typed.oninput = () => { yes.disabled = typed.value.trim() !== expected.trim(); };
+      typed.onkeydown = (event) => { if (event.key === "Enter" && !yes.disabled) { close(); resolve(typed.value.trim()); } };
+      $("[data-no]", box).onclick = () => { close(); resolve(null); };
+      yes.onclick = () => { close(); resolve(typed.value.trim()); };
     });
   });
 }
@@ -395,16 +412,18 @@ async function projectsPage(page, folderId) {
       return `<a class="card" href="#/project/${encodeURIComponent(project.id)}" data-drag="item" data-id="${esc(project.id)}" draggable="true">${extras}
         <div class="thumb">${picture}<span class="badge">${clock(project.duration)}</span></div>
         <div class="card-body"><div class="card-title">${esc(project.name || T.projects.untitled)}${project.name ? "" : ` <span class="badge warn">${esc(T.projects.nameIt)}</span>`}</div>
-        <div class="card-meta"><span>${esc(T.projects.shapes[shape])}</span><span class="dot-sep">${esc(T.projects.clips(project.clips))}</span>${missing}</div></div></a>`;
+        <div class="card-meta"><span>${esc(T.projects.shapes[shape])}</span><span class="dot-sep">${esc(T.projects.clips(project.clips))}</span>${project.versions ? `<span class="dot-sep">${esc(T.projects.versions(project.versions, project.branches))}</span>` : ""}${missing}</div></div></a>`;
     },
   });
 }
 
-// Deleting a project is the user's to do, here, and never the AI's: it has no tool for it.
+// Deleting a project is the user's to do, here, and never the AI's: it has no tool for it. It goes
+// to the trash, and the name has to be typed: one project, or how many when there are several.
 async function deleteProjects(ids, projects) {
   const named = projects.filter((project) => ids.includes(project.id));
   const what = named.length === 1 ? T.projects.deleteOne(named[0].name || T.projects.untitled) : T.projects.deleteMany(named.length);
-  if (!(await confirmBox(T.projects.deleteTitle(what), T.projects.deleteBody, T.projects.delete, true))) return false;
+  const expected = named.length === 1 ? (named[0].name || T.projects.untitled) : String(named.length);
+  if ((await confirmTyped(T.projects.deleteTitle(what), T.projects.deleteBody, expected, T.projects.delete)) === null) return false;
   try {
     const result = await api("/api/projects/delete", { ids });
     toast(T.projects.deleted(result.deleted.length));
@@ -648,17 +667,18 @@ async function aiPage(page) {
 const SWATCHES = ["#5b8def", "#7d8aa6", "#6f9f86", "#a3906a", "#8c7ca6", "#6a98a4", "#a07c7c", "#8a8a8f", "#97a06d"];
 
 async function storagePage(page) {
-  page.innerHTML = head(T.storage.title, T.storage.subtitle) + `<div data-usage><div class="row skeleton" style="height:120px"></div></div>`;
+  page.innerHTML = head(T.storage.title, T.storage.subtitle) + `<div data-usage><div class="row skeleton" style="height:120px"></div></div><div data-trash></div>`;
   const { items } = await api("/api/storage");
-  const inWorkspace = items.filter((item) => item.key !== "outputs");
+  const inWorkspace = items.filter((item) => item.key !== "outputs" && item.key !== "trash");
   const total = inWorkspace.reduce((sum, item) => sum + item.megabytes, 0);
   const colour = (index) => SWATCHES[index % SWATCHES.length];
   const hint = (item) => item.key === "outputs" ? T.storage.outputsHint : item.key === "legacy" ? T.storage.legacyHint
+    : item.key === "trash" ? T.storage.trashHint : item.key === "playback" ? T.storage.playbackHint
     : item.key.startsWith("model:") ? T.storage.modelHint : "";
   $("[data-usage]", page).innerHTML = `<div class="usage-total"><span style="color:var(--muted)">${esc(T.storage.total)}</span><strong>${bytes(total)}</strong></div>
     <div class="stack">${inWorkspace.map((item, index) => `<span title="${esc(item.label)}" style="width:${total ? (item.megabytes / total) * 100 : 0}%;background:${colour(index)}"></span>`).join("")}</div>
     <div class="list">${items.map((item, index) => `<div class="row">
-      <span class="swatch" style="background:${item.key === "outputs" ? "transparent;border:2px solid var(--muted)" : colour(index)}"></span>
+      <span class="swatch" style="background:${item.key === "outputs" || item.key === "trash" ? "transparent;border:2px solid var(--muted)" : colour(index)}"></span>
       <div class="grow"><strong>${esc(item.label)}</strong><div class="sub">${esc(hint(item))}</div></div>
       <span class="size">${bytes(item.megabytes)}</span>
       <button class="btn small" data-open="${esc(item.key)}">${icon("open", 16)}${esc(T.storage.open)}</button>
@@ -675,6 +695,29 @@ async function storagePage(page) {
         const result = await api("/api/storage", { kinds: [item.key] });
         toast(T.storage.cleared(bytes(result.freed_megabytes)));
         await storagePage(page);
+      } catch (error) { toast(error.message, "error"); }
+    };
+  });
+  await drawTrash($("[data-trash]", page), () => storagePage(page));
+}
+
+// The trash: what the user deleted, waiting to be put back until its days run out.
+async function drawTrash(box, redraw) {
+  const { items, keep_days: keep } = await api("/api/trash");
+  box.innerHTML = `<h2 class="section-title">${esc(T.trash.title)}</h2><p class="hint">${esc(T.trash.hint(keep))}</p>
+    ${items.length ? `<div class="list">${items.map((item) => `<div class="row">
+      <span class="swatch" style="background:transparent;border:2px solid var(--muted)"></span>
+      <div class="grow"><strong>${esc(item.kind === "project" ? T.trash.project(item.name || T.projects.untitled) : T.trash.outputs(item.name || T.projects.untitled, item.files))}</strong>
+        <div class="sub">${esc(T.trash.daysLeft(item.days_left))}</div></div>
+      <span class="size">${bytes(item.megabytes)}</span>
+      <button class="btn small" data-restore="${esc(item.key)}">${icon("undo", 16)}${esc(T.trash.restore)}</button>
+    </div>`).join("")}</div>` : `<p class="hint">${esc(T.trash.empty)}</p>`}`;
+  box.querySelectorAll("[data-restore]").forEach((button) => {
+    button.onclick = async () => {
+      try {
+        const back = await api("/api/trash", { key: button.dataset.restore });
+        toast(back.kind === "project" ? T.trash.projectBack(back.name) : T.trash.outputsBack(back.files.length));
+        await redraw();
       } catch (error) { toast(error.message, "error"); }
     };
   });

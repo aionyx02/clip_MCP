@@ -30,8 +30,8 @@ window.T = {
     deleteOne: (name) => `「${name}」`,
     deleteMany: (n) => `這 ${n} 個專案`,
     deleteTitle: (what) => `刪除${what}？`,
-    deleteBody: "刪除後無法復原。已經輸出到「影片\\clip-mcp」的成品不會被刪除；剪輯計畫和校對過的字幕也會留著，之後可以請 AI 用它們重新做出這支影片。",
-    deleted: (n) => `已刪除 ${n} 個專案`,
+    deleteBody: "專案會移到垃圾桶，30 天內可以在「儲存空間」放回來。已經輸出到「影片\\clip-mcp」的成品不會被刪除；剪輯計畫和校對過的字幕也會留著。",
+    deleted: (n) => `已把 ${n} 個專案移到垃圾桶，30 天內可以在「儲存空間」放回來`,
     deleteBusy: (names) => `這些專案正在輸出，請等輸出完成或停止後再刪除：${names.join("、")}`,
     title: "專案",
     subtitle: "AI 剪好的影片都在這裡。點開就能檢查、微調、輸出。",
@@ -40,6 +40,7 @@ window.T = {
     emptyBody: "跟你的 AI 說要剪什麼，它剪好的影片就會出現在這裡。也可以先開一個空的專案。",
     examplePrompt: "幫我把「D:\\影片\\旅行」資料夾裡的影片剪成一支 60 秒的旅行短片",
     clips: (n) => `${n} 段`,
+    versions: (versions, branches) => `${versions} 個版本${branches ? ` · ${branches} 個分支` : ""}`,
     missing: (n) => `${n} 個素材找不到`,
     missingHint: "原始檔案被移動或刪除了，放回原位才能播放。",
     untitled: "未命名專案",
@@ -192,6 +193,24 @@ window.T = {
     outputsHint: "你輸出的成品都在這裡，clip-mcp 不會刪除它們。",
     legacyHint: "舊版本留下的聲音預覽和紀錄，可以請 AI 幫你整理。",
     modelHint: "AI 第一次用到時才會下載，之後就不用再下載。",
+    trashHint: "刪除的專案和其他版本的成品，30 天後自動清掉。",
+    playbackHint: "編輯器播放用的小檔，清掉後打開專案時會重新做。空間不夠時會自動清掉最久沒用的。",
+  },
+
+  confirmTyped: {
+    label: (expected) => `請輸入「${expected}」確認`,
+  },
+
+  trash: {
+    title: "垃圾桶",
+    hint: (days) => `刪除的專案和其他版本的成品會在這裡留 ${days} 天，期間隨時可以放回來。`,
+    empty: "垃圾桶是空的。",
+    project: (name) => `專案「${name}」`,
+    outputs: (name, files) => `「${name}」其他版本的成品（${files} 個檔案）`,
+    daysLeft: (days) => days ? `還會留 ${days} 天` : "今天會清掉",
+    restore: "放回",
+    projectBack: (name) => `已放回專案「${name}」`,
+    outputsBack: (files) => `已把 ${files} 個成品放回原本的位置`,
   },
 
   project: {
@@ -228,6 +247,13 @@ window.T = {
     openParent: "打開原本那支",
     marks: { starred: "標星號", published: "已發布", exported: "已輸出" },
     markIcons: { starred: "⭐", published: "📣", exported: "📤" },
+    diskTitle: "硬碟",
+    disk: (versions, exported, outputs, cache) => `${versions} 個版本，${exported} 個有成品（${outputs}），預覽暫存 ${cache}`,
+    trim: (size) => `刪除其他版本（可釋放 ${size}）`,
+    trimTitle: "刪除其他版本？",
+    trimBody: (files) => `目前這版、標星號和已發布的版本會留著；其他 ${files} 個成品會移到垃圾桶（30 天內可以放回），預覽暫存會清掉。版本紀錄本身都留著，只是標成未輸出。`,
+    trimAction: "刪除其他版本",
+    trimmed: (size) => `已釋放 ${size}`,
   },
   editor: {
     back: "專案",

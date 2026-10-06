@@ -13,17 +13,29 @@ written there; `legacy_plan` says what is in it and `legacy_apply` sorts it
 out once the user has agreed to the list.
 """
 
+import json
 import os
 import re
 import shutil
 import sys
+import time
 from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Callable, Iterable, List, Optional, Set
+from typing import Callable, Dict, Iterable, List, Mapping, Optional, Set, Tuple
 
 TEMP = "temp"
 CACHE = "cache"
 LEGACY = "outputs"
+# The app's own trash, beside the finished videos: what the user deleted waits here to be put back.
+TRASH = ".trash"
+# How long it waits before it is gone for good. Provisional.
+TRASH_KEEP_DAYS = 30
+# Below this much free room on the workspace's drive, the playback copies, previews and sounds
+# used longest ago are given back. Provisional.
+CACHE_FLOOR_BYTES = 10 * 1024 ** 3
+# Once giving room back, this much more than the floor, so it does not start again on the next file. Provisional.
+CACHE_HEADROOM_BYTES = 2 * 1024 ** 3
 
 @dataclass(frozen=True)
 class Usage:
@@ -158,6 +170,10 @@ def _size(path: str) -> int:
                 pass
     return total
 
+def size_of(path: str) -> int:
+    """Bytes under a path, file or folder; zero when it is not there."""
+    return _size(path)
+
 def usage(workspace: str, outputs: str) -> List[Usage]:
     """Say what the workspace holds, kind by kind, and what the user's saved videos take.
 
@@ -183,12 +199,16 @@ def usage(workspace: str, outputs: str) -> List[Usage]:
                        + _size(os.path.join(workspace, CACHE, "pictures")),
                        os.path.join(workspace, TEMP), True))
     found.append(Usage("thumbnails", "縮圖快取", _size(ui_cache_dir(workspace)), ui_cache_dir(workspace), True))
+    found.append(Usage("playback", "播放用小檔", _size(os.path.join(workspace, CACHE, "proxies"))
+                       + _size(os.path.join(workspace, CACHE, "sound")), os.path.join(workspace, CACHE), True))
     found.append(Usage("work", "工作暫存", _size(os.path.join(workspace, "jobs")) + _size(render_dir(workspace)),
                        os.path.join(workspace, "jobs"), True))
     legacy = os.path.join(workspace, LEGACY)
     if os.path.isdir(legacy) and any(os.scandir(legacy)):
         found.append(Usage("legacy", "舊版的輸出（待整理）", _size(legacy), legacy, False))
-    found.append(Usage("outputs", "成品（影片資料夾）", _size(outputs), outputs, False))
+    trash = _size(trash_dir(outputs))
+    found.append(Usage("outputs", "成品（影片資料夾）", _size(outputs) - trash, outputs, False))
+    found.append(Usage("trash", "垃圾桶", trash, trash_dir(outputs), False))
     return [entry for entry in found if entry.bytes or entry.key in ("data", "outputs")]
 
 def clean(workspace: str, keys: Iterable[str], busy: Set[str]) -> int:
@@ -196,8 +216,8 @@ def clean(workspace: str, keys: Iterable[str], busy: Set[str]) -> int:
 
     Args:
         workspace: The workspace folder.
-        keys: `previews`, `thumbnails` and `work`; anything else is refused by
-            the caller and ignored here.
+        keys: `previews`, `thumbnails`, `playback` and `work`; anything else
+            is refused by the caller and ignored here.
         busy: Job IDs still queued or running; their folders are left.
 
     Returns:
@@ -213,6 +233,8 @@ def clean(workspace: str, keys: Iterable[str], busy: Set[str]) -> int:
         folders.append(os.path.join(workspace, CACHE, "pictures"))
     if "thumbnails" in wanted:
         folders.append(ui_cache_dir(workspace))
+    if "playback" in wanted:
+        folders += [os.path.join(workspace, CACHE, "proxies"), os.path.join(workspace, CACHE, "sound")]
     if "work" in wanted:
         folders += [os.path.join(workspace, "jobs"), render_dir(workspace)]
     freed = 0
@@ -383,3 +405,232 @@ def to_recycle_bin(paths: List[str]) -> bool:
     listed = "".join(str(Path(path).resolve()) + "\0" for path in paths) + "\0"
     operation = FileOperation(None, delete, listed, None, allow_undo | no_confirmation | silent | no_error_ui)
     return ctypes.windll.shell32.SHFileOperationW(ctypes.byref(operation)) == 0 and not operation.fAnyOperationsAborted
+
+
+# ---------------------------------------------------------------- the trash
+
+@dataclass(frozen=True)
+class Trashed:
+    """One thing in the trash.
+
+    Attributes:
+        key: Its folder in the trash, which is how it is put back.
+        kind: `project`, a deleted project; `outputs`, the finished videos of
+            a project's other versions.
+        name: The project's name.
+        project_id: The project's ID.
+        trashed_at: When it went in.
+        bytes: How much room it takes.
+        files: The files it holds, as their paths before they went in.
+    """
+
+    key: str
+    kind: str
+    name: str
+    project_id: str
+    trashed_at: datetime
+    bytes: int
+    files: Tuple[str, ...]
+
+    def days_left(self, now: datetime) -> int:
+        """How many days it has before it is gone for good."""
+        return max(0, TRASH_KEEP_DAYS - (now - self.trashed_at).days)
+
+def trash_dir(outputs: str) -> str:
+    """Where the trash is: a folder in the videos folder, beside what the user made."""
+    return os.path.join(outputs, TRASH)
+
+def put_in_trash(outputs: str, kind: str, project_id: str, name: str, kept: Mapping[str, bytes],
+                 files: Iterable[str]) -> Trashed:
+    """Put something in the trash.
+
+    Args:
+        outputs: Where finished videos are saved.
+        kind: `project` or `outputs`.
+        project_id: The project it belongs to.
+        name: The project's name.
+        kept: Data to keep with it, by file name, such as the project itself.
+        files: Files moved into it, to be moved back to where they were.
+
+    Returns:
+        What went in. A file that could not be moved, such as one open in a
+        player, stays where it is and is left out.
+    """
+    now = datetime.now(timezone.utc)
+    key = f"{now.strftime('%Y%m%d-%H%M%S')}-{kind}-{project_id[:8]}"
+    folder = os.path.join(trash_dir(outputs), key)
+    os.makedirs(os.path.join(folder, "files"), exist_ok=True)
+    for file_name, content in kept.items():
+        with open(os.path.join(folder, file_name), "wb") as written:
+            written.write(content)
+    moved = []
+    for path in files:
+        stored = unique_path(os.path.join(folder, "files"), os.path.basename(path))
+        try:
+            shutil.move(path, stored)
+        except OSError:
+            continue
+        moved.append({"from": path, "name": os.path.basename(stored)})
+    meta = {"kind": kind, "project_id": project_id, "name": name, "trashed_at": now.isoformat(), "files": moved}
+    with open(os.path.join(folder, "trashed.json"), "w", encoding="utf-8") as written:
+        json.dump(meta, written, ensure_ascii=False, indent=2)
+    return _read_trashed(folder)
+
+def _read_trashed(folder: str) -> Optional[Trashed]:
+    """One thing in the trash, from its folder; None when the folder is not one."""
+    try:
+        with open(os.path.join(folder, "trashed.json"), encoding="utf-8") as kept:
+            meta = json.load(kept)
+        return Trashed(
+            key=os.path.basename(folder), kind=meta["kind"], name=meta.get("name") or "",
+            project_id=meta["project_id"], trashed_at=datetime.fromisoformat(meta["trashed_at"]),
+            bytes=_size(folder), files=tuple(item["from"] for item in meta.get("files", [])),
+        )
+    except (OSError, ValueError, KeyError):
+        return None
+
+def in_trash(outputs: str) -> List[Trashed]:
+    """What is in the trash, newest first."""
+    root = trash_dir(outputs)
+    if not os.path.isdir(root):
+        return []
+    found = [_read_trashed(entry.path) for entry in os.scandir(root) if entry.is_dir()]
+    return sorted((item for item in found if item), key=lambda item: item.trashed_at, reverse=True)
+
+def take_out_of_trash(outputs: str, key: str) -> Tuple[Trashed, Dict[str, bytes], List[str]]:
+    """Take something out of the trash, moving its files back to where they were.
+
+    A file whose place has been taken since comes back beside it with a number
+    added, never over it.
+
+    Args:
+        outputs: Where finished videos are saved.
+        key: Its folder in the trash.
+
+    Returns:
+        `(what, kept, files)`: what it was, the data kept with it by file
+        name, and where its files are now.
+
+    Raises:
+        KeyError: If there is no such thing in the trash.
+    """
+    folder = os.path.join(trash_dir(outputs), os.path.basename(key))
+    found = _read_trashed(folder)
+    if found is None:
+        raise KeyError(key)
+    with open(os.path.join(folder, "trashed.json"), encoding="utf-8") as kept_file:
+        meta = json.load(kept_file)
+    kept = {}
+    for entry in os.scandir(folder):
+        if entry.is_file() and entry.name != "trashed.json":
+            with open(entry.path, "rb") as read:
+                kept[entry.name] = read.read()
+    back = []
+    for item in meta.get("files", []):
+        source = os.path.join(folder, "files", item["name"])
+        if not os.path.exists(source):
+            continue
+        os.makedirs(os.path.dirname(item["from"]), exist_ok=True)
+        target = item["from"] if not os.path.exists(item["from"]) else unique_path(
+            os.path.dirname(item["from"]), os.path.basename(item["from"]))
+        shutil.move(source, target)
+        back.append(target)
+    shutil.rmtree(folder, ignore_errors=True)
+    return found, kept, back
+
+def empty_old_trash(outputs: str, now: Optional[datetime] = None) -> int:
+    """Remove for good what has been in the trash longer than `TRASH_KEEP_DAYS`.
+
+    Returns:
+        Bytes freed.
+    """
+    now = now or datetime.now(timezone.utc)
+    freed = 0
+    for item in in_trash(outputs):
+        if now - item.trashed_at > timedelta(days=TRASH_KEEP_DAYS):
+            shutil.rmtree(os.path.join(trash_dir(outputs), item.key), ignore_errors=True)
+            freed += item.bytes
+    return freed
+
+# ---------------------------------------------------------------- giving cache room back
+
+def _cached_units(workspace: str, busy: Set[str]) -> List[Tuple[float, int, str]]:
+    """Everything cached that can be made again, as `(last used, bytes, path)`.
+
+    A playback copy, a repaired sound or a picture is one file; a preview or a
+    sound check is its folder. Nothing a running job is using, and nothing
+    still being written.
+    """
+    units = []
+    for folder in (os.path.join(workspace, CACHE, "proxies"), os.path.join(workspace, CACHE, "sound"),
+                   os.path.join(workspace, CACHE, "pictures"), ui_cache_dir(workspace)):
+        if not os.path.isdir(folder):
+            continue
+        for root, _, files in os.walk(folder):
+            for name in files:
+                if name.endswith(".part"):
+                    continue
+                path = os.path.join(root, name)
+                try:
+                    stat = os.stat(path)
+                except OSError:
+                    continue
+                units.append((max(stat.st_atime, stat.st_mtime), stat.st_size, path))
+    for kind in ("previews", "sounds"):
+        root = os.path.join(workspace, TEMP, kind)
+        if not os.path.isdir(root):
+            continue
+        for project in os.scandir(root):
+            if not project.is_dir():
+                continue
+            for made in os.scandir(project.path):
+                if made.is_dir() and made.name not in busy:
+                    units.append((made.stat().st_mtime, _size(made.path), made.path))
+    return units
+
+def give_cache_back(workspace: str, busy: Set[str], floor: int = CACHE_FLOOR_BYTES,
+                    headroom: int = CACHE_HEADROOM_BYTES) -> int:
+    """When the disk runs low, remove what was cached longest ago until there is room again.
+
+    The one place anything is removed without the user asking, and only what
+    can be made again: they agreed to that.
+
+    Args:
+        workspace: The workspace folder.
+        busy: Job IDs still queued or running; their folders are left.
+        floor: Free bytes below which room is given back.
+        headroom: How much more than the floor to free once started.
+
+    Returns:
+        Bytes freed.
+    """
+    try:
+        free = shutil.disk_usage(workspace).free
+    except OSError:
+        return 0
+    if free >= floor:
+        return 0
+    freed = 0
+    for _, size, path in sorted(_cached_units(workspace, busy)):
+        if free + freed >= floor + headroom:
+            break
+        try:
+            shutil.rmtree(path) if os.path.isdir(path) else os.remove(path)
+            freed += size
+        except OSError:
+            continue
+    return freed
+
+def mark_used(path: str, every: float = 3600) -> None:
+    """Note that a cached file was used just now, so it is not the first given back.
+
+    Args:
+        path: The file.
+        every: Seconds between notes; served in pieces, a file is asked for
+            many times a minute.
+    """
+    try:
+        if time.time() - os.stat(path).st_mtime > every:
+            os.utime(path)
+    except OSError:
+        pass

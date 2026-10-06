@@ -163,8 +163,10 @@ def test_the_version_panel_folds_one_sitting_into_one_dot(kept_history, media: P
 
     # Rendering one out marks it, and starts a new dot after it.
     rendered = server.repo.get_project(project).version
+    finished = media / "版本面板.mp4"
+    finished.write_bytes(b"finished")
     server.repo.add_job(Job(kind=JobKind.RENDER, project_id=project, project_version=rendered,
-                            status=JobStatus.COMPLETED, output_path=str(media / "out.mp4")))
+                            status=JobStatus.COMPLETED, output_path=str(finished)))
     edit(project, [{"action": "rename_project", "name": "第四版"}])
     nodes = server.version_graph(project)["nodes"]
     assert [node["marks"] for node in nodes] == [[], ["exported"]]

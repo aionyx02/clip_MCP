@@ -14,7 +14,6 @@ import mimetypes
 import os
 import re
 from datetime import datetime, timedelta, timezone
-import shutil
 import subprocess
 import threading
 import time
@@ -104,7 +103,13 @@ async def projects(request: Request) -> Response:
         ]))
         return JSONResponse({"id": made["id"]})
     listed, filed = [], server.repo.folder_of("projects")
-    for project in server.repo.list_projects():
+    counts = server.history.counts("projects/")
+    everything = server.repo.list_projects()
+    branched = {}
+    for project in everything:
+        if project.branched_from is not None:
+            branched[project.branched_from.project_id] = branched.get(project.branched_from.project_id, 0) + 1
+    for project in everything:
         base = project.base_video_track
         clips = base.clips if base else []
         used = {clip.asset_id for track in project.tracks for clip in track.clips}
@@ -119,6 +124,8 @@ async def projects(request: Request) -> Response:
             "thumb": {"asset_id": first.asset_id, "t": float(first.source_range.start) + 1.0} if first else None,
             "missing": missing,
             "folder_id": filed.get(project.id),
+            "versions": counts.get(project.id, 0),
+            "branches": branched.get(project.id, 0),
         })
     return JSONResponse({"projects": listed})
 
@@ -459,6 +466,7 @@ def _cached(folder: str, name: str, kind: str) -> Response:
     path = os.path.join(folder, name)
     if not os.path.exists(path):
         return _error("not ready", 404)
+    housekeeping.mark_used(path)
     return FileResponse(path, media_type=kind, headers={"Cache-Control": "max-age=31536000, immutable"})
 
 async def proxy(request: Request) -> Response:
@@ -529,24 +537,40 @@ async def delete_assets(request: Request) -> Response:
         return _error(str(error), 404)
     return JSONResponse(result, status_code=409 if result["in_use"] or result["busy"] else 200)
 
-def _delete_projects(project_ids: List[str]) -> dict:
-    """Delete projects and the previews made of them; finished videos stay where they were saved."""
-    server.job_manager.forget_abandoned()
-    deleted, busy = server.repo.delete_projects(project_ids)
-    for project_id in deleted:
-        for folder in (housekeeping.preview_dir(server.WORKSPACE_DIR, project_id),
-                       housekeeping.sound_dir(server.WORKSPACE_DIR, project_id)):
-            shutil.rmtree(folder, ignore_errors=True)
-    return {"deleted": deleted, "busy": busy}
-
 async def delete_projects(request: Request) -> Response:
-    """Delete projects for good. Only from here: deleting is the user's to do, never the AI's."""
+    """Move projects to the trash. Only from here: deleting is the user's to do, never the AI's."""
     body = await request.json()
     ids = [str(project_id) for project_id in body.get("ids", []) if project_id]
     if not ids:
         return _error("no projects chosen")
-    result = await run_in_threadpool(_delete_projects, ids)
+    result = await run_in_threadpool(server.trash_projects, ids)
     return JSONResponse(result, status_code=409 if result["busy"] else 200)
+
+async def trash(request: Request) -> Response:
+    """What is in the trash (GET), or put one thing back from it (POST)."""
+    if request.method == "GET":
+        return JSONResponse(await run_in_threadpool(server.list_trash))
+    body = await request.json()
+    try:
+        return JSONResponse(await run_in_threadpool(server.restore_from_trash, str(body.get("key", ""))))
+    except ValueError as error:
+        return _error(str(error), 404)
+
+async def project_storage(request: Request) -> Response:
+    """What one video takes on disk, and what deleting its other versions would give back."""
+    try:
+        return JSONResponse(await run_in_threadpool(server.project_storage, request.path_params["project_id"]))
+    except ValueError as error:
+        return _error(str(error), 404)
+
+async def trim(request: Request) -> Response:
+    """Delete a video's other versions, once the user has typed its name."""
+    body = await request.json()
+    try:
+        return JSONResponse(await run_in_threadpool(server.trim_project, request.path_params["project_id"],
+                                                    str(body.get("name", ""))))
+    except ValueError as error:
+        return _error(str(error), 400)
 
 async def folders(request: Request) -> Response:
     """The folders of the library or of the projects (GET), or make, rename, move or remove one (POST).
@@ -785,7 +809,7 @@ async def storage(request: Request) -> Response:
     """What the workspace holds, or clear the kinds the user chose."""
     if request.method == "POST":
         body = await request.json()
-        kinds = [kind for kind in body.get("kinds", []) if kind in ("previews", "thumbnails", "work")]
+        kinds = [kind for kind in body.get("kinds", []) if kind in ("previews", "thumbnails", "playback", "work")]
         return JSONResponse(server.clean_storage(kinds))
     return JSONResponse(server.storage_usage())
 
@@ -885,7 +909,7 @@ class Activity:
 # What each kind of change made in the editor is, for the version it leaves in the history.
 EDITOR_DOING = (
     ("/edits", "在編輯器修改"), ("/undo", "復原上一步"), ("/captions/make", "產生字幕"),
-    ("/api/projects/delete", "刪除專案"), ("/api/projects", "新增專案"), ("/api/assets/notes", "寫素材備註"),
+    ("/api/projects/delete", "把專案移到垃圾桶"), ("/api/trash", "從垃圾桶放回"), ("/api/projects", "新增專案"), ("/api/assets/notes", "寫素材備註"),
     ("/api/assets/delete", "從素材庫拿掉"), ("/api/folders", "整理資料夾"), ("/api/file", "整理位置"),
     ("/api/pick", "加入素材"), ("/versions/restore", "回到舊版本"), ("/versions/branch", "開分支"),
 )
@@ -941,6 +965,9 @@ def create_app() -> Starlette:
         Route("/api/projects/{project_id}/versions/restore", restore, methods=["POST"]),
         Route("/api/projects/{project_id}/versions/branch", branch, methods=["POST"]),
         Route("/api/projects/{project_id}/versions/mark", mark, methods=["POST"]),
+        Route("/api/projects/{project_id}/storage", project_storage),
+        Route("/api/projects/{project_id}/storage/trim", trim, methods=["POST"]),
+        Route("/api/trash", trash, methods=["GET", "POST"]),
         Route("/api/words/{asset_id}", words),
         Route("/api/projects/{project_id}/captions", captions),
         Route("/api/projects/{project_id}/captions/make", make_captions, methods=["POST"]),

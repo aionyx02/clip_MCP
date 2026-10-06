@@ -148,8 +148,13 @@ the user talks about tidying their footage.
 
 When the user asks how much room this takes, or the disk is full,
 `storage_usage` says it in their words. `clean_storage` clears only what can
-be made again — `previews`, `thumbnails`, `work` — and only the kinds they
-agreed to. An old `outputs` folder from before this layout shows up as
+be made again — `previews`, `thumbnails`, `playback`, `work` — and only the
+kinds they agreed to; the playback copies also go by themselves, oldest
+first, when the disk runs low. `videos` says what each video's other
+versions would give back: deleting them, deleting a project and emptying the
+trash are the user's to do in the editor — a project's 版本 tab and 儲存空間 —
+so suggest the biggest and say where. A deleted project waits in the trash
+for 30 days and can be put back from 儲存空間. An old `outputs` folder from before this layout shows up as
 `legacy`: `tidy_old_outputs` without `confirm` lists what would happen,
 read that back with the sizes, and confirm only once they agree. Only older
 versions of a video, cover or export go, and to the recycle bin rather than
