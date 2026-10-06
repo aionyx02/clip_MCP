@@ -141,7 +141,9 @@ mcp = FastMCP(
         "never changes how long the video runs. The person using this server is "
         "editing their own video, not writing code: reply in plain language "
         "with no tool names, IDs, or JSON, and read the plan back in one "
-        "sentence for confirmation before the first render. Only files in the "
+        "sentence for confirmation before the first render — unless they asked "
+        "you to finish on your own, and then the skill says what still has to "
+        "happen. Only files in the "
         "library can go into a project: a file the user names is added to it "
         "with import_asset or import_folder first, and you tell them it was "
         "added, since they see the library in the editor app and can take "
@@ -925,7 +927,6 @@ def listen_again(
         asset.path, start, end, language or (transcript.language if transcript else None), keep_as,
         chinese_variant=transcript.chinese_variant if transcript else None,
     )
-    heard = "".join(marked_text(segment) for segment in fresh.segments)
     stored = None
     if transcript is not None:
         said = [word.text for segment in transcript.segments for word in segment.words
@@ -2391,6 +2392,9 @@ def _require_plan(plan_id: Optional[str]) -> EditPlan:
 def save_plan(plan: EditPlan, note: str = "") -> dict:
     """Store a plan for a cut: what it is for, its parts, and which footage fills them.
 
+    Before choosing a length, an opening or how fast to cut, read
+    skill://clip-editing/pacing-and-structure.md.
+
     A plan is written in terms of semantic clips rather than seconds. You
     decide what goes in and why; `compile_plan` works out where every cut
     lands. Write down why each piece is there and why the ones you passed over
@@ -3740,6 +3744,9 @@ def render_project(
     ]]] = None,
 ) -> dict:
     """Start rendering a project to an MP4 file in the background.
+
+    Before a final render, read skill://clip-editing/platform-conventions.md;
+    after any render, look at it with `view_render`.
 
     Before anything is rendered the cut is checked the way `check_render`
     checks it, and a full render is refused while it finds anything: black
