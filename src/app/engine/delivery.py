@@ -282,6 +282,18 @@ def check_delivery(
                 f"the caption at {clock(float(cue.start))} ({cue.text[:16]}) is too tall for a "
                 f"{project.width}x{project.height} frame and runs off the top"
             )))
+        # Placing already held every short caption on as long as its shot allowed; one still
+        # short is one there was no room for, which only a change to the cut can give.
+        shortest = (style or project.caption_style).min_seconds
+        for cue in captions:
+            shown = float(cue.end - cue.start)
+            if shown < shortest - 0.0005:
+                findings.append(Finding("captions", (
+                    f"the caption at {clock(float(cue.start))} ({cue.text[:16]}) is on screen {shown:.2f}s, under "
+                    f"the {shortest:g}s it takes to read, and its shot ends before it can be held longer. Let the "
+                    "shot run on (a later end on its trim), take the caption out with `edit_subtitle` and "
+                    f"`delete`, or lower `min_seconds` in the caption style if the user reads that fast"
+                )))
 
     if target_seconds and abs(duration - target_seconds) / target_seconds > LENGTH_TOLERANCE:
         findings.append(Finding("length", (

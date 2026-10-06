@@ -511,3 +511,45 @@ def test_a_clip_from_the_afternoon_between_two_from_the_morning_is_found() -> No
     marked = project_of(clip("a", "m", 0, 4, 0), clip("b", "p", 0, 4, 4), clip("c", "m", 10, 14, 8),
                         markers=[(4, "下午")])
     assert not [f for f in check_delivery(marked, {}, recorded=recorded) if f.check == "continuity"]
+
+# --- captions long enough to read --------------------------------------------------------
+
+def cue(cue_id: str, start: float, end: float, text: str = "晚安"):
+    """A caption on file `x`, as stored."""
+    from app.models.timeline import SubtitleCue
+
+    return SubtitleCue(id=cue_id, asset_id="x", source_start=start, source_end=end, text=text)
+
+def test_a_short_caption_is_held_on_screen_while_its_shot_has_room() -> None:
+    from app.engine.subtitles import place_cues
+
+    placed = place_cues(project_of(clip("a", "x", 10, 20, 0)), [cue("c1", 12.0, 12.36)])
+    assert float(placed[0].end - placed[0].start) == pytest.approx(0.7)
+
+def test_a_short_caption_is_held_no_further_than_the_next_one() -> None:
+    from app.engine.subtitles import place_cues
+
+    placed = place_cues(project_of(clip("a", "x", 10, 20, 0)), [cue("c1", 12.0, 12.3), cue("c2", 12.5, 13.5, "下一句")])
+    assert float(placed[0].end) == pytest.approx(2.5)
+
+def test_a_caption_that_cannot_be_held_long_enough_is_found_with_the_ways_out() -> None:
+    from app.engine.subtitles import place_cues
+
+    # The last words of the video: the cut ends 0.36s after they start, so there is no room.
+    project = project_of(clip("a", "x", 10, 12.36, 0))
+    placed = place_cues(project, [cue("c1", 12.0, 12.36)])
+    findings = check_delivery(project, {}, captions=placed, style=CaptionStyle())
+    short = [finding for finding in findings if finding.check == "captions"]
+    assert len(short) == 1
+    assert "0.36s" in short[0].message and "0.7s" in short[0].message and "min_seconds" in short[0].message
+
+def test_how_long_a_caption_has_to_stay_is_the_users_to_change() -> None:
+    from app.engine.subtitles import place_cues
+
+    project = project_of(clip("a", "x", 10, 20, 0), caption_style=CaptionStyle(min_seconds=1.2))
+    placed = place_cues(project, [cue("c1", 12.0, 12.36)])
+    assert float(placed[0].end - placed[0].start) == pytest.approx(1.2)
+    relaxed = project_of(clip("a", "x", 10, 12.36, 0), caption_style=CaptionStyle(min_seconds=0.3))
+    placed = place_cues(relaxed, [cue("c1", 12.0, 12.36)])
+    assert not [f for f in check_delivery(relaxed, {}, captions=placed, style=relaxed.caption_style)
+                if f.check == "captions"]

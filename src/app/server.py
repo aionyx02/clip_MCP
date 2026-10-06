@@ -1751,30 +1751,46 @@ def apply_edits(project_id: str, expected_version: int, operations: list[EditOpe
             `set_subtitles`, `edit_subtitle`, or `add_subtitle`. Captions stored
             or corrected here are also remembered against the file they belong
             to, and the next `generate_subtitles` over that file, in any
-            project, starts from them.
+            project, starts from them — unless `this_project_only` keeps one
+            to this project. Caption times can be given in the cut's own
+            seconds with `timeline_start` and `timeline_end`.
 
     Returns:
         A dictionary with the `status` and the project's `new_version`, and,
         when captions were stored or corrected, `captions`: each one touched,
-        as it now reads, one line apiece — read them back rather than assume.
+        as it now reads, one line apiece, marked `(this project only)` where it
+        is — read them back rather than assume — and `captions_kept`, which says
+        where the rest are now remembered.
 
     Raises:
         ValueError: If the project does not exist, the version does not match,
             an operation references a missing or duplicate track or clip, or
             the resulting timeline breaks a rule above.
     """
+    before = repo.get_project(project_id)
     saved = _apply(project_id, expected_version, operations)
     result = {"status": "success", "new_version": saved.version}
-    touched = _touched_captions(saved, operations)
+    touched = _touched_captions(before, saved, operations)
     if touched:
-        repo.remember_captions(touched)
+        shared = [cue for cue in touched if not cue.local]
+        if shared:
+            repo.remember_captions(shared)
         result["captions"] = [_caption_line(saved, cue) for cue in touched]
+        result["captions_kept"] = (
+            "remembered against their footage: every project that captions it starts from them"
+            if shared else "in this project only"
+        )
     return result
 
-def _touched_captions(project: Project, operations: Sequence) -> List[SubtitleCue]:
+def _touched_captions(before: Optional[Project], project: Project, operations: Sequence) -> List[SubtitleCue]:
     """Find the captions a batch of edits stored or corrected, as they now stand.
 
+    By comparing the project's captions before and after rather than reading
+    the operations: a caption added at a time in the cut does not say which
+    file or second it lands on until it has been applied.
+
     Args:
+        before: The project before the edits.
         project: The project after the edits.
         operations: The edits.
 
@@ -1782,14 +1798,12 @@ def _touched_captions(project: Project, operations: Sequence) -> List[SubtitleCu
         Every caption set, added or corrected, in source order; a deleted one
         is left out.
     """
-    if any(isinstance(op, SetSubtitlesOp) for op in operations):
+    if before is None or any(isinstance(op, SetSubtitlesOp) for op in operations):
         return list(project.subtitles)
-    named = {op.cue_id for op in operations if isinstance(op, EditSubtitleOp)}
-    added = [(op.asset_id, op.source_start, op.text) for op in operations if isinstance(op, AddSubtitleOp)]
-    return [
-        cue for cue in project.subtitles
-        if cue.id in named or (cue.asset_id, cue.source_start, cue.text) in added
-    ]
+    if not any(isinstance(op, (EditSubtitleOp, AddSubtitleOp)) for op in operations):
+        return []
+    was = {cue.id: cue for cue in before.subtitles}
+    return [cue for cue in project.subtitles if was.get(cue.id) != cue]
 
 def _caption_line(project: Project, cue: SubtitleCue) -> str:
     """Write one caption as a line to read back: where it lands and what it says.
@@ -1803,7 +1817,8 @@ def _caption_line(project: Project, cue: SubtitleCue) -> str:
     """
     placed = [item for item in place_cues(project, [cue])]
     at = f"{format_timestamp(float(placed[0].start))}" if placed else "not in the cut"
-    return f"{cue.id} {at} {cue.text}" + (f" / {cue.secondary}" if cue.secondary else "")
+    return (f"{cue.id} {at} {cue.text}" + (f" / {cue.secondary}" if cue.secondary else "")
+            + (" (this project only)" if cue.local else ""))
 
 def _apply(
     project_id: str,
@@ -2928,13 +2943,17 @@ def generate_subtitles(
         clip.asset_id: repo.reviewed_captions(clip.asset_id)
         for clip in (base.clips if base else []) if clip.asset_id not in reviewed
     })
+    # What this project kept to itself comes first, then what was corrected on the footage
+    # for every project, then the transcript: each fills only what the ones before left.
+    local = [cue.model_copy(update={"id": ""}) for cue in project.subtitles if cue.local]
+    taken = lambda cue, over: any(cue.asset_id == known.asset_id and _overlaps(cue, known) for known in over)
     kept = [
         cue for cue in proposed
-        if not any(_overlaps(cue, known) for known in reviewed.get(cue.asset_id, ()))
+        if not any(_overlaps(cue, known) for known in reviewed.get(cue.asset_id, ())) and not taken(cue, local)
     ]
     reused = [known.model_copy(update={"id": ""}) for known_list in reviewed.values() for known in known_list]
-    reused = [cue for cue in reused if place_cues(project, [cue])]
-    saved = _apply(project_id, expected_version, [SetSubtitlesOp(cues=[*kept, *reused])])
+    reused = [cue for cue in reused if place_cues(project, [cue]) and not taken(cue, local)]
+    saved = _apply(project_id, expected_version, [SetSubtitlesOp(cues=[*kept, *reused, *local])])
     # Counted where the captions land, not where the words were said: two lines from
     # different files overlap only once the cut puts them on screen together.
     placed = place_cues(saved, saved.subtitles)
@@ -3490,7 +3509,8 @@ def check_render(
     moment; `unplanned`, a sequence of three or more clips put together by hand
     rather than compiled from a plan, so nothing says how it opens, turns
     and ends; `captions`, a caption too tall for
-    the frame — most likely when a landscape cut is rendered portrait; and
+    the frame — most likely when a landscape cut is rendered portrait — or on
+    screen too briefly to read, with no room left in its shot to hold it; and
     `length`, a cut far from the length its plan asked for. Each is a fact
     about the cut, not a verdict on it: black may be meant, and the user may
     prefer the longer cut. Tell them, and let them decide.

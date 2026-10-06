@@ -199,6 +199,12 @@ def place_cues(project: Project, cues: Sequence[SubtitleCue]) -> List[PlacedCue]
     written by hand for its picture, the ones with no word timings: nobody
     hears what was said on it.
 
+    A caption on screen for less than the style's `min_seconds` cannot be
+    read, so it is held on — still inside its own window, and never over the
+    next caption — for as long as that takes, or as long as there is room.
+    One there is no room for stays as it is, and the check before a render
+    finds it.
+
     Args:
         project: Project whose timeline the captions are placed on.
         cues: The stored captions. A sequence rather than an iterable on
@@ -213,6 +219,8 @@ def place_cues(project: Project, cues: Sequence[SubtitleCue]) -> List[PlacedCue]
         by_asset.setdefault(cue.asset_id, []).append(cue)
 
     placed: List[PlacedCue] = []
+    # Where each placement's window ends on the timeline, as far as a short caption may be held.
+    room: Dict[int, Decimal] = {}
     heard = captioned_clips(project)
     # A shot turned all the way down says nothing, but a caption written for its picture —
     # one with no word timings, typed rather than transcribed — still belongs on it.
@@ -230,6 +238,7 @@ def place_cues(project: Project, cues: Sequence[SubtitleCue]) -> List[PlacedCue]
             last = min(cue.source_end, window_end)
             if last - first <= MINIMUM_CUE:
                 continue
+            room[len(placed)] = _at(clip.timeline_in, window_end - window_start, speed)
             placed.append(PlacedCue(
                 cue_id=cue.id,
                 start=_at(clip.timeline_in, first - window_start, speed),
@@ -249,7 +258,19 @@ def place_cues(project: Project, cues: Sequence[SubtitleCue]) -> List[PlacedCue]
                     if word.end > first and word.start < last
                 ],
             ))
-    return sorted(placed, key=lambda item: (item.start, item.end))
+    order = sorted(range(len(placed)), key=lambda index: (placed[index].start, placed[index].end))
+    shortest = Decimal(str(project.caption_style.min_seconds)).quantize(MILLISECOND)
+    for position, index in enumerate(order):
+        cue = placed[index]
+        if cue.end - cue.start >= shortest:
+            continue
+        limit = room[index]
+        if position + 1 < len(order):
+            limit = min(limit, placed[order[position + 1]].start)
+        held = min(cue.start + shortest, limit)
+        if held > cue.end:
+            placed[index] = cue.model_copy(update={"end": held})
+    return [placed[index] for index in order]
 
 def escape_ass_inline(text: str) -> str:
     """Make one word safe to drop into an ASS event without joining it to anything.

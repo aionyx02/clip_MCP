@@ -443,6 +443,44 @@ def test_a_caption_can_be_retimed_and_deleted(spoken: str) -> None:
     edit(project, [{"action": "edit_subtitle", "cue_id": "c2", "delete": True}])
     assert [cue["cue_id"] for cue in get_subtitles(project)["cues"]] == ["c1", "c3"]
 
+def test_a_correction_is_remembered_for_every_project_by_default_and_says_so(spoken: str) -> None:
+    first = build_project([video_track(), insert("a", spoken, 0, 10)])
+    edit(first, [{"action": "set_subtitles", "cues": caption(first)["cues"]}])
+    result = edit(first, [{"action": "edit_subtitle", "cue_id": "c3", "text": "大家都看得到的修正"}])
+    assert "every project" in result["captions_kept"]
+    second = build_project([video_track(), insert("a", spoken, 0, 10)])
+    assert "大家都看得到的修正" in [cue["text"] for cue in caption(second)["cues"]]
+
+def test_a_caption_written_for_one_cut_stays_in_that_project(spoken: str) -> None:
+    # 「第三版」 rewritten as 「第三、四版」 for one cut's order is not what was said in the file,
+    # and every later project captioning that footage used to be handed it.
+    first = build_project([video_track(), insert("a", spoken, 0, 10)])
+    edit(first, [{"action": "set_subtitles", "cues": caption(first)["cues"]}])
+    result = edit(first, [{"action": "edit_subtitle", "cue_id": "c2", "text": "只屬於這一支的說法",
+                           "this_project_only": True}])
+    assert any("this project only" in line for line in result["captions"])
+    assert "只屬於這一支的說法" not in [cue.text for cue in repo.reviewed_captions(spoken)]
+    # Captioned again here, it is kept; captioned elsewhere, the footage's own words come back.
+    assert "只屬於這一支的說法" in [cue["text"] for cue in caption(first)["cues"]]
+    second = build_project([video_track(), insert("a", spoken, 0, 10)])
+    assert "只屬於這一支的說法" not in [cue["text"] for cue in caption(second)["cues"]]
+
+def test_a_caption_can_be_retimed_in_the_cut_s_own_seconds(spoken: str) -> None:
+    # The clip starts 2s into its file, so the cut's 0:01.5 is the file's 3.5s.
+    project = build_project([video_track(), insert("a", spoken, 2, 10)])
+    edit(project, [{"action": "set_subtitles", "cues": caption(project)["cues"]}])
+    edit(project, [{"action": "edit_subtitle", "cue_id": "c1", "timeline_end": 1.5}])
+    first = get_subtitles(project)["cues"][0]
+    assert float(first["end"]) == pytest.approx(1.5)
+    with pytest.raises(ValueError, match="inside one clip"):
+        edit(project, [{"action": "edit_subtitle", "cue_id": "c1", "timeline_end": 30}])
+
+def test_a_caption_can_be_added_at_a_moment_of_the_cut(spoken: str) -> None:
+    project = build_project([video_track(), insert("a", spoken, 2, 10)])
+    edit(project, [{"action": "add_subtitle", "timeline_start": 0.2, "timeline_end": 0.9, "text": "片頭字"}])
+    added = next(cue for cue in get_subtitles(project)["cues"] if cue["text"] == "片頭字")
+    assert float(added["start"]) == pytest.approx(0.2) and float(added["end"]) == pytest.approx(0.9)
+
 def test_editing_an_unknown_caption_is_reported_clearly(spoken: str) -> None:
     project = build_project([video_track(), insert("a", spoken, 0, 10)])
     edit(project, [{"action": "set_subtitles", "cues": caption(project)["cues"]}])

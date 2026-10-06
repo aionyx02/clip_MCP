@@ -84,6 +84,12 @@ class SubtitleCue(BaseModel):
         description="Word timings inside this caption, in source seconds, for captions that light up word by "
                     "word. Empty is normal: a caption written by hand has none, and one lights up whole instead",
     )
+    local: bool = Field(
+        default=False,
+        description="Written for this project only — a title, or words put to fit this cut's order — so it is "
+                    "never remembered against the file for other projects, and captioning this project again "
+                    "keeps it over the file's own words",
+    )
 
     @model_validator(mode="after")
     def validate_span(self):
@@ -220,6 +226,18 @@ class CaptionStyle(BaseModel):
                     "lines one after another, split between words and timed to when they are said. Off, a "
                     "long caption wraps upwards into the picture. A bilingual caption keeps its two lines",
     )
+    min_seconds: float = Field(
+        default=0.7,
+        ge=0,
+        le=5,
+        description="Shortest time a caption stays on screen. A shorter one is held on while its shot has "
+                    "room before the next caption; one that cannot be, such as the last words of a video, is "
+                    "found by the check before a render. 0.7 reads two characters at 0.35s each; change it "
+                    "when the user asks",
+    )
+
+# Provisional (roadmap §13): `CaptionStyle.min_seconds` above — how long a caption has to stay
+# on screen to be read.
 
 # Where each platform's own furniture sits over the picture, how large text has to be to
 # read on a phone held at arm's length, and how heavy an outline it takes to stay legible
@@ -896,6 +914,38 @@ class EditSubtitleOp(BaseModel):
         default=None, ge=0, description="New end in the source file (seconds), to hold a line on screen longer",
     )
     delete: bool = Field(default=False, description="Remove this caption entirely")
+    timeline_start: Optional[Decimal] = Field(
+        default=None, ge=0,
+        description="New start as a time in the finished cut (seconds), as `get_subtitles` reports it; turned into "
+                    "the file's own seconds through the clip playing then. Give this or `source_start`, not both",
+    )
+    timeline_end: Optional[Decimal] = Field(
+        default=None, ge=0,
+        description="New end as a time in the finished cut (seconds). Both times have to fall inside one clip of "
+                    "the caption's file. Give this or `source_end`, not both",
+    )
+    this_project_only: bool = Field(
+        default=False,
+        description="Keep this caption in this project only. Leave it off for a correction of what was said — a "
+                    "misheard word or name — so every project captioning this footage gets it; turn it on for "
+                    "words written for this cut: a title, a part's name, a line reworded to fit this order",
+    )
+
+    @model_validator(mode="after")
+    def validate_one_clock(self):
+        """Refuse a time given both ways at once.
+
+        Returns:
+            The validated `EditSubtitleOp` instance.
+
+        Raises:
+            ValueError: If a start or an end is given both in the file's seconds and the cut's.
+        """
+        if self.source_start is not None and self.timeline_start is not None:
+            raise ValueError("give the start as source_start or timeline_start, not both")
+        if self.source_end is not None and self.timeline_end is not None:
+            raise ValueError("give the end as source_end or timeline_end, not both")
+        return self
 
     @model_validator(mode="after")
     def validate_text(self):
@@ -919,12 +969,118 @@ class AddSubtitleOp(BaseModel):
     """
 
     action: Literal["add_subtitle"] = "add_subtitle"
-    asset_id: str = Field(..., min_length=1, description="The file the caption belongs to")
-    source_start: Decimal = Field(..., ge=0, description="When it starts in that file (seconds)")
-    source_end: Decimal = Field(..., ge=0, description="When it ends in that file (seconds)")
+    asset_id: Optional[str] = Field(
+        default=None, min_length=1,
+        description="The file the caption belongs to; left out with `timeline_start`, it is the file playing then",
+    )
+    source_start: Optional[Decimal] = Field(default=None, ge=0, description="When it starts in that file (seconds)")
+    source_end: Optional[Decimal] = Field(default=None, ge=0, description="When it ends in that file (seconds)")
     text: str = Field(..., min_length=1, description="The caption text")
     secondary: str = Field(default="", description="Second line of a bilingual caption")
     speaker: Optional[str] = Field(default=None, description="Who says it, if anybody")
+    timeline_start: Optional[Decimal] = Field(
+        default=None, ge=0,
+        description="Where it starts as a time in the finished cut (seconds), as `get_subtitles` reports it; turned into "
+                    "the file's own seconds through the clip playing then. Give this or `source_start`, not both",
+    )
+    timeline_end: Optional[Decimal] = Field(
+        default=None, ge=0,
+        description="Where it ends as a time in the finished cut (seconds). Both times have to fall inside one clip of "
+                    "the caption's file. Give this or `source_end`, not both",
+    )
+    this_project_only: bool = Field(
+        default=False,
+        description="Keep this caption in this project only. Leave it off for a correction of what was said — a "
+                    "misheard word or name — so every project captioning this footage gets it; turn it on for "
+                    "words written for this cut: a title, a part's name, a line reworded to fit this order",
+    )
+
+    @model_validator(mode="after")
+    def validate_where(self):
+        """Ensure the caption says where it goes, one way only.
+
+        Returns:
+            The validated `AddSubtitleOp` instance.
+
+        Raises:
+            ValueError: Unless it gives a file and its seconds, or two times in the cut.
+        """
+        by_source = self.source_start is not None or self.source_end is not None
+        by_cut = self.timeline_start is not None or self.timeline_end is not None
+        if by_source == by_cut:
+            raise ValueError("place a caption with asset_id, source_start and source_end, or with timeline_start "
+                             "and timeline_end — one of the two")
+        if by_source and (self.asset_id is None or self.source_start is None or self.source_end is None):
+            raise ValueError("a caption placed in its file needs asset_id, source_start and source_end")
+        if by_cut and (self.timeline_start is None or self.timeline_end is None):
+            raise ValueError("a caption placed in the cut needs both timeline_start and timeline_end")
+        return self
+
+def _in_the_file(
+    project: "Project", start: Decimal, end: Decimal, asset_id: Optional[str],
+) -> Tuple[str, Decimal, Decimal]:
+    """Turn two times in the cut into the file and seconds a caption is anchored to.
+
+    A caption belongs to the words of a file, not to a moment of the cut, so a
+    time in the cut only means something through the clip playing then — and
+    both ends have to come through the same one, or the caption would claim
+    seconds of the file the cut does not play there.
+
+    Args:
+        project: The project, as it stands before this edit.
+        start: Where the caption starts in the cut.
+        end: Where it ends.
+        asset_id: The caption's file, when it already has one.
+
+    Returns:
+        `(asset_id, source_start, source_end)`.
+
+    Raises:
+        ValueError: If no clip of that file plays at `start`, or `end` is past it.
+    """
+    tracks = [project.base_video_track] if project.base_video_track else []
+    tracks += [track for track in project.tracks if track.track_type == TrackType.AUDIO]
+    playing = [
+        clip for track in tracks for clip in track.clips
+        if clip.timeline_in <= start < clip.timeline_out and (asset_id is None or clip.asset_id == asset_id)
+    ]
+    if not playing:
+        whose = f" of {asset_id}" if asset_id else ""
+        raise ValueError(f"no clip{whose} plays at {start}s of the cut, so a caption cannot start there")
+    clip = playing[0]
+    if end > clip.timeline_out:
+        raise ValueError(
+            f"a caption's times have to stay inside one clip of its file: clip {clip.id} plays from "
+            f"{clip.timeline_in}s to {clip.timeline_out}s of the cut"
+        )
+    speed = Decimal(str(clip.speed))
+    to_source = lambda moment: clip.source_range.start + (moment - clip.timeline_in) * speed
+    return clip.asset_id, to_source(start), to_source(end)
+
+def _cut_span(project: "Project", cue: SubtitleCue) -> Tuple[Decimal, Decimal]:
+    """Where a caption now sits in the cut, for the end of it an edit leaves alone.
+
+    Args:
+        project: The project.
+        cue: The caption.
+
+    Returns:
+        `(start, end)` in the cut's seconds, through the first clip of its file
+        that plays any of it.
+
+    Raises:
+        ValueError: If no clip plays any of it, so it has no time in the cut.
+    """
+    tracks = [project.base_video_track] if project.base_video_track else []
+    tracks += [track for track in project.tracks if track.track_type == TrackType.AUDIO]
+    for clip in sorted((clip for track in tracks for clip in track.clips), key=lambda item: item.timeline_in):
+        first = max(cue.source_start, clip.source_range.start)
+        last = min(cue.source_end, clip.source_range.end)
+        if clip.asset_id == cue.asset_id and last > first:
+            speed = Decimal(str(clip.speed))
+            return (clip.timeline_in + (first - clip.source_range.start) / speed,
+                    clip.timeline_in + (last - clip.source_range.start) / speed)
+    raise ValueError(f"caption {cue.id} is not in the cut, so it has no time in it to change")
 
 def _bare(text: str) -> str:
     """Strip a caption to the characters that are said, for matching words to it."""
@@ -969,8 +1125,11 @@ class SetCaptionStyleOp(BaseModel):
     action: Literal["set_caption_style"] = "set_caption_style"
     preset: Optional[str] = Field(
         default=None,
-        description="Where the video is going: `youtube`, `reels`, `tiktok`, or `plain` for no platform's "
-                    "furniture at all. Each one sets the safe area, the text size and the outline",
+        # Listed from the presets themselves, so the description cannot name fewer than there are.
+        description="Where the video is going: one of "
+                    + ", ".join(f"`{name}`" for name in CAPTION_PRESETS)
+                    + " (`plain` for no platform's furniture at all). Each one sets the safe area, the text "
+                      "size and the outline",
     )
     style: Optional[CaptionStyle] = Field(
         default=None, description="Settings to apply on top of the preset, or on their own",
@@ -1458,9 +1617,14 @@ def apply_operation(project: Project, op: EditOperation, assets: Mapping[str, As
         number = len(project.subtitles) + 1
         while f"c{number}" in taken:
             number += 1
+        if op.timeline_start is not None:
+            asset_id, source_start, source_end = _in_the_file(project, op.timeline_start, op.timeline_end,
+                                                              op.asset_id)
+        else:
+            asset_id, source_start, source_end = op.asset_id, op.source_start, op.source_end
         added = SubtitleCue(
-            id=f"c{number}", asset_id=op.asset_id, source_start=op.source_start, source_end=op.source_end,
-            text=op.text, secondary=op.secondary, speaker=op.speaker,
+            id=f"c{number}", asset_id=asset_id, source_start=source_start, source_end=source_end,
+            text=op.text, secondary=op.secondary, speaker=op.speaker, local=op.this_project_only,
         )
         project.subtitles = sorted([*project.subtitles, added], key=cue_order)
         return
@@ -1472,12 +1636,23 @@ def apply_operation(project: Project, op: EditOperation, assets: Mapping[str, As
         if op.delete:
             project.subtitles = [item for item in project.subtitles if item.id != op.cue_id]
             return
+        source_start, source_end = op.source_start, op.source_end
+        if op.timeline_start is not None or op.timeline_end is not None:
+            placed_start, placed_end = _cut_span(project, cue)
+            _, start, end = _in_the_file(project, op.timeline_start if op.timeline_start is not None else placed_start,
+                                         op.timeline_end if op.timeline_end is not None else placed_end, cue.asset_id)
+            source_start = start if op.timeline_start is not None else source_start
+            source_end = end if op.timeline_end is not None else source_end
         named = {
             field: value for field, value in
             (("text", op.text), ("secondary", op.secondary), ("speaker", op.speaker),
-             ("source_start", op.source_start), ("source_end", op.source_end))
+             ("source_start", source_start), ("source_end", source_end))
             if value is not None
         }
+        # Once kept to this project, a caption stays kept to it: edited again without saying,
+        # it would otherwise leak into every other project the next time it was saved.
+        if op.this_project_only:
+            named["local"] = True
         # Correcting the words leaves the word timings describing words that are no longer
         # there, and a caption lighting up against the wrong syllables is worse than one
         # lighting up whole — unless the correction only swaps characters one for one, the
