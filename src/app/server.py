@@ -66,7 +66,7 @@ from app.engine.levels import song_level, talking_in
 from app.engine.delivery import CHECKS, chapter_metadata, chapters, check_delivery, clock, cover_candidates
 from app.engine.frames import format_timestamp, still, storyboard_sheet
 from app.engine.interchange import write_edl, write_fcpxml, write_otio, write_srt
-from app.engine.listen import chart, describe, levels, parts_of
+from app.engine.listen import chart, describe, levels, levels_every, parts_of
 from app.engine.subtitles import (
     DEFAULT_MAX_CHARACTERS,
     DEFAULT_MAX_SECONDS,
@@ -116,7 +116,7 @@ repo = Repository(os.path.join(WORKSPACE_DIR, "clip_mcp.db"))
 CORE_TOOLS = (
     "list_assets", "analyze_asset", "get_job", "build_semantic_timeline", "query_clips", "view_frames",
     "save_plan", "amend_plan", "create_project", "compile_plan", "preview_project", "render_project",
-    "listen_again", "check_render", "apply_edits", "generate_subtitles",
+    "view_render", "listen_again", "check_render", "apply_edits", "generate_subtitles",
 )
 
 mcp = FastMCP(
@@ -862,8 +862,14 @@ def _bare_words(text: str) -> str:
     return re.sub(r"[\s\W_]+", "", text)
 
 @mcp.tool()
-def listen_again(asset_id: str, start: float, end: float, language: Optional[str] = None) -> dict:
-    """Hear one stretch of a file again, with nothing the transcript said, to check a word or a line.
+def listen_again(
+    start: float,
+    end: float,
+    asset_id: Optional[str] = None,
+    language: Optional[str] = None,
+    job_id: Optional[str] = None,
+) -> dict:
+    """Hear one stretch of a file or of a finished render again, to check a word, a line or the mix.
 
     The transcript is one long pass, and a word it misheard — 「沒那麼順」
     written as 「怎麼那麼順」 — is misheard for everything that reads it. This
@@ -871,23 +877,37 @@ def listen_again(asset_id: str, start: float, end: float, language: Optional[str
     before it. Where the two disagree, or the words come back unsure, believe
     neither — give the user `audio_path` to listen to and ask.
 
+    Given a render's `job_id` instead of a file, it hears what the viewer
+    will: whether a word was cut into at an edit, and, from `levels`, whether
+    the music dips under speech and two songs really cross-fade where the
+    plan says.
+
     Args:
-        asset_id: The file.
-        start: Where the stretch starts, in seconds of the file.
+        start: Where the stretch starts, in seconds of the file or the render.
         end: Where it ends; at most 30 seconds after `start`.
+        asset_id: The file to hear. Give this or `job_id`.
         language: Spoken language code; omit to detect it.
+        job_id: A finished render to hear, preview or full.
 
     Returns:
         A dictionary with `heard`, the new hearing with unsure words in ⟦ ⟧;
-        `words`, each with `start`, `end` in seconds of the file and its
-        `probability`; `stored`, what the transcript says for the same stretch,
-        or null; `agrees`, whether the two say the same words; and
-        `audio_path`, a WAV of the stretch for the user to play.
+        `words`, each with `start`, `end` and its `probability`; `levels`,
+        the sound's level in dBFS every `every_seconds` from `start` — speech
+        sits well above a ducked bed, a gap is near -60; `audio_path`, a WAV of
+        the stretch for the user to play; for a file, `stored`, what the
+        transcript says there, or null, and `agrees`, whether the two say the
+        same words; for a render, `captions`, the ones on screen in the
+        stretch, and `changed_since`, true when the project has been edited
+        since it was rendered.
 
     Raises:
-        ValueError: If the file has no sound, or the stretch is empty, too long
-            or outside the file.
+        ValueError: If neither or both of a file and a render are given, it
+            has no sound, or the stretch is empty, too long or outside it.
     """
+    if (asset_id is None) == (job_id is None):
+        raise ValueError("give either asset_id, to hear a file, or job_id, to hear a render")
+    if job_id is not None:
+        return _listen_to_render(job_id, start, end, language)
     asset = _get_asset(asset_id)
     if not asset.has_audio:
         raise ValueError(f"asset {asset_id} has no sound to hear again")
@@ -913,14 +933,80 @@ def listen_again(asset_id: str, start: float, end: float, language: Optional[str
         stored = "".join(said).strip() or None
     plain_heard = "".join(segment.text for segment in fresh.segments)
     return {
-        "heard": heard,
+        **_heard(fresh, keep_as, start),
+        "stored": stored,
+        "agrees": stored is not None and _bare_words(plain_heard) == _bare_words(stored),
+    }
+
+# How long each level `listen_again` reports covers: fine enough to see a fade or a dip
+# under a word, coarse enough that thirty seconds of it is sixty numbers.
+LEVEL_EVERY_SECONDS = 0.5
+
+def _heard(fresh, keep_as: str, start: float) -> dict:
+    """What `listen_again` says about any stretch it heard: the words, the levels, the sound file."""
+    return {
+        "heard": "".join(marked_text(segment) for segment in fresh.segments),
         "words": [
             {"text": word.text.strip(), "start": word.start, "end": word.end, "probability": word.probability}
             for segment in fresh.segments for word in segment.words
         ],
-        "stored": stored,
-        "agrees": stored is not None and _bare_words(plain_heard) == _bare_words(stored),
+        "levels": {"start": start, "every_seconds": LEVEL_EVERY_SECONDS,
+                   "db": levels_every(keep_as, LEVEL_EVERY_SECONDS)},
         "audio_path": keep_as,
+    }
+
+def _finished_render(job_id: str) -> Tuple[Job, str]:
+    """Find a render that has finished, and the file it made.
+
+    Args:
+        job_id: The render's job.
+
+    Returns:
+        `(job, path)`.
+
+    Raises:
+        ValueError: If it is not a render, has not finished, or its file is gone.
+    """
+    job = job_manager.get_job(job_id)
+    if job is None or job.kind != JobKind.RENDER:
+        raise ValueError(f"render {job_id} not found; `render_project` gives the job ID of one")
+    if job.status != JobStatus.COMPLETED:
+        raise ValueError(f"render {job_id} is {job.status.value}; wait for it with `get_job` first")
+    if not job.output_path or not os.path.exists(job.output_path):
+        raise ValueError(f"the file render {job_id} made is no longer there; render again")
+    return job, job.output_path
+
+def _changed_since(job: Job) -> bool:
+    """Whether the project a render was made from has been edited since."""
+    project = repo.get_project(job.project_id) if job.project_id else None
+    return project is not None and job.project_version is not None and project.version != job.project_version
+
+def _listen_to_render(job_id: str, start: float, end: float, language: Optional[str]) -> dict:
+    """`listen_again` over a finished render rather than a file."""
+    job, path = _finished_render(job_id)
+    if end <= start:
+        raise ValueError(f"the stretch has to end after it starts ({start}s to {end}s)")
+    if end - start > LISTEN_AGAIN_SECONDS:
+        raise ValueError(f"hear a stretch of at most {LISTEN_AGAIN_SECONDS:g} seconds at a time; this one is "
+                         f"{end - start:g}s")
+    project = repo.get_project(job.project_id) if job.project_id else None
+    keep_as = os.path.join(WORKSPACE_DIR, "temp", "listen", f"render-{job_id[:8]}-{start:.2f}-{end:.2f}.wav")
+    known = None
+    for clip in (project.base_video_track.clips if project and project.base_video_track else []):
+        analysis = repo.get_analysis(clip.asset_id)
+        if analysis is not None and analysis.transcript is not None:
+            known = analysis.transcript
+            break
+    fresh = listen_again_in_file(
+        path, start, end, language or (known.language if known else None), keep_as,
+        chinese_variant=known.chinese_variant if known else None,
+    )
+    shown = [cue for cue in (place_cues(project, project.subtitles) if project and job.captioned else [])
+             if float(cue.end) > start and float(cue.start) < end]
+    return {
+        **_heard(fresh, keep_as, start),
+        "captions": [f"{format_timestamp(float(cue.start))} {cue.text}" for cue in shown],
+        "changed_since": _changed_since(job),
     }
 
 @mcp.tool()
@@ -1872,6 +1958,101 @@ def view_frames(
     where = f"asset {asset_ids[0]}" if len(asset_ids) == 1 else f"{len(asset_ids)} assets, {count} frames each"
     return ToolResult(content=[
         f"Contact sheet of {where}, in reading order:\n" + "\n".join(listing),
+        Image(data=storyboard_sheet(shots), format="jpeg"),
+    ])
+
+# How far either side of a transition `view_render` looks: clear of the mix, near enough
+# to be the same shot.
+AROUND_TRANSITION_SECONDS = 0.15
+
+@mcp.tool()
+def view_render(
+    job_id: str,
+    at: Literal["even", "transitions", "captions"] = "even",
+    times: Optional[List[Annotated[float, Field(ge=0)]]] = None,
+    start: Annotated[float, Field(ge=0)] = 0,
+    end: Optional[float] = None,
+    count: Annotated[int, Field(ge=1, le=MAX_STORYBOARD_TILES)] = 12,
+) -> ToolResult:
+    """Look at frames of a finished render: what the viewer will see, captions and transitions included.
+
+    `preview_project` shows the footage a cut is made of; this shows the file
+    that came out, so it is how to check what only rendering makes — captions
+    burned in where they belong and readable, transitions that really happen,
+    the framing of another shape. Render a preview, look here, fix what is
+    wrong, and only then render the final cut.
+
+    The frames are returned to you as a tool result, which means they leave
+    this machine if you are not running on it.
+
+    Args:
+        job_id: The render, preview or full, from `render_project`.
+        at: `even` spreads `count` frames over the stretch; `transitions`
+            takes one just before, one in the middle and one just after each
+            transition; `captions` one from the middle of each caption on
+            screen.
+        times: Exact seconds of the render to look at instead.
+        start: Only look from here, in seconds of the render.
+        end: Only look up to here; omit for the end.
+        count: How many frames `even` takes.
+
+    Returns:
+        A text block naming each tile's time and what it is, then the frames
+        as one JPEG. It says so when the project has changed since the render,
+        when a render has no captions burned in, or when more frames were
+        wanted than one sheet holds.
+
+    Raises:
+        ValueError: If the job is not a finished render or its file is gone.
+    """
+    job, path = _finished_render(job_id)
+    project = repo.get_project(job.project_id) if job.project_id else None
+    length = float(project.duration) if project is not None else None
+    last = length if end is None else (end if length is None else min(end, length))
+    said: List[str] = []
+    wanted: List[tuple] = []
+    if times:
+        wanted = [(seconds, "") for seconds in times]
+    elif at == "transitions":
+        base = project.base_video_track if project else None
+        for clip in (base.clips if base else []):
+            if clip.transition_in is None:
+                continue
+            cut, seconds = float(clip.timeline_in), float(clip.transition_in.seconds)
+            if cut < start or (last is not None and cut > last):
+                continue
+            kind = clip.transition_in.kind
+            wanted += [(max(0.0, cut - seconds - AROUND_TRANSITION_SECONDS), f"before the {kind}"),
+                       (cut - seconds / 2, f"middle of the {kind}"),
+                       (cut + AROUND_TRANSITION_SECONDS, f"after the {kind}")]
+        if not wanted:
+            said.append("there is no transition in this stretch of the cut")
+    elif at == "captions":
+        if not job.captioned:
+            said.append("this render has no captions burned in; render with burn_subtitles to look at them")
+        placed = place_cues(project, project.subtitles) if project else []
+        wanted = [((float(cue.start) + float(cue.end)) / 2, f"{cue.cue_id} {cue.text}") for cue in placed
+                  if float(cue.end) > start and (last is None or float(cue.start) < last)]
+    else:
+        stop = last if last is not None else start + 1
+        step = (stop - start) / count
+        wanted = [(start + step * (index + 0.5), "") for index in range(count)]
+    if len(wanted) > MAX_STORYBOARD_TILES:
+        said.append(f"{len(wanted)} frames wanted, the first {MAX_STORYBOARD_TILES} shown; look at the rest with "
+                    "a later `start`")
+        wanted = wanted[:MAX_STORYBOARD_TILES]
+    if _changed_since(job):
+        said.append("the project has been edited since this render, so it may no longer show what the cut is now")
+    if length is not None:
+        wanted = [(min(seconds, length - 0.05), what) for seconds, what in wanted]
+    if not wanted:
+        return ToolResult(content=["Nothing to show: " + "; ".join(said)])
+    shots = [(path, round(seconds, 3), f"#{number}  {format_timestamp(seconds)}")
+             for number, (seconds, _) in enumerate(wanted, start=1)]
+    listing = [f"#{number}: {seconds:.2f}s ({format_timestamp(seconds)})" + (f" | {what}" if what else "")
+               for number, (seconds, what) in enumerate(wanted, start=1)]
+    return ToolResult(content=[
+        "\n".join([*said, "Frames of the render, in reading order:", *listing]),
         Image(data=storyboard_sheet(shots), format="jpeg"),
     ])
 
@@ -3668,7 +3849,7 @@ def _start_render(
         )
     kind = ("preview" if is_preview else "output") + (f"-{frame}" if frame else "")
     housekeeping.sweep_renders(WORKSPACE_DIR, _delivered)
-    job = Job(kind=JobKind.RENDER, project_id=project_id)
+    job = Job(kind=JobKind.RENDER, project_id=project_id, project_version=project.version, captioned=burn_subtitles)
     delivered: Optional[str] = None
     if is_preview:
         job.work_dir = os.path.join(housekeeping.preview_dir(WORKSPACE_DIR, project_id), job.job_id)

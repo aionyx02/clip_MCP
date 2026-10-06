@@ -64,6 +64,28 @@ def levels(path: str) -> np.ndarray:
     rms = np.sqrt(np.mean(windows ** 2, axis=1))
     return np.maximum(FLOOR_DB, 20 * np.log10(np.maximum(rms, 1e-9)))
 
+def levels_every(path: str, seconds: float) -> List[float]:
+    """Measure a mono WAV's level over longer windows, for reading as numbers.
+
+    Averaged as energy, not as decibels, so one loud moment in a window counts
+    for what it is rather than being diluted by the quiet either side.
+
+    Args:
+        path: The file.
+        seconds: How long each window is.
+
+    Returns:
+        One level per window in dB relative to full scale, never below
+        `FLOOR_DB`, rounded to a tenth.
+    """
+    fine = levels(path)
+    size = max(1, int(round(seconds / WINDOW_SECONDS)))
+    measured = []
+    for first in range(0, len(fine), size):
+        energy = float(np.mean(10 ** (fine[first:first + size] / 10)))
+        measured.append(round(max(FLOOR_DB, 10 * np.log10(max(energy, 1e-12))), 1))
+    return measured
+
 @dataclass(frozen=True)
 class PartSound:
     """How one part of a cut sounds.

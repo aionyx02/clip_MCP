@@ -30,7 +30,7 @@ def heard(media: Path, monkeypatch: pytest.MonkeyPatch) -> dict:
     return {"asset": asset, "asked": asked}
 
 def test_a_stretch_is_heard_again_without_the_transcript_and_kept_to_listen_to(heard: dict) -> None:
-    found = server.listen_again(heard["asset"], start=1.5, end=4.5)
+    found = server.listen_again(asset_id=heard["asset"], start=1.5, end=4.5)
     # Nothing of the first pass is handed to the model: no prompt, only this stretch of sound.
     assert heard["asked"]["prompt"] is None and heard["asked"]["duration"] == pytest.approx(3.0)
     assert found["heard"] == "沒那麼順" and found["stored"] == "怎麼那麼順"
@@ -42,6 +42,6 @@ def test_a_stretch_is_heard_again_without_the_transcript_and_kept_to_listen_to(h
 
 def test_only_a_short_stretch_is_heard_again(heard: dict) -> None:
     with pytest.raises(ValueError, match="30"):
-        server.listen_again(heard["asset"], start=0, end=45)
+        server.listen_again(asset_id=heard["asset"], start=0, end=45)
     with pytest.raises(ValueError, match="after"):
-        server.listen_again(heard["asset"], start=4, end=3)
+        server.listen_again(asset_id=heard["asset"], start=4, end=3)

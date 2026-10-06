@@ -981,6 +981,7 @@ def listen_again(
     )
     if cut.returncode != 0:
         raise RuntimeError(f"could not read that stretch of sound: {cut.stderr.strip()[-300:]}")
+
     def hear(on: str) -> Transcript:
         return _run_whisper(on, keep_as, end - start, language, None, lambda fraction: None, lambda: False,
                             None, whisper_model_name())

@@ -48,6 +48,10 @@ class Job(BaseModel):
     progress: float = Field(default=0.0, ge=0, le=1, description="Fraction of the work completed so far")
     stage: Optional[str] = Field(default=None, description="What the job is currently doing")
     output_path: Optional[str] = Field(default=None, description="Rendered file (render jobs)")
+    project_version: Optional[int] = Field(
+        default=None, description="The project's version when it was rendered, to tell whether it has changed since",
+    )
+    captioned: bool = Field(default=False, description="Whether the render burns the captions in (render jobs)")
     work_dir: Optional[str] = Field(default=None, description="Directory holding the job's specification and logs")
     error_message: Optional[str] = None
     cancel_requested: bool = False
