@@ -8,8 +8,14 @@ dependencies = [
     # faster-whisper decodes audio through PyAV and passes it `metadata_errors`, which PyAV 19
     # removed: every transcription fails. Held below 19 until faster-whisper stops passing it.
     "av>=11,<19",
+    # The history of every project, plan and caption is a git repository; written with a
+    # pure-Python git, since nobody installing this is expected to have git.
+    "dulwich>=1.2.17",
     "faster-whisper>=1.2.1",
     "fastmcp>=4.0.4",
+    # One writer at a time on that history: the MCP server and the editor are two processes.
+    # Already here through faster-whisper; named because the history imports it directly.
+    "filelock>=3.13",
     # Chinese word splitting, so a caption broken into lines is not broken inside a word:
     # the recogniser returns Chinese a character at a time.
     "jieba>=0.42.1",

@@ -662,11 +662,20 @@ class Track(BaseModel):
                     "ducks under speech; audio tracks only",
     )
 
+class BranchPoint(BaseModel):
+    """Where a branch came from: which project, at which of its versions."""
+
+    project_id: str
+    commit: str = Field(..., description="The version of that project it started as, a commit in the history")
+
 class Project(BaseModel):
     """An editing project: output format settings plus its tracks."""
 
     id: str
     name: Optional[str] = Field(default=None, description="What the editor calls this project, such as 'EP1 台北'")
+    branched_from: Optional[BranchPoint] = Field(
+        default=None, description="For a branch, the project and version it was started from; null for a first cut",
+    )
     version: int = Field(default=1, description="Project version")
     fps_num: int = Field(default=30, gt=0, description="Frame rate numerator (e.g. 30000 for 29.97 fps)")
     fps_den: int = Field(default=1, gt=0, description="Frame rate denominator (e.g. 1001 for 29.97 fps)")

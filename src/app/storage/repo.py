@@ -12,6 +12,7 @@ from app.models.media import Asset, MediaAnalysis
 from app.models.plan import EditPlan
 from app.models.semantic import ClipKind, ClipLevel, SemanticClip, SemanticTimeline
 from app.models.timeline import Project, SubtitleCue
+from app.storage.history import History, canonical, describe_project, file_stem, fingerprint
 
 # Each entry upgrades the schema by one version; PRAGMA user_version records how many have been applied.
 # Append new migrations to the end and never edit ones that have shipped.
@@ -124,6 +125,9 @@ class Repository:
         self.db_path = os.path.abspath(db_path)
         os.makedirs(os.path.dirname(self.db_path), exist_ok=True)
         self._lock = threading.Lock()
+        # Where every change is kept as a version; None keeps none, for a database opened
+        # only to be read.
+        self.history: Optional[History] = None
         self._conn = sqlite3.connect(self.db_path, timeout=30, isolation_level=None, check_same_thread=False)
         self._conn.execute("PRAGMA journal_mode=WAL")
         # Migrate inside one immediate transaction so concurrent processes never apply a migration twice.
@@ -167,6 +171,75 @@ class Repository:
         with self._lock:
             return self._conn.execute(sql, tuple(params)).fetchall()
 
+    # ------------------------------------------------------------------ the history of every change
+
+    def keep_history(self, root: str) -> History:
+        """Keep a version of every project, plan, caption and library change from now on.
+
+        Args:
+            root: The history repository's folder.
+
+        Returns:
+            The history.
+        """
+        self.history = History(root, snapshot=self._history_files)
+        return self.history
+
+    def _history_files(self) -> Dict[str, bytes]:
+        """Everything the history keeps, as it stands: what its first version holds."""
+        files = {"library.json": canonical(self._library())}
+        for project in self.list_projects():
+            files[_project_file(project)] = canonical(project.model_dump())
+        for plan in self.list_plans():
+            files[f"plans/{plan.id}.json"] = canonical(plan.model_dump())
+        for asset_id, data in self._query("SELECT asset_id, data FROM reviewed_captions"):
+            files[self._captions_file(asset_id)] = canonical(json.loads(data))
+        return files
+
+    def _kept_project(self, project: Optional[Project], before: Optional[Project], gone_id: str = "") -> None:
+        """Tell the history a project changed, was made, or went."""
+        if self.history is None:
+            return
+        project_id = project.id if project is not None else gone_id
+        old = self.history.working_path("projects/", f"-{project_id}.json")
+        new = _project_file(project) if project is not None else None
+        said = describe_project(before.model_dump(mode="json") if before else None,
+                                project.model_dump(mode="json") if project else None)
+        if old and old != new:
+            self.history.write(old, None, said)
+        if new:
+            self.history.write(new, canonical(project.model_dump()), said)
+
+    def _captions_file(self, asset_id: str) -> str:
+        """Where a file's remembered captions live in the history: named after the file."""
+        asset = self.get_assets([asset_id]).get(asset_id)
+        name = file_stem(os.path.basename(asset.path)) if asset else ""
+        return f"captions/{name + '-' if name else ''}{asset_id}.json"
+
+    def _library(self) -> dict:
+        """The library as the history keeps it: each file, where it is, and how it is filed."""
+        filed = {(kind, item): folder for kind, item, folder in
+                 self._query("SELECT kind, item_id, folder_id FROM folder_items")}
+        return {
+            "assets": {
+                asset.id: {
+                    "name": os.path.basename(asset.path), "path": asset.path, "fingerprint": fingerprint(asset.path),
+                    "has_video": asset.has_video, "has_audio": asset.has_audio, "notes": asset.notes,
+                    "folder_id": filed.get(("assets", asset.id)),
+                }
+                for asset in self.list_assets()
+            },
+            "folders": {folder_id: {"kind": kind, "name": name, "parent_id": parent_id}
+                        for folder_id, kind, parent_id, name in
+                        self._query("SELECT id, kind, parent_id, name FROM folders")},
+            "projects": {item: folder for (kind, item), folder in filed.items() if kind == "projects"},
+        }
+
+    def _kept_library(self, said: str) -> None:
+        """Tell the history the library changed: a file added, moved, noted, filed or taken out."""
+        if self.history is not None:
+            self.history.write("library.json", canonical(self._library()), said)
+
     def save_asset(self, asset: Asset) -> None:
         """Insert an asset, or replace the stored asset with the same ID.
 
@@ -179,6 +252,7 @@ class Repository:
                 "ON CONFLICT(id) DO UPDATE SET path = excluded.path, data = excluded.data",
                 (asset.id, asset.path, asset.model_dump_json()),
             )
+        self._kept_library(f"素材「{os.path.basename(asset.path)}」")
 
     def find_asset_by_path(self, path: str) -> Optional[Asset]:
         """Look up the asset registered for a file path.
@@ -275,6 +349,13 @@ class Repository:
                     "INSERT INTO reviewed_captions (asset_id, data) VALUES (?, ?) "
                     "ON CONFLICT(asset_id) DO UPDATE SET data = excluded.data",
                     (asset_id, json.dumps([cue.model_dump(mode="json") for cue in merged], ensure_ascii=False)),
+                )
+        if self.history is not None:
+            for asset_id, fresh in by_asset.items():
+                self.history.write(
+                    self._captions_file(asset_id),
+                    canonical([cue.model_dump() for cue in self.reviewed_captions(asset_id)]),
+                    f"記下了 {len(fresh)} 句校對過的字幕",
                 )
 
     def reviewed_captions(self, asset_id: str) -> List[SubtitleCue]:
@@ -374,6 +455,7 @@ class Repository:
                 "INSERT INTO projects (id, version, data) VALUES (?, ?, ?)",
                 (project.id, project.version, project.model_dump_json()),
             )
+        self._kept_project(project, None)
 
     def get_project(self, project_id: str) -> Optional[Project]:
         """Fetch a project by ID.
@@ -406,6 +488,7 @@ class Repository:
             VersionConflictError: If the stored project is missing or its
                 version differs from `expected_version`.
         """
+        before = self.get_project(project.id) if self.history is not None else None
         with self._transaction() as conn:
             cursor = conn.execute(
                 "UPDATE projects SET version = ?, data = ? WHERE id = ? AND version = ?",
@@ -413,6 +496,7 @@ class Repository:
             )
             if cursor.rowcount != 1:
                 raise VersionConflictError(f"version conflict: project {project.id} is no longer at version {expected_version}")
+        self._kept_project(project, before)
 
     def add_job(self, job: Job) -> None:
         """Store a new background job.
@@ -800,19 +884,21 @@ class Repository:
                     "INSERT INTO plans (id, timeline_id, version, data) VALUES (?, ?, ?, ?)",
                     (stored.id, stored.timeline_id, stored.version, stored.model_dump_json()),
                 )
-                self._keep_version(conn, stored, note)
-                return stored
-            if row[0] != plan.version:
-                raise VersionConflictError(
-                    f"version conflict: plan {plan.id} is at version {row[0]}, not {plan.version}"
+            else:
+                if row[0] != plan.version:
+                    raise VersionConflictError(
+                        f"version conflict: plan {plan.id} is at version {row[0]}, not {plan.version}"
+                    )
+                stored = plan.model_copy(update={"version": plan.version + 1, "updated_at": datetime.now(timezone.utc)})
+                conn.execute(
+                    "UPDATE plans SET timeline_id = ?, version = ?, data = ? WHERE id = ?",
+                    (stored.timeline_id, stored.version, stored.model_dump_json(), stored.id),
                 )
-            stored = plan.model_copy(update={"version": plan.version + 1, "updated_at": datetime.now(timezone.utc)})
-            conn.execute(
-                "UPDATE plans SET timeline_id = ?, version = ?, data = ? WHERE id = ?",
-                (stored.timeline_id, stored.version, stored.model_dump_json(), stored.id),
-            )
             self._keep_version(conn, stored, note)
-            return stored
+        if self.history is not None:
+            self.history.write(f"plans/{stored.id}.json", canonical(stored.model_dump()),
+                               f"計畫第 {stored.version} 版" + (f"：{note}" if note else ""))
+        return stored
 
     @staticmethod
     def _keep_version(conn: sqlite3.Connection, plan: EditPlan, note: str) -> None:
@@ -957,6 +1043,7 @@ class Repository:
             name = self._check_name(conn, kind, parent_id, name)
             conn.execute("INSERT INTO folders (id, kind, parent_id, name) VALUES (?, ?, ?, ?)",
                          (folder_id, kind, parent_id, name))
+        self._kept_library(f"新增資料夾「{name}」")
         return {"id": folder_id, "parent_id": parent_id, "name": name}
 
     def rename_folder(self, folder_id: str, name: str) -> None:
@@ -976,6 +1063,7 @@ class Repository:
                 raise FolderNotFoundError(f"folder {folder_id} not found")
             conn.execute("UPDATE folders SET name = ? WHERE id = ?",
                          (self._check_name(conn, row[0], row[1], name, folder_id), folder_id))
+        self._kept_library(f"資料夾改名為「{name}」")
 
     def delete_folder(self, folder_id: str) -> None:
         """Remove a folder; what was in it moves up into the folder around it.
@@ -1004,6 +1092,7 @@ class Repository:
             else:
                 conn.execute("UPDATE folder_items SET folder_id = ? WHERE folder_id = ?", (parent_id, folder_id))
             conn.execute("DELETE FROM folders WHERE id = ?", (folder_id,))
+        self._kept_library("拿掉了一個資料夾，裡面的東西往上移一層")
 
     def move_folder(self, folder_id: str, parent_id: Optional[str]) -> None:
         """Put a folder inside another, or at the top.
@@ -1031,6 +1120,7 @@ class Repository:
                 ancestor = found[1]
             self._check_name(conn, kind, parent_id, name, folder_id)
             conn.execute("UPDATE folders SET parent_id = ? WHERE id = ?", (parent_id, folder_id))
+        self._kept_library(f"移動了資料夾「{name}」")
 
     def folder_of(self, kind: str) -> Dict[str, str]:
         """Say which folder each filed item of one kind is in.
@@ -1069,6 +1159,7 @@ class Repository:
                         "ON CONFLICT(kind, item_id) DO UPDATE SET folder_id = excluded.folder_id",
                         (kind, item_id, folder_id),
                     )
+        self._kept_library("整理了素材的位置" if kind == "assets" else "整理了專案的位置")
 
     # ------------------------------------------------------------------ taking a file out of the library
 
@@ -1105,6 +1196,10 @@ class Repository:
             for project_id in found:
                 conn.execute("DELETE FROM projects WHERE id = ?", (project_id,))
                 conn.execute("DELETE FROM folder_items WHERE kind = 'projects' AND item_id = ?", (project_id,))
+        for project_id, project in found.items():
+            self._kept_project(None, project, gone_id=project_id)
+        if found:
+            self._kept_library(f"拿掉了 {len(found)} 個專案")
         return sorted(found), []
 
     def delete_unused_assets(self, asset_ids: Iterable[str]) -> Dict[str, Dict[str, List[str]]]:
@@ -1157,8 +1252,14 @@ class Repository:
                     note(job.asset_id, "busy", "analysis")
             if using:
                 return using
+            gone = [self.history.working_path("captions/", f"{asset_id}.json") if self.history else None
+                    for asset_id in wanted]
             for asset_id in wanted:
                 self._delete_asset(conn, asset_id)
+        if self.history is not None:
+            for path in filter(None, gone):
+                self.history.write(path, None)
+            self._kept_library(f"從素材庫拿掉了 {len(wanted)} 個檔案")
         return {}
 
     @staticmethod
@@ -1184,6 +1285,11 @@ class Repository:
             else:
                 conn.execute("UPDATE semantic_timelines SET data = ? WHERE id = ?",
                              (timeline.model_dump_json(), timeline_id))
+
+def _project_file(project: Project) -> str:
+    """Where a project lives in the history: named after it, so a person can find it, and ending in its ID."""
+    name = file_stem(project.name or "")
+    return f"projects/{name + '-' if name else ''}{project.id}.json"
 
 def _plan_references(value: object, assets: Set[str], clips: Set[str]) -> None:
     """Collect the asset IDs and semantic clip IDs anywhere in a plan's JSON.

@@ -48,12 +48,23 @@ comparison as text, down to the reasons.
 
 ## Going back
 
-Every save and every amendment is a version, and all of them are kept.
-「剛剛那樣比較好」 is `list_plan_versions` to find the one they mean — each
-version has its note and what it changed — and `revert_plan` to bring it back.
-That saves the old version as a new one on top, so going back can itself be
-undone and nothing is lost either way. `get_plan` with a `version` reads one
-without going back to it. Compile again afterwards.
+Every change to a video is kept as a version: a compile, an edit, captions,
+whoever made it. 「剛剛那樣比較好」 or 「回到昨天那版」 is `project_history` to
+find the one they mean — each says when, who, and what changed in words — and
+`restore_version` to bring it back. That is a new version on top, so going
+back can be undone the same way and nothing is lost. The plan the video was
+compiled from goes back with it; when another video shares that plan, this
+one gets its own copy, and `plan_copied` says so — tell the user.
+
+「做一個 Reels 版」 or 「試試沒有配樂的」 is a branch: `branch_project` from the
+version to start at, with a name in the user's words. It is a project of its
+own beside the first, which is left alone.
+
+Pass the user's words for every change as `note` — on `apply_edits`,
+`compile_plan`, `generate_subtitles`, `amend_plan` — since that is what the
+version says in the history the user reads. A plan's own versions are still
+there too: `list_plan_versions`, `revert_plan`, and `get_plan` with a
+`version`.
 
 ## What the complaint means
 
@@ -77,7 +88,7 @@ let the user steer from there.
 | 「聽不太清楚」 / hard to hear | `preview_sound` first. Noise under the voice: `set_clip_audio` with `cleanup`. Music over it: `set_music_level`. A voice left apart from the others: its file was not transcribed |
 | 「畫面太悶」「一直同一個畫面」 / the picture is dull | `propose_broll`, then `add_broll` |
 | 「字太小」「字被擋住」 / captions too small or covered | `set_caption_style` with the platform's `preset`, or a larger `size_fraction` |
-| 「剛剛那樣比較好」「回到上一版」 / the last one was better | `list_plan_versions`, then `revert_plan` to that version, then `compile_plan` |
+| 「剛剛那樣比較好」「回到上一版」 / the last one was better | `project_history`, then `restore_version` to that version |
 | 「改了哪裡？」 / what changed | `preview_plan_diff` with the plan and the two versions |
 | 「這段我自己調的不要動」 / keep what I did here | Already kept: a hand edit pinned it |
 

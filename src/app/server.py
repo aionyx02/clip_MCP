@@ -28,6 +28,7 @@ from app.models.semantic import (
 )
 from app.models.timeline import (
     AddSubtitleOp,
+    BranchPoint,
     Clip,
     EditOperation,
     EditSubtitleOp,
@@ -78,6 +79,7 @@ from app.engine.subtitles import (
 )
 from app.engine.renderer import JobManager
 from app.storage import housekeeping
+from app.storage.history import Version, current_batch
 from app.storage.repo import Repository
 from app.workspace import output_dir, workspace_dir
 
@@ -109,6 +111,7 @@ MEDIA_EXTENSIONS = frozenset({
 
 # Opened before the server is described: what it says about this computer's speed comes from runs kept here.
 repo = Repository(os.path.join(WORKSPACE_DIR, "clip_mcp.db"))
+history = repo.keep_history(os.path.join(WORKSPACE_DIR, "history"))
 
 # The tools an ordinary edit goes through, in the order they come up. Named in the opening
 # instructions because a client that loads tools on demand has to guess which ones it will
@@ -305,6 +308,51 @@ class AssetNames(Middleware):
         return await call_next(context)
 
 mcp.add_middleware(AssetNames())
+
+# What each tool that changes things is doing, for a version saved without the user's words.
+DOING = {
+    "apply_edits": "修改時間軸", "compile_plan": "依計畫剪接", "save_plan": "存計畫", "amend_plan": "修改計畫",
+    "revert_plan": "計畫回到舊版", "copy_plan": "複製計畫", "generate_subtitles": "上字幕",
+    "create_project": "建立專案", "import_asset": "加入素材", "import_folder": "加入資料夾", "edit_asset": "寫素材備註",
+    "restore_version": "回到舊版本", "branch_project": "開分支",
+}
+# What the AI programs call themselves when they connect, as a person would name them.
+CLIENT_NAMES = {
+    "claude-code": "Claude Code", "claude-ai": "Claude Desktop", "codex-mcp-client": "Codex",
+    "gemini-cli-mcp-client": "Gemini CLI", "opencode": "opencode", "cherry-studio": "Cherry Studio",
+    "lm-studio": "LM Studio",
+}
+
+def _client_name(context: MiddlewareContext) -> str:
+    """The AI program on the other end of a call, by the name it gave when it connected."""
+    try:
+        params = context.fastmcp_context.session.client_params
+        name = params.client_info.name if params is not None and params.client_info is not None else ""
+    except (AttributeError, RuntimeError):
+        name = ""
+    return CLIENT_NAMES.get(name.lower(), name) or "AI 程式"
+
+class HistorySteps(Middleware):
+    """Keep what one tool call changed as one version, said in words, under the AI's name."""
+
+    async def on_call_tool(self, context: MiddlewareContext, call_next: CallNext) -> ToolResult:
+        """Run the tool inside one step of the history.
+
+        Args:
+            context: The call; its `note` argument, when there is one, is the
+                version's description.
+            call_next: The rest of the chain, ending in the tool.
+
+        Returns:
+            What the tool returned.
+        """
+        arguments = context.message.arguments or {}
+        note = arguments.get("note") if isinstance(arguments.get("note"), str) else ""
+        name = context.message.name
+        with history.step(f"AI（{_client_name(context)}）", note=note, doing=DOING.get(name, name)):
+            return await call_next(context)
+
+mcp.add_middleware(HistorySteps())
 
 # Compiled operations are validated the same way a client's are, so a plan cannot reach
 # the timeline through a door the tool surface does not have.
@@ -600,7 +648,7 @@ def list_assets(
     return {"assets": assets, "total": len(matching), "offset": offset, "folders": repo.list_folders("assets")}
 
 @mcp.tool()
-def edit_asset(asset_id: str, notes: str) -> dict:
+def edit_asset(asset_id: str, notes: str, note: str = "") -> dict:
     """Write down how a file may be used, so it is read wherever the file is.
 
     For an instruction about the footage itself — 「請消音」, 「可不放」,
@@ -611,6 +659,7 @@ def edit_asset(asset_id: str, notes: str) -> dict:
     Args:
         asset_id: The file.
         notes: The notes, replacing what was there; empty clears them.
+        note: Why, in the user's words, kept in the library's history.
 
     Returns:
         The file's `id`, `name` and `notes`.
@@ -2252,7 +2301,7 @@ def get_project(project_id: str, include_subtitles: bool = False) -> dict:
     return _plain(state)
 
 @mcp.tool()
-def apply_edits(project_id: str, expected_version: int, operations: list[EditOperation]) -> dict:
+def apply_edits(project_id: str, expected_version: int, operations: list[EditOperation], note: str = "") -> dict:
     """Apply a batch of edit operations to a project with optimistic locking.
 
     Operations are applied in order and atomically: if any operation fails,
@@ -2293,6 +2342,8 @@ def apply_edits(project_id: str, expected_version: int, operations: list[EditOpe
         project_id: ID of the project to edit.
         expected_version: Project version the caller last read. The request is
             rejected if the project has been modified since then.
+        note: The user's own words for this change — 「結尾的晚安多留一下」 —
+            kept as what this version is in the project's history.
         operations: Edit operations to apply, each identified by its `action`:
             `add_track`, `add_clip`, `insert_clip`, `trim_clip`, `move_clip`,
             `delete_clip`, `split_clip`, `reorder_clip`, `fit_track`,
@@ -2844,7 +2895,7 @@ def validate_plan(plan_id: Optional[str] = None) -> dict:
     }
 
 @mcp.tool()
-def compile_plan(project_id: str, expected_version: int, plan_id: Optional[str] = None) -> dict:
+def compile_plan(project_id: str, expected_version: int, plan_id: Optional[str] = None, note: str = "") -> dict:
     """Build a plan's cut on a project's timeline.
 
     Every second is worked out here, the same way every time: each selection
@@ -2873,6 +2924,8 @@ def compile_plan(project_id: str, expected_version: int, plan_id: Optional[str] 
         project_id: Project to build the cut on.
         expected_version: Version you last read from `get_project`.
         plan_id: Plan to compile; omit for the one saved most recently.
+        note: The user's own words for what this round changes, kept as what
+            this version is in the project's history.
 
     Returns:
         A dictionary with the `plan_id`, the `project_id`, its `new_version`,
@@ -3395,6 +3448,7 @@ def generate_subtitles(
     max_characters: Annotated[int, Field(ge=8, le=120)] = DEFAULT_MAX_CHARACTERS,
     max_seconds: Annotated[float, Field(gt=0.2, le=15)] = DEFAULT_MAX_SECONDS,
     fix_words: Optional[Dict[str, str]] = None,
+    note: str = "",
 ) -> dict:
     """Caption the edited sequence from transcripts already made, and store the captions.
 
@@ -3429,6 +3483,7 @@ def generate_subtitles(
             meant — {"Packet": "Pocket", "裁風寺": "裁縫師"}. Kept for every
             later caption in this workspace; an empty meaning takes a word
             out of the glossary.
+        note: The user's own words for this, kept in the project's history.
 
     Returns:
         A dictionary with the project's `new_version`; `captions`, each as
@@ -4396,6 +4451,192 @@ def export_timeline(
     with open(path, "w", encoding="utf-8-sig" if format == "edl" else "utf-8", newline="\n") as handle:
         handle.write(text)
     return {"output_path": path, "left_behind": behind}
+
+def _version_record(version: Version) -> dict:
+    """One version of a project as the AI reads it."""
+    return {
+        "commit": version.commit[:10],
+        "when": version.when.astimezone().strftime("%Y-%m-%d %H:%M"),
+        "by": version.author,
+        "what": version.subject,
+    }
+
+@mcp.tool()
+def project_history(project_id: str, limit: Annotated[int, Field(ge=1, le=200)] = 30) -> dict:
+    """List a video's versions: every change to it, newest first, with who made it and what it was.
+
+    Every change to a project — a compile, an edit, captions — is kept as a
+    version, and nothing is ever taken out of the history: going back is one
+    more version on top. Use it for 「剛剛那樣比較好」, 「回到昨天那版」 or
+    「誰改了結尾」, then `restore_version` or `branch_project`. A client with a
+    shell can also read the same history with git in the workspace's
+    `history` folder.
+
+    Args:
+        project_id: The video.
+        limit: Most versions to list.
+
+    Returns:
+        `versions`, each with its `commit`, `when`, `by` (the AI program or
+        the editor) and `what` changed in words; and `branched_from`, the
+        project and version a branch started as, or null.
+
+    Raises:
+        ValueError: If there is no such project.
+    """
+    project = repo.get_project(project_id)
+    if project is None:
+        raise ValueError(f"project {project_id} not found")
+    return {
+        "versions": [_version_record(version) for version in history.versions_of("projects/", f"{project_id}.json", limit)],
+        "branched_from": project.branched_from.model_dump() if project.branched_from else None,
+    }
+
+def _project_at(project_id: str, commit: str) -> Project:
+    """A project as it was at one version.
+
+    Raises:
+        ValueError: If there is no such version, or the project was not there then.
+    """
+    try:
+        path = history.find("projects/", f"{project_id}.json", commit)
+    except KeyError as exc:
+        raise ValueError(str(exc).strip("'\"")) from exc
+    content = history.read(path, commit) if path else None
+    if content is None:
+        raise ValueError(f"project {project_id} did not exist at version {commit}")
+    return Project.model_validate_json(content)
+
+def _plans_at(project: Project, commit: str) -> Dict[str, EditPlan]:
+    """The plans a project's clips were compiled from, as they were at one version."""
+    found: Dict[str, EditPlan] = {}
+    for plan_id in {clip.from_plan_id for track in project.tracks for clip in track.clips if clip.from_plan_id}:
+        content = history.read(f"plans/{plan_id}.json", commit)
+        if content is not None:
+            found[plan_id] = EditPlan.model_validate_json(content)
+    return found
+
+def _with_plans(project: Project, renamed: Mapping[str, str]) -> Project:
+    """A project whose compiled clips name their plans by new IDs."""
+    copy = project.model_copy(deep=True)
+    for track in copy.tracks:
+        for clip in track.clips:
+            if clip.from_plan_id in renamed:
+                clip.from_plan_id = renamed[clip.from_plan_id]
+    return copy
+
+def _copied_plan(plan: EditPlan, why: str) -> str:
+    """Save a plan under a new ID, as the starting point of its own history; returns the ID."""
+    stored = repo.save_plan(plan.model_copy(update={"id": str(uuid.uuid4()), "version": 1}), why)
+    return stored.id
+
+@mcp.tool()
+def restore_version(project_id: str, commit: str, expected_version: int, note: str = "") -> dict:
+    """Make a video what it was at one of its versions, as a new version on top.
+
+    Nothing after that version is lost: it all stays in the history, and
+    going back can itself be undone the same way. The plan the video was
+    compiled from goes back with it, so the next compile does not undo this
+    — and when another video was compiled from that same plan, this one gets
+    a copy of it instead, so the other is left exactly as it is.
+
+    Args:
+        project_id: The video.
+        commit: The version to go back to, from `project_history`.
+        expected_version: The project's current `version`.
+        note: The user's own words for why, kept in the history.
+
+    Returns:
+        The project's `new_version`, the `restored` version's `commit` and
+        `what`, and `plan_copied` — true when the plan was shared and this
+        video now has a copy of its own, which is worth telling the user.
+
+    Raises:
+        ValueError: If the project or version does not exist, or the project
+            has moved on from `expected_version`.
+    """
+    current = repo.get_project(project_id)
+    if current is None:
+        raise ValueError(f"project {project_id} not found")
+    if current.version != expected_version:
+        raise ValueError(f"version conflict: project {project_id} is at version {current.version}, not {expected_version}")
+    earlier = _project_at(project_id, commit)
+    chosen = next((version for version in history.versions_of("projects/", f"{project_id}.json", 500)
+                   if version.commit.startswith(commit.strip().lower())), None)
+    batch = current_batch()
+    if batch is not None and not batch.note and chosen is not None:
+        batch.note = f"回到「{chosen.subject}」那一版"
+    renamed: Dict[str, str] = {}
+    copied = False
+    others = [other for other in repo.list_projects() if other.id != project_id]
+    for plan_id, plan in _plans_at(earlier, commit).items():
+        shared = any(clip.from_plan_id == plan_id for other in others for track in other.tracks for clip in track.clips)
+        if shared:
+            renamed[plan_id] = _copied_plan(plan, f"「{current.name or project_id}」回到舊版時另存的計畫")
+            copied = True
+            continue
+        now = repo.get_plan(plan_id)
+        if now is None:
+            repo.save_plan(plan.model_copy(update={"version": 1}), "回到舊版時放回的計畫")
+        elif now.model_dump(exclude={"version", "updated_at"}) != plan.model_dump(exclude={"version", "updated_at"}):
+            repo.save_plan(plan.model_copy(update={"version": now.version}), "跟著影片回到舊版")
+    restored = _with_plans(earlier, renamed).model_copy(update={
+        "id": project_id, "version": current.version + 1, "branched_from": current.branched_from,
+    })
+    repo.update_project(restored, current.version)
+    return {
+        "new_version": restored.version,
+        "restored": {"commit": chosen.commit[:10], "what": chosen.subject} if chosen else {"commit": commit},
+        "plan_copied": copied,
+    }
+
+@mcp.tool()
+def branch_project(project_id: str, name: str, commit: Optional[str] = None, note: str = "") -> dict:
+    """Start another way of cutting a video from one of its versions, beside it rather than over it.
+
+    For 「做一個 Reels 60 秒版」 or 「試試看沒有配樂的版本」: the branch is a project
+    of its own, with its own copy of the plan, so it can be cut, captioned and
+    rendered while the original is left alone. The editor draws it as a line
+    running beside the original's from the version it started at.
+
+    Args:
+        project_id: The video to branch from.
+        name: What to call the branch, in words: 「抽杯架 Reels 60 秒版」.
+        commit: The version to start from, from `project_history`; omit for
+            the video as it is now.
+        note: The user's own words for why, kept in the history.
+
+    Returns:
+        The new `project_id`, its `name`, and `branched_from`.
+
+    Raises:
+        ValueError: If the project or version does not exist.
+    """
+    current = repo.get_project(project_id)
+    if current is None:
+        raise ValueError(f"project {project_id} not found")
+    if commit is None:
+        versions = history.versions_of("projects/", f"{project_id}.json", 1)
+        if not versions:
+            raise ValueError(f"project {project_id} has no version in the history yet")
+        commit = versions[0].commit
+    start = _project_at(project_id, commit)
+    found = next((version.commit for version in history.versions_of("projects/", f"{project_id}.json", 500)
+                  if version.commit.startswith(commit.strip().lower())), commit)
+    renamed = {plan_id: _copied_plan(plan, f"「{name}」分支的計畫")
+               for plan_id, plan in _plans_at(start, commit).items()}
+    branch = _with_plans(start, renamed).model_copy(update={
+        "id": str(uuid.uuid4()), "name": name.strip(), "version": 1,
+        "branched_from": BranchPoint(project_id=project_id, commit=found),
+    })
+    batch = current_batch()
+    if batch is not None and not batch.note:
+        batch.note = f"從「{current.name or project_id}」開分支「{branch.name}」"
+    repo.add_project(branch)
+    folder = repo.folder_of("projects").get(project_id)
+    if folder:
+        repo.file_items("projects", [branch.id], folder)
+    return {"project_id": branch.id, "name": branch.name, "branched_from": branch.branched_from.model_dump()}
 
 @mcp.tool()
 def get_job(

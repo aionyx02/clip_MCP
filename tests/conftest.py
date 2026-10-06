@@ -195,3 +195,28 @@ def ended_after() -> Iterator[list]:
 
     for job_id in started:
         server.repo.update_job(job_id, end)
+
+@pytest.fixture(autouse=True)
+def history_off() -> Iterator[None]:
+    """Keep no versions unless a test asks for them with `kept_history`.
+
+    Every commit is a few dozen file writes, which across the whole run is
+    minutes; the history is tested where it is the subject.
+    """
+    from app.server import repo
+
+    kept, repo.history = repo.history, None
+    yield
+    repo.history = kept
+
+@pytest.fixture
+def kept_history(history_off):
+    """Keep a version of every change in this test, in the server's own history.
+
+    Returns:
+        The history.
+    """
+    from app.server import history, repo
+
+    repo.history = history
+    return history

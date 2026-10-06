@@ -801,16 +801,32 @@ class Activity:
 
     last = time.monotonic()
 
+# What each kind of change made in the editor is, for the version it leaves in the history.
+EDITOR_DOING = (
+    ("/edits", "在編輯器修改"), ("/undo", "復原上一步"), ("/captions/make", "產生字幕"),
+    ("/api/projects/delete", "刪除專案"), ("/api/projects", "新增專案"), ("/api/assets/notes", "寫素材備註"),
+    ("/api/assets/delete", "從素材庫拿掉"), ("/api/folders", "整理資料夾"), ("/api/file", "整理位置"),
+    ("/api/pick", "加入素材"),
+)
+
 class _Stamp:
-    """Note every request as a sign the window is still open."""
+    """Note every request as a sign the window is still open, and keep each change as one version."""
 
     def __init__(self, application):
         self.application = application
 
     async def __call__(self, scope, receive, send):
-        if scope["type"] == "http":
-            Activity.last = time.monotonic()
-        await self.application(scope, receive, send)
+        if scope["type"] != "http":
+            await self.application(scope, receive, send)
+            return
+        Activity.last = time.monotonic()
+        if scope["method"] != "POST":
+            await self.application(scope, receive, send)
+            return
+        path = scope["path"]
+        doing = next((said for ending, said in EDITOR_DOING if path.endswith(ending)), "在編輯器操作")
+        with server.history.step("編輯器", doing=doing):
+            await self.application(scope, receive, send)
 
 class _FreshStatic(StaticFiles):
     """The page's own files, checked with the server every time.
