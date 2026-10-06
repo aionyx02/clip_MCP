@@ -75,10 +75,32 @@ $env:UV_PYTHON_PREFERENCE = "only-managed"
 $env:UV_NO_MODIFY_PATH = "1"
 $uv = Join-Path $App "uv\uv.exe"
 
+# An AI app that has clip-mcp running keeps its files open, and Windows will not let open files
+# be removed: uv would take the old packages half away, stop, and leave nothing that starts. So
+# whatever runs from this folder is stopped first; the AI app starts clip-mcp again the next
+# time it needs it.
+function Stop-Running {
+    $here = [IO.Path]::GetFullPath($App).TrimEnd('\') + '\'
+    $running = @(Get-Process -ErrorAction SilentlyContinue |
+        Where-Object { $_.Id -ne $PID -and $_.Path -and $_.Path.StartsWith($here, [StringComparison]::OrdinalIgnoreCase) })
+    if ($running.Count -eq 0) { return }
+    Say "Stopping $($running.Count) clip-mcp program(s) still running"
+    $running | Stop-Process -Force -ErrorAction SilentlyContinue
+    $running | Wait-Process -Timeout 15 -ErrorAction SilentlyContinue
+}
+
 Say "STEP packages"
-# Every package at the version the release was tested with, not whatever is newest today.
-$code = Run $uv @("tool", "install", "--force", "--python", "3.14", "--constraints", $Constraints, $Wheel)
-if ($code -ne 0) { Say "uv tool install failed: $code"; exit 1 }
+# Every package at the version the release was tested with, not whatever is newest today. Tried
+# again when it fails: an AI app may start clip-mcp again between the stop and the install.
+$tries = 3
+for ($try = 1; $try -le $tries; $try++) {
+    Stop-Running
+    $code = Run $uv @("tool", "install", "--force", "--python", "3.14", "--constraints", $Constraints, $Wheel)
+    if ($code -eq 0) { break }
+    Say "uv tool install failed: $code (try $try of $tries)"
+    if ($try -eq $tries) { exit 1 }
+    Start-Sleep -Seconds 3
+}
 
 # Point clip-mcp at its workspace and at the FFmpeg above. It connects no AI client: that is
 # the user's choice, made in the editor.
