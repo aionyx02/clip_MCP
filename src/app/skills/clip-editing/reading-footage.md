@@ -144,6 +144,13 @@ footage is about — names, products and terms are what it gets wrong — fix
 them through `fix_words` or the caption, and never copy the marks into
 anything the user sees. A fast transcript has about twice as many.
 
+When the meaning of a line hangs on a word — 「怎麼那麼順」 next to 「還是有點微鬆」
+is probably 「沒那麼順」 — call `listen_again` on that stretch, up to 30
+seconds. It hears only that sound, with no prompt and no text before it. If
+it agrees with the transcript and is sure, go on; if the two disagree or it
+comes back unsure, give the user its `audio_path` to play and ask, rather
+than picking one yourself.
+
 ## Requests about content
 
 | Request | Operations |

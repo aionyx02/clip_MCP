@@ -36,6 +36,7 @@ from app.models.timeline import (
 )
 from app.models.job import Job, JobKind, JobStatus
 from app.engine import loudness, machine, meaning, resources, speed
+from app.engine.analysis import listen_again as listen_again_in_file
 from app.engine.analysis import (
     current_recipe, doubtful_spots, marked_text, sound_note, transcription_of, whisper_model_for, whisper_model_name,
 )
@@ -352,32 +353,82 @@ def import_asset(filepath: str) -> dict:
         FileNotFoundError: If the file does not exist.
         RuntimeError: If ffprobe cannot read the file.
     """
-    return _register_asset(filepath).model_dump()
+    return _plain(_register_asset(filepath).model_dump())
 
-@mcp.tool()
-def list_assets() -> dict:
-    """List all imported assets, and say which of them have been analyzed.
+def _plain(value):
+    """Turn the Decimals a model keeps its seconds in into plain numbers, all the way down.
+
+    Times are kept as Decimal so the timeline adds up to the millisecond, but a
+    client reading them gets strings — `"12.5"` — and compares or adds them
+    wrongly. What leaves the server is numbers; what is stored stays exact.
+
+    Args:
+        value: What a tool is about to return.
 
     Returns:
-        A dictionary with an `assets` list, each item in the format
-        `import_asset` returns plus `analyzed`, `transcription` (`fast`,
-        `accurate`, or null when speech was not transcribed) and `stale`.
-        `stale` is true
-        for an asset analyzed with detection settings or a speech model the
-        server no longer uses: its analysis still works, but it was measured
-        with different instruments from a fresh one, so analyze those assets
-        again before comparing them with each other.
+        The same, with every Decimal a float.
     """
+    if isinstance(value, Decimal):
+        return float(value)
+    if isinstance(value, dict):
+        return {key: _plain(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_plain(item) for item in value]
+    return value
+
+@mcp.tool()
+def list_assets(
+    folder_id: Optional[str] = None,
+    text: Optional[str] = None,
+    limit: Annotated[int, Field(ge=1, le=200)] = 50,
+    offset: Annotated[int, Field(ge=0)] = 0,
+) -> dict:
+    """List imported assets a page at a time, and say which of them have been analyzed.
+
+    A library grows into the hundreds, so read it the way the user sorted it:
+    by the folders they made in the editor, or by part of a file name.
+
+    Args:
+        folder_id: Only the files filed in this folder, from `folders`. Its
+            sub-folders are their own; ask for them by their own IDs.
+        text: Only files whose name contains this.
+        limit: Largest number of files to return.
+        offset: How many matching files to skip, for the next page.
+
+    Returns:
+        A dictionary with `assets`, one short record per file — `id`, `name`,
+        `duration` in seconds, `has_video`, `has_audio`, `analyzed`,
+        `transcription` (`fast`, `accurate`, or null when speech was not
+        transcribed), `stale` and `folder_id` — in name order; `total`, how
+        many match; `offset`; and `folders`, every folder of the library with
+        its `id`, `name` and `parent_id`. `stale` is true for an asset analyzed
+        with detection settings or a speech model the server no longer uses:
+        its analysis still works, but analyze those assets again before
+        comparing them with each other. `inspect_media` has a file's full path,
+        size and frame rate.
+    """
+    filed = repo.folder_of("assets")
+    matching = [
+        asset for asset in repo.list_assets()
+        if (folder_id is None or filed.get(asset.id) == folder_id)
+        and (not text or text.lower() in os.path.basename(asset.path).lower())
+    ]
+    matching.sort(key=lambda asset: _natural_key(os.path.basename(asset.path)))
     assets = []
-    for asset in repo.list_assets():
+    for asset in matching[offset:offset + limit]:
         analysis = repo.get_analysis(asset.id)
         assets.append({
-            **asset.model_dump(),
+            "id": asset.id,
+            "name": os.path.basename(asset.path),
+            "duration": None if asset.duration is None else float(asset.duration),
+            "has_video": asset.has_video,
+            "has_audio": asset.has_audio,
             "analyzed": analysis is not None,
-            "stale": analysis is not None and _is_stale(analysis),
             "transcription": _transcription(analysis),
+            "stale": analysis is not None and _is_stale(analysis),
+            "folder_id": filed.get(asset.id),
         })
-    return {"assets": assets}
+    return {"assets": assets, "total": len(matching), "offset": offset, "folders": repo.list_folders("assets")}
 
 @mcp.tool()
 def import_folder(folderpath: str, recursive: bool = False) -> dict:
@@ -427,7 +478,7 @@ def import_folder(folderpath: str, recursive: bool = False) -> dict:
             skipped.append({"path": path, "reason": str(error)})
 
     total = sum((asset.duration for asset in assets if asset.duration is not None), Decimal(0))
-    return {"assets": [asset.model_dump() for asset in assets], "total_duration": total, "skipped": skipped}
+    return _plain({"assets": [asset.model_dump() for asset in assets], "total_duration": total, "skipped": skipped})
 
 def _is_stale(analysis: MediaAnalysis) -> bool:
     """Say whether an analysis was taken in a way the server no longer uses.
@@ -651,6 +702,74 @@ def analyze_asset(
     if found is not None:
         result["estimate"] = found
     return result
+
+LISTEN_AGAIN_SECONDS = 30.0
+
+def _bare_words(text: str) -> str:
+    """Text reduced to what is said, for comparing two hearings: no spaces or punctuation."""
+    return re.sub(r"[\s\W_]+", "", text)
+
+@mcp.tool()
+def listen_again(asset_id: str, start: float, end: float, language: Optional[str] = None) -> dict:
+    """Hear one stretch of a file again, with nothing the transcript said, to check a word or a line.
+
+    The transcript is one long pass, and a word it misheard — 「沒那麼順」
+    written as 「怎麼那麼順」 — is misheard for everything that reads it. This
+    transcribes only that stretch of sound, from scratch: no prompt, no text
+    before it. Where the two disagree, or the words come back unsure, believe
+    neither — give the user `audio_path` to listen to and ask.
+
+    Args:
+        asset_id: The file.
+        start: Where the stretch starts, in seconds of the file.
+        end: Where it ends; at most 30 seconds after `start`.
+        language: Spoken language code; omit to detect it.
+
+    Returns:
+        A dictionary with `heard`, the new hearing with unsure words in ⟦ ⟧;
+        `words`, each with `start`, `end` in seconds of the file and its
+        `probability`; `stored`, what the transcript says for the same stretch,
+        or null; `agrees`, whether the two say the same words; and
+        `audio_path`, a WAV of the stretch for the user to play.
+
+    Raises:
+        ValueError: If the file has no sound, or the stretch is empty, too long
+            or outside the file.
+    """
+    asset = _get_asset(asset_id)
+    if not asset.has_audio:
+        raise ValueError(f"asset {asset_id} has no sound to hear again")
+    if end <= start:
+        raise ValueError(f"the stretch has to end after it starts ({start}s to {end}s)")
+    if end - start > LISTEN_AGAIN_SECONDS:
+        raise ValueError(f"hear a stretch of at most {LISTEN_AGAIN_SECONDS:g} seconds at a time; this one is "
+                         f"{end - start:g}s")
+    if asset.duration is not None and start >= float(asset.duration):
+        raise ValueError(f"the file is only {float(asset.duration):g}s long")
+    known = repo.get_analysis(asset_id)
+    transcript = known.transcript if known is not None else None
+    keep_as = os.path.join(WORKSPACE_DIR, "temp", "listen", f"{asset_id[:8]}-{start:.2f}-{end:.2f}.wav")
+    fresh = listen_again_in_file(
+        asset.path, start, end, language or (transcript.language if transcript else None), keep_as,
+        chinese_variant=transcript.chinese_variant if transcript else None,
+    )
+    heard = "".join(marked_text(segment) for segment in fresh.segments)
+    stored = None
+    if transcript is not None:
+        said = [word.text for segment in transcript.segments for word in segment.words
+                if word.end > start and word.start < end]
+        stored = "".join(said).strip() or None
+    plain_heard = "".join(segment.text for segment in fresh.segments)
+    return {
+        "heard": heard,
+        "words": [
+            {"text": word.text.strip(), "start": word.start, "end": word.end, "probability": word.probability}
+            for segment in fresh.segments for word in segment.words
+        ],
+        "stored": stored,
+        "agrees": stored is not None and _bare_words(plain_heard) == _bare_words(stored),
+        "audio_path": keep_as,
+    }
 
 @mcp.tool()
 def get_analysis(
@@ -1676,7 +1795,7 @@ def get_project(project_id: str, include_subtitles: bool = False) -> dict:
         state["subtitles"] = [cue.model_dump() for cue in project.subtitles]
     else:
         state.pop("subtitles", None)
-    return state
+    return _plain(state)
 
 @mcp.tool()
 def apply_edits(project_id: str, expected_version: int, operations: list[EditOperation]) -> dict:
@@ -3050,7 +3169,7 @@ def get_subtitles(
         if limit <= start:
             raise ValueError(f"the window ends at {limit}s, which is not after its start at {start}s")
     window = [
-        cue.model_dump(exclude=None if words else {"words"}) for cue in placed
+        _plain(cue.model_dump(exclude=None if words else {"words"})) for cue in placed
         if float(cue.end) > start and float(cue.start) < limit
     ]
     return {
@@ -3754,15 +3873,20 @@ def export_timeline(
     return {"output_path": path, "left_behind": behind}
 
 @mcp.tool()
-def get_job(job_ids: List[str]) -> dict:
-    """Return the current state of background jobs.
+def get_job(job_ids: List[str], wait_seconds: Annotated[float, Field(ge=0, le=50)] = 0) -> dict:
+    """Return the current state of background jobs, waiting for one to end if asked.
 
     Pass every job of a batch at once — all the analyses of a folder, or a
-    render — rather than polling them one by one.
+    render — rather than polling them one by one. With `wait_seconds`, the
+    answer comes back as soon as any of them finishes, fails or is cancelled,
+    or when that long has passed: call it again with the same wait until the
+    batch is done, instead of asking every few seconds.
 
     Args:
         job_ids: IDs of the jobs, as returned by `render_project` or
             `analyze_asset`.
+        wait_seconds: How long to wait for one of them to end, at most 50 —
+            under the time most clients allow a tool call. 0 answers at once.
 
     Returns:
         A dictionary with `jobs`, each with its `job_id`, `kind`, `status`,
@@ -3771,6 +3895,35 @@ def get_job(job_ids: List[str]) -> dict:
         `error_message`; and a summary over all of them: `finished` and
         `total` counts, `failed` counting those that failed or were
         cancelled, and `progress`, the average.
+
+    Raises:
+        ValueError: If a job does not exist.
+    """
+    ended = {JobStatus.COMPLETED.value, JobStatus.FAILED.value, JobStatus.CANCELLED.value}
+    listed = _job_states(job_ids)
+    deadline = time.monotonic() + wait_seconds
+    waiting = {entry["job_id"] for entry in listed if entry["status"] not in ended}
+    while waiting and time.monotonic() < deadline:
+        time.sleep(min(1.0, max(0.0, deadline - time.monotonic())))
+        listed = _job_states(job_ids)
+        if any(entry["job_id"] in waiting and entry["status"] in ended for entry in listed):
+            break
+    return {
+        "jobs": listed,
+        "finished": sum(entry["status"] in ended for entry in listed),
+        "failed": sum(entry["status"] in ended - {JobStatus.COMPLETED.value} for entry in listed),
+        "total": len(listed),
+        "progress": round(sum(entry["progress"] for entry in listed) / len(listed), 3) if listed else 1.0,
+    }
+
+def _job_states(job_ids: List[str]) -> List[dict]:
+    """Read each job's state, one record apiece, in the order asked.
+
+    Args:
+        job_ids: The jobs.
+
+    Returns:
+        Their records.
 
     Raises:
         ValueError: If a job does not exist.
@@ -3791,14 +3944,7 @@ def get_job(job_ids: List[str]) -> dict:
         if job.error_message:
             entry["error_message"] = job.error_message
         listed.append(entry)
-    ended = {JobStatus.COMPLETED.value, JobStatus.FAILED.value, JobStatus.CANCELLED.value}
-    return {
-        "jobs": listed,
-        "finished": sum(entry["status"] in ended for entry in listed),
-        "failed": sum(entry["status"] in ended - {JobStatus.COMPLETED.value} for entry in listed),
-        "total": len(listed),
-        "progress": round(sum(entry["progress"] for entry in listed) / len(listed), 3) if listed else 1.0,
-    }
+    return listed
 
 @mcp.tool()
 def cancel_job(job_id: str) -> dict:

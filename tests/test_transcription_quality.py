@@ -94,7 +94,7 @@ def test_an_upgrade_says_the_whole_analysis_is_redone(talk: Asset, started: list
 
 def test_the_library_says_which_transcripts_are_fast(talk: Asset) -> None:
     server.repo.save_analysis(analysed_with(talk.id, analysis.FAST_WHISPER_MODEL))
-    listed = {asset["id"]: asset for asset in server.list_assets()["assets"]}
+    listed = {asset["id"]: asset for asset in server.list_assets(text="talk.mp4", limit=200)["assets"]}
     assert listed[talk.id]["transcription"] == "fast"
     assert server.get_analysis(talk.id)["transcription"] == "fast"
 

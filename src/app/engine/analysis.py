@@ -919,6 +919,68 @@ def _run_whisper(
         on_measured("transcription", device, model_name, time.monotonic() - began)
     return Transcript(language=info.language, model=model_name, segments=result)
 
+def listen_again(
+    path: str,
+    start: float,
+    end: float,
+    language: Optional[str],
+    keep_as: str,
+    chinese_variant: Optional[str] = None,
+    ffmpeg_bin: str = "ffmpeg",
+) -> Transcript:
+    """Transcribe one stretch of a file again, as if nothing had been heard there before.
+
+    The first transcript is one long decode, and everything downstream trusts
+    it: a word it got wrong is wrong for whoever reads it. Heard again on its
+    own — that stretch of sound only, no prompt, no text before it — a word
+    the two passes disagree on is one worth asking the user about.
+
+    Args:
+        path: The media file.
+        start: Where the stretch starts, in seconds of the file.
+        end: Where it ends.
+        language: Spoken language code, or None to detect it.
+        keep_as: Where to write the stretch's sound, a WAV the user can play.
+        chinese_variant: Script to convert Chinese to, to compare like with like.
+        ffmpeg_bin: Path to, or name of, the FFmpeg executable.
+
+    Returns:
+        What was heard, with times in seconds of the file.
+
+    Raises:
+        RuntimeError: If the sound cannot be read or speech recognition fails.
+    """
+    os.makedirs(os.path.dirname(keep_as), exist_ok=True)
+    cut = subprocess.run(
+        [ffmpeg_bin, "-y", "-v", "error", "-ss", f"{start:.3f}", "-t", f"{end - start:.3f}", "-i", path,
+         "-vn", "-ac", "1", "-ar", "16000", keep_as],
+        stdin=subprocess.DEVNULL, capture_output=True, text=True, encoding="utf-8", errors="replace",
+        creationflags=hidden_window_flags(),
+    )
+    if cut.returncode != 0:
+        raise RuntimeError(f"could not read that stretch of sound: {cut.stderr.strip()[-300:]}")
+    device = machine.whisper_device()
+    hear = lambda on: _run_whisper(on, keep_as, end - start, language, None, lambda fraction: None, lambda: False,
+                                   None, whisper_model_name())
+    try:
+        raw = hear(device)
+    except RuntimeError as exc:
+        if device != "cuda" or not any(name in str(exc).lower() for name in ("cuda", "cublas", "cudnn")):
+            raise
+        raw = hear("cpu")
+    moved = lambda seconds: round(seconds + start, 3)
+    segments = [
+        TranscriptSegment(
+            start=moved(segment.start), end=moved(segment.end), text=segment.text.strip(),
+            words=[word.model_copy(update={"start": moved(word.start), "end": moved(word.end)})
+                   for word in segment.words],
+        )
+        for segment in raw.segments
+    ]
+    if chinese_variant is not None and raw.language in CHINESE_LANGUAGES:
+        convert_chinese_variant(segments, chinese_variant)
+    return Transcript(language=raw.language, model=raw.model, chinese_variant=chinese_variant, segments=segments)
+
 def transcribe_speech(
     path: str,
     duration: float,

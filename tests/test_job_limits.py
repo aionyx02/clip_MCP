@@ -236,3 +236,31 @@ def test_a_timeline_too_long_for_a_command_line_still_renders(media: Path, tmp_p
     run_ffmpeg(command, str(tmp_path / "ffmpeg.log"), 18.0, lambda fraction: None, lambda: False)
     assert output.stat().st_size > 0
     assert len(" ".join(graph_from_file(command, str(tmp_path / "graph.txt")))) < 32767
+
+def test_get_job_can_wait_for_a_job_to_end_and_comes_back_as_soon_as_one_does() -> None:
+    import threading
+    import time as clock
+    from app import server
+
+    running = Job(kind=JobKind.RENDER, status=JobStatus.RUNNING)
+    server.repo.add_job(running)
+
+    def finish() -> None:
+        clock.sleep(1.0)
+        server.repo.update_job(running.job_id, lambda job: setattr(job, "status", JobStatus.COMPLETED))
+
+    threading.Thread(target=finish, daemon=True).start()
+    began = clock.monotonic()
+    found = server.get_job([running.job_id], wait_seconds=20)
+    assert found["jobs"][0]["status"] == "completed"
+    assert clock.monotonic() - began < 10
+
+def test_waiting_on_a_job_that_does_not_end_gives_up_when_the_time_is_up() -> None:
+    import time as clock
+    from app import server
+
+    running = Job(kind=JobKind.RENDER, status=JobStatus.RUNNING)
+    server.repo.add_job(running)
+    began = clock.monotonic()
+    found = server.get_job([running.job_id], wait_seconds=1.5)
+    assert found["jobs"][0]["status"] == "running" and 1.4 < clock.monotonic() - began < 6
