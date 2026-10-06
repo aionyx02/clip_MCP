@@ -66,6 +66,9 @@ def test_delivered_files_are_named_as_a_person_would() -> None:
     assert housekeeping.delivery_name("EP1 台北", "output", ".mp4") == "EP1 台北.mp4"
     assert housekeeping.delivery_name("EP1 台北", "output-portrait", ".mp4") == "EP1 台北（直式）.mp4"
     assert housekeeping.delivery_name("EP1 台北", "cover", ".jpg") == "EP1 台北 封面.jpg"
+    # The same cut with its captions burned in is told apart by name, not by a (2).
+    assert housekeeping.delivery_name("EP1 台北", "output", ".mp4", captioned=True) == "EP1 台北（字幕）.mp4"
+    assert housekeeping.delivery_name("EP1 台北", "output-portrait", ".mp4", True) == "EP1 台北（直式、字幕）.mp4"
 
 def test_pruning_keeps_only_what_it_is_told_to(tmp_path: Path) -> None:
     for name in ("old", "newest", "running"):

@@ -36,7 +36,7 @@ def timeline(media: Path) -> dict:
     server_repo.save_analysis(analysis(asset_id=asset_id, **FOOTAGE))
     built = build_semantic_timeline([asset_id], rebuild=True)
     speech = query_clips(timeline_id=built["timeline_id"], text="句話")["clips"]
-    return {"timeline_id": built["timeline_id"], "clips": [clip["clip_id"] for clip in speech]}
+    return {"timeline_id": built["timeline_id"], "clips": [clip["clip_id"] for clip in speech], "asset_id": asset_id}
 
 
 def test_the_timeline_is_taken_off_every_clip_id_said_back() -> None:
@@ -97,3 +97,15 @@ def test_a_clip_is_read_by_its_short_id(timeline: dict) -> None:
     short = timeline["clips"][0].split(":")[1]
     clip = call("get_semantic_clip", {"clip_id": short, "timeline_id": timeline["timeline_id"]})
     assert clip["clip_id"] == short
+
+
+def test_reading_through_footage_carries_each_file_s_notes_once(timeline: dict) -> None:
+    from app.server import edit_asset
+
+    edit_asset(timeline["asset_id"], "後面片段請剪除")
+    try:
+        read = query_clips(timeline_id=timeline["timeline_id"], brief=True)
+        assert read["notes"] == {"wide.mp4": "後面片段請剪除"}
+        assert not any("後面片段請剪除" in line for line in read["lines"])
+    finally:
+        edit_asset(timeline["asset_id"], "")

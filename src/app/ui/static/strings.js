@@ -71,6 +71,12 @@ window.T = {
     dropTitle: "請改用「加入」按鈕",
     dropBody: "拖曳進來的檔案瀏覽器只能複製一份，會多佔空間。按「加入影片／聲音」就能直接使用原檔。",
     moveWarning: "移動或刪除原始檔案，用到它的專案就會找不到素材。",
+    notes: "備註",
+    notesTitle: (name) => `「${name}」的備註`,
+    notesBody: "寫下這個檔案該怎麼用，例如「請消音」「0:12 以後手入鏡，不要用」。AI 每次讀到這個檔案都會看到。",
+    notesPlaceholder: "這個檔案該注意的地方",
+    notesSave: "儲存",
+    notesSaved: "已儲存備註",
     // Said wherever files come in: the AI, too, can only cut what is in the library.
     libraryOnly: "只有素材庫裡的檔案能放進專案，AI 也只能使用素材庫裡的檔案。要用其他影片或音樂，請先按「加入」把它加進素材庫；在 AI 對話中給它檔案路徑時，它也會先把檔案加進素材庫。",
     noSound: "無聲",

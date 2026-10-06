@@ -774,6 +774,17 @@ def marked_text(segment: TranscriptSegment) -> str:
     """
     if not any(word.probability is not None for word in segment.words):
         return segment.text
+    return marked_words(segment.words)
+
+def marked_words(words: Sequence[TranscriptWord]) -> str:
+    """Words joined into a line, with the ones the speech model was unsure of in `⟦…⟧`.
+
+    Args:
+        words: The words, in order.
+
+    Returns:
+        The marked line.
+    """
     pieces: List[str] = []
     run: List[str] = []
 
@@ -786,7 +797,7 @@ def marked_text(segment: TranscriptSegment) -> str:
             pieces.append(f"{lead}{DOUBT_OPEN}{inner}{DOUBT_CLOSE}{trail}" if inner else joined)
             run.clear()
 
-    for word in segment.words:
+    for word in words:
         if _doubtful(word):
             run.append(word.text)
         else:
@@ -794,6 +805,17 @@ def marked_text(segment: TranscriptSegment) -> str:
             pieces.append(word.text)
     close()
     return "".join(pieces).strip()
+
+def unsure_words(words: Sequence[TranscriptWord]) -> List[str]:
+    """The words the speech model was guessing at, as written.
+
+    Args:
+        words: The words to look through.
+
+    Returns:
+        Each one it was unsure of, in order.
+    """
+    return [word.text.strip() for word in words if _doubtful(word)]
 
 def doubtful_spots(segments: Sequence[TranscriptSegment]) -> Optional[int]:
     """Count the stretches of words the speech model was unsure of.

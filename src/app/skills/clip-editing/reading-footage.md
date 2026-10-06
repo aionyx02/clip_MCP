@@ -151,6 +151,15 @@ it agrees with the transcript and is sure, go on; if the two disagree or it
 comes back unsure, give the user its `audio_path` to play and ask, rather
 than picking one yourself.
 
+### What the user wrote on a file
+
+A file's `notes` — in `list_assets`, `get_analysis` and a `brief` search —
+are the user's instructions for it: 「請消音」 is volume 0, 「可不放」 is
+yours to leave out, 「後面片段請剪除」 ends it where the notes say. Users
+also write these into file names (`0901(請消音).mp4`); follow those the same
+way, and ask whether to keep them as notes with `edit_asset`, where the
+editor shows them too.
+
 ## Requests about content
 
 | Request | Operations |

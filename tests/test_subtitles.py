@@ -829,3 +829,29 @@ def test_a_one_for_one_correction_keeps_the_word_timings() -> None:
     assert [word.start for word in retimed_words(words, "掰掰")] == [Decimal("1.0"), Decimal("1.5")]
     # A different number of characters leaves nothing to hang the old timings on.
     assert retimed_words(words, "再見了") == []
+
+def test_each_caption_says_where_it_came_from(spoken: str) -> None:
+    transcribe(spoken, [
+        TranscriptSegment(start=1.0, end=3.0, text="整個用起來怎麼那麼順", words=[
+            TranscriptWord(text="整個用起來", start=1.0, end=2.0, probability=0.9),
+            TranscriptWord(text="怎麼", start=2.0, end=2.4, probability=0.2),
+            TranscriptWord(text="那麼順", start=2.4, end=3.0, probability=0.8),
+        ]),
+        TranscriptSegment(start=4.0, end=6.0, text="第二句",
+                          words=[TranscriptWord(text="第二句", start=4.0, end=6.0, probability=0.9)]),
+        TranscriptSegment(start=7.0, end=9.0, text="第三句",
+                          words=[TranscriptWord(text="第三句", start=7.0, end=9.0, probability=0.9)]),
+    ])
+    project = build_project([video_track(), insert("a", spoken, 0, 10)])
+    made = caption(project)
+    assert made["sources"] == {"reviewed": 0, "this_project": 0, "transcript": 3}
+    # The line the speech model was unsure of is the one to proofread first.
+    assert made["to_check"][0] == "c1" and sorted(made["to_check"]) == ["c1", "c2", "c3"]
+
+    edit(project, [{"action": "edit_subtitle", "cue_id": "c2", "text": "第二句改好了"}])
+    edit(project, [{"action": "edit_subtitle", "cue_id": "c3", "text": "只給這支", "this_project_only": True}])
+    cues = {cue["cue_id"]: cue for cue in get_subtitles(project)["cues"]}
+    assert cues["c1"]["from"] == "transcript" and cues["c1"]["unsure"] == ["怎麼"]
+    assert cues["c1"]["marked"] == "整個用起來⟦怎麼⟧那麼順" and cues["c1"]["text"] == "整個用起來怎麼那麼順"
+    assert cues["c2"]["from"] == "reviewed" and "unsure" not in cues["c2"]
+    assert cues["c3"]["from"] == "this_project"

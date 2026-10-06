@@ -62,3 +62,30 @@ def test_seconds_leave_the_server_as_numbers(media: Path) -> None:
     clip = server.get_project(project["id"])["tracks"][0]["clips"][0]
     assert isinstance(clip["source_range"]["end"], float) and isinstance(clip["timeline_in"], float)
     json.dumps(server.get_project(project["id"]))
+
+def test_notes_on_how_a_file_may_be_used_are_read_wherever_the_file_is(shelf: dict) -> None:
+    written = server.edit_asset(shelf["outside"], "  請消音  ")
+    assert written["notes"] == "請消音"
+    listed = server.list_assets(text=shelf["name"])["assets"]
+    assert listed[0]["notes"] == "請消音"
+    # A file without notes carries none, rather than an empty field on every line.
+    assert all("notes" not in item for item in server.list_assets(folder_id=shelf["folder"])["assets"])
+    server.edit_asset(shelf["outside"], "")
+    assert "notes" not in server.list_assets(text=shelf["name"])["assets"][0]
+
+def test_importing_a_file_again_keeps_its_notes(media: Path) -> None:
+    asset_id = server.import_asset(str(media / "song.mp3"))["id"]
+    server.edit_asset(asset_id, "只用前 20 秒")
+    assert server.import_asset(str(media / "song.mp3"))["id"] == asset_id
+    assert server.repo.get_assets([asset_id])[asset_id].notes == "只用前 20 秒"
+    server.edit_asset(asset_id, "")
+
+def test_the_editor_writes_the_same_notes(shelf: dict) -> None:
+    from starlette.testclient import TestClient
+    from app.ui import app as editor
+
+    client = TestClient(editor.create_app())
+    assert client.post("/api/assets/notes", json={"asset_id": shelf["outside"], "notes": "可不放"}).status_code == 200
+    assert server.repo.get_assets([shelf["outside"]])[shelf["outside"]].notes == "可不放"
+    shown = next(item for item in client.get("/api/assets?all=1").json()["assets"] if item["id"] == shelf["outside"])
+    assert shown["notes"] == "可不放"

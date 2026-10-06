@@ -81,6 +81,7 @@ def _asset_summary(asset) -> dict:
         "height": asset.height,
         # Shown on the file, so the user checking captions later knows to expect misheard words.
         "fast_transcript": server.transcription_of(server.repo.transcript_model(asset.id)) == "fast",
+        "notes": asset.notes,
     }
 
 async def projects(request: Request) -> Response:
@@ -388,6 +389,15 @@ async def assets(request: Request) -> Response:
             listed.append({**_asset_summary(asset), "folder_id": filed.get(asset.id), "missing": not present})
     listed.sort(key=lambda asset: asset["name"].lower())
     return JSONResponse({"assets": listed})
+
+async def asset_notes(request: Request) -> Response:
+    """Write the notes on how a file may be used, the ones the AI reads wherever it reads about the file."""
+    body = await request.json()
+    try:
+        found = await run_in_threadpool(server.edit_asset, str(body.get("asset_id", "")), str(body.get("notes", "")))
+    except ValueError as error:
+        return _error(str(error), 404)
+    return JSONResponse(found)
 
 def _remove_assets(asset_ids: List[str], recycle: bool) -> dict:
     """Take files out of the library, and their originals to the recycle bin when asked.
@@ -830,6 +840,7 @@ def create_app() -> Starlette:
         Route("/api/jobs/cancel", cancel_job, methods=["POST"]),
         Route("/api/assets", assets),
         Route("/api/assets/delete", delete_assets, methods=["POST"]),
+        Route("/api/assets/notes", asset_notes, methods=["POST"]),
         Route("/api/folders", folders, methods=["GET", "POST"]),
         Route("/api/file", file_items, methods=["POST"]),
         Route("/api/pick", pick, methods=["POST"]),

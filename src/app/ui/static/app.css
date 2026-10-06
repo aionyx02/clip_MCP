@@ -275,6 +275,14 @@ a.card:hover, button.card:hover { border-color: var(--line-2); background: var(-
 .used-list small { color: var(--muted); }
 
 /* work going on: floats over the bottom of the sidebar, above the update link and storage */
+.card-notes {
+  margin-top: 4px; font-size: 11.5px; color: var(--muted);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.notes-input {
+  width: 100%; box-sizing: border-box; resize: vertical; font: inherit; padding: 8px 10px;
+  background: var(--panel-2); color: inherit; border: 1px solid var(--line-2); border-radius: var(--radius);
+}
 .jobs-float {
   position: fixed; left: 8px; width: 180px; z-index: 55; padding: 8px 10px; display: flex; flex-direction: column; gap: 8px;
   background: var(--panel-2); border: 1px solid var(--line-2); border-radius: var(--radius); box-shadow: 0 6px 18px rgba(0, 0, 0, .35);

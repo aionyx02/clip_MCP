@@ -22,6 +22,11 @@ class Asset(BaseModel):
     recorded_at: Optional[datetime] = Field(
         default=None, description="When recording started, from the file's own timestamp or its name; null if unknown",
     )
+    notes: str = Field(
+        default="",
+        description="How this file may be used, in the user's words: 「請消音」, 「0:12 以後手入鏡，不要用」. Shown "
+                    "wherever the file is read about, so an instruction does not have to live in its name",
+    )
 
 class Span(BaseModel):
     """A time span within a media file, in seconds."""

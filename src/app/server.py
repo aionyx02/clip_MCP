@@ -7,7 +7,7 @@ import uuid
 from decimal import Decimal
 from fractions import Fraction
 from pathlib import Path
-from typing import Annotated, Callable, Dict, List, Literal, Mapping, Optional, Sequence, Tuple
+from typing import Annotated, Callable, Dict, Iterable, List, Literal, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 from fastmcp import FastMCP
@@ -43,7 +43,8 @@ from app.models.job import Job, JobKind, JobStatus
 from app.engine import loudness, machine, meaning, resources, speed
 from app.engine.analysis import listen_again as listen_again_in_file
 from app.engine.analysis import (
-    current_recipe, doubtful_spots, marked_text, sound_note, transcription_of, whisper_model_for, whisper_model_name,
+    current_recipe, doubtful_spots, marked_text, marked_words, sound_note, transcription_of, unsure_words,
+    whisper_model_for, whisper_model_name,
 )
 from app.engine.diarize import speaker_model_name
 from app.engine.rhythm import rhythm_model_name
@@ -391,6 +392,8 @@ def _register_asset(filepath: str) -> Asset:
     if size is not None:
         asset.width, asset.height = size
     asset.recorded_at = recorded_at(info, path)
+    if existing is not None:
+        asset.notes = existing.notes
     repo.save_asset(asset)
     return asset
 
@@ -519,7 +522,8 @@ def list_assets(
         A dictionary with `assets`, one short record per file — `id`, `name`,
         `duration` in seconds, `has_video`, `has_audio`, `analyzed`,
         `transcription` (`fast`, `accurate`, or null when speech was not
-        transcribed), `stale` and `folder_id` — in name order; `total`, how
+        transcribed), `stale`, `folder_id` and, where the file has them,
+        its `notes` — how it may be used — in name order; `total`, how
         many match; `offset`; and `folders`, every folder of the library with
         its `id`, `name` and `parent_id`. `stale` is true for an asset analyzed
         with detection settings or a speech model the server no longer uses:
@@ -547,8 +551,32 @@ def list_assets(
             "transcription": _transcription(analysis),
             "stale": analysis is not None and _is_stale(analysis),
             "folder_id": filed.get(asset.id),
+            **({"notes": asset.notes} if asset.notes else {}),
         })
     return {"assets": assets, "total": len(matching), "offset": offset, "folders": repo.list_folders("assets")}
+
+@mcp.tool()
+def edit_asset(asset_id: str, notes: str) -> dict:
+    """Write down how a file may be used, so it is read wherever the file is.
+
+    For an instruction about the footage itself — 「請消音」, 「可不放」,
+    「0:12 以後手入鏡」. Users often put these in the file's name; when you see
+    one there, follow it, and ask whether to keep it here too. The editor
+    shows the same notes and the user can change them there.
+
+    Args:
+        asset_id: The file.
+        notes: The notes, replacing what was there; empty clears them.
+
+    Returns:
+        The file's `id`, `name` and `notes`.
+
+    Raises:
+        ValueError: If the file is not in the library.
+    """
+    asset = _get_asset(asset_id).model_copy(update={"notes": notes.strip()})
+    repo.save_asset(asset)
+    return {"id": asset.id, "name": os.path.basename(asset.path), "notes": asset.notes}
 
 @mcp.tool()
 def import_folder(folderpath: str, recursive: bool = False) -> dict:
@@ -918,7 +946,8 @@ def get_analysis(
             save space.
 
     Returns:
-        A dictionary with the asset `duration`, `analyzed_at`,
+        A dictionary with the asset's `notes` where it has them — how it may
+        be used, which every cut from it has to respect — its `duration`, `analyzed_at`,
         `transcription` (`fast` — expect misheard words, check them before
         trusting a cut to a word — `accurate`, or null), `doubtful_spots`
         (how many stretches in the whole file the speech model was unsure
@@ -979,8 +1008,10 @@ def get_analysis(
                 if segment.end > start and segment.start < end
             ],
         }
+    notes = _get_asset(asset_id).notes
     return {
         "asset_id": asset_id,
+        **({"notes": notes} if notes else {}),
         "duration": analysis.duration,
         "analyzed_at": analysis.analyzed_at.isoformat(),
         "recipe": analysis.recipe.model_dump(),
@@ -1259,7 +1290,8 @@ def query_clips(
         A dictionary with the `timeline_id` searched and the matching `clips`,
         each with its `clip_id`, `asset_id`, `kind`, `start` and `end` in the
         source file, `duration`, `safe_in` / `safe_out`, its `text`, and its
-        `scores` — or with `brief`, their `lines`. `truncated` is true when the
+        `scores` — or with `brief`, their `lines`, and `notes`: each file's
+        notes on how it may be used, by file name. `truncated` is true when the
         limit cut the results short; the next page starts at `offset` plus
         `limit`.
 
@@ -1301,6 +1333,7 @@ def query_clips(
                         clip, os.path.basename(assets[clip.asset_id].path) if clip.asset_id in assets else clip.asset_id)
                     for clip in page
                 ],
+                **_file_notes(assets.values()),
                 "truncated": offset + limit < len(clips),
             }
         return {
@@ -1327,6 +1360,7 @@ def query_clips(
                            else clip.asset_id)
                 for clip in page
             ],
+            **_file_notes(assets[clip.asset_id] for clip in page if clip.asset_id in assets),
             "truncated": offset + limit < len(ordered),
         }
     truncated = len(clips) == offset + limit
@@ -1415,6 +1449,18 @@ def _rank_by_meaning(clips: List[SemanticClip], question: str) -> List[Tuple[str
         )
         vectors.update({clip.id: vector for (clip, _, _), vector in zip(missing, made)})
     return meaning.rank(question, vectors)
+
+def _file_notes(assets: Iterable[Asset]) -> dict:
+    """The notes of the files a page of search results comes from, once per file.
+
+    Args:
+        assets: The files.
+
+    Returns:
+        `{"notes": {name: notes}}`, or nothing when none of them has notes.
+    """
+    noted = {os.path.basename(asset.path): asset.notes for asset in assets if asset.notes}
+    return {"notes": noted} if noted else {}
 
 def _clip_line(clip: SemanticClip, file_name: str) -> str:
     """Describe a semantic clip in one line, for reading footage through.
@@ -3109,7 +3155,11 @@ def generate_subtitles(
     Returns:
         A dictionary with the project's `new_version`; `captions`, each as
         one line — its ID, where it lands in the cut, and what it says;
-        `reused`, how many came from captions already reviewed; `glossary`,
+        `reused`, how many came from captions already reviewed; `sources`,
+        how many came from each of `reviewed`, `this_project` and
+        `transcript`; `to_check`, the IDs of the ones straight from the
+        transcript, those with the most words the speech model was unsure of
+        first — proofread those, the others somebody has read; `glossary`,
         the words corrected; `assets_without_transcript`, the video sources
         that still need `analyze_asset` before they can be captioned; and
         `overlapping`, how many captions land on top of the one before them
@@ -3198,6 +3248,12 @@ def generate_subtitles(
     # different files overlap only once the cut puts them on screen together.
     placed = place_cues(saved, saved.subtitles)
     overlapping = sum(1 for earlier, later in zip(placed, placed[1:]) if later.start < earlier.end)
+    heard = _caption_sources(saved)
+    from_transcript = [cue for cue in saved.subtitles if heard[cue.id]["from"] == "transcript"]
+    to_check = sorted(
+        (cue for cue in from_transcript if any(placed_cue.cue_id == cue.id for placed_cue in placed)),
+        key=lambda cue: (-len(heard[cue.id].get("unsure", [])), cue.asset_id, cue.source_start),
+    )
     return {
         "new_version": saved.version,
         "captions": [
@@ -3206,10 +3262,60 @@ def generate_subtitles(
             for cue in placed
         ],
         "reused": len(reused),
+        "sources": {source: sum(1 for cue in saved.subtitles if heard[cue.id]["from"] == source)
+                    for source in ("reviewed", "this_project", "transcript")},
+        "to_check": [cue.id for cue in to_check],
         "glossary": glossary,
         "assets_without_transcript": untranscribed,
         "overlapping": overlapping,
     }
+
+def _caption_sources(project: Project) -> Dict[str, dict]:
+    """Say where each of a project's captions came from, and what in it is worth checking.
+
+    Worked out each time rather than stored: a caption kept to this project is
+    this project's; one that matches what is remembered against its footage
+    was written or corrected by somebody; anything else is the transcript as
+    it was heard, and only those carry the words the speech model was unsure
+    of.
+
+    Args:
+        project: The project.
+
+    Returns:
+        For each caption ID, `from` — `this_project`, `reviewed` or
+        `transcript` — and for a transcript one with unsure words, `unsure`,
+        those words, and `marked`, its text with them in ⟦ ⟧ when the text is
+        still the transcript's own.
+    """
+    remembered: Dict[str, List[SubtitleCue]] = {}
+    analyses: Dict[str, Optional[MediaAnalysis]] = {}
+    sources: Dict[str, dict] = {}
+    for cue in project.subtitles:
+        if cue.local:
+            sources[cue.id] = {"from": "this_project"}
+            continue
+        if cue.asset_id not in remembered:
+            remembered[cue.asset_id] = repo.reviewed_captions(cue.asset_id)
+        if any(_overlaps(cue, known) and known.text == cue.text for known in remembered[cue.asset_id]):
+            sources[cue.id] = {"from": "reviewed"}
+            continue
+        if cue.asset_id not in analyses:
+            analyses[cue.asset_id] = repo.get_analysis(cue.asset_id)
+        analysis = analyses[cue.asset_id]
+        words = [
+            word for segment in (analysis.transcript.segments if analysis and analysis.transcript else [])
+            for word in segment.words
+            if word.start >= float(cue.source_start) - 0.05 and word.end <= float(cue.source_end) + 0.05
+        ]
+        found: dict = {"from": "transcript"}
+        doubted = unsure_words(words)
+        if doubted:
+            found["unsure"] = doubted
+            if _bare_words("".join(word.text for word in words)) == _bare_words(cue.text):
+                found["marked"] = marked_words(words)
+        sources[cue.id] = found
+    return sources
 
 def _overlaps(first: SubtitleCue, second: SubtitleCue) -> bool:
     """Say whether two captions of one file cover some of the same words.
@@ -3270,7 +3376,12 @@ def get_subtitles(
 
     Returns:
         A dictionary with `cues` in the window — each with its `cue_id`,
-        `start` and `end` on the timeline, and `text` — `placed`, how many
+        `start` and `end` on the timeline, `text`, and `from`: `reviewed`
+        (somebody wrote or corrected it), `this_project` (kept to this
+        project) or `transcript` (as heard, not yet read by anyone); a
+        transcript one the speech model was unsure of also has `unsure`, those
+        words, and `marked`, its text with them in ⟦ ⟧ — for reading only,
+        never to write back — and `placed`, how many
         land anywhere in the cut, `stored`, how many captions the project
         holds, and the `window` that was read. `stored` above `placed` means
         some captions belong to footage the edit dropped.
@@ -3289,8 +3400,10 @@ def get_subtitles(
         limit = end
         if limit <= start:
             raise ValueError(f"the window ends at {limit}s, which is not after its start at {start}s")
+    heard = _caption_sources(project)
     window = [
-        _plain(cue.model_dump(exclude=None if words else {"words"})) for cue in placed
+        _plain({**cue.model_dump(exclude=None if words else {"words"}), **heard.get(cue.cue_id, {})})
+        for cue in placed
         if float(cue.end) > start and float(cue.start) < limit
     ]
     return {
@@ -3328,7 +3441,7 @@ def _delivered(job_id: str) -> bool:
     job = repo.get_job(job_id)
     return job is not None and job.status == JobStatus.COMPLETED
 
-def _delivery_name(project: Project, kind: str, extension: str) -> str:
+def _delivery_name(project: Project, kind: str, extension: str, captioned: bool = False) -> str:
     """Name a file saved for the user after the project: `EP1 台北.mp4`, `EP1 台北 封面.jpg`.
 
     Args:
@@ -3336,12 +3449,13 @@ def _delivery_name(project: Project, kind: str, extension: str) -> str:
         kind: `output`, `cover` or `timeline`, with `-portrait` and the like
             for another shape.
         extension: With its dot.
+        captioned: Whether its captions are burned in.
 
     Returns:
         A file name; the caller makes it unique in its folder.
     """
     stem = _output_name(project, "x")[: -len("_x.mp4")]
-    return housekeeping.delivery_name(stem, kind, extension)
+    return housekeeping.delivery_name(stem, kind, extension, captioned)
 
 # A preview is rendered with its short side this long, from pictures cached at that size.
 PREVIEW_SHORT_SIDE = 480
@@ -3493,8 +3607,9 @@ def render_project(
         A dictionary with the `job_id`, the initial `status`, `stage`, and the
         absolute `output_path` the file will be written to. A full render is
         saved in the user's videos folder under the project's name, such as
-        `Videos\\clip-mcp\\EP1 台北.mp4`, and `(2)` is added rather than
-        overwrite one already there; `get_job` gives the final path once it is
+        `Videos\\clip-mcp\\EP1 台北.mp4`, with what sets it apart from the
+        project's other videos in brackets — `EP1 台北（直式、字幕）.mp4` — and
+        `(2)` is added rather than overwrite one already there; `get_job` gives the final path once it is
         done. A preview is a working file in the workspace, and only the
         newest preview of each project is kept.
         Renders and analyses run one or two at a time, so that several of them
@@ -3562,7 +3677,7 @@ def _start_render(
         # Rendered in the workspace and moved out whole once finished, so the videos
         # folder never holds half a file.
         job.work_dir = os.path.join(housekeeping.render_dir(WORKSPACE_DIR), job.job_id)
-        delivered = housekeeping.unique_path(str(output_dir()), _delivery_name(project, kind, ".mp4"))
+        delivered = housekeeping.unique_path(str(output_dir()), _delivery_name(project, kind, ".mp4", burn_subtitles))
     render_path = os.path.join(job.work_dir, _output_name(project, kind))
 
     subtitle_path = None

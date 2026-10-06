@@ -182,6 +182,7 @@ function chooseFolder(folders, title, current, blocked = new Set()) {
 //   lead       the first tile in the grid (the new-project tile)
 //   card(item, extras) one thing as a card, with `extras` (its select box and tools) inside it
 //   opens      a card is a link, so a click opens it unless things are being chosen
+//   tools(item) more buttons for one thing's card, beside moving it
 //   remove(ids, items) takes things out for good; resolves to whether it did
 //   removeLabel what the button that does it says (「移除」 for files, 「刪除」 for projects)
 //   empty      what to show when there are no things and no folders at all
@@ -233,7 +234,7 @@ async function folderPage(page, folderId, config) {
       <button class="tool danger" data-remove-folder="${esc(folder.id)}" title="${esc(T.folders.remove)}">${icon("trash")}</button></div></a>`).join("");
     const cards = shown.map((item) => {
       const extras = `<button class="select-box" data-select="${esc(item.id)}" title="${esc(T.folders.choose)}">${icon("check")}</button>
-        <div class="card-tools"><button class="tool" data-move-item="${esc(item.id)}" title="${esc(T.folders.moveTo)}">${icon("moveTo")}</button>
+        <div class="card-tools">${config.tools ? config.tools(item) : ""}<button class="tool" data-move-item="${esc(item.id)}" title="${esc(T.folders.moveTo)}">${icon("moveTo")}</button>
         ${config.remove ? `<button class="tool danger" data-remove-item="${esc(item.id)}" title="${esc(config.removeLabel || T.media.remove)}">${icon("trash")}</button>` : ""}</div>`;
       return config.card(item, extras);
     }).join("");
@@ -462,7 +463,8 @@ async function mediaPage(page, folderId) {
     head: () => head(T.media.title, T.media.subtitle,
       `${newFolderButton()}<button class="btn" data-pick="folder">${icon("folder")}${esc(T.media.addFolder)}</button>
        <button class="btn primary" data-pick="files">${icon("plus")}${esc(T.media.addFiles)}</button>`),
-    wire: (root, refresh) => wireImport(root, refresh, folderId),
+    wire: (root, refresh) => { wireImport(root, refresh, folderId); wireNotes(root, refresh); },
+    tools: (asset) => `<button class="tool" data-notes="${esc(asset.id)}" title="${esc(T.media.notes)}">${icon("edit")}</button>`,
     notes: `<div class="callout">${icon("info")}<span>${esc(T.media.libraryOnly)}</span></div>
       <div class="callout warn">${icon("alert")}<span>${esc(T.media.moveWarning)}</span></div>`,
     empty: `<div class="callout">${icon("info")}<span>${esc(T.media.libraryOnly)}</span></div>
@@ -476,9 +478,38 @@ async function mediaPage(page, folderId) {
       const fast = asset.fast_transcript ? `<span class="badge" title="${esc(T.media.fastTranscriptHint)}">${esc(T.media.fastTranscript)}</span>` : "";
       return `<div class="card${asset.missing ? " gone" : ""}" title="${esc(asset.path)}" data-drag="item" data-id="${esc(asset.id)}">${extras}<div class="thumb">${picture}
         <span class="badge">${clock(asset.duration)}</span></div>
-        <div class="card-body"><div class="card-title">${esc(asset.name)}</div><div class="card-meta"><span>${asset.width ? `${asset.width}×${asset.height}` : ""}</span>${kind}${fast}${gone}</div></div></div>`;
+        <div class="card-body"><div class="card-title">${esc(asset.name)}</div><div class="card-meta"><span>${asset.width ? `${asset.width}×${asset.height}` : ""}</span>${kind}${fast}${gone}</div>
+        ${asset.notes ? `<div class="card-notes" title="${esc(asset.notes)}">${esc(asset.notes)}</div>` : ""}</div></div>`;
     },
     remove: removeAssets,
+  });
+}
+
+// Notes on how a file may be used: the AI reads them wherever it reads about the file.
+function wireNotes(page, refresh) {
+  page.querySelectorAll("[data-notes]").forEach((button) => {
+    button.addEventListener("click", async (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      const assets = (await api("/api/assets?all=1")).assets;
+      const asset = assets.find((item) => item.id === button.dataset.notes);
+      if (!asset) return;
+      modal(`<h2>${esc(T.media.notesTitle(asset.name))}</h2><p>${esc(T.media.notesBody)}</p>
+        <textarea class="notes-input" rows="4" data-text placeholder="${esc(T.media.notesPlaceholder)}">${esc(asset.notes || "")}</textarea>
+        <div class="foot"><button class="btn" data-no>${esc(T.newProject.cancel)}</button><button class="btn primary" data-yes>${esc(T.media.notesSave)}</button></div>`,
+      (box, close) => {
+        $("[data-text]", box).focus();
+        $("[data-no]", box).onclick = close;
+        $("[data-yes]", box).onclick = async () => {
+          try {
+            await api("/api/assets/notes", { asset_id: asset.id, notes: $("[data-text]", box).value });
+            close();
+            toast(T.media.notesSaved);
+            await refresh();
+          } catch (error) { toast(error.message, "error"); }
+        };
+      });
+    });
   });
 }
 

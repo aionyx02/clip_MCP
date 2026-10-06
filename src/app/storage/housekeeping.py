@@ -238,20 +238,26 @@ FRAME_WORDS = {"landscape": "橫式", "portrait": "直式", "square": "方形"}
 # What follows the project's name for each kind of thing delivered.
 KIND_WORDS = {"output": "", "cover": " 封面", "timeline": ""}
 
-def delivery_name(stem: str, kind: str, extension: str) -> str:
-    """Name a delivered file the way a person would: `EP1 台北.mp4`, `EP1 台北（直式）.mp4`.
+# Said after the shape when a video has its captions burned in. The same cut with and
+# without them used to come out as `EP1.mp4` and `EP1 (2).mp4`, and nothing said which was which.
+CAPTIONED_WORD = "字幕"
+
+def delivery_name(stem: str, kind: str, extension: str, captioned: bool = False) -> str:
+    """Name a delivered file the way a person would: `EP1 台北.mp4`, `EP1 台北（直式、字幕）.mp4`.
 
     Args:
         stem: The project's name, already safe for a file system.
         kind: `output`, `cover` or `timeline`, with `-portrait`, `-square` or
             `-landscape` for a cut delivered in another shape.
         extension: With its dot.
+        captioned: Whether the captions are burned into it.
 
     Returns:
         The file name.
     """
     base, _, frame = kind.partition("-")
-    return f"{stem}{KIND_WORDS[base]}{f'（{FRAME_WORDS[frame]}）' if frame else ''}{extension}"
+    differs = ([FRAME_WORDS[frame]] if frame else []) + ([CAPTIONED_WORD] if captioned else [])
+    return f"{stem}{KIND_WORDS[base]}{f'（{'、'.join(differs)}）' if differs else ''}{extension}"
 
 # What a legacy render's file was called: the project's name, then what kind of render.
 LEGACY_NAME = re.compile(
