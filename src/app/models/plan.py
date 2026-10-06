@@ -29,7 +29,7 @@ def _utc_now() -> datetime:
 # says which timeline it is about; it is stored whole, so nothing that reads it has to know.
 CLIP_ID_FIELDS = ("clip_id", "over_clip_id", "before_clip_id", "first_clip_id", "last_clip_id")
 CLIP_ID_LISTS = ("keep_clip_ids", "clip_ids")
-TIMELINE_PREFIX = re.compile(r"\btl_[0-9a-f]{8}:(?=[us]\d{4}\b)")
+TIMELINE_PREFIX = re.compile(r"\btl_[0-9a-f]{8}:(?=[us]\d{4,}\b)")
 
 def whole_clip_id(clip_id: str, timeline_id: str) -> str:
     """Put a clip ID written without its timeline back together.

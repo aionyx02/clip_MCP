@@ -109,3 +109,22 @@ def test_reading_through_footage_carries_each_file_s_notes_once(timeline: dict) 
         assert not any("後面片段請剪除" in line for line in read["lines"])
     finally:
         edit_asset(timeline["asset_id"], "")
+
+
+def test_a_short_id_in_two_timelines_is_not_guessed_between(timeline: dict, media: Path, tmp_path: Path) -> None:
+    import shutil
+
+    from app.server import get_semantic_clip
+
+    shutil.copy(media / "tall.mp4", tmp_path / "另一條時間軸.mp4")
+    other = import_asset(str(tmp_path / "另一條時間軸.mp4"))["id"]
+    server_repo.save_analysis(analysis(asset_id=other, **FOOTAGE))
+    build_semantic_timeline([other], rebuild=True)
+    short = timeline["clips"][0].split(":")[1]
+    with pytest.raises(ValueError, match="give the timeline_id"):
+        get_semantic_clip(short)
+    assert get_semantic_clip(short, timeline_id=timeline["timeline_id"])["timeline_id"] == timeline["timeline_id"]
+
+
+def test_a_long_timeline_s_ids_are_shortened_too() -> None:
+    assert short_clip_ids("tl_0000abcd:u12345") == "u12345"

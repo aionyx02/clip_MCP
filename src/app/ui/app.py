@@ -391,7 +391,14 @@ async def assets(request: Request) -> Response:
     return JSONResponse({"assets": listed})
 
 async def asset_notes(request: Request) -> Response:
-    """Write the notes on how a file may be used, the ones the AI reads wherever it reads about the file."""
+    """Write the notes on how a file may be used, the ones the AI reads wherever it reads about the file.
+
+    Args:
+        request: `asset_id` and `notes`, as JSON.
+
+    Returns:
+        The file's `id`, `name` and `notes`, or 404 when it is not in the library.
+    """
     body = await request.json()
     try:
         found = await run_in_threadpool(server.edit_asset, str(body.get("asset_id", "")), str(body.get("notes", "")))

@@ -129,7 +129,8 @@ class Note(str):
         kind: What sort of note, such as `pauses_taken_out`.
         beat_id: The part of the video it is about, when it is about one.
         clip_ids: The clips it is about.
-        seconds: How much: seconds taken out, short, or too long.
+        seconds: The one number the note is about, as its message says:
+            seconds taken out or short, a length, or a point in a song.
         look: Whether it is worth weighing — something the plan did not ask
             for, or something left that may sound wrong — rather than only
             said. What to do about it is in the sentence.
@@ -1739,8 +1740,7 @@ def _cut_notes(
         total = sum(seconds for seconds, _ in owed)
         worst, piece = max(owed, key=lambda item: item[0])
         share = f", {total / duration:.0%} of the cut" if duration else ""
-        short = [f"{first} {seconds:.1f}s" for seconds, first in
-                 ((seconds, _first_clips([cut])[0]) for seconds, cut in owed if cut.from_clip_ids)]
+        short = [f"{cut.from_clip_ids[0]} {seconds:.1f}s" for seconds, cut in owed if cut.from_clip_ids]
         said.append(Note(
             f"{len(owed)} window(s) stop before the sentence ends: {', '.join(short)} short. Finishing them all "
             f"would add {total:.1f}s{share}; the longest is {piece.from_clip_ids[0]}, {worst:.1f}s short. "

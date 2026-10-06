@@ -638,6 +638,23 @@ class Repository:
             rows = self._query("SELECT data FROM semantic_timelines WHERE id = ?", (timeline_id,))
         return SemanticTimeline.model_validate_json(rows[0][0]) if rows else None
 
+    def timelines_holding(self, short_id: str) -> List[str]:
+        """Say which timelines have a clip by this short ID, such as `u0034`.
+
+        Args:
+            short_id: The part of a clip ID after its timeline's.
+
+        Returns:
+            The IDs of the timelines that have one, oldest build first.
+        """
+        rows = self._query(
+            "SELECT semantic_clips.timeline_id FROM semantic_clips JOIN semantic_timelines "
+            "ON semantic_timelines.id = semantic_clips.timeline_id WHERE semantic_clips.id = "
+            "semantic_clips.timeline_id || ':' || ? ORDER BY semantic_timelines.rowid",
+            (short_id,),
+        )
+        return [row[0] for row in rows]
+
     def get_semantic_clip(self, clip_id: str) -> Optional[SemanticClip]:
         """Fetch one semantic clip.
 

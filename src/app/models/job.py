@@ -10,7 +10,8 @@ def _utc_now() -> datetime:
     """Return the current time as a timezone-aware UTC datetime."""
     return datetime.now(timezone.utc)
 
-# How far a job has to have gone before its pace says anything about the rest of it.
+# Provisional (roadmap §13): how far a job has to have gone before its pace says anything
+# about the rest of it.
 ESTIMATE_FROM_PROGRESS = 0.05
 
 class JobKind(str, Enum):

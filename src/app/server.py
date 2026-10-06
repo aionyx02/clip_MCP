@@ -19,7 +19,7 @@ from fastmcp.tools import ToolResult
 from fastmcp.utilities.types import Image
 from mcp.types import TextContent
 from pydantic import Field, TypeAdapter
-from app.models.media import Asset, Measured, MediaAnalysis, Span, SpeakerTurn
+from app.models.media import Asset, Measured, MediaAnalysis, Span, SpeakerTurn, Transcript
 from app.models.plan import (
     EditPlan, PlanAmendment, apply_amendment, describe_amendment, short_clip_ids, whole_clip_id, with_whole_clip_ids,
 )
@@ -161,8 +161,15 @@ mcp = FastMCP(
 mcp.add_provider(SkillsDirectoryProvider(roots=SKILLS_DIR, supporting_files="resources"))
 mcp.add_transform(ResourcesAsTools(mcp))
 
-def _shortened(value):
-    """Take the timeline off every clip ID in a result, however deep it sits."""
+def _shortened(value: object) -> object:
+    """Take the timeline off every clip ID in a result, however deep it sits.
+
+    Args:
+        value: A result, or any part of one.
+
+    Returns:
+        The same shape, with every string's clip IDs short.
+    """
     if isinstance(value, str):
         return short_clip_ids(value)
     if isinstance(value, list):
@@ -181,6 +188,18 @@ class ShortClipIds(Middleware):
     """
 
     async def on_call_tool(self, context: MiddlewareContext, call_next: CallNext) -> ToolResult:
+        """Run the tool, then shorten every clip ID in what it said or raised.
+
+        Args:
+            context: The call.
+            call_next: The rest of the chain, ending in the tool.
+
+        Returns:
+            The tool's result with short clip IDs.
+
+        Raises:
+            ToolError: The tool's own error, its clip IDs short.
+        """
         try:
             result = await call_next(context)
         except Exception as exc:
@@ -228,8 +247,19 @@ def asset_id_for(name: str) -> str:
         )
     return named[0].id if named else name
 
-def _with_asset_ids(value):
-    """Put an ID in place of every file name given as an asset, however deep it sits."""
+def _with_asset_ids(value: object) -> object:
+    """Put an ID in place of every file name given as an asset, however deep it sits.
+
+    Args:
+        value: A tool's arguments, or any part of them.
+
+    Returns:
+        The same shape, with each `asset_id` and `asset_ids` entry an ID
+        where it named exactly one file.
+
+    Raises:
+        ValueError: If a name is shared by more than one file.
+    """
     if isinstance(value, list):
         return [_with_asset_ids(item) for item in value]
     if not isinstance(value, dict):
@@ -253,6 +283,18 @@ class AssetNames(Middleware):
     """
 
     async def on_call_tool(self, context: MiddlewareContext, call_next: CallNext) -> ToolResult:
+        """Swap file names for IDs in the arguments, then run the tool.
+
+        Args:
+            context: The call.
+            call_next: The rest of the chain, ending in the tool.
+
+        Returns:
+            What the tool returned.
+
+        Raises:
+            ToolError: If a name is shared by more than one file.
+        """
         arguments = context.message.arguments
         if arguments:
             try:
@@ -913,11 +955,7 @@ def listen_again(
     asset = _get_asset(asset_id)
     if not asset.has_audio:
         raise ValueError(f"asset {asset_id} has no sound to hear again")
-    if end <= start:
-        raise ValueError(f"the stretch has to end after it starts ({start}s to {end}s)")
-    if end - start > LISTEN_AGAIN_SECONDS:
-        raise ValueError(f"hear a stretch of at most {LISTEN_AGAIN_SECONDS:g} seconds at a time; this one is "
-                         f"{end - start:g}s")
+    _hearable(start, end)
     if asset.duration is not None and start >= float(asset.duration):
         raise ValueError(f"the file is only {float(asset.duration):g}s long")
     known = repo.get_analysis(asset_id)
@@ -939,12 +977,21 @@ def listen_again(
         "agrees": stored is not None and _bare_words(plain_heard) == _bare_words(stored),
     }
 
-# How long each level `listen_again` reports covers: fine enough to see a fade or a dip
-# under a word, coarse enough that thirty seconds of it is sixty numbers.
+# Provisional (roadmap §13): how long each level `listen_again` reports covers — fine
+# enough to see a fade or a dip under a word, coarse enough that thirty seconds is sixty numbers.
 LEVEL_EVERY_SECONDS = 0.5
 
-def _heard(fresh, keep_as: str, start: float) -> dict:
-    """What `listen_again` says about any stretch it heard: the words, the levels, the sound file."""
+def _heard(fresh: Transcript, keep_as: str, start: float) -> dict:
+    """What `listen_again` says about any stretch it heard.
+
+    Args:
+        fresh: The new hearing, in seconds of the file or render.
+        keep_as: The stretch's sound, kept for the user to play.
+        start: Where the stretch starts, which the levels count from.
+
+    Returns:
+        `heard`, `words`, `levels` and `audio_path`.
+    """
     return {
         "heard": "".join(marked_text(segment) for segment in fresh.segments),
         "words": [
@@ -977,20 +1024,52 @@ def _finished_render(job_id: str) -> Tuple[Job, str]:
         raise ValueError(f"the file render {job_id} made is no longer there; render again")
     return job, job.output_path
 
+def _rendered_from(job: Job) -> Optional[Project]:
+    """The project a render was made from, as it is now; None when it is gone."""
+    return repo.get_project(job.project_id) if job.project_id else None
+
 def _changed_since(job: Job) -> bool:
-    """Whether the project a render was made from has been edited since."""
-    project = repo.get_project(job.project_id) if job.project_id else None
+    """Whether the project a render was made from has been edited since.
+
+    Args:
+        job: The render.
+
+    Returns:
+        True when its project's version has moved on from the one rendered.
+    """
+    project = _rendered_from(job)
     return project is not None and job.project_version is not None and project.version != job.project_version
 
-def _listen_to_render(job_id: str, start: float, end: float, language: Optional[str]) -> dict:
-    """`listen_again` over a finished render rather than a file."""
-    job, path = _finished_render(job_id)
+def _hearable(start: float, end: float) -> None:
+    """Refuse a stretch `listen_again` cannot take: empty, or longer than it hears at once.
+
+    Raises:
+        ValueError: Saying which.
+    """
     if end <= start:
         raise ValueError(f"the stretch has to end after it starts ({start}s to {end}s)")
     if end - start > LISTEN_AGAIN_SECONDS:
         raise ValueError(f"hear a stretch of at most {LISTEN_AGAIN_SECONDS:g} seconds at a time; this one is "
                          f"{end - start:g}s")
-    project = repo.get_project(job.project_id) if job.project_id else None
+
+def _listen_to_render(job_id: str, start: float, end: float, language: Optional[str]) -> dict:
+    """`listen_again` over a finished render rather than a file.
+
+    Args:
+        job_id: The render.
+        start: Where the stretch starts, in seconds of the render.
+        end: Where it ends.
+        language: Spoken language code, or None for the footage's own.
+
+    Returns:
+        What `_heard` says, with the `captions` on screen in the stretch and
+        `changed_since`.
+    """
+    job, path = _finished_render(job_id)
+    _hearable(start, end)
+    project = _rendered_from(job)
+    if project is not None and not _changed_since(job) and start >= float(project.duration):
+        raise ValueError(f"the render is only {float(project.duration):g}s long")
     keep_as = os.path.join(WORKSPACE_DIR, "temp", "listen", f"render-{job_id[:8]}-{start:.2f}-{end:.2f}.wav")
     known = None
     for clip in (project.base_video_track.clips if project and project.base_video_track else []):
@@ -1156,16 +1235,27 @@ def _semantic_clip(clip_id: str, timeline_id: Optional[str]) -> SemanticClip:
 
     Args:
         clip_id: `u0034`, or a whole ID.
-        timeline_id: The timeline a short one is in; the newest build when
-            left out, as for `query_clips`.
+        timeline_id: The timeline a short one is in. Left out, the one
+            timeline that has such a clip; never a guess between several,
+            since the same short ID is a different moment in each.
 
     Returns:
         The clip.
 
     Raises:
-        ValueError: If there is no such clip.
+        ValueError: If there is no such clip, or a short ID is in more than
+            one timeline and none was named.
     """
-    whole = clip_id if ":" in clip_id else whole_clip_id(clip_id, _require_timeline(timeline_id).id)
+    if ":" in clip_id:
+        whole = clip_id
+    elif timeline_id is not None:
+        whole = whole_clip_id(clip_id, _require_timeline(timeline_id).id)
+    else:
+        holding = repo.timelines_holding(clip_id)
+        if len(holding) > 1:
+            raise ValueError(f"{clip_id} is in {len(holding)} timelines ({', '.join(holding)}); "
+                             "give the timeline_id of the one meant")
+        whole = whole_clip_id(clip_id, holding[0]) if holding else clip_id
     clip = repo.get_semantic_clip(whole)
     if clip is None:
         raise ValueError(f"semantic clip {clip_id} not found; query_clips lists the ones that exist")
@@ -1706,7 +1796,7 @@ def set_sections(
     if not sections:
         raise ValueError("give at least one section; to clear them, build the timeline again with rebuild")
     timeline = _require_timeline(timeline_id)
-    sections =[SectionChoice.model_validate(with_whole_clip_ids(choice.model_dump(), timeline.id))
+    sections = [SectionChoice.model_validate(with_whole_clip_ids(choice.model_dump(), timeline.id))
                 for choice in sections]
     clips = _timeline_utterances(timeline)
     candidates = propose_candidates(clips, _timeline_analyses(timeline))
@@ -1748,7 +1838,8 @@ def get_semantic_clip(clip_id: str, include_words: bool = False, timeline_id: Op
         clip_id: ID of the clip, as `query_clips` returned it.
         include_words: Whether to include each word's timing. Leave it off
             unless cutting inside a sentence.
-        timeline_id: The timeline the clip is in; omit for the newest build.
+        timeline_id: The timeline the clip is in; needed only when more than
+            one timeline has been built.
 
     Returns:
         The clip: its `clip_id`, `timeline_id`, `asset_id`, `level`, `kind`,
@@ -1794,7 +1885,8 @@ def frames_for_clips(
         clip_ids: Clips to sample, in the order to show them. One frame is
             taken from the middle of each.
         columns: Most tiles per row.
-        timeline_id: The timeline the clips are in; omit for the newest build.
+        timeline_id: The timeline the clips are in; needed only when more
+            than one timeline has been built.
 
     Returns:
         A text block naming each tile's clip and time, followed by the grid as
@@ -1858,7 +1950,8 @@ def set_clip_tags(
         written_by: Who or what is writing, such as the model and version that
             read the frames, or the user's name when they dictated a fix.
         reviewed: True once the user has seen these and agreed to them.
-        timeline_id: The timeline the clips are in; omit for the newest build.
+        timeline_id: The timeline the clips are in; needed only when more
+            than one timeline has been built.
 
     Returns:
         A dictionary with how many clips were `updated` and the total `tags`
@@ -1962,8 +2055,8 @@ def view_frames(
         Image(data=storyboard_sheet(shots), format="jpeg"),
     ])
 
-# How far either side of a transition `view_render` looks: clear of the mix, near enough
-# to be the same shot.
+# Provisional (roadmap §13): how far either side of a transition `view_render` looks —
+# clear of the mix, near enough to be the same shot.
 AROUND_TRANSITION_SECONDS = 0.15
 
 @mcp.tool()
@@ -2007,7 +2100,7 @@ def view_render(
         ValueError: If the job is not a finished render or its file is gone.
     """
     job, path = _finished_render(job_id)
-    project = repo.get_project(job.project_id) if job.project_id else None
+    project = _rendered_from(job)
     length = float(project.duration) if project is not None else None
     last = length if end is None else (end if length is None else min(end, length))
     said: List[str] = []
@@ -3435,9 +3528,12 @@ def generate_subtitles(
     overlapping = sum(1 for earlier, later in zip(placed, placed[1:]) if later.start < earlier.end)
     heard = _caption_sources(saved)
     from_transcript = [cue for cue in saved.subtitles if heard[cue.id]["from"] == "transcript"]
+    first_shown = {}
+    for placed_cue in placed:
+        first_shown.setdefault(placed_cue.cue_id, placed_cue.start)
     to_check = sorted(
-        (cue for cue in from_transcript if any(placed_cue.cue_id == cue.id for placed_cue in placed)),
-        key=lambda cue: (-len(heard[cue.id].get("unsure", [])), cue.asset_id, cue.source_start),
+        (cue for cue in from_transcript if cue.id in first_shown),
+        key=lambda cue: (-len(heard[cue.id].get("unsure", [])), first_shown[cue.id]),
     )
     return {
         "new_version": saved.version,
@@ -3454,6 +3550,10 @@ def generate_subtitles(
         "assets_without_transcript": untranscribed,
         "overlapping": overlapping,
     }
+
+# How much of a file two captions, or a caption and a word, may share or miss by and still be
+# told apart: the rounding their times went through, not a judgement.
+CAPTION_SLIVER = 0.05
 
 def _caption_sources(project: Project) -> Dict[str, dict]:
     """Say where each of a project's captions came from, and what in it is worth checking.
@@ -3488,10 +3588,11 @@ def _caption_sources(project: Project) -> Dict[str, dict]:
         if cue.asset_id not in analyses:
             analyses[cue.asset_id] = repo.get_analysis(cue.asset_id)
         analysis = analyses[cue.asset_id]
+        # The same sliver `_overlaps` allows: a caption's edges were cut from these words' times.
         words = [
             word for segment in (analysis.transcript.segments if analysis and analysis.transcript else [])
             for word in segment.words
-            if word.start >= float(cue.source_start) - 0.05 and word.end <= float(cue.source_end) + 0.05
+            if word.start >= float(cue.source_start) - CAPTION_SLIVER and word.end <= float(cue.source_end) + CAPTION_SLIVER
         ]
         found: dict = {"from": "transcript"}
         doubted = unsure_words(words)
@@ -3513,7 +3614,7 @@ def _overlaps(first: SubtitleCue, second: SubtitleCue) -> bool:
         True when they share more than a sliver of the file.
     """
     shared = min(first.source_end, second.source_end) - max(first.source_start, second.source_start)
-    return float(shared) > 0.05
+    return float(shared) > CAPTION_SLIVER
 
 def _corrected(cue: SubtitleCue, glossary: Mapping[str, str]) -> SubtitleCue:
     """Correct a proposed caption's text with the workspace glossary.
@@ -4353,7 +4454,8 @@ def queue_positions(active: Sequence[Job]) -> Dict[str, int]:
     Returns:
         Each queued job's place, 0 for the next to start.
     """
-    waiting = [job for job in active if job.status == JobStatus.QUEUED]
+    waiting = [job for job in active
+               if job.status == JobStatus.QUEUED and job.admitted_at is None and not job.cancel_requested]
     return {job.job_id: place for place, job in enumerate(waiting)}
 
 def _job_states(job_ids: List[str]) -> List[dict]:
@@ -4383,8 +4485,9 @@ def _job_states(job_ids: List[str]) -> List[dict]:
             entry["asset_id"] = job.asset_id
         if job.output_path:
             entry["output_path"] = job.output_path
-        if job.remaining_seconds(now) is not None:
-            entry["remaining_seconds"] = job.remaining_seconds(now)
+        remaining = job.remaining_seconds(now)
+        if remaining is not None:
+            entry["remaining_seconds"] = remaining
         if job.job_id in ahead:
             entry["ahead"] = ahead[job.job_id]
         if job.error_message:
