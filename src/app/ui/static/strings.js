@@ -65,6 +65,8 @@ window.T = {
     clips: (n) => `${n} 段`,
     versions: (versions, branches) => `${versions} 個版本${branches ? ` · ${branches} 個分支` : ""}`,
     disk: (size) => `佔 ${size}`,
+    fold: (n, open) => open ? `收起 ${n} 個分支` : `展開 ${n} 個分支`,
+    branchHint: "從上面那支片分出來的版本",
     missing: (n) => `${n} 個素材找不到`,
     missingHint: "原始檔案被移動或刪除了，放回原位才能播放。",
     untitled: "未命名專案",

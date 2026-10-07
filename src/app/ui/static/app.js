@@ -21,6 +21,7 @@ const ICONS = {
   trash: '<path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/>',
   stop: '<rect x="7" y="7" width="10" height="10" rx="1.5"/>',
   back: '<path d="M15 6l-6 6 6 6"/>',
+  chevron: '<path d="M9 6l6 6-6 6"/>',
   undo: '<path d="M9 14L4 9l5-5"/><path d="M4 9h10a6 6 0 0 1 0 12h-3"/>',
   play: '<path d="M8 5v14l11-7z"/>',
   link: '<path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"/>',
@@ -207,6 +208,8 @@ function chooseFolder(folders, title, current, blocked = new Set()) {
 async function folderPage(page, folderId, config) {
   const { kind } = config;
   const chosen = new Set();
+  // Items that came from another one in the same view sit folded under it until it is opened.
+  const opened = new Set();
   let folders = [], items = [];
   const refresh = async () => {
     [folders, items] = await Promise.all([api(`/api/folders?kind=${kind}`).then((data) => data.folders), config.load()]);
@@ -250,11 +253,17 @@ async function folderPage(page, folderId, config) {
       <div class="card-tools"><button class="tool" data-rename="${esc(folder.id)}" title="${esc(T.folders.rename)}">${icon("edit")}</button>
       <button class="tool" data-move-folder="${esc(folder.id)}" title="${esc(T.folders.moveTo)}">${icon("moveTo")}</button>
       <button class="tool danger" data-remove-folder="${esc(folder.id)}" title="${esc(T.folders.remove)}">${icon("trash")}</button></div></a>`).join("");
-    const cards = shown.map((item) => {
+    const present = new Set(shown.map((item) => item.id));
+    const underOf = (item) => item.under && item.under !== item.id && present.has(item.under) ? item.under : null;
+    const kids = {};
+    for (const item of shown) if (underOf(item)) (kids[item.under] ||= []).push(item);
+    const unfold = (item, depth) => [{ item, depth }, ...(opened.has(item.id) ? (kids[item.id] || []).flatMap((kid) => unfold(kid, depth + 1)) : [])];
+    const laid = shown.filter((item) => !underOf(item)).flatMap((item) => unfold(item, 0));
+    const cards = laid.map(({ item, depth }) => {
       const extras = `<button class="select-box" data-select="${esc(item.id)}" title="${esc(T.folders.choose)}">${icon("check")}</button>
         <div class="card-tools">${config.tools ? config.tools(item) : ""}<button class="tool" data-move-item="${esc(item.id)}" title="${esc(T.folders.moveTo)}">${icon("moveTo")}</button>
         ${config.remove ? `<button class="tool danger" data-remove-item="${esc(item.id)}" title="${esc(config.removeLabel || T.media.remove)}">${icon("trash")}</button>` : ""}</div>`;
-      return config.card(item, extras);
+      return config.card(item, extras, { depth, kids: (kids[item.id] || []).length, open: opened.has(item.id) });
     }).join("");
     const bar = chosen.size ? `<div class="selection-bar"><span class="grow">${esc(T.folders.chosen(chosen.size))}</span>
       <button class="btn small" data-choose-all>${esc(T.folders.chooseAll)}</button>
@@ -290,6 +299,11 @@ async function folderPage(page, folderId, config) {
     });
     const picked = (id) => chosen.has(id) ? [...chosen] : [id];
     $("[data-new-folder]", page).onclick = makeFolder;
+    act("[data-fold]", (element) => {
+      const id = element.dataset.fold;
+      opened.has(id) ? opened.delete(id) : opened.add(id);
+      draw();
+    });
     act("[data-select]", (element) => {
       const id = element.dataset.select;
       chosen.has(id) ? chosen.delete(id) : chosen.add(id);
@@ -405,15 +419,16 @@ async function projectsPage(page, folderId) {
       <h2>${esc(T.projects.emptyTitle)}</h2><p>${esc(T.projects.emptyBody)}</p>
       <div class="prompt" style="margin-top:8px;max-width:560px"><span>${esc(T.projects.examplePrompt)}</span>
       <button class="btn small" data-copy>${icon("copy", 16)}${esc(T.ai.copy)}</button></div></div>`,
-    card: (project, extras) => {
+    card: (project, extras, family = {}) => {
       const shape = shapeOf(project.width, project.height);
+      const fold = family.kids ? `<button class="fold${family.open ? " open" : ""}" data-fold="${esc(project.id)}">${icon("chevron", 13)}${esc(T.projects.fold(family.kids, family.open))}</button>` : "";
       const picture = project.thumb ? `<img loading="lazy" alt="" draggable="false" onerror="this.dataset.broken=1" src="${thumbUrl(project.thumb.asset_id, project.thumb.t)}">` : icon("film", 30);
       const missing = project.missing.length
         ? `<span class="badge warn" title="${esc(T.projects.missingHint + "\n" + project.missing.join("\n"))}">${icon("alert", 13)}${esc(T.projects.missing(project.missing.length))}</span>` : "";
-      return `<a class="card" href="#/project/${encodeURIComponent(project.id)}" data-drag="item" data-id="${esc(project.id)}" draggable="true">${extras}
+      return `<a class="card${family.depth ? " branch" : ""}" href="#/project/${encodeURIComponent(project.id)}" data-drag="item" data-id="${esc(project.id)}" draggable="true"${family.depth ? ` title="${esc(T.projects.branchHint)}"` : ""}>${extras}
         <div class="thumb">${picture}<span class="badge">${clock(project.duration)}</span></div>
         <div class="card-body"><div class="card-title">${esc(project.name || T.projects.untitled)}${project.name ? "" : ` <span class="badge warn">${esc(T.projects.nameIt)}</span>`}</div>
-        <div class="card-meta"><span>${esc(T.projects.shapes[shape])}</span><span class="dot-sep">${esc(T.projects.clips(project.clips))}</span>${project.versions ? `<span class="dot-sep">${esc(T.projects.versions(project.versions, project.branches))}</span>` : ""}${project.megabytes >= 1 ? `<span class="dot-sep">${esc(T.projects.disk(bytes(project.megabytes)))}</span>` : ""}${missing}</div></div></a>`;
+        <div class="card-meta"><span>${esc(T.projects.shapes[shape])}</span><span class="dot-sep">${esc(T.projects.clips(project.clips))}</span>${project.versions ? `<span class="dot-sep">${esc(T.projects.versions(project.versions, project.branches))}</span>` : ""}${project.megabytes >= 1 ? `<span class="dot-sep">${esc(T.projects.disk(bytes(project.megabytes)))}</span>` : ""}${missing}</div>${fold}</div></a>`;
     },
   });
 }

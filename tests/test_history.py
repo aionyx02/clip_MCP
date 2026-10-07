@@ -187,3 +187,9 @@ def test_the_version_panel_folds_one_sitting_into_one_dot(kept_history, media: P
     assert graph["branches"][0]["project_id"] == branch["project_id"]
     assert graph["branches"][0]["from"] == nodes[1]["commit"]
     assert server.version_graph(branch["project_id"])["branched_from"]["name"] == "第四版"
+    # The editor's list folds the branch under the project it came from.
+    from starlette.testclient import TestClient
+
+    from app.ui import app as editor
+    listed = {item["id"]: item for item in TestClient(editor.create_app()).get("/api/projects").json()["projects"]}
+    assert listed[branch["project_id"]]["under"] == project and listed[project]["under"] is None

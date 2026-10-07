@@ -129,6 +129,8 @@ async def projects(request: Request) -> Response:
             "folder_id": filed.get(project.id),
             "versions": counts.get(project.id, 0),
             "branches": branched.get(project.id, 0),
+            # Shown under the project it was branched from, when that one is in the same folder.
+            "under": project.branched_from.project_id if project.branched_from else None,
             "megabytes": server.disk_of(project.id),
         })
     return JSONResponse({"projects": listed})

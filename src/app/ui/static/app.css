@@ -96,6 +96,12 @@ a.card:hover, button.card:hover { border-color: var(--line-2); background: var(-
 .thumb img:not([src]), .thumb img[data-broken] { display: none; }
 .thumb .badge { position: absolute; right: 6px; bottom: 6px; }
 .card-body { padding: 8px 10px 10px; }
+/* A branch sits folded under the project it came from; opened, it follows it with a mark on its edge. */
+.card.branch { border-left: 3px solid var(--accent); background: linear-gradient(var(--accent-soft), var(--accent-soft)) , var(--panel); }
+.fold { display: inline-flex; align-items: center; gap: 3px; margin-top: 6px; padding: 2px 6px 2px 2px; border: 1px solid var(--line); border-radius: 999px; background: transparent; color: var(--muted); font: inherit; font-size: 11px; cursor: pointer; }
+.fold:hover { color: var(--text); background: var(--panel-2); }
+.fold svg { transition: transform .15s; }
+.fold.open svg { transform: rotate(90deg); }
 .card-title { font-weight: 500; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .card-meta { display: flex; gap: 6px; align-items: center; margin-top: 3px; color: var(--muted); font-size: 11.5px; flex-wrap: wrap; }
 .badge {
