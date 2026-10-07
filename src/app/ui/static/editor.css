@@ -138,6 +138,31 @@ body.editing .page { padding: 0; overflow: hidden; }
 }
 .lane { position: relative; border-bottom: 1px solid var(--line); }
 
+/* Comments: a flag on the ruler where each one is, a bar under a stretch; closed ones faded. */
+.cmark { position: absolute; top: 18px; width: 10px; height: 13px; margin-left: -1px; z-index: 2; cursor: pointer;
+  background: var(--warn); clip-path: polygon(0 0, 100% 0, 100% 62%, 22% 62%, 22% 100%, 0 100%); }
+.crange { position: absolute; bottom: 0; height: 4px; z-index: 1; cursor: pointer; background: color-mix(in srgb, var(--warn) 55%, transparent); }
+.crange.picking { background: color-mix(in srgb, var(--accent) 60%, transparent); pointer-events: none; }
+.cmark.resolved, .crange.resolved { opacity: .35; }
+.cmark.on { outline: 2px solid var(--text); outline-offset: 1px; }
+.comment-btn { margin-left: 10px; gap: 5px; }
+.tabs .count { margin-left: 5px; padding: 0 5px; border-radius: 8px; background: var(--warn); color: #111; font-size: 10px; font-weight: 600; }
+.clist { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.citem { padding: 8px 10px; border: 1px solid var(--line); border-left: 3px solid var(--warn); border-radius: 6px; background: var(--panel-2); cursor: pointer; }
+.citem.resolved { border-left-color: var(--line-2); opacity: .75; }
+.citem.on { border-color: var(--text); border-left-color: var(--warn); }
+.chead { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+.ctime { border: 0; background: transparent; color: var(--accent); font: 11px var(--mono); padding: 0; cursor: pointer; }
+.ctime:disabled { color: var(--faint); cursor: default; }
+.ctext { margin: 4px 0 6px; white-space: pre-wrap; word-break: break-word; }
+.creplies { list-style: none; margin: 0 0 6px; padding: 0 0 0 8px; border-left: 2px solid var(--line-2); display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--muted); }
+.creplies b { margin-right: 6px; color: var(--text); font-weight: 600; }
+.cactions { display: flex; gap: 6px; flex-wrap: wrap; }
+.creply { display: flex; flex-direction: column; gap: 6px; align-items: flex-end; margin-top: 6px; }
+.creply textarea { width: 100%; }
+.cclosed { margin-top: 10px; }
+.cclosed summary { cursor: pointer; color: var(--muted); font-size: 12px; margin-bottom: 8px; }
+
 .clip {
   position: absolute; top: 4px; bottom: 4px; border-radius: 2px; overflow: hidden; cursor: grab; user-select: none;
   background: var(--clip-v); box-shadow: inset 0 0 0 1px var(--clip-v-edge);

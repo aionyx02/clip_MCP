@@ -36,9 +36,25 @@
   async function loadProject() {
     E.project = await api(`/api/projects/${encodeURIComponent(E.id)}`);
     E.captions = (await api(`/api/projects/${encodeURIComponent(E.id)}/captions`)).captions;
+    await loadComments();
     E.ownVersion = E.project.version;
     if (E.selectedCaption && !E.captions.some((cue) => cue.cue_id === E.selectedCaption)) E.selectedCaption = null;
     if (E.selected && !findClip(E.selected.track, E.selected.clip)) E.selected = null;
+  }
+
+  // What the user said about moments of the cut, open and closed, where each is on the cut now.
+  async function loadComments() {
+    try {
+      const listed = await api(`/api/projects/${encodeURIComponent(E.id)}/comments`);
+      const seen = JSON.stringify(listed.comments);
+      const changed = seen !== E.commentsSeen;
+      E.comments = listed.comments;
+      E.commentsSeen = seen;
+      return changed;
+    } catch {
+      E.comments = E.comments || [];
+      return false;
+    }
   }
 
   // Nothing changes while the cut is playing: a cut moving under the picture being watched
@@ -527,6 +543,7 @@
             <button class="icon-btn" data-step="-1" title="${esc(T.editor.previousFrame)}">${svg("prev")}</button>
             <button class="icon-btn" data-play disabled title="${esc(T.editor.play)}">${svg("play")}</button>
             <button class="icon-btn" data-step="1" title="${esc(T.editor.nextFrame)}">${svg("next")}</button>
+            <button class="btn small comment-btn edit-only" data-comment-btn title="${esc(T.comments.addTitle)}">${svg("comment", 14)}${esc(T.comments.add)}</button>
           </div>
           <span class="meta" data-fps></span>
         </div>
@@ -577,6 +594,7 @@
     replay: '<path d="M4 12a8 8 0 1 0 2.3-5.7"/><path d="M4 4v5h5"/>',
     captions: '<rect x="3" y="5" width="18" height="14" rx="3"/><path d="M7 15h4M13 15h4M7 11h10"/>',
     speaker: '<path d="M4 9h4l5-4v14l-5-4H4z"/><path d="M16 9a4 4 0 0 1 0 6"/>',
+    comment: '<path d="M4 5h16v11H9l-5 4z"/>',
   };
   const svg = (name, size = 16) => `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">${EXTRA[name]}</svg>`;
 
@@ -756,6 +774,40 @@
       element.textContent = marker.name;
       ruler.append(element);
     }
+    drawCommentMarks();
+  }
+
+  // A flag where each comment is on the cut now, and a bar under a stretch; a closed one faded.
+  function drawCommentMarks() {
+    const ruler = $("[data-ruler]", E.root);
+    ruler.querySelectorAll(".cmark, .crange").forEach((element) => element.remove());
+    for (const comment of E.comments || []) {
+      if (comment.gone) continue;
+      const state = `${comment.status}${comment.id === E.focusComment ? " on" : ""}`;
+      if (comment.end !== null && comment.end !== undefined) {
+        const bar = document.createElement("span");
+        bar.className = `crange ${state}`;
+        bar.dataset.comment = comment.id;
+        bar.style.left = `${comment.start * E.pps}px`;
+        bar.style.width = `${Math.max(2, (comment.end - comment.start) * E.pps)}px`;
+        bar.title = comment.text;
+        ruler.append(bar);
+      }
+      const flag = document.createElement("span");
+      flag.className = `cmark ${state}`;
+      flag.dataset.comment = comment.id;
+      flag.style.left = `${comment.start * E.pps}px`;
+      flag.title = `${fmt(comment.start)} ${comment.text}`;
+      ruler.append(flag);
+    }
+    if (E.picking) {
+      const bar = document.createElement("span");
+      bar.className = "crange picking";
+      const from = Math.min(E.picking.from, E.picking.to), to = Math.max(E.picking.from, E.picking.to);
+      bar.style.left = `${from * E.pps}px`;
+      bar.style.width = `${Math.max(2, (to - from) * E.pps)}px`;
+      ruler.append(bar);
+    }
   }
 
   function drawPlayhead() {
@@ -778,16 +830,19 @@
     const root = $("[data-inspector]", E.root);
     const clip = E.selected && findClip(E.selected.track, E.selected.clip);
     const track = clip && E.project.tracks.find((entry) => entry.id === E.selected.track);
-    const available = [...(E.selectedCaption ? ["captions"] : !clip ? [] : track.track_type === "audio" ? ["sound"]
-      : (E.project.assets[clip.asset_id]?.has_audio === false ? ["picture"] : ["picture", "sound"]))];
-    if (!available.includes(E.tab)) E.tab = available.length > 1 ? available[0] : null;
-    root.innerHTML = `<div class="tabs">${["picture", "sound", "captions"].map((tab) =>
-      `<button type="button" data-tab="${tab}" class="${tab === E.tab ? "on" : ""}" ${available.includes(tab) ? "" : "disabled"}>${esc(T.editor.tabs[tab])}</button>`).join("")}</div>
+    const context = E.selectedCaption ? ["captions"] : !clip ? [] : track.track_type === "audio" ? ["sound"]
+      : (E.project.assets[clip.asset_id]?.has_audio === false ? ["picture"] : ["picture", "sound"]);
+    const available = [...context, "comments"];
+    if (!available.includes(E.tab)) E.tab = context[0] || null;
+    const waiting = (E.comments || []).filter((comment) => comment.status === "open").length;
+    root.innerHTML = `<div class="tabs">${["picture", "sound", "captions", "comments"].map((tab) =>
+      `<button type="button" data-tab="${tab}" class="${tab === E.tab ? "on" : ""}" ${available.includes(tab) ? "" : "disabled"}>${esc(T.editor.tabs[tab])}${tab === "comments" && waiting ? `<span class="count">${waiting}</span>` : ""}</button>`).join("")}</div>
       <div class="props" data-props></div>`;
     root.querySelectorAll("[data-tab]").forEach((button) => {
       button.onclick = () => { E.tab = button.dataset.tab; drawInspector(); };
     });
     const panel = $("[data-props]", root);
+    if (E.tab === "comments") return drawComments(panel);
     if (E.selectedCaption) return drawCaptionInspector(panel);
     if (clip && track.track_type === "audio") return drawSoundInspector(panel, clip, track);
     if (clip && E.tab === "sound") return drawClipSound(panel, clip);
@@ -883,10 +938,121 @@
     };
   }
 
+  // ------------------------------------------------------------------ comments
+
+  // What the user wants at a moment, or over a stretch, in their words; the AI reads it next time it looks.
+  function writeComment(start, end = null) {
+    if (E.viewing) { toast(T.versions.viewingLocked, "error"); return; }
+    clock().pause();
+    const where = end === null ? fmt(start) : `${fmt(start)}–${fmt(end)}`;
+    modal(`<h2>${esc(T.comments.title(where))}</h2><p class="hint">${esc(end === null ? T.comments.momentHint : T.comments.stretchHint)}</p>
+      <div class="field"><textarea class="input" data-text rows="3" maxlength="1000" placeholder="${esc(T.comments.placeholder)}"></textarea></div>
+      <div class="foot"><button class="btn" data-cancel>${esc(T.newProject.cancel)}</button><button class="btn primary" data-save>${esc(T.comments.save)}</button></div>`,
+    (box, close) => {
+      const text = $("[data-text]", box);
+      text.focus();
+      $("[data-cancel]", box).onclick = close;
+      const save = async () => {
+        if (!text.value.trim()) { text.focus(); return; }
+        try {
+          const made = await api(`/api/projects/${encodeURIComponent(E.id)}/comments`, { text: text.value.trim(), start, end });
+          close();
+          await loadComments();
+          E.selected = null;
+          E.selectedCaption = null;
+          E.tab = "comments";
+          E.focusComment = made.id;
+          drawLanes();
+          drawRuler();
+          drawInspector();
+          toast(T.comments.saved);
+        } catch (error) { toast(error.message, "error"); }
+      };
+      $("[data-save]", box).onclick = save;
+      text.addEventListener("keydown", (event) => { if (event.key === "Enter" && (event.ctrlKey || event.metaKey)) save(); });
+    });
+  }
+
+  function focusComment(id, jump) {
+    const comment = (E.comments || []).find((item) => item.id === id);
+    if (!comment) return;
+    E.focusComment = id;
+    E.selected = null;
+    E.selectedCaption = null;
+    E.tab = "comments";
+    if (jump && !comment.gone) { clock().pause(); seek(comment.start); }
+    drawLanes();
+    drawCommentMarks();
+    drawInspector();
+    $(`[data-cid="${CSS.escape(id)}"]`, E.root)?.scrollIntoView({ block: "nearest" });
+  }
+
+  function commentHtml(comment) {
+    const where = comment.end !== null && comment.end !== undefined ? `${fmt(comment.start)}–${fmt(comment.end)}` : fmt(comment.start);
+    const replies = comment.replies.map((reply) => `<li class="${reply.by === T.comments.you ? "mine" : "theirs"}"><b>${esc(reply.by)}</b>${esc(reply.text)}</li>`).join("");
+    return `<li class="citem ${comment.status}${comment.id === E.focusComment ? " on" : ""}" data-cid="${esc(comment.id)}">
+      <div class="chead"><button class="ctime" data-jump ${comment.gone ? "disabled" : ""}>${esc(where)}</button>
+        ${comment.gone ? `<span class="badge warn">${esc(T.comments.gone)}</span>` : ""}
+        ${comment.status === "resolved" ? `<span class="badge">${esc(T.comments.resolvedTag)}</span>` : ""}</div>
+      <p class="ctext">${esc(comment.text)}</p>
+      ${replies ? `<ul class="creplies">${replies}</ul>` : ""}
+      <div class="cactions">
+        <button class="btn small" data-reply>${esc(T.comments.reply)}</button>
+        ${comment.status === "open"
+          ? `<button class="btn small" data-status="resolved">${esc(T.comments.resolve)}</button>`
+          : `<button class="btn small" data-status="open">${esc(T.comments.reopen)}</button>`}
+        <button class="btn small danger" data-remove>${esc(T.comments.remove)}</button>
+      </div>
+      <div class="creply" data-reply-box hidden><textarea class="input" rows="2" maxlength="1000" placeholder="${esc(T.comments.replyPlaceholder)}"></textarea>
+        <button class="btn small primary" data-send>${esc(T.comments.send)}</button></div></li>`;
+  }
+
+  function drawComments(panel) {
+    const comments = E.comments || [];
+    const open = comments.filter((comment) => comment.status === "open");
+    const closed = comments.filter((comment) => comment.status !== "open");
+    panel.innerHTML = `<div class="group"><button class="btn small" data-new-comment>${svg("comment", 14)}${esc(T.comments.addHere(fmt(E.time)))}</button>
+      <p class="hint">${esc(T.comments.how)}</p></div>
+      ${open.length ? `<ol class="clist">${open.map(commentHtml).join("")}</ol>` : `<p class="hint">${esc(comments.length ? T.comments.allDone : T.comments.none)}</p>`}
+      ${closed.length ? `<details class="cclosed"${closed.some((comment) => comment.id === E.focusComment) ? " open" : ""}><summary>${esc(T.comments.closed(closed.length))}</summary>
+        <ol class="clist">${closed.map(commentHtml).join("")}</ol></details>` : ""}`;
+    $("[data-new-comment]", panel).onclick = () => writeComment(E.time);
+    const change = async (id, body) => {
+      try {
+        await api(`/api/projects/${encodeURIComponent(E.id)}/comments/${encodeURIComponent(id)}`, body);
+        await loadComments();
+        E.focusComment = id;
+        drawCommentMarks();
+        drawInspector();
+      } catch (error) { toast(error.message, "error"); }
+    };
+    panel.querySelectorAll("[data-cid]").forEach((item) => {
+      const id = item.dataset.cid;
+      item.onclick = (event) => { if (!event.target.closest("button, textarea, summary")) focusComment(id, true); };
+      $("[data-jump]", item).onclick = () => focusComment(id, true);
+      $("[data-reply]", item).onclick = () => {
+        const box = $("[data-reply-box]", item);
+        box.hidden = !box.hidden;
+        if (!box.hidden) $("textarea", box).focus();
+      };
+      $("[data-send]", item).onclick = () => {
+        const text = $("[data-reply-box] textarea", item).value.trim();
+        if (text) change(id, { reply: text });
+      };
+      $("[data-status]", item).onclick = (event) => change(id, { status: event.currentTarget.dataset.status });
+      $("[data-remove]", item).onclick = async () => {
+        if (!(await confirmBox(T.comments.removeTitle, T.comments.removeBody, T.comments.remove, true))) return;
+        await change(id, { delete: true });
+        if (E.focusComment === id) E.focusComment = null;
+      };
+    });
+  }
+
   // ------------------------------------------------------------------ captions
 
   function selectCaption(cueId, jump) {
     E.selectedCaption = cueId;
+    if (E.tab === "comments") E.tab = null;
     E.selected = null;
     const cue = E.captions.find((entry) => entry.cue_id === cueId);
     if (jump && cue) {
@@ -1291,6 +1457,19 @@
 
   function onPointerDown(event) {
     if (event.button !== 0) return;
+    const flag = event.target.closest("[data-comment]");
+    if (flag && flag.closest("[data-ruler]")) {
+      focusComment(flag.dataset.comment, true);
+      return;
+    }
+    if (event.shiftKey && !event.target.closest(".clip [data-handle]")) {
+      clock().pause();
+      const at = timeAt(event);
+      E.picking = { from: at, to: at };
+      E.drag = { kind: "range" };
+      drawCommentMarks();
+      return;
+    }
     const caption = event.target.closest(".cap");
     if (caption) {
       selectCaption(caption.dataset.cue, true);
@@ -1306,6 +1485,7 @@
       const trackId = clipElement.dataset.track, clipId = clipElement.dataset.clip;
       const clip = findClip(trackId, clipId);
       E.selected = { track: trackId, clip: clipId };
+      if (E.tab === "comments") E.tab = null;
       E.selectedCaption = null;
       if (lockedWhilePlaying()) {
         drawLanes();
@@ -1331,6 +1511,11 @@
     // Finish where the cut last was rather than follow a mouse nobody is dragging.
     if (event.buttons === 0) { onPointerUp(); return; }
     if (drag.kind === "seek") { seek(timeAt(event)); return; }
+    if (drag.kind === "range") {
+      E.picking.to = Math.max(0, Math.min(timeAt(event), E.project.duration));
+      drawCommentMarks();
+      return;
+    }
     const dx = event.clientX - drag.x;
     if (!drag.moved && Math.abs(dx) < 4) return;
     drag.moved = true;
@@ -1391,6 +1576,13 @@
   async function onPointerUp() {
     const drag = E.drag;
     E.drag = null;
+    if (drag?.kind === "range") {
+      const from = Math.min(E.picking.from, E.picking.to), to = Math.max(E.picking.from, E.picking.to);
+      E.picking = null;
+      drawCommentMarks();
+      if (to - from >= 0.2) writeComment(from, to);
+      return;
+    }
     if (!drag || drag.kind === "seek" || !drag.moved) {
       hideSource();
       return;
@@ -1444,6 +1636,7 @@
     else if (event.key === "Home") seek(0);
     else if (event.key === "End") seek(shownLength());
     else if (E.view === "versions") return;
+    else if (event.key.toLowerCase() === "c" && !event.ctrlKey && !event.metaKey) { event.preventDefault(); writeComment(E.time); }
     else if (event.key.toLowerCase() === "s" && !event.ctrlKey) split();
     else if (event.key.toLowerCase() === "b" && event.ctrlKey) { event.preventDefault(); split(); }
     else if (event.key === "Delete" || event.key === "Backspace") remove();
@@ -1457,6 +1650,10 @@
     if (!E.drag && !E.busy && document.visibilityState === "visible") {
       try {
         const { version } = await api(`/api/projects/${encodeURIComponent(E.id)}/version`);
+        if (E && await loadComments()) {
+          drawCommentMarks();
+          if (E.view === "edit") drawInspector();
+        }
         if (E && version !== E.project.version && version !== E.ownVersion) {
           await loadProject();
           drawAll();
@@ -1509,6 +1706,7 @@
     if (!E.project.name) renameProject(E.project, async () => { await loadProject(); drawAll(); }, T.project.needsName);
 
     $("[data-play]", page).onclick = togglePlay;
+    $("[data-comment-btn]", page).onclick = () => writeComment(E.time);
     $("[data-replay]", page).onclick = replay;
     page.querySelectorAll("[data-step]").forEach((button) => {
       button.onclick = () => { clock().pause(); seek(E.time + num(button.dataset.step) / 30); };
