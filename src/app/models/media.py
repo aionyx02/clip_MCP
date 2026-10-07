@@ -1,6 +1,6 @@
 from datetime import datetime, timezone
 from decimal import Decimal
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
@@ -199,6 +199,16 @@ class Rhythm(BaseModel):
         description="Every beat, in seconds from the start of the file; empty when there is no pulse",
     )
 
+class MusicSense(BaseModel):
+    """What a song sounds like, as it was heard, and how its energy moves through it."""
+
+    moods: Dict[str, float] = Field(default_factory=dict, description="Its score against each mood word")
+    styles: Dict[str, float] = Field(default_factory=dict, description="Its score against each style word")
+    vector: List[float] = Field(default_factory=list, description="Where it lies among descriptions of music")
+    energy: List[float] = Field(
+        default_factory=list, description="Its energy each second, on its own scale from 0 (quietest) to 1 (fullest)",
+    )
+
 class AnalysisRecipe(BaseModel):
     """What produced an analysis, so that an out-of-date one can be recognised.
 
@@ -214,6 +224,7 @@ class AnalysisRecipe(BaseModel):
     speech_model: Optional[str] = Field(default=None, description="Speech model used, when speech was transcribed")
     speaker_model: Optional[str] = Field(default=None, description="Speaker model used, when voices were told apart")
     rhythm_model: Optional[str] = Field(default=None, description="Beat tracker used, when the beat was measured")
+    clap_model: Optional[str] = Field(default=None, description="Model the song was heard with, for music")
 
     def differs_from(self, current: "AnalysisRecipe") -> bool:
         """Say whether an analysis taken this way is out of date.
@@ -234,6 +245,7 @@ class AnalysisRecipe(BaseModel):
             (self.speech_model, current.speech_model),
             (self.speaker_model, current.speaker_model),
             (self.rhythm_model, current.rhythm_model),
+            (self.clap_model, current.clap_model),
         ):
             if used is not None and used != now:
                 return True
@@ -263,5 +275,6 @@ class MediaAnalysis(BaseModel):
                     "measured, which is different from measured and found to have no beat",
     )
     transcript: Optional[Transcript] = None
+    music: Optional[MusicSense] = Field(default=None, description="For a song: its mood, style and energy")
     recipe: AnalysisRecipe = Field(default_factory=AnalysisRecipe, description="What produced this analysis")
     analyzed_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))

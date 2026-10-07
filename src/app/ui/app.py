@@ -398,6 +398,7 @@ async def assets(request: Request) -> Response:
     analyzing = {job.asset_id for job in server.repo.jobs_to_show(datetime.now(timezone.utc))[0]
                  if job.kind.value == "analyze"}
     listed = []
+    heard = server.song_tags() if library == MUSIC else {}
     for asset in server.repo.list_assets():
         if library in LIBRARIES and library_of(asset) != library:
             continue
@@ -409,9 +410,18 @@ async def assets(request: Request) -> Response:
                 entry["tempo"] = analysis.rhythm.tempo if analysis is not None and analysis.rhythm else None
                 entry["analyzed"] = analysis is not None and analysis.rhythm is not None
                 entry["analyzing"] = asset.id in analyzing
+                if analysis is not None and analysis.music is not None:
+                    entry.update(heard.get(asset.id, {}))
+                    energy = analysis.music.energy
+                    # Enough points for the bar on a card, not one a second.
+                    step = max(1, len(energy) // ENERGY_POINTS)
+                    entry["energy"] = [round(max(energy[index:index + step]), 2) for index in range(0, len(energy), step)]
             listed.append(entry)
     listed.sort(key=lambda asset: asset["name"].lower())
     return JSONResponse({"assets": listed})
+
+# How many bars a song's energy is drawn with on its card.
+ENERGY_POINTS = 48
 
 async def move_library(request: Request) -> Response:
     """Move files to the footage or the music library."""

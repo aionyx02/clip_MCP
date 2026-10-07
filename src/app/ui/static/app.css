@@ -300,3 +300,9 @@ a.card:hover, button.card:hover { border-color: var(--line-2); background: var(-
 .job-state { font: 500 11px/1.4 var(--mono); color: var(--muted); }
 .job-badge .spinner { width: 9px; height: 9px; }
 .toast .btn { margin-left: 8px; }
+
+/* A song's card: its energy as bars where a picture would be, and how it sounds as tags. */
+.thumb .energy { position: absolute; inset: 18% 10% 22%; display: flex; align-items: flex-end; gap: 2px; }
+.thumb .energy i { flex: 1; background: var(--accent); opacity: .55; border-radius: 1px; }
+.card .tags { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
+.card .tags span { font-size: 11px; padding: 1px 6px; border-radius: 4px; background: var(--line); color: var(--muted); }

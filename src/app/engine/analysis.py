@@ -21,12 +21,15 @@ from app.engine.diarize import (
 )
 from app.engine.ffmpeg import OperationCancelled, escape_filter_path, hidden_window_flags, run_ffmpeg
 from app.engine.rhythm import measure_rhythm, rhythm_model_name
+from app.engine import clap
 from app.engine.library import MUSIC, library_of
+from app.engine.music import energy_curve
 from app.models.media import (
     AnalysisRecipe,
     Asset,
     FaceMeasurement,
     MediaAnalysis,
+    MusicSense,
     Rhythm,
     ShotMeasurement,
     SILENCE_DB,
@@ -218,6 +221,7 @@ def current_recipe(
     ffmpeg_bin: str = "ffmpeg",
     speaker_model: Optional[str] = None,
     rhythm_model: Optional[str] = None,
+    clap_model: Optional[str] = None,
 ) -> AnalysisRecipe:
     """Describe the way this pass measures things right now.
 
@@ -233,6 +237,7 @@ def current_recipe(
             when voices were not told apart.
         rhythm_model: How the beat was found, or `None` when it was not
             looked for.
+        clap_model: What a song was heard with, or `None` when it is not one.
 
     Returns:
         The recipe.
@@ -267,6 +272,7 @@ def current_recipe(
         speech_model=speech_model,
         speaker_model=speaker_model,
         rhythm_model=rhythm_model,
+        clap_model=clap_model,
     )
 
 def _scan_graph(asset: Asset, work_dir: str, with_shake: bool) -> Tuple[str, List[List[str]]]:
@@ -1127,6 +1133,7 @@ def _shares(
         weights.append(("speakers", 4.0))
     if with_rhythm:
         weights.append(("rhythm", 1.0))
+        weights.append(("mood", 1.0))
     total = sum(weight for _, weight in weights)
     shares: Dict[str, Tuple[float, float]] = {}
     cursor = 0.0
@@ -1229,6 +1236,8 @@ def analyze_media(
         needed.append(models.FACE_DETECTION)
     if with_speakers:
         needed += [models.SPEAKER_SEGMENTATION, models.SPEAKER_EMBEDDING]
+    if music:
+        needed += clap.needed()
     _fetch_models(needed, on_progress)
 
     def report(stage: str, text: str) -> Callable[[float], None]:
@@ -1285,8 +1294,13 @@ def analyze_media(
                 lambda seconds: on_measured("speakers", "cpu", speaker_model_name(), seconds)),
         )
     rhythm: Optional[Rhythm] = None
+    sense: Optional[MusicSense] = None
     if with_rhythm:
         rhythm = measure_rhythm(asset.path, report("rhythm", "finding the beat"), is_cancelled, ffmpeg_bin)
+        report("mood", "listening for mood and style")(0.0)
+        vector, moods, styles = clap.listen(asset.path, duration, ffmpeg_bin)
+        sense = MusicSense(moods=moods, styles=styles, vector=vector,
+                           energy=energy_curve([second.loudness for second in scan.sound]))
     return MediaAnalysis(
         asset_id=asset.id,
         duration=duration,
@@ -1301,10 +1315,12 @@ def analyze_media(
         voices=voices,
         rhythm=rhythm,
         transcript=transcript,
+        music=sense,
         recipe=current_recipe(
             transcript.model if transcript is not None else None,
             ffmpeg_bin,
             speaker_model_name() if with_speakers else None,
             rhythm_model_name() if with_rhythm else None,
+            clap.MODEL_ID if sense is not None else None,
         ),
     )

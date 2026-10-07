@@ -17,12 +17,14 @@ making the decisions it was built to stay out of.
 
 import bisect
 import math
+import os
 from dataclasses import dataclass, replace
 from datetime import timedelta
 from difflib import SequenceMatcher
 from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from app.engine.continuity import Shot, strays
+from app.engine.music import MIDDLE, energy_at, fullest
 from app.models.media import Asset
 from app.models.plan import STRUCTURES, Beat, BeatRole, EditPlan, MusicCue, Selection, Structure, TrimKind
 from app.engine.semantic import EDGE_TOLERANCE_SECONDS, CleanCuts
@@ -2119,6 +2121,7 @@ def check_plan(
                     f"the {cue.start:g}s asked for, so the cuts it sets the beat for are counted from a beat",
                     "music_enters_on_a_beat", beat_id=cue.beat_id, seconds=entry,
                 ))
+        notes.extend(music_fit_notes(plan, pieces, assets, cuts))
         _, covering, said = broll_covers(plan, pieces, clips, assets, cuts)
         problems.extend(covering)
         notes.extend(said)
@@ -2502,6 +2505,91 @@ def music_beds(
                 lane=lane,
             ))
     return beds
+
+# A song's fullest part landing this far from the start of the payoff does not land on it. Provisional.
+PEAK_TOLERANCE_SECONDS = 4.0
+# A cut ending this much before its song does, while the song is still going, cuts it off. Provisional.
+CUT_OFF_SECONDS = 3.0
+
+def music_fit_notes(
+    plan: EditPlan,
+    pieces: Sequence[Piece],
+    assets: Mapping[str, Asset],
+    cuts: Optional[Mapping[str, CleanCuts]],
+) -> List[Note]:
+    """Say where a song sits badly under the cut, each with what would fix it.
+
+    Three things, from the song's analysis: it runs out and starts again, its
+    fullest part misses the payoff, the cut stops it while it is still going.
+    These are for the AI to weigh and the user to hear about; none of them
+    stops a compile, since a loop or an ending faded out can be just right.
+
+    Args:
+        plan: The plan.
+        pieces: Its windows, in order.
+        assets: The files, songs included.
+        cuts: What is known about each file; a song's energy is in here.
+
+    Returns:
+        The notes, worth a look each.
+    """
+    beds = music_beds(plan, pieces, assets, cuts)
+    if not beds:
+        return []
+    total = compiled_duration(pieces)
+    payoff = next((beat.id for beat in plan.beats if beat.role == BeatRole.PAYOFF), None)
+    climax, position = None, 0.0
+    for piece in pieces:
+        if piece.beat_id == payoff and climax is None:
+            climax = position
+        position += piece.played
+    by_cue: Dict[str, List[Bed]] = {}
+    for bed in beds:
+        by_cue.setdefault(bed.key[0], []).append(bed)
+    notes: List[Note] = []
+    for key, passes in by_cue.items():
+        song = assets.get(passes[0].asset_id)
+        name = os.path.basename(song.path) if song is not None else passes[0].asset_id
+        beat_id = None if key.endswith("^") else key.split(":", 1)[1]
+        first, last = passes[0], passes[-1]
+        heard = round(last.timeline_in + last.end - last.start - first.timeline_in, 1)
+        if len(passes) > 1:
+            notes.append(Note(
+                f"{name} runs out at {passes[1].timeline_in:.1f}s of the cut and starts again from "
+                f"{passes[1].start:g}s of the song, since the part it plays under is {heard:g}s. To have it play "
+                f"once, choose a song of at least {heard:.0f}s (find_music with min_seconds), or let another cue "
+                f"take over before {passes[1].timeline_in:.1f}s",
+                "music_loops", beat_id=beat_id, seconds=passes[1].timeline_in, look=True,
+            ))
+        energy = (cuts or {}).get(first.asset_id).energy if (cuts or {}).get(first.asset_id) else None
+        length = _song_length(song)
+        if not energy or length is None:
+            continue
+        peak = fullest(energy)
+        if len(passes) == 1 and peak is not None and climax is not None and first.timeline_in <= climax:
+            lands = first.timeline_in + peak[0] - first.start if first.start <= peak[0] < first.end else None
+            if lands is None or abs(lands - climax) > PEAK_TOLERANCE_SECONDS:
+                start = peak[0] - (climax - first.timeline_in)
+                fix = (f"start the cue at {start:.1f}s of the song to land it there" if 0 <= start < length
+                       else "a song that builds later would land it there")
+                notes.append(Note(
+                    f"the fullest part of {name} ({peak[0]}–{peak[1]}s of the song) "
+                    + (f"lands at {lands:.1f}s of the cut" if lands is not None else "is never heard")
+                    + f", and the payoff ({payoff}) starts at {climax:.1f}s; {fix}",
+                    "music_peak_off", beat_id=beat_id, seconds=climax, look=True,
+                ))
+        ends_with_cut = abs(last.timeline_in + last.end - last.start - total) < 0.01
+        still = energy_at(energy, last.end)
+        if ends_with_cut and length - last.end > CUT_OFF_SECONDS and still is not None and still >= MIDDLE:
+            start = length - heard
+            notes.append(Note(
+                f"the cut ends {length - last.end:.0f}s before {name} does, while it is still going; it is faded "
+                f"out over {last.fade_out:g}s. For the song to end with the video, start the cue at "
+                f"{max(0.0, start):.1f}s of the song" + ("" if start >= 0 else " — it is shorter than the part, so "
+                                                         "it loops first") + ", or give it a longer fade_out",
+                "music_cut_off", beat_id=beat_id, seconds=total, look=True,
+            ))
+    return notes
 
 def _as_made(pinned: Clip) -> dict:
     """Describe a hand-adjusted clip so it can be put back exactly as it is.

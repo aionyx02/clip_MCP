@@ -567,9 +567,15 @@ async function musicPage(page, folderId) {
         : asset.analyzing ? `<span class="badge">${esc(T.musicPage.analyzing)}</span>`
         : asset.analyzed ? "" : `<span class="badge">${esc(T.musicPage.waiting)}</span>`;
       const gone = asset.missing ? `<span class="badge warn" title="${esc(T.media.goneHint)}">${icon("alert", 13)}${esc(T.media.gone)}</span>` : "";
-      return `<div class="card${asset.missing ? " gone" : ""}" title="${esc(asset.path)}" data-drag="item" data-id="${esc(asset.id)}">${extras}<div class="thumb">${icon("music", 30)}
+      // The song's energy across its length, quiet to full, where the picture would be.
+      const bars = asset.energy?.length
+        ? `<div class="energy">${asset.energy.map((value) => `<i style="height:${Math.round(8 + value * 92)}%"></i>`).join("")}</div>`
+        : icon("music", 30);
+      const tags = [...(asset.moods || []).slice(0, 2), ...(asset.styles || []).slice(0, 2)];
+      return `<div class="card${asset.missing ? " gone" : ""}" title="${esc(asset.path)}" data-drag="item" data-id="${esc(asset.id)}">${extras}<div class="thumb">${bars}
         <span class="badge">${clock(asset.duration)}</span></div>
         <div class="card-body"><div class="card-title">${esc(asset.name)}</div><div class="card-meta">${state}${gone}</div>
+        ${tags.length ? `<div class="tags" title="${esc(T.musicPage.tagsHint)}">${tags.map((tag) => `<span>${esc(tag)}</span>`).join("")}</div>` : ""}
         ${asset.notes ? `<div class="card-notes" title="${esc(asset.notes)}">${esc(asset.notes)}</div>` : ""}</div></div>`;
     },
     remove: removeAssets,

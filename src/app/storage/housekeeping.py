@@ -61,6 +61,7 @@ MODEL_LABELS = {
     "diarization": "AI 模型：分辨說話的人",
     "faces": "AI 模型：人臉偵測",
     "search": "AI 模型：依意思搜尋片段",
+    "clap": "AI 模型：聽音樂的情緒與風格",
     "tts": "AI 模型：配音（未啟用）",
 }
 

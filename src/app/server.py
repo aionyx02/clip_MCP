@@ -68,6 +68,8 @@ from app.engine.probe import picture_size, probe_file, recorded_at, speech_loudn
 from app.engine.reframe import Framing, centre_at, frame_project
 from app.engine import playback
 from app.engine.library import FOOTAGE, LIBRARIES, MUSIC, classify, library_of
+from app.engine import clap
+from app.engine import music as music_energy
 from app.engine.builder import DEFAULT_LOUDNESS_TARGET, FFmpegRenderer, Talking, voice_keys
 from app.engine.levels import song_level, talking_in
 from app.engine.delivery import CHECKS, chapter_metadata, chapters, check_delivery, clock, cover_candidates
@@ -322,6 +324,7 @@ DOING = {
     "create_project": "建立專案", "import_asset": "加入素材", "import_folder": "加入資料夾", "edit_asset": "寫素材備註",
     "restore_version": "回到舊版本", "branch_project": "開分支", "mark_version": "標記版本",
     "organize_library": "整理素材庫", "move_files": "搬動檔案", "set_asset_library": "移動分類",
+    "find_music": "找歌",
 }
 # What the AI programs call themselves when they connect, as a person would name them.
 CLIENT_NAMES = {
@@ -531,7 +534,8 @@ def _queue_music(assets: Iterable[Asset]) -> List[str]:
         if library_of(asset) != MUSIC or asset.duration is None or asset.id in busy:
             continue
         existing = repo.get_analysis(asset.id)
-        if existing is not None and existing.rhythm is not None and not _is_stale(existing):
+        if existing is not None and existing.rhythm is not None and existing.music is not None \
+                and not _is_stale(existing):
             continue
         # Behind the footage somebody asked about: a song can wait until it is wanted.
         started.append(_start_analysis(asset, False, "accurate", priority=1).job_id)
@@ -674,7 +678,11 @@ def list_assets(
     Args:
         kind: `footage` — what was shot, and recordings of people talking —
             or `music`; omit for both. A song is listed with its `tempo` in
-            beats per minute once analyzed, or `analyzing` while it is.
+            beats per minute, the `moods` and `styles` that set it apart in
+            this library, how it `ends` and where it is `fullest`, once
+            analyzed; `analyzing` while it is. The mood is how it sounds to a
+            model, right about half the time: say it as 「聽起來偏…」, never as
+            a verdict.
         folder_id: Only the files filed in this folder, from `folders`. Its
             sub-folders are their own; ask for them by their own IDs.
         text: Only files whose name contains this.
@@ -704,6 +712,7 @@ def list_assets(
     ]
     analyzing = {job.asset_id for job in repo.jobs_to_show(datetime.now(timezone.utc))[0]
                  if job.kind == JobKind.ANALYZE}
+    heard = song_tags() if kind == MUSIC or any(library_of(asset) == MUSIC for asset in matching) else {}
     matching.sort(key=lambda asset: _natural_key(os.path.basename(asset.path)))
     assets = []
     for asset in matching[offset:offset + limit]:
@@ -722,9 +731,80 @@ def list_assets(
             **({"notes": asset.notes} if asset.notes else {}),
             **({"tempo": analysis.rhythm.tempo} if analysis is not None and analysis.rhythm is not None else {}),
             **({"analyzing": True} if asset.id in analyzing else {}),
+            **(_sounds_like(asset.id, analysis, heard) if analysis is not None and analysis.music is not None else {}),
         })
     return {"assets": assets, "total": len(matching), "offset": offset,
             "folders": repo.list_folders(_folder_kind(kind or FOOTAGE))}
+
+def song_tags() -> Dict[str, Dict[str, List[str]]]:
+    """The moods and styles that set each analyzed song apart from the rest of the library.
+
+    Returns:
+        `moods` and `styles` by song.
+    """
+    sensed = {}
+    for asset in repo.list_assets():
+        if library_of(asset) != MUSIC:
+            continue
+        analysis = repo.get_analysis(asset.id)
+        if analysis is not None and analysis.music is not None:
+            sensed[asset.id] = analysis.music
+    moods = clap.ranked({song: sense.moods for song, sense in sensed.items()})
+    styles = clap.ranked({song: sense.styles for song, sense in sensed.items()})
+    return {song: {"moods": moods.get(song, []), "styles": styles.get(song, [])} for song in sensed}
+
+def _sounds_like(asset_id: str, analysis: MediaAnalysis, heard: Mapping[str, Mapping[str, List[str]]]) -> dict:
+    """A song in a line: its moods and styles, how it ends and where it is fullest."""
+    summary = music_energy.summary(analysis.music.energy)
+    return {**heard.get(asset_id, {}), "ends": summary["ends"], "fullest": summary["fullest"]}
+
+@mcp.tool()
+def find_music(description: str, min_seconds: Annotated[float, Field(ge=0)] = 0,
+               limit: Annotated[int, Field(ge=1, le=30)] = 8) -> dict:
+    """Find songs in the music library that sound like a description, closest first.
+
+    Describe the music in English, the way the model was taught — "calm
+    acoustic guitar music", "upbeat electronic music with a strong beat",
+    "tense cinematic strings" — however the user put it. Give `min_seconds`
+    as the length of the part it plays under, so a song that would loop is
+    left out. A song not analyzed yet cannot be found; `analyzing` says how
+    many are waiting.
+
+    The match is a model's ear: read the top few back with their moods and
+    styles as 「聽起來偏…」, and let the user listen before you build on one.
+
+    Args:
+        description: The music wanted, in English.
+        min_seconds: Shortest song to consider, in seconds.
+        limit: Most songs to return.
+
+    Returns:
+        `songs`, each with its `id`, `name`, `duration`, `tempo`, `match`
+        (higher is closer), `moods`, `styles`, how it `ends` and where it is
+        `fullest`; and `analyzing`, songs not analyzed yet.
+    """
+    heard = song_tags()
+    vectors, found, waiting = {}, {}, 0
+    for asset in repo.list_assets():
+        if library_of(asset) != MUSIC or not os.path.exists(asset.path):
+            continue
+        analysis = repo.get_analysis(asset.id)
+        if analysis is None or analysis.music is None or not analysis.music.vector:
+            waiting += 1
+            continue
+        if float(asset.duration or 0) < min_seconds:
+            continue
+        vectors[asset.id] = analysis.music.vector
+        found[asset.id] = (asset, analysis)
+    songs = []
+    for asset_id, match in clap.closest(description, vectors)[:limit]:
+        asset, analysis = found[asset_id]
+        songs.append({
+            "id": asset_id, "name": os.path.basename(asset.path), "duration": float(asset.duration or 0),
+            "tempo": analysis.rhythm.tempo if analysis.rhythm is not None else None, "match": match,
+            **_sounds_like(asset_id, analysis, heard),
+        })
+    return {"songs": songs, "analyzing": waiting}
 
 def _folder_kind(library: str) -> str:
     """The kind of folder a library's files are filed in."""
@@ -1073,7 +1153,7 @@ def _is_stale(analysis: MediaAnalysis) -> bool:
     speech_model = analysis.recipe.speech_model
     current = speech_model if transcription_of(speech_model) == "fast" else whisper_model_name()
     return analysis.recipe.differs_from(current_recipe(
-        current, speaker_model=speaker_model_name(), rhythm_model=rhythm_model_name(),
+        current, speaker_model=speaker_model_name(), rhythm_model=rhythm_model_name(), clap_model=clap.MODEL_ID,
     ))
 
 def _transcription(analysis: Optional[MediaAnalysis]) -> Optional[str]:
@@ -1542,7 +1622,10 @@ def get_analysis(
         and gives the `tempo` in beats per minute and the `beats` in the
         range; its `tempo` is null when the music has no steady pulse, and
         the whole of it is null for footage, or for music analyzed before
-        beats were measured.
+        beats were measured. `music`, for a song, has the `moods` and
+        `styles` that set it apart in the library (how it sounds to a model,
+        right about half the time on mood), its `sections` of quiet, middle
+        and full energy, where it is `fullest`, and how it `ends`.
 
         All of these are measurements and none of them is a verdict: whether a
         shot is too dark or too wobbly depends on what it is for.
@@ -1595,6 +1678,10 @@ def get_analysis(
         "rhythm": None if analysis.rhythm is None else {
             "tempo": analysis.rhythm.tempo,
             "beats": [beat for beat in analysis.rhythm.beats if start <= beat < end],
+        },
+        "music": None if analysis.music is None else {
+            **song_tags().get(asset_id, {}),
+            **music_energy.summary(analysis.music.energy),
         },
         "transcript": transcript,
     }

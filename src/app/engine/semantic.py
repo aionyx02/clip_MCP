@@ -698,6 +698,8 @@ class CleanCuts:
             unknown are kept apart, because the answers differ: None is a song
             nobody measured, and an empty tuple is one measured and found to
             have no steady pulse.
+        energy: For a song, its energy each second on its own scale from 0
+            to 1; None when it was not heard as one.
     """
 
     words: Tuple[Tuple[float, float], ...] = ()
@@ -707,6 +709,7 @@ class CleanCuts:
     bad_picture: Tuple[Tuple[float, float], ...] = ()
     transcribed: bool = False
     beats: Optional[Tuple[float, ...]] = None
+    energy: Optional[Tuple[float, ...]] = None
 
     def splits_a_word(self, seconds: float) -> bool:
         """Say whether a cut here would land inside a word.
@@ -1050,4 +1053,5 @@ def clean_cuts(analysis: MediaAnalysis) -> CleanCuts:
         bad_picture=_joined([*analysis.black_frames, *analysis.frozen_frames]),
         transcribed=transcript is not None,
         beats=None if analysis.rhythm is None else tuple(analysis.rhythm.beats),
+        energy=tuple(analysis.music.energy) if analysis.music is not None and analysis.music.energy else None,
     )

@@ -256,10 +256,16 @@ hand:
 
 ### Where the music comes from
 
-There is no built-in music library, and the server never fetches music from
-the internet. When the user wants music and has not given a file, ask for
-one, and in the same message tell them in plain words what each kind of
-source means for where the video is going:
+The user's songs are in the library's music half. When they want music and
+have not named a song, `find_music` with what they asked for in English and
+the length of the part as `min_seconds`; read the top two or three back with
+how each sounds (「聽起來偏懷舊、原聲吉他」 — the mood is a model's ear) and
+let them choose. When reading a plan back, say the mood of the song in it the
+same way. A compile's `music_loops`, `music_peak_off` and `music_cut_off`
+notes say where a song sits badly and how to fix it: tell the user, and fix
+it only if they want. When nothing in the library fits, ask for a file, and
+in the same message tell them in plain words what each kind of source means
+for where the video is going:
 
 - **A commercial song** — bought, or from a streaming app: fine for a video
   only they watch. Posted to YouTube, Instagram or TikTok, it is almost
