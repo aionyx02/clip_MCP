@@ -7,6 +7,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Callable, Dict, Iterable, Iterator, List, Mapping, Optional, Set, Tuple
 
+from app.models.comment import Comment
 from app.models.job import Job
 from app.models.media import Asset, MediaAnalysis
 from app.models.plan import EditPlan
@@ -101,6 +102,13 @@ _MIGRATIONS: List[List[str]] = [
         # a commit in the history, which never changes, so the marks are kept beside it here.
         "CREATE TABLE IF NOT EXISTS version_marks (project_id TEXT NOT NULL, commit_id TEXT NOT NULL, "
         "mark TEXT NOT NULL, PRIMARY KEY (project_id, commit_id, mark))",
+    ],
+    [
+        # What the user said about a moment of a cut while watching it, and what was said back.
+        # Kept with the project's ID rather than in it: a comment is not a change to the cut, and
+        # going back to an older version must not take back what the user asked for.
+        "CREATE TABLE IF NOT EXISTS comments (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, data TEXT NOT NULL)",
+        "CREATE INDEX IF NOT EXISTS comments_project ON comments (project_id)",
     ],
 ]
 # Footage and music are filed apart, each in folders of its own; projects in theirs.
@@ -201,6 +209,9 @@ class Repository:
             files[f"plans/{plan.id}.json"] = canonical(plan.model_dump())
         for asset_id, data in self._query("SELECT asset_id, data FROM reviewed_captions"):
             files[self._captions_file(asset_id)] = canonical(json.loads(data))
+        for (project_id,) in self._query("SELECT DISTINCT project_id FROM comments"):
+            files[f"comments/{project_id}.json"] = canonical(
+                [comment.model_dump(mode="json") for comment in self.comments(project_id)])
         return files
 
     def _kept_project(self, project: Optional[Project], before: Optional[Project], gone_id: str = "") -> None:
@@ -617,6 +628,55 @@ class Repository:
             else:
                 conn.execute("DELETE FROM version_marks WHERE project_id = ? AND commit_id = ? AND mark = ?",
                              (project_id, commit, mark))
+
+    def comments(self, project_id: str) -> List[Comment]:
+        """Read what the user said about a project, oldest first.
+
+        Args:
+            project_id: The project.
+
+        Returns:
+            Its comments.
+        """
+        found = [Comment.model_validate_json(data) for (data,) in
+                 self._query("SELECT data FROM comments WHERE project_id = ?", (project_id,))]
+        return sorted(found, key=lambda comment: comment.created_at)
+
+    def save_comment(self, comment: Comment, said: str) -> None:
+        """Keep a comment, new or changed, and the project's comments in the history.
+
+        Args:
+            comment: The comment as it is now.
+            said: What happened to it, for the history.
+        """
+        with self._transaction() as conn:
+            conn.execute("INSERT OR REPLACE INTO comments (id, project_id, data) VALUES (?, ?, ?)",
+                         (comment.id, comment.project_id, comment.model_dump_json()))
+        self._kept_comments(comment.project_id, said)
+
+    def delete_comment(self, project_id: str, comment_id: str) -> bool:
+        """Take a comment away; only ever the user's own doing, from the editor.
+
+        Args:
+            project_id: The project.
+            comment_id: The comment.
+
+        Returns:
+            Whether there was one.
+        """
+        with self._transaction() as conn:
+            gone = conn.execute("DELETE FROM comments WHERE id = ? AND project_id = ?",
+                                (comment_id, project_id)).rowcount
+        if gone:
+            self._kept_comments(project_id, "刪除一則留言")
+        return bool(gone)
+
+    def _kept_comments(self, project_id: str, said: str) -> None:
+        """Tell the history a project's comments changed."""
+        if self.history is None:
+            return
+        listed = [comment.model_dump(mode="json") for comment in self.comments(project_id)]
+        self.history.write(f"comments/{project_id}.json", canonical(listed) if listed else None, said)
 
     def get_job(self, job_id: str) -> Optional[Job]:
         """Fetch a background job by ID.

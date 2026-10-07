@@ -59,6 +59,7 @@ feedback are mapped in their own files.
 | 「後來又加了一段，那段沒有字幕」 / new footage has no captions | `generate_subtitles` again; the lines already corrected come back as corrected |
 | 「這句字幕多停一下」 / hold this caption longer | `edit_subtitle` with a new `source_end` |
 | 「這句不要了」 / drop this caption | `edit_subtitle` with `delete: true` |
+| 「照我的留言改」 / do what my comments say | `get_comments`, change each moment it names, then `resolve_comment` with what was done |
 | 「現在剪成什麼樣子」 / show me the cut so far | `preview_project`, then describe the order and the cut points |
 | 「先聽聽看」 / let me hear it | `preview_sound`, and give the user the mix file |
 

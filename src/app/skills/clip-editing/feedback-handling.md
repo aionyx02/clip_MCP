@@ -65,6 +65,15 @@ the editor's version panel or asks for (「把這版標起來」「這版發到 
 `mark_version`), and `exported`, which a version rendered out wears by itself.
 「回到我標星號那版」 or 「回到發出去那版」 is the version with that mark.
 
+The user can also leave comments in the editor while watching: a moment or
+a stretch of the cut with what they want there. Anything you do to that
+video says `open_comments` when some are waiting — read them with
+`get_comments`, which says where each is on the cut now (it follows the
+footage it was written on; `gone` means that footage was cut out), do what
+each asks like any other feedback, then `resolve_comment` with what you did
+in a sentence the user reads. Ask with `resolve_comment` and `resolved:
+false` when one can be read two ways. Comments are the user's to delete.
+
 Pass the user's words for every change as `note` — on `apply_edits`,
 `compile_plan`, `generate_subtitles`, `amend_plan` — since that is what the
 version says in the history the user reads. A plan's own versions are still

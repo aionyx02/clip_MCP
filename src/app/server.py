@@ -8,6 +8,7 @@ import subprocess
 import threading
 import time
 import uuid
+from contextvars import ContextVar
 from decimal import Decimal
 from fractions import Fraction
 from pathlib import Path
@@ -45,6 +46,7 @@ from app.models.timeline import (
     apply_operation,
     validate_project,
 )
+from app.models.comment import Comment, Reply
 from app.models.job import Job, JobKind, JobStatus
 from app.engine import loudness, machine, meaning, resources, speed
 from app.engine.analysis import listen_again as listen_again_in_file
@@ -74,6 +76,7 @@ from app.engine import fetch
 from app.engine import music as music_energy
 from app.engine.builder import DEFAULT_LOUDNESS_TARGET, FFmpegRenderer, Talking, voice_keys
 from app.engine.levels import song_level, talking_in
+from app.engine.comments import anchor_at, where_now
 from app.engine.delivery import CHECKS, chapter_metadata, chapters, check_delivery, clock, cover_candidates
 from app.engine.frames import format_timestamp, still, storyboard_sheet
 from app.engine.interchange import write_edl, write_fcpxml, write_otio, write_srt
@@ -326,7 +329,7 @@ DOING = {
     "create_project": "建立專案", "import_asset": "加入素材", "import_folder": "加入資料夾", "edit_asset": "寫素材備註",
     "restore_version": "回到舊版本", "branch_project": "開分支", "mark_version": "標記版本",
     "organize_library": "整理素材庫", "move_files": "搬動檔案", "set_asset_library": "移動分類",
-    "find_music": "找歌", "add_music_from_url": "從網路加入音樂",
+    "find_music": "找歌", "add_music_from_url": "從網路加入音樂", "resolve_comment": "回覆留言",
 }
 # What the AI programs call themselves when they connect, as a person would name them.
 CLIENT_NAMES = {
@@ -343,6 +346,9 @@ def _client_name(context: MiddlewareContext) -> str:
     except (AttributeError, RuntimeError):
         name = ""
     return CLIENT_NAMES.get(name.lower(), name) or "AI 程式"
+
+# The AI program making the current call, for what it says under its own name.
+_calling_client: ContextVar[str] = ContextVar("calling_client", default="AI 程式")
 
 class HistorySteps(Middleware):
     """Keep what one tool call changed as one version, said in words, under the AI's name."""
@@ -361,10 +367,57 @@ class HistorySteps(Middleware):
         arguments = context.message.arguments or {}
         note = arguments.get("note") if isinstance(arguments.get("note"), str) else ""
         name = context.message.name
-        with history.step(f"AI（{_client_name(context)}）", note=note, doing=DOING.get(name, name)):
-            return await call_next(context)
+        client = _client_name(context)
+        token = _calling_client.set(client)
+        try:
+            with history.step(f"AI（{client}）", note=note, doing=DOING.get(name, name)):
+                return await call_next(context)
+        finally:
+            _calling_client.reset(token)
 
 mcp.add_middleware(HistorySteps())
+
+# Tools that already are about the comments, so are not reminded of them.
+ABOUT_COMMENTS = {"get_comments", "resolve_comment"}
+
+class OpenComments(Middleware):
+    """Remind the AI, on anything it does to a video, of what the user said about it and is still waiting.
+
+    The editor cannot call the AI: a comment written there waits until the
+    AI next looks. So every tool that names a project says how many are
+    waiting, whether or not the user remembered to mention them.
+    """
+
+    async def on_call_tool(self, context: MiddlewareContext, call_next: CallNext) -> ToolResult:
+        """Run the tool, then add the count of open comments on the project it was about.
+
+        Args:
+            context: The call.
+            call_next: The rest of the chain, ending in the tool.
+
+        Returns:
+            The tool's result, with `open_comments` when there are any.
+        """
+        result = await call_next(context)
+        project_id = (context.message.arguments or {}).get("project_id")
+        if (context.message.name in ABOUT_COMMENTS or not isinstance(project_id, str)
+                or not isinstance(result, ToolResult)):
+            return result
+        try:
+            waiting = open_comments(project_id)
+        except Exception:
+            return result
+        if not waiting:
+            return result
+        said = (f"the user left {waiting} comment(s) on this video in the editor that are not dealt with yet: "
+                "read them with `get_comments`, and close each with `resolve_comment` once done")
+        structured = result.structured_content
+        if isinstance(structured, dict):
+            structured = {**structured, "open_comments": {"count": waiting, "say": said}}
+        return ToolResult(content=[*result.content, TextContent(type="text", text=said)],
+                          structured_content=structured, meta=result.meta)
+
+mcp.add_middleware(OpenComments())
 
 # Compiled operations are validated the same way a client's are, so a plan cannot reach
 # the timeline through a door the tool surface does not have.
@@ -5884,6 +5937,160 @@ def mark_version(project_id: str, commit: str, mark: Literal["starred", "publish
     marks = next((marked for version, _, marked in _project_versions(project_id, 500)
                   if version.commit == chosen.commit), set(repo.version_marks(project_id).get(chosen.commit, ())))
     return {"commit": chosen.commit[:10], "marks": sorted(marks)}
+
+# ------------------------------------------------------------------ what the user said about a moment
+
+def _current_commit(project_id: str) -> Optional[str]:
+    """The version a project is at now, as its latest commit; None before it has one."""
+    found = history.versions_of("projects/", f"{project_id}.json", 1)
+    return found[0].commit if found else None
+
+def _comment_said(project: Project, comment: Comment) -> dict:
+    """A comment as the AI and the editor read it: where it is on the cut now, and what was said back."""
+    now = where_now(project, comment)
+    asset = repo.get_assets([comment.start_anchor.asset_id]).get(comment.start_anchor.asset_id) \
+        if comment.start_anchor else None
+    return {
+        "id": comment.id, "text": comment.text, "by": comment.by, "status": comment.status,
+        "at": clock(now["start"]) + (f"–{clock(now['end'])}" if now["end"] is not None else ""),
+        "start": now["start"], "end": now["end"], "clip_id": now["clip_id"], "gone": now["gone"],
+        "file": os.path.basename(asset.path) if asset else None,
+        "file_seconds": comment.start_anchor.source if comment.start_anchor else None,
+        "written": comment.created_at.isoformat(timespec="seconds"),
+        "replies": [{"by": reply.by, "text": reply.text, "at": reply.at.isoformat(timespec="seconds")}
+                    for reply in comment.replies],
+    }
+
+def open_comments(project_id: str) -> int:
+    """How many things the user said about a project are still waiting."""
+    return sum(comment.status == "open" for comment in repo.comments(project_id))
+
+def add_comment(project_id: str, text: str, start: float, end: Optional[float] = None) -> dict:
+    """Write down what the user said about a moment of the cut, pinned to the footage under it.
+
+    The editor's, never the AI's: a comment is the user speaking.
+
+    Args:
+        project_id: The video.
+        text: What they said.
+        start: Where on the cut, in seconds.
+        end: Where the stretch it is about ends; None for a moment.
+
+    Returns:
+        The comment as `get_comments` shows it.
+
+    Raises:
+        ValueError: If the project does not exist or the text is empty.
+    """
+    project = repo.get_project(project_id)
+    if project is None:
+        raise ValueError(f"project {project_id} not found")
+    if not text.strip():
+        raise ValueError("a comment needs something said")
+    if end is not None and end < start:
+        start, end = end, start
+    if end is not None and end - start < 0.05:
+        end = None
+    comment = Comment(
+        id="c" + uuid.uuid4().hex[:7], project_id=project_id, text=text.strip(), commit=_current_commit(project_id),
+        start=round(max(0.0, start), 3), end=round(end, 3) if end is not None else None,
+        start_anchor=anchor_at(project, start), end_anchor=anchor_at(project, end) if end is not None else None,
+    )
+    repo.save_comment(comment, f"留言：{comment.text[:30]}")
+    return _comment_said(project, comment)
+
+def change_comment(project_id: str, comment_id: str, by: str, reply: str = "",
+                   status: Optional[Literal["open", "resolved"]] = None) -> dict:
+    """Say something back on a comment, close it, or open it again.
+
+    Args:
+        project_id: The video.
+        comment_id: The comment.
+        by: Who is speaking: the AI program, or 你.
+        reply: What is said; empty to only change its status.
+        status: `resolved` to close it, `open` to open it again; None leaves it.
+
+    Returns:
+        The comment as `get_comments` shows it.
+
+    Raises:
+        ValueError: If the project or comment does not exist.
+    """
+    project = repo.get_project(project_id)
+    comment = next((item for item in repo.comments(project_id) if item.id == comment_id), None)
+    if project is None or comment is None:
+        raise ValueError(f"project {project_id} has no comment {comment_id}")
+    commit = _current_commit(project_id)
+    if reply.strip():
+        comment.replies.append(Reply(by=by, text=reply.strip(), commit=commit))
+    if status == "resolved":
+        comment.status, comment.resolved_commit = "resolved", commit
+    elif status == "open":
+        comment.status, comment.resolved_commit = "open", None
+    said = {"resolved": "處理了一則留言", "open": "重開一則留言"}.get(status or "", "回覆一則留言")
+    repo.save_comment(comment, f"{said}：{comment.text[:30]}")
+    return _comment_said(project, comment)
+
+@mcp.tool()
+def get_comments(project_id: str, include_resolved: bool = False) -> dict:
+    """Read what the user said about moments of a video while watching it in the editor.
+
+    Each is a request written on the cut — 「這裡太拖」, 「這段配樂太大聲」 —
+    pinned to the footage that was on screen, so it is shown where that
+    footage is now even after the cut changed: `start` (and `end` for a
+    stretch) in seconds, `at` as a timecode, the `clip_id` under it, and the
+    `file` and `file_seconds`. `gone` means that footage has since been cut
+    out. Read it, do what it asks — or ask the user if it can be read two
+    ways — then close it with `resolve_comment`, saying what you did.
+
+    Args:
+        project_id: The video.
+        include_resolved: Also list the ones already dealt with.
+
+    Returns:
+        `comments`, oldest first, each with its `id`, `text`, `status` and
+        `replies`; and `open`, how many are waiting.
+
+    Raises:
+        ValueError: If the project does not exist.
+    """
+    project = repo.get_project(project_id)
+    if project is None:
+        raise ValueError(f"project {project_id} not found")
+    every = repo.comments(project_id)
+    return {
+        "comments": [_comment_said(project, comment) for comment in every
+                     if include_resolved or comment.status == "open"],
+        "open": sum(comment.status == "open" for comment in every),
+    }
+
+@mcp.tool()
+def resolve_comment(project_id: str, comment_id: str, reply: str, resolved: bool = True) -> dict:
+    """Close a comment the user wrote, saying what was done about it.
+
+    The reply is shown under the comment in the editor, in plain words the
+    user reads: 「把開頭縮短 2 秒」, not the edits. The comment stays, greyed,
+    and the user can open it again. With `resolved` false the reply is only
+    said — to ask which of two things they meant, or why it was not done.
+    Comments are the user's: there is no way to delete one from here.
+
+    Args:
+        project_id: The video.
+        comment_id: The comment, from `get_comments`.
+        reply: What was done, or what you need to know.
+        resolved: False to reply and leave it open.
+
+    Returns:
+        The comment as `get_comments` shows it.
+
+    Raises:
+        ValueError: If the project or comment does not exist, or the reply
+            is empty.
+    """
+    if not reply.strip():
+        raise ValueError("say what was done, or what you need to know")
+    return change_comment(project_id, comment_id, f"AI（{_calling_client.get()}）", reply,
+                          "resolved" if resolved else None)
 
 @mcp.tool()
 def get_job(

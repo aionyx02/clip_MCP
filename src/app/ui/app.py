@@ -474,6 +474,38 @@ async def mark(request: Request) -> Response:
         return _error(str(error), 400)
     return JSONResponse(result)
 
+async def comments(request: Request) -> Response:
+    """Every comment on a video, open and closed (GET), or a new one at a moment or a stretch (POST)."""
+    project_id = request.path_params["project_id"]
+    try:
+        if request.method == "GET":
+            return JSONResponse(await run_in_threadpool(server.get_comments, project_id, True))
+        body = await request.json()
+        end = body.get("end")
+        made = await run_in_threadpool(server.add_comment, project_id, str(body.get("text", "")),
+                                       float(body["start"]), float(end) if end is not None else None)
+    except (ValueError, KeyError, TypeError) as error:
+        return _error(str(error), 400)
+    return JSONResponse(made)
+
+async def comment(request: Request) -> Response:
+    """Add to a comment, close it or open it again; or delete it, which only the user can do, here."""
+    project_id, comment_id = request.path_params["project_id"], request.path_params["comment_id"]
+    body = await request.json()
+    try:
+        if body.get("delete"):
+            if not await run_in_threadpool(server.repo.delete_comment, project_id, comment_id):
+                return _error(f"project {project_id} has no comment {comment_id}", 404)
+            return JSONResponse({"deleted": comment_id})
+        status = body.get("status")
+        if status not in (None, "open", "resolved"):
+            return _error("a comment is open or resolved", 400)
+        changed = await run_in_threadpool(server.change_comment, project_id, comment_id, "你",
+                                          str(body.get("reply", "")), status)
+    except ValueError as error:
+        return _error(str(error), 400)
+    return JSONResponse(changed)
+
 async def playback(request: Request) -> Response:
     """What the browser needs to play a cut as it is, or as it was at one version.
 
@@ -966,6 +998,7 @@ EDITOR_DOING = (
     ("/api/projects/delete", "把專案移到垃圾桶"), ("/api/trash", "從垃圾桶放回"), ("/api/projects", "新增專案"), ("/api/assets/notes", "寫素材備註"),
     ("/api/assets/delete", "從素材庫拿掉"), ("/api/folders", "整理資料夾"), ("/api/file", "整理位置"),
     ("/api/pick", "加入素材"), ("/api/assets/library", "移動分類"), ("/versions/restore", "回到舊版本"), ("/versions/branch", "開分支"),
+    ("/comments", "留言"),
 )
 
 class _Stamp:
@@ -1021,6 +1054,8 @@ def create_app() -> Starlette:
         Route("/api/projects/{project_id}/versions/restore", restore, methods=["POST"]),
         Route("/api/projects/{project_id}/versions/branch", branch, methods=["POST"]),
         Route("/api/projects/{project_id}/versions/mark", mark, methods=["POST"]),
+        Route("/api/projects/{project_id}/comments", comments, methods=["GET", "POST"]),
+        Route("/api/projects/{project_id}/comments/{comment_id}", comment, methods=["POST"]),
         Route("/api/projects/{project_id}/storage", project_storage),
         Route("/api/projects/{project_id}/storage/trim", trim, methods=["POST"]),
         Route("/api/trash", trash, methods=["GET", "POST"]),
