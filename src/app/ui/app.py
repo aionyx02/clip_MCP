@@ -38,7 +38,7 @@ from app.engine.frames import extract_frame
 from app.engine.subtitles import captioned_clips, place_cues
 from app.models.timeline import Project
 from app.storage import housekeeping
-from app.engine.library import LIBRARIES, MUSIC, library_of
+from app.engine.library import FOLDER_KINDS as LIBRARY_FOLDERS, FOOTAGE, LIBRARIES, MUSIC, library_of
 from app.storage.repo import FOLDER_KINDS, FolderNotFoundError
 from app.ui import dialogs, updates
 
@@ -396,10 +396,9 @@ async def assets(request: Request) -> Response:
     everything = request.query_params.get("all") == "1"
     library = request.query_params.get("library")
     filed = {**server.repo.folder_of("assets"), **server.repo.folder_of("music")}
-    analyzing = {job.asset_id for job in server.repo.jobs_to_show(datetime.now(timezone.utc))[0]
-                 if job.kind.value == "analyze"}
     listed = []
     heard = server.song_tags() if library == MUSIC else {}
+    analyzing = server.analyzing_assets()
     for asset in server.repo.list_assets():
         if library in LIBRARIES and library_of(asset) != library:
             continue
@@ -408,11 +407,8 @@ async def assets(request: Request) -> Response:
             entry = {**_asset_summary(asset), "folder_id": filed.get(asset.id), "missing": not present}
             if entry["library"] == MUSIC:
                 analysis = server.repo.get_analysis(asset.id)
-                entry["tempo"] = analysis.rhythm.tempo if analysis is not None and analysis.rhythm else None
-                entry["analyzed"] = analysis is not None and analysis.rhythm is not None
-                entry["analyzing"] = asset.id in analyzing
+                entry.update(server.song_details(asset, analysis, heard, analyzing))
                 if analysis is not None and analysis.music is not None:
-                    entry.update(heard.get(asset.id, {}))
                     energy = analysis.music.energy
                     # Enough points for the bar on a card, not one a second.
                     step = max(1, len(energy) // ENERGY_POINTS)
@@ -835,12 +831,14 @@ async def pick(request: Request) -> Response:
                 ids += [item["id"] for item in result["assets"]]
                 failed += [os.path.basename(item["path"]) for item in result["skipped"]]
             else:
-                ids.append(server._register_asset(path, library).id)
+                ids.append(server.register_asset(path, library).id)
                 imported += 1
         except (FileNotFoundError, ValueError, RuntimeError):
             failed.append(os.path.basename(path))
-    if library and ids:
-        server.set_asset_library(ids, library)
+    if library and kind == "folder" and ids:
+        # A folder is listened to file by file; added on the music page, its songs are music all the same.
+        server.set_asset_library([asset_id for asset_id, asset in server.repo.get_assets(ids).items()
+                                  if not asset.has_video], library)
     found = server.repo.get_assets(ids)
     music = [asset_id for asset_id in ids if asset_id in found and library_of(found[asset_id]) == MUSIC]
     # Chosen with one of the library's folders open: filed there, where the user is looking.
@@ -848,7 +846,7 @@ async def pick(request: Request) -> Response:
     if folder_id and ids:
         here = music if body.get("library") == MUSIC else [asset_id for asset_id in ids if asset_id not in music]
         try:
-            server.repo.file_items("music" if body.get("library") == MUSIC else "assets", here, str(folder_id))
+            server.repo.file_items(LIBRARY_FOLDERS[MUSIC if body.get("library") == MUSIC else FOOTAGE], here, str(folder_id))
         except FolderNotFoundError:
             # The folder went while the window was open; the files are in the library all the same.
             pass

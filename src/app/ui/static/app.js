@@ -563,9 +563,9 @@ async function musicPage(page, folderId) {
     empty: `<div class="callout">${icon("info")}<span>${esc(T.musicPage.hint)}</span></div>
       <div class="empty"><div class="icon-ring">${icon("music", 28)}</div><h2>${esc(T.musicPage.emptyTitle)}</h2><p>${esc(T.musicPage.emptyBody)}</p></div>`,
     card: (asset, extras) => {
-      const state = asset.tempo ? `<span>${esc(T.musicPage.tempo(Math.round(asset.tempo)))}</span>`
-        : asset.analyzing ? `<span class="badge">${esc(T.musicPage.analyzing)}</span>`
-        : asset.analyzed ? "" : `<span class="badge">${esc(T.musicPage.waiting)}</span>`;
+      const state = (asset.tempo ? `<span>${esc(T.musicPage.tempo(Math.round(asset.tempo)))}</span>` : "")
+        + (asset.analyzing ? `<span class="badge">${esc(T.musicPage.analyzing)}</span>` : "")
+        + (asset.sounds_like_speech ? `<span class="badge warn" title="${esc(T.musicPage.speechHint)}">${esc(T.musicPage.speech)}</span>` : "");
       const gone = asset.missing ? `<span class="badge warn" title="${esc(T.media.goneHint)}">${icon("alert", 13)}${esc(T.media.gone)}</span>` : "";
       // The song's energy across its length, quiet to full, where the picture would be.
       const bars = asset.energy?.length
@@ -850,6 +850,8 @@ function renameProject(project, done, prompt = "") {
 const PAGES = { projects: projectsPage, media: mediaPage, music: musicPage, ai: aiPage, storage: storagePage };
 
 async function route() {
+  // A song being listened to on the music page stops when the page is left.
+  listening.audio?.pause();
   const [, name = "", id] = location.hash.replace(/^#/, "").split("/");
   const key = name === "project" ? "project" : (PAGES[name] ? name : "projects");
   document.querySelectorAll(".nav-item").forEach((item) => {

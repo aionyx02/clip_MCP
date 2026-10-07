@@ -221,6 +221,9 @@ class MusicSense(BaseModel):
     energy: List[float] = Field(
         default_factory=list, description="Its energy each second, on its own scale from 0 (quietest) to 1 (fullest)",
     )
+    sounds_like_speech: bool = Field(
+        default=False, description="It was heard as closer to somebody talking than to music, though put with music",
+    )
 
 class AnalysisRecipe(BaseModel):
     """What produced an analysis, so that an out-of-date one can be recognised.

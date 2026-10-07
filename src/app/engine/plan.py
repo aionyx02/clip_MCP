@@ -2393,6 +2393,12 @@ class Bed:
     lane: int = 0
 
     @property
+    def cue_beat(self) -> Optional[str]:
+        """The beat of the cue this stretch belongs to; None for the cue that starts with the video."""
+        beat = self.key[0].split(":", 1)[1] if self.key else "^"
+        return None if beat == "^" else beat
+
+    @property
     def track_id(self) -> str:
         """Say which music track this stretch goes on.
 
@@ -2547,10 +2553,10 @@ def music_fit_notes(
     for bed in beds:
         by_cue.setdefault(bed.key[0], []).append(bed)
     notes: List[Note] = []
-    for key, passes in by_cue.items():
+    for passes in by_cue.values():
         song = assets.get(passes[0].asset_id)
         name = os.path.basename(song.path) if song is not None else passes[0].asset_id
-        beat_id = None if key.endswith("^") else key.split(":", 1)[1]
+        beat_id = passes[0].cue_beat
         first, last = passes[0], passes[-1]
         heard = round(last.timeline_in + last.end - last.start - first.timeline_in, 1)
         if len(passes) > 1:
@@ -2561,7 +2567,8 @@ def music_fit_notes(
                 f"take over before {passes[1].timeline_in:.1f}s",
                 "music_loops", beat_id=beat_id, seconds=passes[1].timeline_in, look=True,
             ))
-        energy = (cuts or {}).get(first.asset_id).energy if (cuts or {}).get(first.asset_id) else None
+        known = (cuts or {}).get(first.asset_id)
+        energy = known.energy if known is not None else None
         length = _song_length(song)
         if not energy or length is None:
             continue

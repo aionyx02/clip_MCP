@@ -135,11 +135,18 @@ def credit_line(site: str, title: str, artist: str, licence: str, page: str) -> 
 
 
 class _StayOnSite(urllib.request.HTTPRedirectHandler):
-    """Follow a redirect only to another allowed host: a download link may hand over to a CDN, nothing else."""
+    """Follow a redirect only to another host of the same site: a page may hand over to its CDN, nothing else.
+
+    Not to another allowed site either: the licence was read for this one.
+    """
+
+    def __init__(self, site: Optional[str]) -> None:
+        super().__init__()
+        self.site = site
 
     def redirect_request(self, request, response, code, message, headers, new_url):
-        if site_of(new_url) is None:
-            raise ValueError(f"the link leads to {urlparse(new_url).hostname}, which is not an allowed site")
+        if site_of(new_url) is None or site_of(new_url) != self.site:
+            raise ValueError(f"the link leads to {urlparse(new_url).hostname}, which is not the site it is on")
         return super().redirect_request(request, response, code, message, headers, new_url)
 
 
@@ -169,15 +176,17 @@ def download(url: str, folder: str, title: str) -> str:
         Where it was saved. Whether it is a song is for the caller to check.
 
     Raises:
-        ValueError: If the link or a redirect leaves the allowed sites, or the
-            file is bigger than `MAX_BYTES` or not sound.
+        ValueError: If the link or a redirect leaves its site, the server says
+            it is text, a picture or a video, or the file is bigger than
+            `MAX_BYTES`. Whether it really is a song is for the caller to
+            check by reading it.
         OSError: If the download fails.
     """
     from app.storage.housekeeping import unique_path
 
     if site_of(url) is None:
         raise ValueError("this link is not on one of the sites music may be taken from")
-    opener = urllib.request.build_opener(_StayOnSite)
+    opener = urllib.request.build_opener(_StayOnSite(site_of(url)))
     request = urllib.request.Request(url, headers={"User-Agent": "clip-mcp (music for the user's own video)"})
     with opener.open(request, timeout=TIMEOUT_SECONDS) as response:
         kind = (response.headers.get("Content-Type") or "").split(";")[0].strip().lower()

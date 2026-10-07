@@ -175,6 +175,24 @@ def describe(text: str) -> np.ndarray:
     return _described[text]
 
 
+# What a song is weighed against to tell whether it is somebody talking: the model was trained on
+# both, so it can say which a file is closer to. A second opinion beside the speech detector's.
+SPEECH, MUSIC_ITSELF = "a person talking", "music"
+
+
+def sounds_like_speech(vector: Sequence[float]) -> bool:
+    """Whether a file lies closer to somebody talking than to music.
+
+    Args:
+        vector: What `listen` heard.
+
+    Returns:
+        True when it does: worth asking about, never a reason to move it.
+    """
+    heard = np.asarray(vector)
+    return float(describe(SPEECH) @ heard) > float(describe(MUSIC_ITSELF) @ heard)
+
+
 def listen(path: str, duration: float, ffmpeg_bin: str = "ffmpeg") -> Tuple[List[float], Dict[str, float], Dict[str, float]]:
     """Hear a song: what it is like as a vector, and how close it lies to each mood and style.
 

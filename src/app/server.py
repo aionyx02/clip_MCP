@@ -67,7 +67,7 @@ from app.engine.ffmpeg import graph_from_file, hidden_window_flags
 from app.engine.probe import picture_size, probe_file, recorded_at, speech_loudness, timecode_start
 from app.engine.reframe import Framing, centre_at, frame_project
 from app.engine import playback
-from app.engine.library import FOOTAGE, LIBRARIES, MUSIC, classify, library_of
+from app.engine.library import FOLDER_KINDS, FOOTAGE, LIBRARIES, MUSIC, classify, library_of
 from app.engine import clap
 from app.engine import fetch
 from app.engine import music as music_energy
@@ -461,7 +461,7 @@ def _natural_key(name: str) -> List[object]:
     """
     return [int(part) if part.isdigit() else part.lower() for part in re.split(r"(\d+)", name)]
 
-def _register_asset(filepath: str, library: Optional[str] = None) -> Asset:
+def register_asset(filepath: str, library: Optional[str] = None) -> Asset:
     """Probe a media file and save it as an asset, in the footage or the music library.
 
     A new file without a picture is listened to: mostly somebody talking, it
@@ -556,7 +556,11 @@ def tend_library() -> None:
         with FileLock(os.path.join(WORKSPACE_DIR, "library.lock"), timeout=0):
             for asset in repo.list_assets():
                 if asset.library is None and os.path.exists(asset.path):
-                    asset.library = classify(asset)
+                    try:
+                        asset.library = classify(asset)
+                    except (OSError, RuntimeError, ValueError):
+                        # Left where its picture says until it can be listened to; the next start tries again.
+                        continue
                     repo.save_asset(asset)
             _queue_music(repo.list_assets())
     except Timeout:
@@ -641,7 +645,7 @@ def import_asset(filepath: str) -> dict:
         FileNotFoundError: If the file does not exist.
         RuntimeError: If ffprobe cannot read the file.
     """
-    return _plain(_register_asset(filepath).model_dump())
+    return _plain(register_asset(filepath).model_dump())
 
 def _plain(value):
     """Turn the Decimals a model keeps its seconds in into plain numbers, all the way down.
@@ -712,8 +716,7 @@ def list_assets(
         and (folder_id is None or filed.get(asset.id) == folder_id)
         and (not text or text.lower() in os.path.basename(asset.path).lower())
     ]
-    analyzing = {job.asset_id for job in repo.jobs_to_show(datetime.now(timezone.utc))[0]
-                 if job.kind == JobKind.ANALYZE}
+    analyzing = analyzing_assets()
     heard = song_tags() if kind == MUSIC or any(library_of(asset) == MUSIC for asset in matching) else {}
     matching.sort(key=lambda asset: _natural_key(os.path.basename(asset.path)))
     assets = []
@@ -731,9 +734,8 @@ def list_assets(
             "library": library_of(asset),
             "folder_id": filed.get(asset.id),
             **({"notes": asset.notes} if asset.notes else {}),
-            **({"tempo": analysis.rhythm.tempo} if analysis is not None and analysis.rhythm is not None else {}),
-            **({"analyzing": True} if asset.id in analyzing else {}),
-            **(_sounds_like(asset.id, analysis, heard) if analysis is not None and analysis.music is not None else {}),
+            **(song_details(asset, analysis, heard, analyzing) if library_of(asset) == MUSIC
+               else {"analyzing": True} if asset.id in analyzing else {}),
         })
     return {"assets": assets, "total": len(matching), "offset": offset,
             "folders": repo.list_folders(_folder_kind(kind or FOOTAGE))}
@@ -758,7 +760,37 @@ def song_tags() -> Dict[str, Dict[str, List[str]]]:
 def _sounds_like(asset_id: str, analysis: MediaAnalysis, heard: Mapping[str, Mapping[str, List[str]]]) -> dict:
     """A song in a line: its moods and styles, how it ends and where it is fullest."""
     summary = music_energy.summary(analysis.music.energy)
-    return {**heard.get(asset_id, {}), "ends": summary["ends"], "fullest": summary["fullest"]}
+    return {**heard.get(asset_id, {}), "ends": summary["ends"], "fullest": summary["fullest"],
+            # The speech detector put it with music; the model hears talking. Asked about, not moved.
+            **({"sounds_like_speech": True} if analysis.music.sounds_like_speech else {})}
+
+def analyzing_assets() -> set:
+    """The files an analysis is queued or running for."""
+    return {job.asset_id for job in repo.jobs_to_show(datetime.now(timezone.utc))[0] if job.kind == JobKind.ANALYZE}
+
+def song_details(asset: Asset, analysis: Optional[MediaAnalysis], heard: Mapping[str, Mapping[str, List[str]]],
+                 analyzing: set) -> dict:
+    """What is known about a song, for the AI's list and the editor's page alike.
+
+    Args:
+        asset: The song.
+        analysis: Its analysis, if any.
+        heard: From `song_tags`.
+        analyzing: From `analyzing_assets`.
+
+    Returns:
+        Its `tempo`, its moods, styles, ending and fullest part once heard,
+        and `analyzing` until then — queued or running, since every song
+        added is analyzed by itself.
+    """
+    found: dict = {}
+    if analysis is not None and analysis.rhythm is not None:
+        found["tempo"] = analysis.rhythm.tempo
+    if analysis is not None and analysis.music is not None:
+        found.update(_sounds_like(asset.id, analysis, heard))
+    if asset.id in analyzing or analysis is None or analysis.music is None:
+        found["analyzing"] = True
+    return found
 
 @mcp.tool()
 def find_music(description: str, min_seconds: Annotated[float, Field(ge=0)] = 0,
@@ -884,7 +916,7 @@ def add_music_from_url(url: str, page: str, title: str, artist: str = "", licenc
         os.remove(path)
         raise ValueError("what was downloaded is not a song: it has no sound, or it has a picture")
     _say_in_history(f"從 {planned['site']} 加入「{title}」")
-    asset = _register_asset(path, MUSIC).model_copy(update={"source": Source(
+    asset = register_asset(path, MUSIC).model_copy(update={"source": Source(
         site=planned["site"], page=page, url=url, title=title, artist=artist, licence=planned["licence"],
         credit=planned["credit"], personal_only=personal_use,
     )})
@@ -910,8 +942,10 @@ def music_credits(project_id: str) -> dict:
     project = repo.get_project(project_id)
     if project is None:
         raise ValueError(f"project {project_id} not found")
-    used = repo.get_assets({clip.asset_id for track in project.tracks if track.track_type.value == "audio"
+    used = repo.get_assets({clip.asset_id for track in project.tracks if track.track_type == TrackType.AUDIO
                             for clip in track.clips})
+    # A voice-over is on an audio track too, but owes nobody a credit.
+    used = {asset_id: asset for asset_id, asset in used.items() if library_of(asset) == MUSIC}
     credits, personal, unknown = [], [], []
     for asset in used.values():
         if asset.source is None:
@@ -925,7 +959,7 @@ def music_credits(project_id: str) -> dict:
 
 def _folder_kind(library: str) -> str:
     """The kind of folder a library's files are filed in."""
-    return "music" if library == MUSIC else "assets"
+    return FOLDER_KINDS[library]
 
 @mcp.tool()
 def set_asset_library(asset_ids: List[str], library: Literal["footage", "music"], note: str = "") -> dict:
@@ -945,14 +979,25 @@ def set_asset_library(asset_ids: List[str], library: Literal["footage", "music"]
 
     Returns:
         `moved`, the names of the files moved; a file already there is not
-        among them. Each now sits at the top of that library's folders.
+        among them. Each now sits at the top of that library's folders. A
+        recording moved to footage is transcribed in the background.
 
     Raises:
-        ValueError: If a file is not in the library.
+        ValueError: If a file is not in the library, or a file with a
+            picture is moved to music.
     """
     assets = [_get_asset(asset_id) for asset_id in asset_ids]
-    moved = repo.move_to_library([asset.id for asset in assets], library, _folder_kind(library))
+    pictured = [os.path.basename(asset.path) for asset in assets if asset.has_video]
+    if library == MUSIC and pictured:
+        raise ValueError(f"{', '.join(pictured)} has a picture, so it is footage: music is sound alone")
+    moved = repo.move_to_library([asset.id for asset in assets], library)
     _queue_music(moved)
+    if library == FOOTAGE and ANALYZE_MUSIC_ON_ADD:
+        # Heard as a song, it was never transcribed: now it is listened to for what is said.
+        for asset in moved:
+            existing = repo.get_analysis(asset.id)
+            if existing is not None and existing.transcript is None and asset.has_audio:
+                _start_analysis(asset, True, "accurate", priority=1)
     return {"moved": [os.path.basename(asset.path) for asset in moved]}
 
 @mcp.tool()
@@ -1064,6 +1109,12 @@ def organize_library(steps: List[LibraryStep], note: str = "") -> dict:
 
 def _file_in(asset_ids: List[str], folder_id: Optional[str], library: Optional[str] = None) -> None:
     """File footage or songs in a folder of their own library, or at its top.
+
+    Args:
+        asset_ids: The files.
+        folder_id: The folder; its library's top when None.
+        library: The library the folder belongs to, when it is known apart
+            from the files.
 
     Raises:
         ValueError: If the files are of both libraries, or the folder is of the other one.
@@ -1247,7 +1298,7 @@ def import_folder(folderpath: str, recursive: bool = False) -> dict:
     skipped: List[dict] = []
     for path in paths:
         try:
-            assets.append(_register_asset(path))
+            assets.append(register_asset(path))
         except (OSError, RuntimeError, ValueError) as error:
             skipped.append({"path": path, "reason": str(error)})
 
@@ -1285,6 +1336,17 @@ def _start_analysis(asset: Asset, transcribe: bool, transcription: str, language
                     prompt: Optional[str] = None, chinese_variant: Optional[str] = None, diarize: bool = True,
                     speakers: Optional[int] = None, priority: int = 0) -> Job:
     """Queue one file's analysis.
+
+    Args:
+        asset: The file.
+        transcribe: Whether speech is transcribed; never for a song.
+        transcription: `accurate` or `fast`.
+        language: Spoken language code, or None to detect it.
+        prompt: Text that guides transcription.
+        chinese_variant: Script and regional variant for a Chinese transcript.
+        diarize: Whether to tell the voices apart.
+        speakers: How many people are talking, when known.
+        priority: Lower goes first; a song added by itself waits behind footage.
 
     Returns:
         The job.
@@ -1337,7 +1399,10 @@ def _plan_analyses(
         existing = repo.get_analysis(asset.id)
         had = _transcription(existing)
         upgrade = _transcribed(asset, transcribe) and transcription == "accurate" and had == "fast"
-        if not again and not upgrade and existing is not None and not _is_stale(existing):
+        # Heard as a song, never transcribed; footage now, so it is listened to again for what is said.
+        heard_as_song = (existing is not None and existing.transcript is None and existing.rhythm is not None
+                         and _transcribed(asset, transcribe))
+        if not again and not upgrade and not heard_as_song and existing is not None and not _is_stale(existing):
             skipped.append(asset.id)
             continue
         if upgrade:
@@ -1735,9 +1800,8 @@ def get_analysis(
         where the largest face sat across the frame and how far it moved,
         which is what a vertical reframe needs. `speakers` lists the stretches
         each voice held; the labels are this file's own and mean nothing
-        outside it. `rhythm` is for music — files with sound and no picture —
-        and gives the `tempo` in beats per minute and the `beats` in the
-        range; its `tempo` is null when the music has no steady pulse, and
+        outside it. `rhythm` is for a file in the music library, and gives
+        the `tempo` in beats per minute and the `beats` in the range; its `tempo` is null when the music has no steady pulse, and
         the whole of it is null for footage, or for music analyzed before
         beats were measured. `music`, for a song, has the `moods` and
         `styles` that set it apart in the library (how it sounds to a model,
@@ -1796,7 +1860,7 @@ def get_analysis(
             "tempo": analysis.rhythm.tempo,
             "beats": [beat for beat in analysis.rhythm.beats if start <= beat < end],
         },
-        "music": None if analysis.music is None else {
+        "music": None if analysis.music is None or library_of(_get_asset(asset_id)) != MUSIC else {
             **song_tags().get(asset_id, {}),
             **music_energy.summary(analysis.music.energy),
         },
@@ -2925,6 +2989,9 @@ def apply_edits(project_id: str, expected_version: int, operations: list[EditOpe
     saved = _apply(project_id, expected_version, operations)
     prepare_playback(saved)
     result = {"status": "success", "new_version": saved.version}
+    gap = _music_ends_early(saved)
+    if gap:
+        result["music"] = gap
     touched = _touched_captions(before, saved, operations)
     if touched:
         shared = [cue for cue in touched if not cue.local]
@@ -2939,6 +3006,22 @@ def apply_edits(project_id: str, expected_version: int, operations: list[EditOpe
         else:
             result["captions_kept"] = "remembered against their footage: every project that captions it starts from them"
     return result
+
+# Music stopping this much before the video does leaves an ending without it. Provisional.
+MUSIC_GAP_SECONDS = 3.0
+
+def _music_ends_early(project: Project) -> Optional[str]:
+    """Say when the music laid by hand stops well before the video ends, with what would fix it."""
+    music = [track for track in project.tracks if track.track_type == TrackType.AUDIO and track.duck_under_speech]
+    clips = [clip for track in music for clip in track.clips]
+    if not clips:
+        return None
+    ends = max(float(clip.timeline_out) for clip in clips)
+    left = float(project.duration) - ends
+    if left <= MUSIC_GAP_SECONDS:
+        return None
+    return (f"the music stops at {ends:.1f}s and the last {left:.0f}s have none: fit_track with loop to repeat it, "
+            f"a longer song (find_music with min_seconds), or say that is wanted")
 
 def _touched_captions(before: Optional[Project], project: Project, operations: Sequence) -> List[SubtitleCue]:
     """Find the captions a batch of edits stored or corrected, as they now stand.
@@ -3532,7 +3615,20 @@ def compile_plan(project_id: str, expected_version: int, plan_id: Optional[str] 
         "kept": sum(1 for origin in provenance.values() if origin["pinned"]),
         "duration": float(saved.duration),
         "notes": [note_record(note) for note in notes],
+        **({"songs": songs} if (songs := _songs_in(plan)) else {}),
     }
+
+def _songs_in(plan: EditPlan) -> List[dict]:
+    """The songs a plan plays, each with how it sounds, to say when the plan is read back."""
+    heard = song_tags()
+    found = []
+    for cue in plan.music.cues if plan.music is not None else []:
+        if cue.asset_id is None or any(song["id"] == cue.asset_id for song in found):
+            continue
+        asset = repo.get_assets([cue.asset_id]).get(cue.asset_id)
+        if asset is not None:
+            found.append({"id": asset.id, "name": os.path.basename(asset.path), **heard.get(asset.id, {})})
+    return found
 
 @mcp.tool()
 def diff_plan(

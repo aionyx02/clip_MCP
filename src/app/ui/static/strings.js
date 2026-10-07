@@ -21,6 +21,8 @@ window.T = {
     wentToMusic: (n) => `其中 ${n} 個是歌，放到了「音樂」`,
     tagsHint: "AI 聽出來的情緒和風格；風格大多準，情緒大約一半準，只當參考",
     from: (site, licence) => `來自 ${site} · ${licence}`,
+    speech: "像是講話？",
+    speechHint: "聽起來比較像有人在講話，不像音樂。如果是講話的錄音，按「移到素材」，它會被聽打成字幕。",
     noCredit: "這首不需要標註出處",
   },
 

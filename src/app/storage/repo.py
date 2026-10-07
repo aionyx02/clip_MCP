@@ -248,17 +248,19 @@ class Repository:
         if self.history is not None:
             self.history.write("library.json", canonical(self._library()), said)
 
-    def move_to_library(self, asset_ids: Iterable[str], library: str, kind: str) -> List[Asset]:
+    def move_to_library(self, asset_ids: Iterable[str], library: str) -> List[Asset]:
         """Put files in the footage or the music library, at the top of its folders.
 
         Args:
             asset_ids: The files.
             library: `footage` or `music`.
-            kind: The folder kind of that library, `assets` or `music`.
 
         Returns:
             The files that moved; one already there is left as it is.
         """
+        from app.engine.library import FOLDER_KINDS
+
+        kind = FOLDER_KINDS[library]
         moved = []
         with self._transaction() as conn:
             for asset_id in asset_ids:

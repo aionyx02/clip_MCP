@@ -34,10 +34,13 @@ def test_the_credit_is_written_the_way_the_licence_asks() -> None:
     assert fetch.credit_line("fma", "Song", "Band", "CC BY", "https://x") == '"Song" by Band (https://x), licensed under CC BY'
 
 
-def test_a_redirect_off_the_allowed_sites_is_refused() -> None:
-    handler = fetch._StayOnSite()
-    with pytest.raises(ValueError, match="not an allowed site"):
+def test_a_redirect_stays_on_the_site_it_started_on() -> None:
+    handler = fetch._StayOnSite("pixabay")
+    with pytest.raises(ValueError, match="not the site it is on"):
         handler.redirect_request(None, None, 302, "Found", {}, "https://elsewhere.example/a.mp3")
+    # Another allowed site is still another site: its licence was not the one read.
+    with pytest.raises(ValueError, match="not the site it is on"):
+        handler.redirect_request(None, None, 302, "Found", {}, "https://upload.wikimedia.org/a.mp3")
 
 
 def test_a_song_is_taken_only_by_the_plan_the_user_heard(media: Path, monkeypatch: pytest.MonkeyPatch,

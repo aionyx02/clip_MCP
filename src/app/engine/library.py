@@ -19,6 +19,8 @@ from app.models.media import Asset
 FOOTAGE = "footage"
 MUSIC = "music"
 LIBRARIES = (FOOTAGE, MUSIC)
+# The kind of folder each library's files are filed in.
+FOLDER_KINDS = {FOOTAGE: "assets", MUSIC: "music"}
 
 # A file with no picture is a recording of somebody talking when at least this share of
 # what is listened to is speech. Singing is heard as speech now and then, so it is well

@@ -76,3 +76,36 @@ def test_the_editor_shows_and_moves_each_library(media: Path) -> None:
     assert client.post("/api/assets/library", json={"ids": [song], "library": "footage"}).status_code == 200
     assert any(item["id"] == song for item in client.get("/api/assets?library=footage").json()["assets"])
     client.post("/api/assets/library", json={"ids": [song], "library": "music"})
+
+
+def test_a_file_with_a_picture_is_never_music(media: Path) -> None:
+    shot = server.import_asset(str(media / "wide.mp4"))["id"]
+    with pytest.raises(ValueError, match="has a picture"):
+        server.set_asset_library([shot], "music")
+
+
+def test_a_song_moved_to_footage_is_listened_to_for_what_is_said(media: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.models.media import MediaAnalysis, Rhythm
+
+    song = server.import_asset(str(media / "jingle.wav"))["id"]
+    server.repo.save_analysis(MediaAnalysis(asset_id=song, duration=4.0, rhythm=Rhythm(tempo=None, beats=[])))
+    started = []
+    monkeypatch.setattr(server, "ANALYZE_MUSIC_ON_ADD", True)
+    monkeypatch.setattr(server, "_start_analysis", lambda asset, transcribe, *args, **kwargs: started.append(
+        (asset.id, transcribe)) or type("Job", (), {"job_id": "j"})())
+    server.set_asset_library([song], "footage")
+    assert started == [(song, True)]
+    server.set_asset_library([song], "music")
+
+
+def test_music_laid_by_hand_that_stops_early_is_said(media: Path) -> None:
+    from helpers import build_project, insert, video_track
+
+    shot = server.import_asset(str(media / "wide.mp4"))["id"]
+    song = server.import_asset(str(media / "jingle.wav"))["id"]
+    project = build_project([video_track(), insert("a", shot, 0, 10),
+                             {"action": "add_track", "track_id": "music", "track_type": "audio",
+                              "duck_under_speech": True},
+                             {"action": "insert_clip", "track_id": "music", "clip_id": "m", "asset_id": song,
+                              "source_range": {"start": 0, "end": 4}}], name="音樂太短")
+    assert "stops at 4.0s" in server._music_ends_early(server.repo.get_project(project))

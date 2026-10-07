@@ -22,6 +22,7 @@ SECTION_SECONDS = 8
 FULLEST_SECONDS = 8
 # A song that falls under this in its last seconds fades out; one still above it ends full. Provisional.
 FADED, ENDS_FULL = 0.25, 0.6
+# How much of the end is looked at to say how a song ends. Provisional.
 ENDING_SECONDS = 6
 _LEVELS = ("quiet", "middle", "full")
 

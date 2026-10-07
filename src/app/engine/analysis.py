@@ -1300,7 +1300,8 @@ def analyze_media(
         report("mood", "listening for mood and style")(0.0)
         vector, moods, styles = clap.listen(asset.path, duration, ffmpeg_bin)
         sense = MusicSense(moods=moods, styles=styles, vector=vector,
-                           energy=energy_curve([second.loudness for second in scan.sound]))
+                           energy=energy_curve([second.loudness for second in scan.sound]),
+                           sounds_like_speech=clap.sounds_like_speech(vector))
     return MediaAnalysis(
         asset_id=asset.id,
         duration=duration,
