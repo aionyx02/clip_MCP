@@ -301,7 +301,7 @@
       E.compare.players.a.pause();
       E.compare.players.b.pause();
     }
-    Object.assign(E.compare, { a, b, data: null });
+    Object.assign(E.compare, { a, b, data: null, picks: {} });
     drawVersions();
     try {
       const query = new URLSearchParams({ a, ...(b ? { b } : {}) });
@@ -427,18 +427,37 @@
     scrub.onchange = () => { if (E?.compare) E.compare.scrubbing = false; };
   }
 
-  // What changed, part by part; a click takes both sides there.
+  // What changed, part by part; a click takes both sides there. Each part that differs, and the
+  // video's songs and captions, can be taken from either side into a new version.
   function drawChanges(box) {
     const data = E.compare?.data;
     if (!data) { box.innerHTML = `<p class="hint">${esc(T.versions.loading)}</p>`; return; }
+    const picks = E.compare.picks;
     const at = (change) => `data-a="${change.a_at ?? ""}" data-b="${change.b_at ?? ""}"`;
-    const parts = data.parts.map((part) => `<li class="cpart${part.same ? " same" : ""}">
-      <div class="cpart-head"><b>${esc(part.name)}</b>${part.same ? `<span class="hint">${esc(T.compare.same)}</span>` : ""}</div>
+    const pick = (key) => `<span class="cpick" data-pick="${esc(key)}">
+      <button class="${picks[key] === "a" ? "on" : ""}" data-side-pick="a">${esc(T.compare.useLeft)}</button><button class="${picks[key] === "a" ? "" : "on"}" data-side-pick="b">${esc(T.compare.useRight)}</button></span>`;
+    const parts = data.parts.map((part) => `<li class="cpart${part.same ? " same" : ""}${picks[part.name] === "a" ? " left" : ""}">
+      <div class="cpart-head"><b>${esc(part.name)}</b>${part.same ? `<span class="hint">${esc(T.compare.same)}</span>` : part.order ? "" : pick(part.name)}</div>
       ${part.changes.length ? `<ul>${part.changes.map((change) => `<li><button class="cchange" ${at(change)}>${esc(change.what)}</button></li>`).join("")}</ul>` : ""}</li>`).join("");
-    const whole = data.whole.map((change) => `<li class="cpart"><button class="cchange" ${at(change)}>${esc(change.what)}</button></li>`).join("");
+    const whole = data.whole.map((change) => `<li class="cpart${picks[change.key] === "a" ? " left" : ""}"><div class="cpart-head"><button class="cchange" ${at(change)}>${esc(change.what)}</button>
+      ${["music", "captions", "caption_style"].includes(change.key) ? pick(change.key) : ""}</div></li>`).join("");
     const unchanged = data.parts.every((part) => part.same) && !data.whole.length;
+    const taken = Object.keys(picks).filter((key) => picks[key] === "a");
     box.innerHTML = `<div class="cmp-head"><h2>${esc(T.compare.title)}</h2><span class="hint">${esc(T.compare.hint)}</span></div>
-      ${unchanged ? `<p class="hint">${esc(T.compare.identical)}</p>` : `<ol class="cparts">${parts}${whole}</ol>`}`;
+      ${unchanged ? `<p class="hint">${esc(T.compare.identical)}</p>` : `<ol class="cparts">${parts}${whole}</ol>
+      <div class="cmerge"><span class="hint">${esc(taken.length ? T.compare.willTake(taken.map((key) => T.compare.keys[key] || key).join("、")) : T.compare.pickHint)}</span>
+        <button class="btn primary" data-merge ${taken.length ? "" : "disabled"}>${esc(T.compare.merge)}</button></div>`}`;
+    box.querySelectorAll("[data-pick]").forEach((group) => {
+      group.querySelectorAll("[data-side-pick]").forEach((button) => {
+        button.onclick = () => {
+          if (button.dataset.sidePick === "a") picks[group.dataset.pick] = "a";
+          else delete picks[group.dataset.pick];
+          drawChanges(box);
+        };
+      });
+    });
+    const mergeButton = $("[data-merge]", box);
+    if (mergeButton) mergeButton.onclick = mergeCompared;
     box.querySelectorAll("[data-a]").forEach((button) => {
       button.onclick = () => {
         const value = (raw) => (raw === "" ? null : Number(raw));
@@ -447,6 +466,44 @@
         seekCompare(value(button.dataset.a), value(button.dataset.b));
       };
     });
+  }
+
+  // The editor's own changes are written to the history just after it answers, so a version it has
+  // just made can take a moment to appear: read the graph until the newest version is another one.
+  async function graphAfter(head) {
+    for (let tries = 0; tries < 12; tries += 1) {
+      await loadGraph(true);
+      if (!E || E.graph.nodes[0]?.commit !== head) return;
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+  }
+
+  // The parts picked from the left made into one cut with the rest of the right, as a new version.
+  async function mergeCompared() {
+    const { a, b, picks, data } = E.compare;
+    const taken = Object.keys(picks).filter((key) => picks[key] === "a").map((key) => T.compare.keys[key] || key);
+    const ok = await confirmBox(T.compare.mergeTitle, T.compare.mergeBody(taken.join("、"), data.a.what, b ? data.b.what : T.compare.now),
+      T.compare.merge);
+    if (!ok) return;
+    let result;
+    try {
+      result = await api(`/api/projects/${encodeURIComponent(E.id)}/versions/merge`,
+        { a, b, picks, expected_version: E.project.version });
+    } catch (error) {
+      toast(/version conflict/.test(error.message) ? T.editor.conflict : error.message, "error");
+      return;
+    }
+    const head = E.graph.nodes[0]?.commit;
+    stopCompare(false);
+    E.viewing = null;
+    E.chosenVersion = null;
+    $(".editor", E.root).classList.remove("viewing-old");
+    await loadProject();
+    await graphAfter(head);
+    drawAll();
+    refreshPlayback();
+    drawVersions();
+    toast(result.plan ? `${T.compare.merged} ${result.plan}` : T.compare.merged);
   }
 
   function redrawVersions() {
@@ -561,11 +618,12 @@
       toast(/version conflict/.test(error.message) ? T.editor.conflict : error.message, "error");
       return;
     }
+    const head = E.graph?.nodes[0]?.commit;
     E.viewing = null;
     E.chosenVersion = null;
     $(".editor", E.root).classList.remove("viewing-old");
     await loadProject();
-    await loadGraph(true);
+    await graphAfter(head);
     drawAll();
     refreshPlayback();
     redrawVersions();

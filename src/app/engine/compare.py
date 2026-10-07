@@ -55,7 +55,7 @@ def _shown(project: Project) -> List[Clip]:
     return sorted(base.clips, key=lambda clip: clip.timeline_in) if base else []
 
 
-def _in(part: Part, clips: List[Clip], last: bool) -> List[Clip]:
+def clips_in(part: Part, clips: List[Clip], last: bool) -> List[Clip]:
     """The clips whose middle is inside a part.
 
     The middle rather than the start: a trim by hand moves the clips after
@@ -238,8 +238,8 @@ def compare(before: Project, after: Project, said: Said, named: Named) -> dict:
         right_by_name.setdefault(part.name, part)
     # Matched across the whole cut first, so a shot that went from one part to another is one move.
     pairs = match_clips(left_clips, right_clips)
-    left_in = {part.name: _in(part, left_clips, part is left_parts[-1]) for part in left_parts}
-    right_in = {part.name: _in(part, right_clips, part is right_parts[-1]) for part in right_parts}
+    left_in = {part.name: clips_in(part, left_clips, part is left_parts[-1]) for part in left_parts}
+    right_in = {part.name: clips_in(part, right_clips, part is right_parts[-1]) for part in right_parts}
     left_part = {id(clip): name for name, clips in left_in.items() for clip in clips}
     right_part = {id(clip): name for name, clips in right_in.items() for clip in clips}
     moved_to = {id(other): right_part[id(other)] for one, other in pairs

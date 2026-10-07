@@ -78,6 +78,8 @@ from app.engine.builder import DEFAULT_LOUDNESS_TARGET, FFmpegRenderer, Talking,
 from app.engine.levels import song_level, talking_in
 from app.engine.comments import anchor_at, where_now
 from app.engine.compare import compare
+from app.engine.compare import parts_of as cut_parts
+from app.engine.merge import WHOLE as MERGE_WHOLE, merge, merge_plans
 from app.engine.delivery import CHECKS, chapter_metadata, chapters, check_delivery, clock, cover_candidates
 from app.engine.frames import format_timestamp, still, storyboard_sheet
 from app.engine.interchange import write_edl, write_fcpxml, write_otio, write_srt
@@ -330,7 +332,7 @@ DOING = {
     "create_project": "建立專案", "import_asset": "加入素材", "import_folder": "加入資料夾", "edit_asset": "寫素材備註",
     "restore_version": "回到舊版本", "branch_project": "開分支", "mark_version": "標記版本",
     "organize_library": "整理素材庫", "move_files": "搬動檔案", "set_asset_library": "移動分類",
-    "find_music": "找歌", "compare_versions": "比較版本", "add_music_from_url": "從網路加入音樂", "resolve_comment": "回覆留言",
+    "find_music": "找歌", "compare_versions": "比較版本", "merge_version_parts": "合成兩版", "add_music_from_url": "從網路加入音樂", "resolve_comment": "回覆留言",
 }
 # What the AI programs call themselves when they connect, as a person would name them.
 CLIENT_NAMES = {
@@ -5969,6 +5971,115 @@ def compare_versions(project_id: str, commit_a: str, commit_b: Optional[str] = N
     compared = compare_projects(before, after)
     compared.pop("aligned")
     return {"a": a, "b": b, **compared}
+
+def _merged_plan(before: Project, after: Project, commit_a: Optional[str], merged: Project,
+                 from_left: List[str], name: str) -> Tuple[Project, str]:
+    """Merge the plans the two sides were compiled from, beat by beat, when they can be.
+
+    Returns:
+        The merged cut with its compiled clips naming the plan they now come
+        from, and what happened to the plans, in words.
+    """
+    def plan_ids(project: Project) -> set:
+        return {clip.from_plan_id for track in project.tracks for clip in track.clips if clip.from_plan_id}
+
+    left_ids, right_ids = plan_ids(before), plan_ids(after)
+    if not from_left or not left_ids:
+        return merged, ""
+    if len(left_ids) != 1 or len(right_ids) != 1:
+        return merged, "沒有合併剪輯計畫：兩邊不是各從一份計畫剪出來的"
+    left_id, right_id = next(iter(left_ids)), next(iter(right_ids))
+    left = _plans_at(before, commit_a).get(left_id) if commit_a else repo.get_plan(left_id)
+    right = repo.get_plan(right_id)
+    if left is None or right is None:
+        return merged, "沒有合併剪輯計畫：找不到其中一份"
+    if left.timeline_id != right.timeline_id:
+        return merged, "沒有合併剪輯計畫：兩份計畫用的是不同的素材時間軸"
+    combined = merge_plans(left, right, from_left)
+    shared = any(clip.from_plan_id == right_id for other in repo.list_projects() if other.id != merged.id
+                 for track in other.tracks for clip in track.clips)
+    if shared:
+        plan_id = _copied_plan(combined, f"「{name}」合成兩版時另存的計畫")
+        said = "剪輯計畫也合併了；原本的計畫有別支影片在用，所以另存了一份"
+    else:
+        plan_id = repo.save_plan(combined, "合成兩版").id
+        said = "剪輯計畫也依段落合併了"
+    relinked = merged.model_copy(update={"tracks": [
+        track.model_copy(update={"clips": [
+            clip.model_copy(update={"from_plan_id": plan_id}) if clip.from_plan_id in (left_id, right_id) else clip
+            for clip in track.clips]})
+        for track in merged.tracks]})
+    return relinked, said
+
+def merge_versions(project_id: str, commit_a: str, commit_b: Optional[str], picks: Mapping[str, str],
+                   expected_version: int) -> dict:
+    """Make the video one cut of two of its versions, a part from each, as a new version on top.
+
+    Raises:
+        ValueError: If the project or a version does not exist, a pick is
+            not `a` or `b`, or the project moved on from `expected_version`.
+    """
+    current = repo.get_project(project_id)
+    if current is None:
+        raise ValueError(f"project {project_id} not found")
+    if current.version != expected_version:
+        raise ValueError(f"version conflict: project {project_id} is at version {current.version}, "
+                         f"not {expected_version}")
+    before, a = _version_at(project_id, commit_a)
+    after, b = _version_at(project_id, commit_b)
+    names = {part.name for part in cut_parts(before) + cut_parts(after)} | set(MERGE_WHOLE)
+    unknown = sorted(set(picks) - names)
+    if unknown:
+        raise ValueError(f"nothing called {', '.join(unknown)} to pick: the parts are "
+                         f"{', '.join(sorted(names - set(MERGE_WHOLE)))}, and the whole video's "
+                         f"{', '.join(MERGE_WHOLE)}")
+    if any(side not in ("a", "b") for side in picks.values()):
+        raise ValueError("each pick is a (the first version) or b (the second)")
+    merged = merge(before, after, picks)
+    from_left = [name for name, side in picks.items() if side == "a" and name not in MERGE_WHOLE]
+    merged, plan_said = _merged_plan(before, after, a.get("commit") and commit_a, merged, from_left,
+                                     current.name or project_id)
+    taken = [name for name, side in picks.items() if side == "a"]
+    _say_in_history(f"合成兩版：{'、'.join(taken) or '全部'}用「{a.get('what')}」" if taken else "合成兩版")
+    result = merged.model_copy(update={"id": project_id, "version": current.version + 1,
+                                       "name": current.name, "branched_from": current.branched_from})
+    validate_project(result, repo.get_assets({clip.asset_id for track in result.tracks for clip in track.clips}))
+    repo.update_project(result, current.version)
+    said = {"new_version": result.version, "seconds": round(float(result.duration), 3), "from_a": taken}
+    if plan_said:
+        said["plan"] = plan_said
+    return said
+
+@mcp.tool()
+def merge_version_parts(project_id: str, commit_a: str, picks: Dict[str, Literal["a", "b"]], expected_version: int,
+                        commit_b: Optional[str] = None, note: str = "") -> dict:
+    """Make a video one cut of two of its versions, taking each part from one or the other.
+
+    For 「開頭用第 3 版的，其他用現在的」. The parts are the ones
+    `compare_versions` lists; each is taken whole, and `music`, `captions`
+    and `caption_style` can be picked for the video as a whole. The result is
+    a new version on top of the video — both versions it came from stay in
+    the history. When both were compiled from one plan, the plan is merged
+    beat by beat too, with the reasons and trims of the beats taken.
+
+    Args:
+        project_id: The video.
+        commit_a: The other version, from `project_history`.
+        picks: `a` for each part, or `music`/`captions`/`caption_style`, to
+            take from `commit_a`; anything left out comes from `commit_b`.
+        expected_version: The project's current version.
+        commit_b: The version the rest comes from; omit for the video as it is.
+        note: The user's own words, kept in the history.
+
+    Returns:
+        `new_version`, its length in `seconds`, `from_a` — what was taken
+        from `commit_a` — and `plan`, what happened to the plan, when it did.
+
+    Raises:
+        ValueError: If a version does not exist, a pick names no part, or the
+            project moved on from `expected_version`.
+    """
+    return merge_versions(project_id, commit_a, commit_b, picks, expected_version)
 
 @mcp.tool()
 def mark_version(project_id: str, commit: str, mark: Literal["starred", "published"], on: bool = True) -> dict:

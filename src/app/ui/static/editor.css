@@ -330,3 +330,10 @@ ul.points { margin: 0 0 10px; padding-left: 18px; color: var(--muted); display: 
 .cchange { border: 0; background: transparent; color: var(--text); font: inherit; text-align: left; padding: 2px 4px; border-radius: 4px; cursor: pointer; }
 .cchange:hover { background: var(--line); }
 .cpart ul .cchange::before { content: "• "; color: var(--muted); }
+.cpart.left { border-color: var(--accent); }
+.cpart-head { justify-content: space-between; }
+.cpick { display: inline-flex; margin-left: auto; border: 1px solid var(--line-2); border-radius: var(--radius-sm); overflow: hidden; flex: none; }
+.cpick button { border: 0; background: transparent; color: var(--muted); font: inherit; font-size: 11.5px; padding: 2px 10px; cursor: pointer; }
+.cpick button + button { border-left: 1px solid var(--line-2); }
+.cpick button.on { background: var(--accent); color: var(--accent-ink); }
+.cmerge { display: flex; align-items: center; justify-content: flex-end; gap: 12px; margin-top: 4px; }

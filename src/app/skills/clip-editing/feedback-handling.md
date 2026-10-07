@@ -65,7 +65,10 @@ the editor's version panel or asks for (「把這版標起來」「這版發到 
 `mark_version`), and `exported`, which a version rendered out wears by itself.
 「回到我標星號那版」 or 「回到發出去那版」 is the version with that mark.
 「這版跟第 3 版差在哪」 is `compare_versions`: what changed, part by part, in
-sentences you can read back as they are.
+sentences you can read back as they are. 「開頭用第 3 版的，其他用現在的」 is
+`merge_version_parts` with those parts picked from the older one — a new
+version on top, with the plan merged by beat when both came from one. The
+user can do the same in the editor's comparison view.
 
 The user can also leave comments in the editor while watching: a moment or
 a stretch of the cut with what they want there. Anything you do to that

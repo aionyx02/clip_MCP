@@ -486,6 +486,17 @@ async def compare_versions(request: Request) -> Response:
     except ValueError as error:
         return _error(str(error), 400)
 
+async def merge_versions(request: Request) -> Response:
+    """Make the video one cut of two versions, the parts picked in the comparison view."""
+    body = await request.json()
+    try:
+        result = await run_in_threadpool(
+            server.merge_versions, request.path_params["project_id"], str(body["a"]), body.get("b") or None,
+            {str(key): str(value) for key, value in (body.get("picks") or {}).items()}, int(body["expected_version"]))
+    except (ValueError, KeyError, TypeError) as error:
+        return _error(str(error), 400)
+    return JSONResponse(result)
+
 async def comments(request: Request) -> Response:
     """Every comment on a video, open and closed (GET), or a new one at a moment or a stretch (POST)."""
     project_id = request.path_params["project_id"]
@@ -1010,7 +1021,7 @@ EDITOR_DOING = (
     ("/api/projects/delete", "把專案移到垃圾桶"), ("/api/trash", "從垃圾桶放回"), ("/api/projects", "新增專案"), ("/api/assets/notes", "寫素材備註"),
     ("/api/assets/delete", "從素材庫拿掉"), ("/api/folders", "整理資料夾"), ("/api/file", "整理位置"),
     ("/api/pick", "加入素材"), ("/api/assets/library", "移動分類"), ("/versions/restore", "回到舊版本"), ("/versions/branch", "開分支"),
-    ("/comments", "留言"),
+    ("/comments", "留言"), ("/versions/merge", "合成兩版"),
 )
 
 class _Stamp:
@@ -1068,6 +1079,7 @@ def create_app() -> Starlette:
         Route("/api/projects/{project_id}/versions/mark", mark, methods=["POST"]),
         Route("/api/projects/{project_id}/comments", comments, methods=["GET", "POST"]),
         Route("/api/projects/{project_id}/versions/compare", compare_versions),
+        Route("/api/projects/{project_id}/versions/merge", merge_versions, methods=["POST"]),
         Route("/api/projects/{project_id}/comments/{comment_id}", comment, methods=["POST"]),
         Route("/api/projects/{project_id}/storage", project_storage),
         Route("/api/projects/{project_id}/storage/trim", trim, methods=["POST"]),
