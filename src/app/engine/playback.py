@@ -234,11 +234,14 @@ def describe(
                 continue
             media = prepared.proxies.get(clip.asset_id)
             if media is None:
+                # Until its copy is made the clip plays from the file itself: heavier, but it plays.
                 waiting.add(clip.asset_id)
+                media = f"/media/{clip.asset_id}"
             gain = (clip_gains.get(clip.id, 0.0) + music_gains.get(track.id, {}).get(clip.id, 0.0)
                     + voices.get(track.id, 0.0))
             entry = {
-                "id": clip.id, "asset_id": clip.asset_id, "proxy": media, "has_video": asset.has_video,
+                "id": clip.id, "asset_id": clip.asset_id, "proxy": media, "original": clip.asset_id in waiting,
+                "has_video": asset.has_video,
                 "has_audio": asset.has_audio, "source_start": _seconds(clip.source_range.start),
                 "source_end": _seconds(clip.source_range.end), "timeline_in": _seconds(clip.timeline_in),
                 "timeline_out": _seconds(clip.timeline_out), "speed": float(clip.speed),

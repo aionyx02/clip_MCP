@@ -126,6 +126,7 @@ async def projects(request: Request) -> Response:
             "folder_id": filed.get(project.id),
             "versions": counts.get(project.id, 0),
             "branches": branched.get(project.id, 0),
+            "megabytes": server.disk_of(project.id),
         })
     return JSONResponse({"projects": listed})
 
@@ -549,7 +550,7 @@ async def delete_projects(request: Request) -> Response:
 async def trash(request: Request) -> Response:
     """What is in the trash (GET), or put one thing back from it (POST)."""
     if request.method == "GET":
-        return JSONResponse(await run_in_threadpool(server.list_trash))
+        return JSONResponse(await run_in_threadpool(server.list_trash, True))
     body = await request.json()
     try:
         return JSONResponse(await run_in_threadpool(server.restore_from_trash, str(body.get("key", ""))))
@@ -935,8 +936,10 @@ class _Stamp:
             return
         path = scope["path"]
         doing = next((said for ending, said in EDITOR_DOING if path.endswith(ending)), "在編輯器操作")
-        with server.history.step("編輯器", doing=doing):
+        with server.history.step("編輯器", doing=doing, later=True) as batch:
             await self.application(scope, receive, send)
+        # Committing waits on the disk and a lock the MCP server shares: off the event loop.
+        await run_in_threadpool(server.history.finish, batch)
 
 class _FreshStatic(StaticFiles):
     """The page's own files, checked with the server every time.

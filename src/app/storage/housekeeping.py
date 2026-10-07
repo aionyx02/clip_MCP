@@ -474,19 +474,31 @@ def put_in_trash(outputs: str, kind: str, project_id: str, name: str, kept: Mapp
     meta = {"kind": kind, "project_id": project_id, "name": name, "trashed_at": now.isoformat(), "files": moved}
     with open(os.path.join(folder, "trashed.json"), "w", encoding="utf-8") as written:
         json.dump(meta, written, ensure_ascii=False, indent=2)
-    return _read_trashed(folder)
+    trashed = _read_trashed(folder)
+    if trashed is None:
+        raise OSError(f"the trash could not keep {name or project_id}")
+    return trashed
+
+def _read_meta(folder: str) -> Optional[dict]:
+    """What a folder in the trash says it holds; None when it is not one."""
+    try:
+        with open(os.path.join(folder, "trashed.json"), encoding="utf-8") as kept:
+            return json.load(kept)
+    except (OSError, ValueError):
+        return None
 
 def _read_trashed(folder: str) -> Optional[Trashed]:
     """One thing in the trash, from its folder; None when the folder is not one."""
+    meta = _read_meta(folder)
+    if meta is None:
+        return None
     try:
-        with open(os.path.join(folder, "trashed.json"), encoding="utf-8") as kept:
-            meta = json.load(kept)
         return Trashed(
             key=os.path.basename(folder), kind=meta["kind"], name=meta.get("name") or "",
             project_id=meta["project_id"], trashed_at=datetime.fromisoformat(meta["trashed_at"]),
             bytes=_size(folder), files=tuple(item["from"] for item in meta.get("files", [])),
         )
-    except (OSError, ValueError, KeyError):
+    except (ValueError, KeyError):
         return None
 
 def in_trash(outputs: str) -> List[Trashed]:
@@ -497,8 +509,36 @@ def in_trash(outputs: str) -> List[Trashed]:
     found = [_read_trashed(entry.path) for entry in os.scandir(root) if entry.is_dir()]
     return sorted((item for item in found if item), key=lambda item: item.trashed_at, reverse=True)
 
-def take_out_of_trash(outputs: str, key: str) -> Tuple[Trashed, Dict[str, bytes], List[str]]:
-    """Take something out of the trash, moving its files back to where they were.
+def look_in_trash(outputs: str, key: str) -> Tuple[Trashed, Dict[str, bytes]]:
+    """Read what something in the trash is and the data kept with it, leaving it there.
+
+    Putting something back reads it first and lets go of it with
+    `take_out_of_trash` only once it is safely back, so a failure on the way
+    loses nothing.
+
+    Args:
+        outputs: Where finished videos are saved.
+        key: Its folder in the trash.
+
+    Returns:
+        `(what, kept)`: what it is, and the data kept with it by file name.
+
+    Raises:
+        KeyError: If there is no such thing in the trash.
+    """
+    folder = os.path.join(trash_dir(outputs), os.path.basename(key))
+    found = _read_trashed(folder)
+    if found is None:
+        raise KeyError(key)
+    kept = {}
+    for entry in os.scandir(folder):
+        if entry.is_file() and entry.name != "trashed.json":
+            with open(entry.path, "rb") as read:
+                kept[entry.name] = read.read()
+    return found, kept
+
+def take_out_of_trash(outputs: str, key: str) -> List[str]:
+    """Move something's files back to where they were, and let go of it.
 
     A file whose place has been taken since comes back beside it with a number
     added, never over it.
@@ -508,23 +548,10 @@ def take_out_of_trash(outputs: str, key: str) -> Tuple[Trashed, Dict[str, bytes]
         key: Its folder in the trash.
 
     Returns:
-        `(what, kept, files)`: what it was, the data kept with it by file
-        name, and where its files are now.
-
-    Raises:
-        KeyError: If there is no such thing in the trash.
+        Where its files are now.
     """
     folder = os.path.join(trash_dir(outputs), os.path.basename(key))
-    found = _read_trashed(folder)
-    if found is None:
-        raise KeyError(key)
-    with open(os.path.join(folder, "trashed.json"), encoding="utf-8") as kept_file:
-        meta = json.load(kept_file)
-    kept = {}
-    for entry in os.scandir(folder):
-        if entry.is_file() and entry.name != "trashed.json":
-            with open(entry.path, "rb") as read:
-                kept[entry.name] = read.read()
+    meta = _read_meta(folder) or {}
     back = []
     for item in meta.get("files", []):
         source = os.path.join(folder, "files", item["name"])
@@ -536,7 +563,11 @@ def take_out_of_trash(outputs: str, key: str) -> Tuple[Trashed, Dict[str, bytes]
         shutil.move(source, target)
         back.append(target)
     shutil.rmtree(folder, ignore_errors=True)
-    return found, kept, back
+    return back
+
+def let_go(outputs: str, key: str) -> None:
+    """Take something out of the trash that never went in, such as a project still being rendered."""
+    shutil.rmtree(os.path.join(trash_dir(outputs), os.path.basename(key)), ignore_errors=True)
 
 def empty_old_trash(outputs: str, now: Optional[datetime] = None) -> int:
     """Remove for good what has been in the trash longer than `TRASH_KEEP_DAYS`.

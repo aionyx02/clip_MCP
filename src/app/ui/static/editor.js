@@ -179,10 +179,11 @@
     const chosen = E.chosenVersion?.commit && node.versions.some((version) => version.commit === E.chosenVersion.commit);
     const thumb = node.thumb ? `<img class="vthumb" loading="lazy" src="${thumbUrl(node.thumb.asset_id, node.thumb.t, 96)}" alt="">` : '<span class="vthumb"></span>';
     const many = node.versions.length > 1 ? ` · ${esc(T.versions.changes(node.versions.length))}` : "";
+    const length = node.seconds ? ` · ${fmt(node.seconds)}` : "";
     return `<li class="vnode${chosen ? " sel" : ""}${current ? " current" : ""}" data-node="${esc(node.commit)}"${branch ? ` data-branch="${esc(branch)}"` : ""}>
       <span class="rail"><i></i></span>${thumb}
       <div class="vtext"><b>${markIcons(node.marks)}${esc(node.what)}</b>
-        <span>${esc(node.by)} · ${esc(node.when)}${many}${current ? ` · ${esc(T.versions.now)}` : ""}</span></div></li>`;
+        <span>${esc(node.by)} · ${esc(node.when)}${length}${many}${current ? ` · ${esc(T.versions.now)}` : ""}</span></div></li>`;
   }
 
   async function drawVersions(panel) {
@@ -226,7 +227,8 @@
     const size = (megabytes) => (megabytes >= 1000 ? `${(megabytes / 1000).toFixed(1)} GB` : `${megabytes.toFixed(megabytes < 10 ? 1 : 0)} MB`);
     box.innerHTML = `<div class="label">${esc(T.versions.diskTitle)}</div>
       <p class="hint">${esc(T.versions.disk(disk.versions, disk.exported, size(disk.outputs_megabytes), size(disk.cache_megabytes)))}</p>
-      <button class="btn small danger" data-trim ${disk.freeable_megabytes > 0 ? "" : "disabled"}>${esc(T.versions.trim(size(disk.freeable_megabytes)))}</button>`;
+      <button class="btn small danger" data-trim ${disk.freeable_megabytes > 0 && E.project.name ? "" : "disabled"}>${esc(T.versions.trim(size(disk.freeable_megabytes)))}</button>
+      ${E.project.name ? "" : `<p class="hint">${esc(T.versions.trimNeedsName)}</p>`}`;
     $("[data-trim]", box).onclick = async () => {
       const name = await confirmTyped(T.versions.trimTitle, T.versions.trimBody(disk.other_outputs.length), E.project.name || "", T.versions.trimAction);
       if (name === null) return;
@@ -273,6 +275,8 @@
       <p class="hint">${esc(node.by)} · ${esc(version.when)}</p>
       ${node.versions.length > 1 ? `<ol class="vmembers">${node.versions.map((item) =>
         `<li class="${item.commit === commit ? "on" : ""}" data-member="${esc(item.commit)}"><span>${esc(item.when)}</span>${esc(item.what)}</li>`).join("")}</ol>` : ""}
+      ${commit === node.commit && node.outputs.length ? `<div class="vouts">${node.outputs.map((output) =>
+        `<button class="btn small" data-reveal-output="${esc(output.job_id)}" title="${esc(T.versions.revealOutput)}">📤 ${esc(output.name)}</button>`).join("")}</div>` : ""}
       <div class="group stack-buttons">
         ${newest ? `<p class="hint">${esc(T.versions.isNow)}</p>` : `<button class="btn primary" data-restore>${esc(T.versions.restore)}</button>`}
         <button class="btn" data-branch-from>${esc(T.versions.branch)}</button>
@@ -281,6 +285,9 @@
           <button class="btn small${isMarked("published") ? " on" : ""}" data-mark="published">${T.versions.markIcons.published} ${esc(T.versions.marks.published)}</button></div>` : ""}
       </div>`;
     box.querySelectorAll("[data-member]").forEach((item) => { item.onclick = () => chooseVersion(E.id, item.dataset.member); });
+    box.querySelectorAll("[data-reveal-output]").forEach((button) => {
+      button.onclick = () => api("/api/reveal", { job_id: button.dataset.revealOutput }).catch((error) => toast(error.message, "error"));
+    });
     const restore = $("[data-restore]", box);
     if (restore) restore.onclick = () => restoreVersion(commit, version.what);
     $("[data-branch-from]", box).onclick = () => branchFrom(commit);
@@ -298,8 +305,9 @@
   }
 
   async function restoreVersion(commit, what) {
+    let restored;
     try {
-      await api(`/api/projects/${encodeURIComponent(E.id)}/versions/restore`, { commit, expected_version: E.project.version });
+      restored = await api(`/api/projects/${encodeURIComponent(E.id)}/versions/restore`, { commit, expected_version: E.project.version });
     } catch (error) {
       toast(/version conflict/.test(error.message) ? T.editor.conflict : error.message, "error");
       return;
@@ -311,7 +319,8 @@
     await loadGraph(true);
     drawAll();
     refreshPlayback();
-    toast(T.versions.restored(what));
+    // A plan another video shares was copied for this one, which the user should know.
+    toast(restored.plan_copied ? T.versions.restoredWithCopy(what) : T.versions.restored(what));
   }
 
   function branchFrom(commit) {

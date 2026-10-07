@@ -412,7 +412,7 @@ async function projectsPage(page, folderId) {
       return `<a class="card" href="#/project/${encodeURIComponent(project.id)}" data-drag="item" data-id="${esc(project.id)}" draggable="true">${extras}
         <div class="thumb">${picture}<span class="badge">${clock(project.duration)}</span></div>
         <div class="card-body"><div class="card-title">${esc(project.name || T.projects.untitled)}${project.name ? "" : ` <span class="badge warn">${esc(T.projects.nameIt)}</span>`}</div>
-        <div class="card-meta"><span>${esc(T.projects.shapes[shape])}</span><span class="dot-sep">${esc(T.projects.clips(project.clips))}</span>${project.versions ? `<span class="dot-sep">${esc(T.projects.versions(project.versions, project.branches))}</span>` : ""}${missing}</div></div></a>`;
+        <div class="card-meta"><span>${esc(T.projects.shapes[shape])}</span><span class="dot-sep">${esc(T.projects.clips(project.clips))}</span>${project.versions ? `<span class="dot-sep">${esc(T.projects.versions(project.versions, project.branches))}</span>` : ""}${project.megabytes >= 1 ? `<span class="dot-sep">${esc(T.projects.disk(bytes(project.megabytes)))}</span>` : ""}${missing}</div></div></a>`;
     },
   });
 }

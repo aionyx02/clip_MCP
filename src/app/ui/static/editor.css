@@ -234,5 +234,7 @@ ul.points { margin: 0 0 10px; padding-left: 18px; color: var(--muted); display: 
 .vmembers li.on { color: var(--text); background: var(--line); }
 .vmarks { display: flex; gap: 6px; }
 .vmarks .btn.on { border-color: var(--accent); color: var(--text); }
+.vouts { display: flex; flex-direction: column; gap: 4px; align-items: flex-start; }
+.vouts .btn { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .vviewing { display: flex; gap: 8px; align-items: center; justify-content: space-between; padding: 6px 8px; border-radius: 6px; background: color-mix(in srgb, var(--warn) 18%, transparent); font-size: 12px; }
 .editor.viewing-old .ed-viewer { box-shadow: inset 0 0 0 2px var(--warn); }

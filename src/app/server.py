@@ -1,3 +1,4 @@
+import hashlib
 import json
 import os
 from datetime import datetime, timezone
@@ -728,9 +729,6 @@ def organize_library(steps: List[LibraryStep], note: str = "") -> dict:
     Raises:
         ValueError: If a folder or file is unknown, or a name is taken.
     """
-    batch = current_batch()
-    if batch is not None and not batch.note and note:
-        batch.note = note
     names = {folder["id"]: folder["name"] for folder in repo.list_folders("assets")}
     done = []
     for step in steps:
@@ -756,8 +754,7 @@ def organize_library(steps: List[LibraryStep], note: str = "") -> dict:
                             + (f"「{names.get(step.folder_id, step.folder_id)}」" if step.folder_id else "最上層"))
         except LookupError as exc:
             raise ValueError(str(exc).strip("'\"")) from exc
-    if batch is not None and not batch.note and done:
-        batch.note = "；".join(done)[:72]
+    _say_in_history("；".join(done))
     return {"done": done, "folders": repo.list_folders("assets")}
 
 class FileMove(BaseModel):
@@ -777,14 +774,21 @@ def _free_target(folder: str, name: str, taken: set) -> str:
         number += 1
     return candidate
 
+def _inside(path: str, folder: str) -> bool:
+    """Whether a path is a folder or inside it, whole names only: `D:\\work2` is not inside `D:\\work`."""
+    path, folder = os.path.normcase(os.path.abspath(path)), os.path.normcase(os.path.abspath(folder))
+    return path == folder or path.startswith(folder.rstrip(os.sep) + os.sep)
+
 def _planned_moves(moves: List[FileMove]) -> List[dict]:
     """Where each file would go, and what that touches."""
-    own = [os.path.normcase(os.path.abspath(folder)) for folder in (WORKSPACE_DIR, str(output_dir()))]
-    users = {}
+    users: Dict[str, set] = {}
+    using: Dict[str, set] = {}
     for project in repo.list_projects():
         for track in project.tracks:
             for clip in track.clips:
                 users.setdefault(clip.asset_id, set()).add(project.name or project.id)
+                using.setdefault(clip.asset_id, set()).add(project.id)
+    working = repo.jobs_to_show(datetime.now(timezone.utc))[0]
     taken: set = set()
     planned = []
     for move in moves:
@@ -792,7 +796,7 @@ def _planned_moves(moves: List[FileMove]) -> List[dict]:
         if not os.path.isabs(move.to_folder):
             raise ValueError(f"{move.to_folder} is not a full folder path")
         folder = os.path.abspath(move.to_folder)
-        if any(os.path.normcase(folder).startswith(root) for root in own):
+        if any(_inside(folder, own) for own in (WORKSPACE_DIR, str(output_dir()))):
             raise ValueError("footage is not moved into clip-mcp's own folders")
         name = (move.name or os.path.basename(asset.path)).strip()
         if not name or os.path.basename(name) != name:
@@ -809,47 +813,59 @@ def _planned_moves(moves: List[FileMove]) -> List[dict]:
             "new_folder": not os.path.isdir(folder),
             "megabytes": round(os.path.getsize(asset.path) / 1e6, 1) if os.path.exists(asset.path) else 0,
             "projects": sorted(users.get(asset.id, ())),
+            # A render or an analysis has the file open: Windows will not let it move.
+            "busy": any(job.asset_id == asset.id or job.project_id in using.get(asset.id, ()) for job in working),
         })
     return planned
 
+def _plan_key(planned: List[dict]) -> str:
+    """A short name for exactly this plan, so what is carried out is what the user was shown."""
+    moves = [[plan["asset_id"], plan["from"], plan["to"]] for plan in planned]
+    return hashlib.sha256(json.dumps(moves, ensure_ascii=False).encode("utf-8")).hexdigest()[:12]
+
 @mcp.tool()
-def move_files(moves: List[FileMove], confirm: bool = False, note: str = "") -> dict:
+def move_files(moves: List[FileMove], confirm_plan: Optional[str] = None, note: str = "") -> dict:
     """Move or rename footage on disk, keeping the library and every project pointing at it.
 
-    Moving a user's own files is theirs to agree to. Call without `confirm`
-    first: it moves nothing and says where each file would go. Read that back
-    — how many files, from where to where, any that get a number added — and
-    call again with `confirm` only once they agree. Nothing is overwritten: a
-    name already taken gets ` (2)` added. Nothing is deleted: footage they do
-    not want goes to an 歸檔 folder like any other move. Projects keep
-    working, since the library follows each file to where it went.
+    Moving a user's own files is theirs to agree to. Call without
+    `confirm_plan` first: it moves nothing, says where each file would go, and
+    names that `plan`. Read it back — how many files, from where to where, any
+    that get a number added — and call again with the same moves and
+    `confirm_plan` set to that `plan` only once they agree; a plan that has
+    changed since is refused. Nothing is overwritten: a name already taken
+    gets ` (2)` added. Nothing is deleted: footage they do not want goes to an
+    歸檔 folder like any other move. Projects keep working, since the library
+    follows each file to where it went.
 
     Args:
         moves: Each file and the folder to move it to, with a new name if wanted.
-        confirm: Carry it out.
+        confirm_plan: The `plan` the user agreed to; carries it out.
         note: The user's words for why, kept in the library's history.
 
     Returns:
-        Without `confirm`: `planned`, each with `from`, `to`, `numbered`
-        (a number was added), `new_folder`, `megabytes`, the `projects`
-        using it, and `missing` for a file not found where the library has
-        it. With it: `moved` and `not_moved` with the reason, such as a file
-        open in another program.
+        Without `confirm_plan`: `plan`, and `planned`, each with `from`, `to`,
+        `numbered` (a number was added), `new_folder`, `megabytes`, the
+        `projects` using it, `busy` for a file a render or analysis has open,
+        and `missing` for a file not found where the library has it. With it:
+        `moved`, and `not_moved` with the reason.
 
     Raises:
         ValueError: If a file is not in the library, a folder is not a full
-            path or is one of clip-mcp's own.
+            path or is one of clip-mcp's own, or the plan is not the one shown.
     """
     planned = _planned_moves(moves)
-    if not confirm:
-        return {"planned": planned}
-    batch = current_batch()
-    if batch is not None and not batch.note:
-        batch.note = note or f"搬動了 {len(planned)} 個檔案"
+    if confirm_plan is None:
+        return {"plan": _plan_key(planned), "planned": planned}
+    if confirm_plan.strip() != _plan_key(planned):
+        raise ValueError("this is not the plan the user was shown: things have changed since, so show them the new "
+                         "plan and ask again")
+    _say_in_history(note or f"搬動了 {len(planned)} 個檔案")
     moved, not_moved = [], []
     for plan in planned:
-        if plan["already_there"] or plan["missing"]:
-            not_moved.append({"from": plan["from"], "why": "already there" if plan["already_there"] else "file not found"})
+        why = ("already there" if plan["already_there"] else "file not found" if plan["missing"]
+               else "in use by a render or an analysis" if plan["busy"] else "")
+        if why:
+            not_moved.append({"from": plan["from"], "why": why})
             continue
         # Worked out again at the moment of moving: a file may have appeared there since the plan.
         target = _free_target(os.path.dirname(plan["to"]), os.path.basename(plan["to"]), set())
@@ -857,6 +873,12 @@ def move_files(moves: List[FileMove], confirm: bool = False, note: str = "") -> 
             os.makedirs(os.path.dirname(target), exist_ok=True)
             shutil.move(plan["from"], target)
         except OSError as exc:
+            # Across drives a move is a copy first: one that stopped halfway is ours to take back.
+            if os.path.exists(plan["from"]) and os.path.exists(target):
+                try:
+                    os.remove(target)
+                except OSError:
+                    pass
             not_moved.append({"from": plan["from"], "why": str(exc)})
             continue
         asset = _get_asset(plan["asset_id"])
@@ -4653,7 +4675,10 @@ def export_timeline(
 # watch, such as a test run.
 PREPARE_PLAYBACK = True
 # What a preparation job is expected to hold in memory: one FFmpeg encoding a small picture.
+# Provisional: an estimate, not measured.
 PREPARE_MEMORY_BYTES = 300 * 1024 * 1024
+# Giving cache room back looks at the disk at most this often, in seconds. Provisional.
+ROOM_CHECK_SECONDS = 60
 
 def _being_prepared() -> set:
     """The files preparation jobs still waiting or running will write, so none is asked for twice."""
@@ -4787,6 +4812,23 @@ def playback_of(project: Project, urgent: bool = True) -> dict:
 # version that was rendered out, not as a preview, wears it by itself.
 VERSION_MARKS = ("starred", "published")
 
+def _say_in_history(words: str) -> None:
+    """Give the version being made these words, unless the user's own were passed on."""
+    batch = current_batch()
+    if batch is not None and not batch.note and words:
+        batch.note = words
+
+def _project_json_at(project_id: str, commit: str) -> Optional[dict]:
+    """A project as its file held it at one version, or None when it was not there then."""
+    path = history.find("projects/", f"{project_id}.json", commit)
+    content = history.read(path, commit) if path else None
+    return json.loads(content) if content else None
+
+def _branches_of(project_id: str) -> List[Project]:
+    """The projects started as branches of this one."""
+    return [other for other in repo.list_projects()
+            if other.branched_from is not None and other.branched_from.project_id == project_id]
+
 def _version_record(version: Version, marks: Iterable[str] = ()) -> dict:
     """One version of a project as the AI reads it."""
     return {
@@ -4802,27 +4844,33 @@ def _project_versions(project_id: str, limit: int) -> List[Tuple[Version, Option
 
     Returns:
         `(version, project, marks)`, the project None where the version took
-        it away.
+        it away. A version whose finished video is still there is `exported`;
+        one whose finished video has gone since, `removed`.
     """
     marks = repo.version_marks(project_id)
-    delivered = {job.project_version for job in _outputs_of(project_id)}
+    delivered = _delivered_renders(project_id)
+    there = {job.project_version for job in delivered if os.path.exists(job.output_path)}
+    gone = {job.project_version for job in delivered} - there
     found = []
     for version in history.versions_of("projects/", f"{project_id}.json", limit):
-        path = history.find("projects/", f"{project_id}.json", version.commit)
-        content = history.read(path, version.commit) if path else None
-        data = json.loads(content) if content else None
+        data = _project_json_at(project_id, version.commit)
         marked = set(marks.get(version.commit, ()))
-        if data is not None and data.get("version") in delivered:
+        if data is not None and data.get("version") in there:
             marked.add("exported")
+        elif data is not None and data.get("version") in gone:
+            marked.add("removed")
         found.append((version, data, marked))
     return found
 
-def _outputs_of(project_id: str) -> List[Job]:
-    """The finished videos of a project that are still where they were saved; previews are not among them."""
+def _delivered_renders(project_id: str) -> List[Job]:
+    """Every full render of a project that finished, whether its file is still there or not."""
     previews = os.path.abspath(housekeeping.preview_dir(WORKSPACE_DIR, project_id))
     return [job for job in repo.renders_of(project_id)
-            if job.output_path and not os.path.abspath(job.output_path).startswith(previews)
-            and os.path.exists(job.output_path)]
+            if job.output_path and not os.path.abspath(job.output_path).startswith(previews)]
+
+def _outputs_of(project_id: str) -> List[Job]:
+    """The finished videos of a project that are still where they were saved; previews are not among them."""
+    return [job for job in _delivered_renders(project_id) if os.path.exists(job.output_path)]
 
 def _project_caches(project_id: str) -> List[str]:
     """The folders of a project's previews and sound checks: made again when wanted."""
@@ -4833,8 +4881,8 @@ def project_storage(project_id: str) -> dict:
 
     Its other versions are the finished videos of every version but the one
     it is now and those the user starred or marked published; with them go
-    its previews. The versions themselves stay in the history, only no longer
-    exported.
+    its previews. The versions themselves stay in the history, marked as no
+    longer exported.
 
     Args:
         project_id: The video.
@@ -4854,24 +4902,30 @@ def project_storage(project_id: str) -> dict:
     kept = {project.version}
     for commit, marks in repo.version_marks(project_id).items():
         if marks & set(VERSION_MARKS):
-            path = history.find("projects/", f"{project_id}.json", commit)
-            content = history.read(path, commit) if path else None
-            if content:
-                kept.add(json.loads(content).get("version"))
+            data = _project_json_at(project_id, commit)
+            if data:
+                kept.add(data.get("version"))
     outputs = _outputs_of(project_id)
     others = [job for job in outputs if job.project_version not in kept]
     size = {job.job_id: housekeeping.size_of(job.output_path) for job in outputs}
-    cache = sum(housekeeping.size_of(folder) for folder in _project_caches(project_id))
-    branches = sum(1 for other in repo.list_projects()
-                   if other.branched_from is not None and other.branched_from.project_id == project_id)
+    cache = _cache_bytes(project_id)
     return {
-        "versions": history.counts("projects/").get(project_id, 0), "branches": branches,
+        "versions": history.counts("projects/").get(project_id, 0), "branches": len(_branches_of(project_id)),
         "exported": len({job.project_version for job in outputs}),
         "outputs_megabytes": round(sum(size.values()) / 1e6, 1),
         "cache_megabytes": round(cache / 1e6, 1),
         "freeable_megabytes": round((sum(size[job.job_id] for job in others) + cache) / 1e6, 1),
         "other_outputs": [{"path": job.output_path, "megabytes": round(size[job.job_id] / 1e6, 1)} for job in others],
     }
+
+def _cache_bytes(project_id: str) -> int:
+    """What a project's previews and sound checks take."""
+    return sum(housekeeping.size_of(folder) for folder in _project_caches(project_id))
+
+def disk_of(project_id: str) -> float:
+    """What a video takes on disk in megabytes, its finished videos and previews together, for its card."""
+    outputs = sum(housekeeping.size_of(job.output_path) for job in _outputs_of(project_id))
+    return round((outputs + _cache_bytes(project_id)) / 1e6, 1)
 
 def trim_project(project_id: str, typed_name: str) -> dict:
     """Delete a video's other versions: their finished videos go to the trash, its previews go.
@@ -4892,7 +4946,9 @@ def trim_project(project_id: str, typed_name: str) -> dict:
     project = repo.get_project(project_id)
     if project is None:
         raise ValueError(f"project {project_id} not found")
-    if typed_name.strip() != (project.name or "").strip():
+    if not (project.name or "").strip():
+        raise ValueError("name the video first: its name is what is typed to confirm")
+    if typed_name.strip() != project.name.strip():
         raise ValueError("the name typed is not the video's name")
     found = project_storage(project_id)
     paths = [item["path"] for item in found["other_outputs"]]
@@ -4917,7 +4973,8 @@ def trash_projects(project_ids: List[str]) -> dict:
 
     Their finished videos stay where they were saved; their previews go,
     since they are made again. A project waits in the trash for
-    `TRASH_KEEP_DAYS` days and can be put back until then.
+    `TRASH_KEEP_DAYS` days and can be put back until then. Each is in the
+    trash before it leaves the database, so nothing is lost on the way.
 
     Args:
         project_ids: The projects.
@@ -4927,27 +4984,35 @@ def trash_projects(project_ids: List[str]) -> dict:
         rendered; when `busy` is not empty nothing was moved.
     """
     job_manager.forget_abandoned()
-    before = {project_id: repo.get_project(project_id) for project_id in project_ids}
+    before = {project_id: project for project_id in project_ids if (project := repo.get_project(project_id))}
     filed = repo.folder_of("projects")
-    batch = current_batch()
-    named = [project.name for project in before.values() if project is not None and project.name]
-    if batch is not None and not batch.note and named:
-        batch.note = f"把「{'」「'.join(named[:3])}」移到垃圾桶" + (f"等 {len(named)} 支" if len(named) > 3 else "")
-    deleted, busy = repo.delete_projects(project_ids)
+    named = [project.name for project in before.values() if project.name]
+    _say_in_history(f"把「{'」「'.join(named[:3])}」移到垃圾桶" + (f"等 {len(named)} 支" if len(named) > 3 else ""))
     outputs = str(output_dir())
-    for project_id in deleted:
-        project = before[project_id]
-        housekeeping.put_in_trash(outputs, "project", project_id, project.name or "", {
+    trashed = {
+        project_id: housekeeping.put_in_trash(outputs, "project", project_id, project.name or "", {
             "project.json": project.model_dump_json().encode("utf-8"),
             "place.json": json.dumps({"folder_id": filed.get(project_id)}).encode("utf-8"),
         }, [])
+        for project_id, project in before.items()
+    }
+    deleted, busy = repo.delete_projects(list(before))
+    for project_id, kept in trashed.items():
+        if project_id not in deleted:
+            housekeeping.let_go(outputs, kept.key)
+    for project_id in deleted:
         for folder in _project_caches(project_id):
             shutil.rmtree(folder, ignore_errors=True)
     housekeeping.empty_old_trash(outputs)
     return {"deleted": deleted, "busy": busy}
 
-def list_trash() -> dict:
-    """What is in the trash, after removing what has waited there longer than it keeps things.
+def list_trash(expire: bool = False) -> dict:
+    """What is in the trash.
+
+    Args:
+        expire: First remove for good what has waited longer than the trash
+            keeps things. Only the editor asks for that: the AI reads the
+            trash and never deletes anything.
 
     Returns:
         `items`, newest first, each with its `key`, `kind` (`project` or
@@ -4955,7 +5020,8 @@ def list_trash() -> dict:
         `keep_days`.
     """
     outputs = str(output_dir())
-    housekeeping.empty_old_trash(outputs)
+    if expire:
+        housekeeping.empty_old_trash(outputs)
     now = datetime.now(timezone.utc)
     return {
         "items": [{"key": item.key, "kind": item.kind, "name": item.name, "project_id": item.project_id,
@@ -4967,6 +5033,8 @@ def list_trash() -> dict:
 def restore_from_trash(key: str) -> dict:
     """Put something back from the trash: a project as it was, or finished videos where they were.
 
+    The trash lets go of it only once the project is back in the database.
+
     Args:
         key: Its `key` from `list_trash`.
 
@@ -4977,15 +5045,14 @@ def restore_from_trash(key: str) -> dict:
     Raises:
         ValueError: If there is no such thing in the trash.
     """
+    outputs = str(output_dir())
     try:
-        what, kept, back = housekeeping.take_out_of_trash(str(output_dir()), key)
+        what, kept = housekeeping.look_in_trash(outputs, key)
     except KeyError as exc:
         raise ValueError(f"{key} is not in the trash") from exc
     project_id = what.project_id
     if what.kind == "project" and "project.json" in kept:
-        batch = current_batch()
-        if batch is not None and not batch.note:
-            batch.note = f"從垃圾桶放回「{what.name}」"
+        _say_in_history(f"從垃圾桶放回「{what.name}」")
         project = Project.model_validate_json(kept["project.json"])
         if repo.get_project(project.id) is not None:
             project = project.model_copy(update={"id": str(uuid.uuid4())})
@@ -4994,10 +5061,9 @@ def restore_from_trash(key: str) -> dict:
         folder = json.loads(kept.get("place.json", b"{}")).get("folder_id")
         if folder and any(item["id"] == folder for item in repo.list_folders("projects")):
             repo.file_items("projects", [project.id], folder)
+    back = housekeeping.take_out_of_trash(outputs, key)
     return {"kind": what.kind, "name": what.name, "project_id": project_id, "files": back}
 
-# Giving cache room back looks at the disk at most this often, in seconds.
-ROOM_CHECK_SECONDS = 60
 _room_checked = 0.0
 
 def _make_room() -> None:
@@ -5008,57 +5074,72 @@ def _make_room() -> None:
     _room_checked = time.monotonic()
     housekeeping.give_cache_back(WORKSPACE_DIR, repo.active_job_ids())
 
+def _base_clips(data: Optional[dict]) -> List[dict]:
+    """A project's sequence, as its file holds it, in the order it plays."""
+    base = next((track for track in (data or {}).get("tracks", []) if track.get("track_type") == "video"), None)
+    return sorted(base.get("clips", []) if base else [], key=lambda clip: float(clip["timeline_in"]))
+
 def _thumb_of(data: Optional[dict]) -> Optional[dict]:
-    """Which frame stands for a version: the sequence a third of the way in."""
-    if not data:
-        return None
-    base = next((track for track in data.get("tracks", []) if track.get("track_type") == "video"), None)
-    clips = sorted(base.get("clips", []) if base else [], key=lambda clip: float(clip["timeline_in"]))
+    """Which frame stands for a version: its first shot, a second in, as the projects page shows it."""
+    clips = _base_clips(data)
     if not clips:
         return None
-    length = sum((float(clip["source_range"]["end"]) - float(clip["source_range"]["start"])) / float(clip.get("speed") or 1)
-                 for clip in clips)
-    at, chosen = length / 3, clips[-1]
-    for clip in clips:
-        span = (float(clip["source_range"]["end"]) - float(clip["source_range"]["start"])) / float(clip.get("speed") or 1)
-        if float(clip["timeline_in"]) + span > at:
-            chosen = clip
-            break
-    into = max(0.0, at - float(chosen["timeline_in"])) * float(chosen.get("speed") or 1)
-    end = float(chosen["source_range"]["end"])
-    return {"asset_id": chosen["asset_id"], "t": round(min(float(chosen["source_range"]["start"]) + into, end - 0.05), 2)}
+    first = clips[0]
+    start, end = float(first["source_range"]["start"]), float(first["source_range"]["end"])
+    return {"asset_id": first["asset_id"], "t": round(min(start + 1.0, (start + end) / 2), 2)}
 
-def _version_nodes(entries: List[Tuple[Version, Optional[dict], set]], apart: set) -> List[dict]:
+def _length_of(data: Optional[dict]) -> float:
+    """How long a version runs: where its sequence ends."""
+    return round(max((float(clip["timeline_in"])
+                      + (float(clip["source_range"]["end"]) - float(clip["source_range"]["start"]))
+                      / float(clip.get("speed") or 1) for clip in _base_clips(data)), default=0.0), 2)
+
+def _version_nodes(entries: List[Tuple[Version, Optional[dict], set]], apart: set,
+                   outputs: Mapping[int, List[Job]]) -> List[dict]:
     """Group versions into what the version panel shows as one dot each.
 
     A run of changes by one author with nothing rendered out between them is
     one dot: twenty nudges in the editor are one sitting, not twenty
-    versions. A version with a mark, or one a branch started from, always
-    gets its own.
+    versions. A render ends a sitting, so a rendered version heads its own
+    dot; a version the user starred or marked published, or one a branch
+    started from, stands alone.
 
     Args:
         entries: From `_project_versions`, newest first.
         apart: Commits that must not be folded into another's dot.
+        outputs: The finished videos still there, by the project version
+            they were rendered from.
 
     Returns:
         The dots, newest first, each named by its newest version.
     """
+    alone = set(VERSION_MARKS)
     nodes: List[dict] = []
     for version, data, marked in entries:
         record = {"commit": version.commit, "what": version.subject,
                   "when": version.when.astimezone().strftime("%m/%d %H:%M")}
         last = nodes[-1] if nodes else None
-        if (last is not None and last["by"] == version.author and not marked
+        if (last is not None and last["by"] == version.author and not marked and not alone & set(last["marks"])
                 and version.commit not in apart and last["versions"][-1]["commit"] not in apart):
             last["versions"].append(record)
             continue
+        number = data.get("version") if data else None
         nodes.append({
             "commit": version.commit, "when": record["when"], "by": version.author, "what": version.subject,
-            "body": version.body, "marks": sorted(marked), "gone": data is None,
-            "project_version": data.get("version") if data else None, "thumb": _thumb_of(data),
+            "body": version.body, "marks": sorted(marked), "gone": data is None, "project_version": number,
+            "thumb": _thumb_of(data), "seconds": _length_of(data),
+            "outputs": [{"job_id": job.job_id, "name": os.path.basename(job.output_path)}
+                        for job in outputs.get(number, [])],
             "versions": [record],
         })
     return nodes
+
+def _nodes_of(project_id: str, limit: int, apart: set) -> List[dict]:
+    """A project's dots for the version panel."""
+    outputs: Dict[int, List[Job]] = {}
+    for job in _outputs_of(project_id):
+        outputs.setdefault(job.project_version, []).append(job)
+    return _version_nodes(_project_versions(project_id, limit), apart, outputs)
 
 def version_graph(project_id: str, limit: int = 200) -> dict:
     """Everything the editor's version panel draws for one video.
@@ -5078,8 +5159,7 @@ def version_graph(project_id: str, limit: int = 200) -> dict:
     project = repo.get_project(project_id)
     if project is None:
         raise ValueError(f"project {project_id} not found")
-    branches = [other for other in repo.list_projects()
-                if other.branched_from is not None and other.branched_from.project_id == project_id]
+    branches = _branches_of(project_id)
     starts = {branch.branched_from.commit for branch in branches}
     parent = None
     if project.branched_from is not None:
@@ -5091,10 +5171,10 @@ def version_graph(project_id: str, limit: int = 200) -> dict:
                   "name": source.name if source else None, "what": start.subject if start else None}
     return {
         "project": {"id": project.id, "name": project.name, "version": project.version},
-        "nodes": _version_nodes(_project_versions(project_id, limit), starts),
+        "nodes": _nodes_of(project_id, limit, starts),
         "branches": [
             {"project_id": branch.id, "name": branch.name, "from": branch.branched_from.commit,
-             "nodes": _version_nodes(_project_versions(branch.id, 30), set())}
+             "nodes": _nodes_of(branch.id, 30, set())}
             for branch in sorted(branches, key=lambda item: item.name or "")
         ],
         "branched_from": parent,
@@ -5204,9 +5284,8 @@ def restore_version(project_id: str, commit: str, expected_version: int, note: s
     earlier = _project_at(project_id, commit)
     chosen = next((version for version in history.versions_of("projects/", f"{project_id}.json", 500)
                    if version.commit.startswith(commit.strip().lower())), None)
-    batch = current_batch()
-    if batch is not None and not batch.note and chosen is not None:
-        batch.note = f"回到「{chosen.subject}」那一版"
+    if chosen is not None:
+        _say_in_history(f"回到「{chosen.subject}」那一版")
     renamed: Dict[str, str] = {}
     copied = False
     others = [other for other in repo.list_projects() if other.id != project_id]
@@ -5270,9 +5349,7 @@ def branch_project(project_id: str, name: str, commit: Optional[str] = None, not
         "id": str(uuid.uuid4()), "name": name.strip(), "version": 1,
         "branched_from": BranchPoint(project_id=project_id, commit=found),
     })
-    batch = current_batch()
-    if batch is not None and not batch.note:
-        batch.note = f"從「{current.name or project_id}」開分支「{branch.name}」"
+    _say_in_history(f"從「{current.name or project_id}」開分支「{branch.name}」")
     repo.add_project(branch)
     folder = repo.folder_of("projects").get(project_id)
     if folder:
@@ -5306,7 +5383,8 @@ def mark_version(project_id: str, commit: str, mark: Literal["starred", "publish
     if chosen is None:
         raise ValueError(f"project {project_id} has no version {commit}")
     repo.set_version_mark(project_id, chosen.commit, mark, on)
-    marks = next(marked for version, _, marked in _project_versions(project_id, 500) if version.commit == chosen.commit)
+    marks = next((marked for version, _, marked in _project_versions(project_id, 500)
+                  if version.commit == chosen.commit), set(repo.version_marks(project_id).get(chosen.commit, ())))
     return {"commit": chosen.commit[:10], "marks": sorted(marks)}
 
 @mcp.tool()

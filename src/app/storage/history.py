@@ -35,8 +35,10 @@ from dulwich.repo import Repo
 from filelock import FileLock
 
 # Who a commit is written by when nobody said: a write outside any tool call or editor
-# action, such as starting the history or a background job.
-SERVER_AUTHOR = "clip-mcp"
+# action, such as starting the history or a background job. Said the way the panel reads it.
+SERVER_AUTHOR = "自動"
+# A project's ID at the end of its file's name.
+_ID_AT_END = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 # Every commit carries the same address: the name says who; the address only has to be valid.
 AUTHOR_EMAIL = "clip-mcp@localhost"
 # How many characters of a commit's first line: long enough for a sentence, short enough
@@ -107,6 +109,8 @@ class Batch:
     doing: str = ""
     files: Dict[str, Tuple[Optional[bytes], Optional[bytes]]] = field(default_factory=dict)
     said: List[str] = field(default_factory=list)
+    # Ended, with its commit left to `History.finish`.
+    waiting: bool = False
 
 
 _batch: ContextVar[Optional[Batch]] = ContextVar("history_batch", default=None)
@@ -157,7 +161,7 @@ class History:
         self._counted: Dict[str, Tuple[str, Dict[str, int]]] = {}
 
     @contextmanager
-    def step(self, author: str, note: str = "", doing: str = "") -> Iterator[Batch]:
+    def step(self, author: str, note: str = "", doing: str = "", later: bool = False) -> Iterator[Batch]:
         """Gather every write made inside the block into one commit.
 
         A step inside a step belongs to the outer one: a tool that calls
@@ -167,6 +171,9 @@ class History:
             author: Who is taking the step.
             note: The user's own words for it, if any were passed on.
             doing: What is being done, for the summary when there is no note.
+            later: Leave the commit to `finish`, for a caller that must not
+                wait on the disk where the block ends, such as the editor's
+                event loop.
 
         Yields:
             The batch being gathered.
@@ -181,8 +188,21 @@ class History:
             yield batch
         finally:
             _batch.reset(token)
-        if batch.files:
+        if later:
+            batch.waiting = True
+        elif batch.files:
             self._commit(batch)
+
+    def finish(self, batch: Batch) -> None:
+        """Commit a step that was left for later; nothing for any other.
+
+        Args:
+            batch: What `step` yielded.
+        """
+        if batch.waiting:
+            batch.waiting = False
+            if batch.files:
+                self._commit(batch)
 
     def write(self, path: str, content: Optional[bytes], said: str = "") -> None:
         """Record that a file in the history now holds this, or is gone.
@@ -435,9 +455,10 @@ class History:
                         for side in (one.old, one.new):
                             if side is not None and side.path and side.path.startswith(folder):
                                 stem = side.path.decode("utf-8").rsplit("/", 1)[-1].removesuffix(".json")
-                                seen.add(stem[-36:])
-                for found in seen:
-                    counted[found] = counted.get(found, 0) + 1
+                                found = _ID_AT_END.search(stem)
+                                seen.add(found.group(0) if found else stem)
+                for item in seen:
+                    counted[item] = counted.get(item, 0) + 1
         self._counted[prefix] = (head, counted)
         return counted
 

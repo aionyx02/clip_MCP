@@ -139,13 +139,54 @@ def test_files_move_on_disk_only_once_agreed_and_never_over_another(media: Path,
     (target / "要搬的.mp4").write_bytes(b"already here")
 
     moves = [server.FileMove(asset_id=asset, to_folder=str(target))]
-    planned = server.move_files(moves)["planned"][0]
+    shown = server.move_files(moves)
+    planned = shown["planned"][0]
     # Nothing moves without agreement, and the taken name gets a number.
     assert source.exists() and planned["numbered"] and planned["to"].endswith("要搬的 (2).mp4")
     assert planned["projects"] == ["搬檔"]
 
-    moved = server.move_files(moves, confirm=True)["moved"][0]
+    # Only the plan the user was shown is carried out.
+    with pytest.raises(ValueError):
+        server.move_files(moves, confirm_plan="something else")
+    assert source.exists()
+    moved = server.move_files(moves, confirm_plan=shown["plan"])["moved"][0]
     assert not source.exists() and (target / "要搬的.mp4").read_bytes() == b"already here"
     assert server.repo.get_assets([asset])[asset].path == moved["to"] == str(target / "要搬的 (2).mp4")
     # The project still plays it, from where it went.
     assert server.playback_of(server.repo.get_project(project))["tracks"][0]["clips"][0]["asset_id"] == asset
+
+
+def test_a_folder_next_to_clip_mcp_s_own_is_not_taken_for_it(tmp_path: Path) -> None:
+    assert server._inside(str(tmp_path / "work" / "a"), str(tmp_path / "work"))
+    assert not server._inside(str(tmp_path / "work2"), str(tmp_path / "work"))
+
+
+def test_the_ai_reading_the_trash_deletes_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(server, "output_dir", lambda: tmp_path)
+    old = housekeeping.put_in_trash(str(tmp_path), "project", "b" * 36, "過期了", {"project.json": b"{}"}, [])
+    meta = tmp_path / housekeeping.TRASH / old.key / "trashed.json"
+    import json
+    data = json.loads(meta.read_text(encoding="utf-8"))
+    data["trashed_at"] = (datetime.now(timezone.utc) - timedelta(days=40)).isoformat()
+    meta.write_text(json.dumps(data), encoding="utf-8")
+    assert [item["key"] for item in server.storage_usage()["trash"]] == [old.key]
+    # The editor's own look at it is what lets it go.
+    assert server.list_trash(expire=True)["items"] == []
+
+
+def test_a_broken_project_in_the_trash_stays_there(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(server, "output_dir", lambda: tmp_path)
+    kept = housekeeping.put_in_trash(str(tmp_path), "project", "c" * 36, "壞掉的", {"project.json": b"not json"}, [])
+    with pytest.raises(ValueError):
+        server.restore_from_trash(kept.key)
+    assert [item.key for item in housekeeping.in_trash(str(tmp_path))] == [kept.key]
+
+
+def test_other_versions_of_a_video_with_no_name_are_not_let_go(media: Path) -> None:
+    import uuid
+
+    named = server.repo.get_project(server.create_project(name="有名字")["id"])
+    nameless = named.model_copy(update={"id": str(uuid.uuid4()), "name": ""})
+    server.repo.add_project(nameless)
+    with pytest.raises(ValueError, match="name the video first"):
+        server.trim_project(nameless.id, "")

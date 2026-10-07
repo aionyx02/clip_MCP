@@ -6,6 +6,7 @@
 
 (() => {
   // How far ahead a clip's file is opened and put at its first frame, so it is ready on its cut.
+  // These five are provisional: not yet tried on a slow computer.
   const PRELOAD_SECONDS = 2;
   // How far a file may run from the clock before it is put back by seeking rather than nudged.
   const SEEK_DRIFT = 0.5;

@@ -176,6 +176,12 @@ def test_the_version_panel_folds_one_sitting_into_one_dot(kept_history, media: P
     # A star is the user's own, and a branch grows from the dot it started at.
     starred = call("mark_version", {"project_id": project, "commit": nodes[1]["commit"][:10], "mark": "starred"})
     assert starred["marks"] == ["exported", "starred"]
+    # A starred version is its own dot, not the head of the edits before it.
+    marked = server.version_graph(project)["nodes"][1]
+    assert marked["versions"] == marked["versions"][:1] and marked["outputs"][0]["name"] == "版本面板.mp4"
+    # Its finished video gone, it says so rather than going quiet.
+    finished.unlink()
+    assert "removed" in server.version_graph(project)["nodes"][1]["marks"]
     branch = call("branch_project", {"project_id": project, "name": "版本面板短版", "commit": nodes[1]["commit"]})
     graph = server.version_graph(project)
     assert graph["branches"][0]["project_id"] == branch["project_id"]
