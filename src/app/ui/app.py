@@ -85,6 +85,7 @@ def _asset_summary(asset) -> dict:
         "fast_transcript": server.transcription_of(server.repo.transcript_model(asset.id)) == "fast",
         "notes": asset.notes,
         "library": library_of(asset),
+        "source": asset.source.model_dump() if asset.source is not None else None,
     }
 
 async def projects(request: Request) -> Response:

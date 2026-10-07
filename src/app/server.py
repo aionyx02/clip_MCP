@@ -23,7 +23,7 @@ from fastmcp.tools import ToolResult
 from fastmcp.utilities.types import Image
 from mcp.types import TextContent
 from pydantic import BaseModel, Field, TypeAdapter
-from app.models.media import Asset, Measured, MediaAnalysis, Span, SpeakerTurn, Transcript
+from app.models.media import Asset, Measured, MediaAnalysis, Source, Span, SpeakerTurn, Transcript
 from app.models.plan import (
     EditPlan, PlanAmendment, apply_amendment, describe_amendment, short_clip_ids, whole_clip_id, with_whole_clip_ids,
 )
@@ -69,6 +69,7 @@ from app.engine.reframe import Framing, centre_at, frame_project
 from app.engine import playback
 from app.engine.library import FOOTAGE, LIBRARIES, MUSIC, classify, library_of
 from app.engine import clap
+from app.engine import fetch
 from app.engine import music as music_energy
 from app.engine.builder import DEFAULT_LOUDNESS_TARGET, FFmpegRenderer, Talking, voice_keys
 from app.engine.levels import song_level, talking_in
@@ -324,7 +325,7 @@ DOING = {
     "create_project": "建立專案", "import_asset": "加入素材", "import_folder": "加入資料夾", "edit_asset": "寫素材備註",
     "restore_version": "回到舊版本", "branch_project": "開分支", "mark_version": "標記版本",
     "organize_library": "整理素材庫", "move_files": "搬動檔案", "set_asset_library": "移動分類",
-    "find_music": "找歌",
+    "find_music": "找歌", "add_music_from_url": "從網路加入音樂",
 }
 # What the AI programs call themselves when they connect, as a person would name them.
 CLIENT_NAMES = {
@@ -504,6 +505,7 @@ def _register_asset(filepath: str, library: Optional[str] = None) -> Asset:
     if existing is not None:
         asset.notes = existing.notes
         asset.library = existing.library
+        asset.source = existing.source
     if library in LIBRARIES:
         asset.library = library
     elif asset.library is None:
@@ -805,6 +807,121 @@ def find_music(description: str, min_seconds: Annotated[float, Field(ge=0)] = 0,
             **_sounds_like(asset_id, analysis, heard),
         })
     return {"songs": songs, "analyzing": waiting}
+
+def _music_folder() -> str:
+    """Where songs taken from the web are kept: beside the user's finished videos, where they can find them."""
+    return os.path.join(str(output_dir()), "音樂")
+
+def _web_song_plan(url: str, page: str, title: str, artist: str, licence: Optional[str], personal_use: bool) -> dict:
+    """What taking a song would do, or why it cannot be taken."""
+    site = fetch.site_of(url)
+    if site is None or fetch.site_of(page) != site:
+        raise ValueError("music is only taken from " + ", ".join(item.name for item in fetch.SITES.values())
+                         + ", with the file's link and its page both on the same one")
+    problem = fetch.licence_problem(site, licence, personal_use)
+    if problem:
+        raise ValueError(problem)
+    terms = fetch.SITES[site]
+    chosen = terms.licence or licence
+    return {
+        "site": terms.name, "title": title, "artist": artist, "licence": chosen, "terms": terms.terms,
+        "credit": fetch.credit_line(site, title, artist, chosen, page), "personal_only": personal_use,
+        "saved_in": _music_folder(), "url": url, "page": page,
+    }
+
+@mcp.tool()
+def add_music_from_url(url: str, page: str, title: str, artist: str = "", licence: Optional[str] = None,
+                       personal_use: bool = False, confirm_plan: Optional[str] = None) -> dict:
+    """Take a song from one of the allowed music sites into the music library.
+
+    Allowed: Pixabay Music, Mixkit, Incompetech (Kevin MacLeod), Free Music
+    Archive and Wikimedia Commons; anything else is refused. Call without
+    `confirm_plan` first: it downloads nothing and says the site, the
+    licence, what it allows and the credit it asks for, and names that
+    `plan`. Tell the user the title, the site and those terms, and only once
+    they agree call again with `confirm_plan` set to that `plan`. On Free
+    Music Archive and Wikimedia Commons each track has its own licence: read
+    it off the page and pass it as `licence`. NC or ND is refused unless the
+    user said the video is only for themselves (`personal_use`).
+
+    The song is saved in the videos folder's 音樂, checked to be a song, and
+    analyzed in the background like any other. `music_credits` gives the
+    credit lines a video owes.
+
+    Args:
+        url: The audio file's own link, not its page.
+        page: The track's page, where its licence is shown.
+        title: The track's title.
+        artist: Who made it, for the credit.
+        licence: For a per-track site, as the page shows it: CC0, Public
+            domain, CC BY, CC BY-SA, CC BY-NC, CC BY-ND, CC BY-NC-SA, CC BY-NC-ND.
+        personal_use: The user said the video is only for themselves.
+        confirm_plan: The `plan` the user agreed to; downloads it.
+
+    Returns:
+        Without `confirm_plan`: `plan` and what would be taken. With it: the
+        song's `id`, `name`, `path` and `credit`.
+
+    Raises:
+        ValueError: If the site is not allowed, the licence does not allow
+            the use, the plan is not the one shown, or the file is not a song.
+    """
+    planned = _web_song_plan(url, page, title, artist, licence, personal_use)
+    key = hashlib.sha256(json.dumps(planned, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()[:12]
+    if confirm_plan is None:
+        return {"plan": key, **planned}
+    if confirm_plan.strip() != key:
+        raise ValueError("this is not the plan the user was shown: show them the new one and ask again")
+    path = fetch.download(url, _music_folder(), title)
+    try:
+        streams = probe_file(path).get("streams", [])
+    except RuntimeError:
+        streams = []
+    pictures = any(stream.get("codec_type") == "video" and not stream.get("disposition", {}).get("attached_pic")
+                   for stream in streams)
+    if pictures or not any(stream.get("codec_type") == "audio" for stream in streams):
+        # Ours, just downloaded, and not what was agreed to: it does not stay.
+        os.remove(path)
+        raise ValueError("what was downloaded is not a song: it has no sound, or it has a picture")
+    _say_in_history(f"從 {planned['site']} 加入「{title}」")
+    asset = _register_asset(path, MUSIC).model_copy(update={"source": Source(
+        site=planned["site"], page=page, url=url, title=title, artist=artist, licence=planned["licence"],
+        credit=planned["credit"], personal_only=personal_use,
+    )})
+    repo.save_asset(asset)
+    return {"id": asset.id, "name": os.path.basename(path), "path": path, "credit": planned["credit"]}
+
+@mcp.tool()
+def music_credits(project_id: str) -> dict:
+    """The credit lines a video owes for the songs in it, ready for its description.
+
+    Args:
+        project_id: The video.
+
+    Returns:
+        `credits`, one line per song that asks for one; `personal_only`, the
+        songs taken for a video only the user watches, which must not go in
+        one that is published; and `unknown`, songs with no record of where
+        they came from — ask the user how they are licensed.
+
+    Raises:
+        ValueError: If there is no such project.
+    """
+    project = repo.get_project(project_id)
+    if project is None:
+        raise ValueError(f"project {project_id} not found")
+    used = repo.get_assets({clip.asset_id for track in project.tracks if track.track_type.value == "audio"
+                            for clip in track.clips})
+    credits, personal, unknown = [], [], []
+    for asset in used.values():
+        if asset.source is None:
+            unknown.append(os.path.basename(asset.path))
+            continue
+        if asset.source.credit and asset.source.credit not in credits:
+            credits.append(asset.source.credit)
+        if asset.source.personal_only:
+            personal.append(asset.source.title)
+    return {"credits": credits, "personal_only": personal, "unknown": unknown}
 
 def _folder_kind(library: str) -> str:
     """The kind of folder a library's files are filed in."""

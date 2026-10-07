@@ -5,6 +5,18 @@ from typing import Dict, List, Optional
 from pydantic import BaseModel, Field
 
 
+class Source(BaseModel):
+    """Where a song taken from the web came from, and on what terms."""
+
+    site: str = Field(..., description="The site, as the user knows it")
+    page: str = Field(..., description="The page it was taken from")
+    url: str = Field(..., description="The file's own link")
+    title: str
+    artist: str = ""
+    licence: str
+    credit: Optional[str] = Field(default=None, description="The credit line it asks for; null when it asks for none")
+    personal_only: bool = Field(default=False, description="Taken for a video only the user watches")
+
 class Asset(BaseModel):
     """A registered source media file and the probe facts editing relies on."""
 
@@ -27,6 +39,7 @@ class Asset(BaseModel):
         description="How this file may be used, in the user's words: 「請消音」, 「0:12 以後手入鏡，不要用」. Shown "
                     "wherever the file is read about, so an instruction does not have to live in its name",
     )
+    source: Optional[Source] = Field(default=None, description="For a song taken from the web: where, and on what terms")
     library: Optional[str] = Field(
         default=None,
         description="`footage` or `music`: which of the library's two halves the file is in. Null for a file "

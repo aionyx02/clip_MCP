@@ -576,6 +576,7 @@ async function musicPage(page, folderId) {
         <span class="badge">${clock(asset.duration)}</span></div>
         <div class="card-body"><div class="card-title">${esc(asset.name)}</div><div class="card-meta">${state}${gone}</div>
         ${tags.length ? `<div class="tags" title="${esc(T.musicPage.tagsHint)}">${tags.map((tag) => `<span>${esc(tag)}</span>`).join("")}</div>` : ""}
+        ${asset.source ? `<div class="card-notes" title="${esc(asset.source.credit || T.musicPage.noCredit)}">${esc(T.musicPage.from(asset.source.site, asset.source.licence))}</div>` : ""}
         ${asset.notes ? `<div class="card-notes" title="${esc(asset.notes)}">${esc(asset.notes)}</div>` : ""}</div></div>`;
     },
     remove: removeAssets,

@@ -20,6 +20,8 @@ window.T = {
     movedToFootage: "已移到素材",
     wentToMusic: (n) => `其中 ${n} 個是歌，放到了「音樂」`,
     tagsHint: "AI 聽出來的情緒和風格；風格大多準，情緒大約一半準，只當參考",
+    from: (site, licence) => `來自 ${site} · ${licence}`,
+    noCredit: "這首不需要標註出處",
   },
 
   jobs: {
