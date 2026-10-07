@@ -77,6 +77,7 @@ from app.engine import music as music_energy
 from app.engine.builder import DEFAULT_LOUDNESS_TARGET, FFmpegRenderer, Talking, voice_keys
 from app.engine.levels import song_level, talking_in
 from app.engine.comments import anchor_at, where_now
+from app.engine.compare import compare
 from app.engine.delivery import CHECKS, chapter_metadata, chapters, check_delivery, clock, cover_candidates
 from app.engine.frames import format_timestamp, still, storyboard_sheet
 from app.engine.interchange import write_edl, write_fcpxml, write_otio, write_srt
@@ -329,7 +330,7 @@ DOING = {
     "create_project": "建立專案", "import_asset": "加入素材", "import_folder": "加入資料夾", "edit_asset": "寫素材備註",
     "restore_version": "回到舊版本", "branch_project": "開分支", "mark_version": "標記版本",
     "organize_library": "整理素材庫", "move_files": "搬動檔案", "set_asset_library": "移動分類",
-    "find_music": "找歌", "add_music_from_url": "從網路加入音樂", "resolve_comment": "回覆留言",
+    "find_music": "找歌", "compare_versions": "比較版本", "add_music_from_url": "從網路加入音樂", "resolve_comment": "回覆留言",
 }
 # What the AI programs call themselves when they connect, as a person would name them.
 CLIENT_NAMES = {
@@ -5906,6 +5907,68 @@ def branch_project(project_id: str, name: str, commit: Optional[str] = None, not
     if folder:
         repo.file_items("projects", [branch.id], folder)
     return {"project_id": branch.id, "name": branch.name, "branched_from": branch.branched_from.model_dump()}
+
+def _said_between(asset_id: str, start: float, end: float) -> str:
+    """What the transcript has said in a file between two of its seconds; empty when nothing was."""
+    analysis = repo.get_analysis(asset_id)
+    if analysis is None or analysis.transcript is None:
+        return ""
+    return "".join(
+        word.text for segment in analysis.transcript.segments for word in segment.words
+        if word.start < end - 0.05 and word.end > start + 0.05
+    ).strip()
+
+def _version_at(project_id: str, commit: Optional[str]) -> Tuple[Project, dict]:
+    """A project at one of its versions, or as it is now, with that version as the AI reads it.
+
+    Raises:
+        ValueError: If the project or the version does not exist.
+    """
+    current = repo.get_project(project_id)
+    if current is None:
+        raise ValueError(f"project {project_id} not found")
+    versions = history.versions_of("projects/", f"{project_id}.json", 500)
+    if not commit:
+        return current, (_version_record(versions[0]) if versions else {"commit": None, "what": "目前"})
+    chosen = next((version for version in versions if version.commit.startswith(commit.strip().lower())), None)
+    if chosen is None:
+        raise ValueError(f"project {project_id} has no version {commit}")
+    return _project_at(project_id, chosen.commit), _version_record(chosen)
+
+def compare_projects(before: Project, after: Project) -> dict:
+    """What changed from one cut to another, files named by name and stretches by their words."""
+    names = {asset_id: os.path.basename(asset.path) for asset_id, asset in repo.get_assets(
+        {clip.asset_id for project in (before, after) for track in project.tracks for clip in track.clips}).items()}
+    return compare(before, after, _said_between, lambda asset_id: names.get(asset_id, asset_id))
+
+@mcp.tool()
+def compare_versions(project_id: str, commit_a: str, commit_b: Optional[str] = None) -> dict:
+    """Say what changed between two versions of a video, part by part, in words the user reads.
+
+    For 「第 3 版跟現在差在哪」 or before restoring or merging. Footage is matched
+    by what it shows, not by clip IDs, so a recompile is not reported as
+    everything changing. The editor's comparison view shows the same list.
+
+    Args:
+        project_id: The video.
+        commit_a: The earlier version, from `project_history`.
+        commit_b: The other one; omit for the video as it is now.
+
+    Returns:
+        `a` and `b` (each version's `commit`, `when`, `what`), `length` of
+        each in seconds, `parts` — each part of the cut (its markers, one per
+        beat) with `same` and `changes`, each a sentence with `a_at`/`b_at`,
+        where it is in each version — and `whole`, changes to the video as a
+        whole: songs, captions, caption style, frame.
+
+    Raises:
+        ValueError: If the project or a version does not exist.
+    """
+    before, a = _version_at(project_id, commit_a)
+    after, b = _version_at(project_id, commit_b)
+    compared = compare_projects(before, after)
+    compared.pop("aligned")
+    return {"a": a, "b": b, **compared}
 
 @mcp.tool()
 def mark_version(project_id: str, commit: str, mark: Literal["starred", "published"], on: bool = True) -> dict:

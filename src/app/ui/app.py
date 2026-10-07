@@ -474,6 +474,18 @@ async def mark(request: Request) -> Response:
         return _error(str(error), 400)
     return JSONResponse(result)
 
+async def compare_versions(request: Request) -> Response:
+    """What changed between two versions, and which stretches show the same footage, for the comparison view."""
+    project_id = request.path_params["project_id"]
+    try:
+        def compared():
+            before, a = server._version_at(project_id, request.query_params.get("a"))
+            after, b = server._version_at(project_id, request.query_params.get("b"))
+            return {"a": a, "b": b, **server.compare_projects(before, after)}
+        return JSONResponse(await run_in_threadpool(compared))
+    except ValueError as error:
+        return _error(str(error), 400)
+
 async def comments(request: Request) -> Response:
     """Every comment on a video, open and closed (GET), or a new one at a moment or a stretch (POST)."""
     project_id = request.path_params["project_id"]
@@ -1055,6 +1067,7 @@ def create_app() -> Starlette:
         Route("/api/projects/{project_id}/versions/branch", branch, methods=["POST"]),
         Route("/api/projects/{project_id}/versions/mark", mark, methods=["POST"]),
         Route("/api/projects/{project_id}/comments", comments, methods=["GET", "POST"]),
+        Route("/api/projects/{project_id}/versions/compare", compare_versions),
         Route("/api/projects/{project_id}/comments/{comment_id}", comment, methods=["POST"]),
         Route("/api/projects/{project_id}/storage", project_storage),
         Route("/api/projects/{project_id}/storage/trim", trim, methods=["POST"]),
