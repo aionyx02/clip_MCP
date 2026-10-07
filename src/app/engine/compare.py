@@ -144,31 +144,56 @@ def _clip_changes(one: Clip, other: Clip, said: Said, named: Named) -> List[str]
     return changes
 
 
-def _part_changes(before: List[Clip], after: List[Clip], said: Said, named: Named) -> Tuple[List[dict], list]:
-    """Say what changed inside one part, and which stretches of the two show the same footage."""
-    pairs = match_clips(before, after)
-    paired_before = {id(one) for one, _ in pairs}
-    paired_after = {id(other) for _, other in pairs}
+def _named_stretch(clip: Clip, said: Said, named: Named) -> str:
+    """A clip as a person names it: by what is said in it, or else by its file."""
+    return _quote(said, clip, float(clip.source_range.start), float(clip.source_range.end)) or \
+        f"{named(clip.asset_id)} 的一段"
+
+
+def _part_changes(before: List[Clip], after: List[Clip], pairs: List[Tuple[Clip, Clip]], moved_to: Dict[int, str],
+                  said: Said, named: Named) -> List[dict]:
+    """Say what changed inside one part.
+
+    Args:
+        before: The part's clips on the left.
+        after: Its clips on the right.
+        pairs: Every pair of clips showing the same footage, across the whole cut.
+        moved_to: For a right clip in another part than its left one, that part's name, by `id`.
+        said: What is heard in a stretch of a file.
+        named: A file's name.
+
+    Returns:
+        The changes, in the order they come on the left.
+    """
+    left_paired = {id(one) for one, _ in pairs}
+    right_paired = {id(other) for _, other in pairs}
+    mine = [(one, other) for one, other in pairs if any(one is clip for clip in before)]
     changes: List[dict] = []
     for clip in before:
-        if id(clip) not in paired_before:
-            quote = _quote(said, clip, float(clip.source_range.start), float(clip.source_range.end))
-            changes.append({"what": f"拿掉 {quote or named(clip.asset_id) + ' 的一段'}（{_seconds(float(clip.timeline_duration))}）",
+        if id(clip) not in left_paired:
+            changes.append({"what": f"拿掉 {_named_stretch(clip, said, named)}（{_seconds(float(clip.timeline_duration))}）",
                             "a_at": float(clip.timeline_in), "b_at": None})
     for clip in after:
-        if id(clip) not in paired_after:
-            quote = _quote(said, clip, float(clip.source_range.start), float(clip.source_range.end))
-            changes.append({"what": f"加入 {quote or named(clip.asset_id) + ' 的一段'}（{_seconds(float(clip.timeline_duration))}）",
+        if id(clip) not in right_paired:
+            changes.append({"what": f"加入 {_named_stretch(clip, said, named)}（{_seconds(float(clip.timeline_duration))}）",
                             "a_at": None, "b_at": float(clip.timeline_in)})
-    for one, other in pairs:
+    for one, other in mine:
+        at = {"a_at": float(one.timeline_in), "b_at": float(other.timeline_in)}
+        if id(other) in moved_to:
+            changes.append({"what": f"{_named_stretch(one, said, named)}移到「{moved_to[id(other)]}」", **at})
         for what in _clip_changes(one, other, said, named):
-            changes.append({"what": what, "a_at": float(one.timeline_in), "b_at": float(other.timeline_in)})
-    order_before = [id(one) for one, _ in sorted(pairs, key=lambda pair: pair[0].timeline_in)]
-    order_after = [id(one) for one, _ in sorted(pairs, key=lambda pair: pair[1].timeline_in)]
-    if order_before != order_after:
+            changes.append({"what": what, **at})
+    staying = [(one, other) for one, other in mine if id(other) not in moved_to]
+    if [id(one) for one, _ in sorted(staying, key=lambda pair: pair[0].timeline_in)] != \
+            [id(one) for one, _ in sorted(staying, key=lambda pair: pair[1].timeline_in)]:
         changes.append({"what": "順序換了", "a_at": float(before[0].timeline_in) if before else None,
                         "b_at": float(after[0].timeline_in) if after else None})
     changes.sort(key=lambda change: (change["a_at"] if change["a_at"] is not None else change["b_at"] or 0))
+    return changes
+
+
+def _aligned(pairs: List[Tuple[Clip, Clip]]) -> List[list]:
+    """Where the same footage plays on each side: `[a_start, a_end, b_start, b_end]` per pair."""
     aligned = []
     for one, other in pairs:
         shared_start = max(float(one.source_range.start), float(other.source_range.start))
@@ -179,7 +204,7 @@ def _part_changes(before: List[Clip], after: List[Clip], said: Said, named: Name
             round(float(other.timeline_in) + (shared_start - float(other.source_range.start)) / (other.speed or 1), 3),
             round(float(other.timeline_in) + (shared_end - float(other.source_range.start)) / (other.speed or 1), 3),
         ])
-    return changes, aligned
+    return sorted(aligned)
 
 
 def _songs(project: Project) -> List[Tuple[str, float]]:
@@ -211,8 +236,15 @@ def compare(before: Project, after: Project, said: Said, named: Named) -> dict:
     right_by_name: Dict[str, Part] = {}
     for part in right_parts:
         right_by_name.setdefault(part.name, part)
+    # Matched across the whole cut first, so a shot that went from one part to another is one move.
+    pairs = match_clips(left_clips, right_clips)
+    left_in = {part.name: _in(part, left_clips, part is left_parts[-1]) for part in left_parts}
+    right_in = {part.name: _in(part, right_clips, part is right_parts[-1]) for part in right_parts}
+    left_part = {id(clip): name for name, clips in left_in.items() for clip in clips}
+    right_part = {id(clip): name for name, clips in right_in.items() for clip in clips}
+    moved_to = {id(other): right_part[id(other)] for one, other in pairs
+                if id(other) in right_part and right_part[id(other)] != left_part.get(id(one))}
     parts: List[dict] = []
-    aligned: List[list] = []
     seen = set()
     for part in left_parts:
         other = right_by_name.get(part.name) if part.name not in seen else None
@@ -221,9 +253,9 @@ def compare(before: Project, after: Project, said: Said, named: Named) -> dict:
             parts.append({"name": part.name, "a": [part.start, part.end], "b": None, "same": False,
                           "changes": [{"what": f"拿掉整段「{part.name}」", "a_at": part.start, "b_at": None}]})
             continue
-        changes, matched = _part_changes(_in(part, left_clips, part is left_parts[-1]),
-                                         _in(other, right_clips, other is right_parts[-1]), said, named)
-        aligned += matched
+        arriving = {id(clip) for clip in right_in[part.name] if id(clip) in moved_to}
+        changes = _part_changes(left_in[part.name], [clip for clip in right_in[part.name] if id(clip) not in arriving],
+                                pairs, moved_to, said, named)
         parts.append({"name": part.name, "a": [part.start, part.end], "b": [other.start, other.end],
                       "same": not changes, "changes": changes})
     for part in right_parts:
@@ -257,5 +289,5 @@ def compare(before: Project, after: Project, said: Said, named: Named) -> dict:
         "length": [round(float(before.duration), 3), round(float(after.duration), 3)],
         "parts": parts,
         "whole": whole,
-        "aligned": sorted(aligned),
+        "aligned": _aligned(pairs),
     }

@@ -272,7 +272,7 @@ ul.points { margin: 0 0 10px; padding-left: 18px; color: var(--muted); display: 
 .seg button + button { border-left: 1px solid var(--line-2); }
 .seg button:hover { color: var(--text); }
 .seg button.on { background: var(--panel-3); color: var(--text); }
-.ed-versions, .ed-vdetail, .scrub-row { display: none; }
+.ed-versions, .ed-vdetail, .scrub-row, .ed-compare { display: none; }
 
 /* The version page: the player big on the left, the tree down the right, the chosen version under the player. */
 .editor.view-versions { grid-template-columns: 1fr minmax(360px, 34%); grid-template-rows: 38px minmax(260px, 1fr) minmax(150px, auto); }
@@ -299,3 +299,34 @@ ul.points { margin: 0 0 10px; padding-left: 18px; color: var(--muted); display: 
 .ed-vdetail .stack-buttons { display: flex; flex-direction: row; flex-wrap: wrap; align-items: center; gap: 8px; }
 .ed-vdetail .vmembers { max-height: 110px; }
 .ed-vdetail .vouts { flex-direction: row; flex-wrap: wrap; }
+
+/* Two versions side by side: the players where the one was, what changed under them. */
+.editor.view-versions.comparing .ed-viewer { display: none; }
+.editor.view-versions.comparing .ed-compare { display: grid; grid-column: 1; grid-row: 2; grid-template-rows: 1fr 38px; min-height: 0; background: var(--well); }
+.cmp-sides { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; padding: 10px; min-height: 0; }
+.ed-compare.stacked .cmp-sides { grid-template-columns: 1fr; grid-template-rows: 1fr 1fr; }
+.cmp-side { display: grid; grid-template-rows: 22px 1fr; min-height: 0; min-width: 0; border-radius: 6px; padding: 4px; cursor: pointer; border: 1px solid transparent; }
+.cmp-side.heard { border-color: var(--accent); }
+.cmp-label { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); padding: 0 4px; overflow: hidden; }
+.cmp-label b { font-weight: 500; color: var(--text); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.cmp-label .heard { display: none; color: var(--accent); }
+.cmp-side.heard .cmp-label .heard { display: inline-flex; }
+.cmp-stage-wrap { min-height: 0; display: grid; place-items: center; }
+.cmp-stage-wrap .stage { max-width: 100%; max-height: 100%; height: 100%; }
+.ed-compare.stacked .cmp-stage-wrap .stage { height: 100%; width: auto; }
+.cmp-bar { display: flex; align-items: center; gap: 10px; padding: 0 12px; border-top: 1px solid var(--line); background: var(--panel); }
+.cmp-bar .scrub { flex: 1; }
+.cmp-time { font: 11px var(--mono); color: var(--muted); white-space: nowrap; }
+.vnode.side { background: color-mix(in srgb, var(--accent) 12%, transparent); }
+.vside { position: absolute; margin: 4px 0 0 4px; padding: 0 5px; border-radius: 4px; background: var(--accent); color: var(--accent-ink); font-size: 10px; font-weight: 700; }
+.vnode { position: relative; }
+.cmp-head { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+.cmp-head h2 { margin: 0; font-size: 15px; font-weight: 600; }
+.cparts { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
+.cpart { padding: 6px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel-2); }
+.cpart.same { opacity: .7; }
+.cpart-head { display: flex; gap: 8px; align-items: baseline; }
+.cpart ul { list-style: none; margin: 4px 0 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.cchange { border: 0; background: transparent; color: var(--text); font: inherit; text-align: left; padding: 2px 4px; border-radius: 4px; cursor: pointer; }
+.cchange:hover { background: var(--line); }
+.cpart ul .cchange::before { content: "• "; color: var(--muted); }

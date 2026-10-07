@@ -64,7 +64,7 @@ from app.engine.plan import (
 )
 from app.engine.sections import build_sections, candidate_hash, check_sections, propose_candidates
 from app.engine.semantic import (
-    build_timeline, clean_cuts, content_scores, join_voices, timeline_input_hash,
+    build_timeline, clean_cuts, content_scores, join_voices, timeline_input_hash, was_made_up,
 )
 from app.engine.ffmpeg import graph_from_file, hidden_window_flags
 from app.engine.probe import picture_size, probe_file, recorded_at, speech_loudness, timecode_start
@@ -5914,7 +5914,7 @@ def _said_between(asset_id: str, start: float, end: float) -> str:
     if analysis is None or analysis.transcript is None:
         return ""
     return "".join(
-        word.text for segment in analysis.transcript.segments for word in segment.words
+        word.text for segment in analysis.transcript.segments if not was_made_up(segment) for word in segment.words
         if word.start < end - 0.05 and word.end > start + 0.05
     ).strip()
 

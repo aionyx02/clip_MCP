@@ -91,6 +91,11 @@
 
     show(visible) { this.canvas.hidden = !visible; if (!visible) this.pause(); }
 
+    mute(silent) {
+      this.silent = silent;
+      if (this.out) this.out.gain.setTargetAtTime(silent ? 0 : 1, this.audio.currentTime, 0.02);
+    }
+
     destroy() {
       cancelAnimationFrame(this.frame);
       for (const element of [...this.free, ...[...this.slots.values()].flatMap((slot) => slot.elements)]) {
@@ -117,7 +122,10 @@
       limiter.ratio.value = 20;
       limiter.attack.value = 0.002;
       limiter.release.value = 0.08;
-      this.master.connect(limiter).connect(this.audio.destination);
+      // Last of all, on or off: two versions compared side by side are heard one at a time.
+      this.out = this.audio.createGain();
+      this.out.gain.value = this.silent ? 0 : 1;
+      this.master.connect(limiter).connect(this.out).connect(this.audio.destination);
       this.buses = new Map();
     }
 

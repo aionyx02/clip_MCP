@@ -199,8 +199,10 @@
     const thumb = node.thumb ? `<img class="vthumb" loading="lazy" src="${thumbUrl(node.thumb.asset_id, node.thumb.t, 180)}" alt="">` : '<span class="vthumb"></span>';
     const many = node.versions.length > 1 ? ` · ${esc(T.versions.changes(node.versions.length))}` : "";
     const length = node.seconds ? ` · ${fmt(node.seconds)}` : "";
-    return `<li class="vnode${chosen ? " sel" : ""}${current ? " current" : ""}" data-node="${esc(node.commit)}"${branch ? ` data-branch="${esc(branch)}"` : ""}>
-      <span class="rail"><i></i></span>${thumb}
+    const side = E.compare && !branch ? (node.versions.some((version) => version.commit === E.compare.a) ? "A"
+      : node.versions.some((version) => version.commit === (E.compare.b || E.graph?.nodes[0]?.commit)) ? "B" : "") : "";
+    return `<li class="vnode${chosen && !E.compare ? " sel" : ""}${side ? " side" : ""}${current ? " current" : ""}" data-node="${esc(node.commit)}"${branch ? ` data-branch="${esc(branch)}"` : ""}>
+      <span class="rail"><i></i></span>${thumb}${side ? `<span class="vside">${side}</span>` : ""}
       <div class="vtext"><b>${markIcons(node.marks)}${esc(node.what)}</b>
         <span>${esc(node.by)} · ${esc(node.when)}${length}${many}${current ? ` · ${esc(T.versions.now)}` : ""}</span></div></li>`;
   }
@@ -238,12 +240,16 @@
       <div class="vdisk" data-disk></div>`;
     panel.scrollTop = scrolled;
     panel.querySelectorAll("[data-node]").forEach((item) => {
-      item.onclick = () => chooseVersion(item.dataset.branch || E.id, item.dataset.node);
+      item.onclick = () => {
+        if (E.compare && !item.dataset.branch) { compareWith(E.compare.a, item.dataset.node); return; }
+        chooseVersion(item.dataset.branch || E.id, item.dataset.node);
+      };
     });
     panel.querySelectorAll("[data-keep-view], .vbranch-name").forEach((link) => {
       link.addEventListener("click", () => { keptView = "versions"; });
     });
-    drawVersionDetail($("[data-vdetail]", E.root));
+    if (E.compare) drawChanges($("[data-vdetail]", E.root));
+    else drawVersionDetail($("[data-vdetail]", E.root));
     drawDisk($("[data-disk]", panel));
   }
 
@@ -255,6 +261,7 @@
     const editor = $(".editor", E.root);
     editor.classList.toggle("view-versions", view === "versions");
     E.root.querySelectorAll("[data-view]").forEach((button) => button.classList.toggle("on", button.dataset.view === view));
+    if (E.compare) stopCompare(false);
     if (view === "edit") {
       // Editing is always of the cut as it is now.
       if (E.viewing) viewVersion(null);
@@ -268,6 +275,178 @@
     }
     requestAnimationFrame(() => { if (E) fitStage(); });
     drawTime();
+  }
+
+  // ------------------------------------------------------------------ two versions side by side
+
+  // Left is A, right is B (null: the cut as it is). One clock, the left's; the right follows it by
+  // what is on screen, and only one side is heard.
+  async function compareWith(a, b) {
+    if (b && b === E.graph?.nodes[0]?.commit) b = null;
+    if (a === b || (!b && a === E.graph?.nodes[0]?.commit)) { toast(T.compare.sameVersion, "error"); return; }
+    clock().pause();
+    const fresh = !E.compare;
+    if (fresh) {
+      E.compare = { heard: "a" };
+      const view = $("[data-compare-view]", E.root);
+      E.compare.players = {
+        a: Player.create($('[data-side="a"] [data-cmp-stage]', view), () => drawCompareBar()),
+        b: Player.create($('[data-side="b"] [data-cmp-stage]', view), () => drawCompareBar()),
+      };
+      E.compare.players.b.mute(true);
+      $(".editor", E.root).classList.add("comparing");
+      wireCompare(view);
+      E.compare.frame = requestAnimationFrame(compareTick);
+    } else {
+      E.compare.players.a.pause();
+      E.compare.players.b.pause();
+    }
+    Object.assign(E.compare, { a, b, data: null });
+    drawVersions();
+    try {
+      const query = new URLSearchParams({ a, ...(b ? { b } : {}) });
+      E.compare.data = await api(`/api/projects/${encodeURIComponent(E.id)}/versions/compare?${query}`);
+    } catch (error) { toast(error.message, "error"); stopCompare(); return; }
+    if (!E?.compare) return;
+    const view = $("[data-compare-view]", E.root);
+    $('[data-side="a"] [data-label]', view).textContent = T.compare.label(E.compare.data.a.what);
+    $('[data-side="b"] [data-label]', view).textContent = b ? T.compare.label(E.compare.data.b.what) : T.compare.now;
+    view.classList.toggle("stacked", E.project.width > E.project.height);
+    for (const side of ["a", "b"]) {
+      const stage = $(`[data-side="${side}"] [data-cmp-stage]`, view);
+      stage.style.aspectRatio = `${E.project.width} / ${E.project.height}`;
+    }
+    loadSide("a", a);
+    loadSide("b", b);
+    drawCompareBar();
+    redrawVersions();
+  }
+
+  async function loadSide(side, commit, tries = 0) {
+    if (!E?.compare) return;
+    try {
+      const at = commit ? `?commit=${encodeURIComponent(commit)}` : "";
+      const described = await api(`/api/projects/${encodeURIComponent(E.id)}/playback${at}`);
+      if (!E?.compare || (side === "a" ? E.compare.a : E.compare.b) !== commit) return;
+      E.compare.players[side].load(described);
+      drawCompareBar();
+      if (described.waiting.length && tries < 30) setTimeout(() => loadSide(side, commit, tries + 1), 1500 + tries * 500);
+    } catch { if (tries < 30) setTimeout(() => loadSide(side, commit, tries + 1), 2000); }
+  }
+
+  function stopCompare(redraw = true) {
+    if (!E?.compare) return;
+    cancelAnimationFrame(E.compare.frame);
+    E.compare.players.a.destroy();
+    E.compare.players.b.destroy();
+    E.compare = null;
+    $(".editor", E.root).classList.remove("comparing");
+    if (redraw) { drawVersions(); requestAnimationFrame(() => { if (E) fitStage(); }); }
+  }
+
+  // Where the right side should be when the left is at a second: the same footage, where it is there.
+  function rightAt(seconds) {
+    for (const [aStart, aEnd, bStart, bEnd] of E.compare.data?.aligned || []) {
+      if (seconds >= aStart && seconds < aEnd) return bStart + (seconds - aStart) * ((bEnd - bStart) / Math.max(0.001, aEnd - aStart));
+    }
+    return null;
+  }
+
+  function compareTick() {
+    if (!E?.compare) return;
+    const { a, b } = E.compare.players;
+    if (!a.paused) {
+      const wanted = rightAt(a.time);
+      // Only where the same footage is in both; elsewhere the right side runs on by itself.
+      if (wanted !== null && Math.abs(b.time - wanted) > 0.25) b.seek(wanted);
+      drawCompareTime();
+    }
+    E.compare.frame = requestAnimationFrame(compareTick);
+  }
+
+  // A change is jumped to a frame inside where it starts: clip edges are kept to the millisecond,
+  // and landing exactly on one can show the black between two clips that only touch.
+  const INSIDE = 0.02;
+
+  function seekCompare(aAt, bAt) {
+    const { a, b } = E.compare.players;
+    if (aAt !== null && aAt !== undefined) a.seek(aAt + INSIDE);
+    const wanted = bAt !== null && bAt !== undefined ? bAt + INSIDE : rightAt(a.time);
+    if (wanted !== null && wanted !== undefined) b.seek(wanted);
+    drawCompareTime();
+  }
+
+  function toggleCompare() {
+    const { a, b } = E.compare.players;
+    if (!a.ready) return;
+    if (a.paused) { a.play(); if (b.ready) b.play(); } else { a.pause(); b.pause(); }
+  }
+
+  function hear(side) {
+    E.compare.heard = side;
+    E.compare.players.a.mute(side !== "a");
+    E.compare.players.b.mute(side !== "b");
+    drawCompareBar();
+  }
+
+  function drawCompareTime() {
+    const view = $("[data-compare-view]", E.root);
+    const { a, b } = E.compare.players;
+    const lengths = E.compare.data?.length || [a.duration, b.duration];
+    $("[data-cmp-time]", view).textContent = `${fmt(a.time)} / ${fmt(b.time)} · ${T.compare.lengths(fmt(lengths[0]), fmt(lengths[1]))}`;
+    const scrub = $("[data-cmp-scrub]", view);
+    if (!E.compare.scrubbing) scrub.value = a.duration ? String(Math.round((a.time / a.duration) * 1000)) : "0";
+  }
+
+  function drawCompareBar() {
+    if (!E?.compare) return;
+    const view = $("[data-compare-view]", E.root);
+    $("[data-cmp-play]", view).innerHTML = svg(E.compare.players.a.paused ? "play" : "pause", 18);
+    for (const side of ["a", "b"]) {
+      $(`[data-side="${side}"]`, view).classList.toggle("heard", E.compare.heard === side);
+    }
+    drawCompareTime();
+  }
+
+  function wireCompare(view) {
+    $("[data-cmp-play]", view).onclick = toggleCompare;
+    $("[data-cmp-close]", view).onclick = () => stopCompare();
+    $("[data-cmp-swap]", view).onclick = () => {
+      // B as it is now has no commit of its own to put on the left: the newest version stands in.
+      const now = E.graph.nodes[0]?.commit;
+      compareWith(E.compare.b || now, E.compare.a);
+    };
+    for (const side of ["a", "b"]) $(`[data-side="${side}"]`, view).onclick = () => hear(side);
+    const scrub = $("[data-cmp-scrub]", view);
+    scrub.oninput = () => {
+      E.compare.scrubbing = true;
+      E.compare.players.a.pause();
+      E.compare.players.b.pause();
+      seekCompare((Number(scrub.value) / 1000) * E.compare.players.a.duration, null);
+    };
+    scrub.onchange = () => { if (E?.compare) E.compare.scrubbing = false; };
+  }
+
+  // What changed, part by part; a click takes both sides there.
+  function drawChanges(box) {
+    const data = E.compare?.data;
+    if (!data) { box.innerHTML = `<p class="hint">${esc(T.versions.loading)}</p>`; return; }
+    const at = (change) => `data-a="${change.a_at ?? ""}" data-b="${change.b_at ?? ""}"`;
+    const parts = data.parts.map((part) => `<li class="cpart${part.same ? " same" : ""}">
+      <div class="cpart-head"><b>${esc(part.name)}</b>${part.same ? `<span class="hint">${esc(T.compare.same)}</span>` : ""}</div>
+      ${part.changes.length ? `<ul>${part.changes.map((change) => `<li><button class="cchange" ${at(change)}>${esc(change.what)}</button></li>`).join("")}</ul>` : ""}</li>`).join("");
+    const whole = data.whole.map((change) => `<li class="cpart"><button class="cchange" ${at(change)}>${esc(change.what)}</button></li>`).join("");
+    const unchanged = data.parts.every((part) => part.same) && !data.whole.length;
+    box.innerHTML = `<div class="cmp-head"><h2>${esc(T.compare.title)}</h2><span class="hint">${esc(T.compare.hint)}</span></div>
+      ${unchanged ? `<p class="hint">${esc(T.compare.identical)}</p>` : `<ol class="cparts">${parts}${whole}</ol>`}`;
+    box.querySelectorAll("[data-a]").forEach((button) => {
+      button.onclick = () => {
+        const value = (raw) => (raw === "" ? null : Number(raw));
+        E.compare.players.a.pause();
+        E.compare.players.b.pause();
+        seekCompare(value(button.dataset.a), value(button.dataset.b));
+      };
+    });
   }
 
   function redrawVersions() {
@@ -340,6 +519,7 @@
       <div class="group stack-buttons">
         ${newest ? `<p class="hint">${esc(T.versions.isNow)}</p>` : `<button class="btn primary" data-restore>${esc(T.versions.restore)}</button>`}
         <button class="btn" data-branch-from>${esc(T.versions.branch)}</button>
+        <button class="btn" data-compare-start>${esc(newest ? T.compare.startNow : T.compare.start)}</button>
         ${commit === node.commit ? `<div class="vmarks">
           <button class="btn small${isMarked("starred") ? " on" : ""}" data-mark="starred">${T.versions.markIcons.starred} ${esc(T.versions.marks.starred)}</button>
           <button class="btn small${isMarked("published") ? " on" : ""}" data-mark="published">${T.versions.markIcons.published} ${esc(T.versions.marks.published)}</button></div>` : ""}
@@ -353,6 +533,13 @@
     const restore = $("[data-restore]", box);
     if (restore) restore.onclick = () => restoreVersion(commit, version.what);
     $("[data-branch-from]", box).onclick = () => branchFrom(commit);
+    $("[data-compare-start]", box).onclick = () => {
+      // An older version is compared with the cut as it is; the newest with the one before it.
+      const nodes = E.graph.nodes;
+      if (!newest) compareWith(commit, null);
+      else if (nodes[1]) compareWith(nodes[1].commit, null);
+      else toast(T.compare.nothing, "error");
+    };
     box.querySelectorAll("[data-mark]").forEach((button) => {
       button.onclick = async () => {
         try {
@@ -549,6 +736,19 @@
         </div>
       </section>
       <aside class="ed-inspector" data-inspector></aside>
+      <section class="ed-compare" data-compare-view>
+        <div class="cmp-sides">
+          <div class="cmp-side" data-side="a"><div class="cmp-label"><b data-label></b><span class="heard" data-heard>${svg("speaker", 13)}</span></div><div class="cmp-stage-wrap"><div class="stage" data-cmp-stage></div></div></div>
+          <div class="cmp-side" data-side="b"><div class="cmp-label"><b data-label></b><span class="heard" data-heard>${svg("speaker", 13)}</span></div><div class="cmp-stage-wrap"><div class="stage" data-cmp-stage></div></div></div>
+        </div>
+        <div class="cmp-bar">
+          <button class="icon-btn" data-cmp-play title="${esc(T.editor.play)}">${svg("play", 18)}</button>
+          <input type="range" class="scrub" data-cmp-scrub min="0" max="1000" step="1" value="0">
+          <span class="cmp-time" data-cmp-time></span>
+          <button class="btn small" data-cmp-swap title="${esc(T.compare.swapTitle)}">${esc(T.compare.swap)}</button>
+          <button class="btn small" data-cmp-close>${esc(T.compare.close)}</button>
+        </div>
+      </section>
       <aside class="ed-versions" data-versions></aside>
       <section class="ed-vdetail" data-vdetail></section>
       <section class="ed-timeline">
@@ -1630,6 +1830,10 @@
     if (!E || event.target.closest?.("input, textarea") || $("#modal-root").children.length) return;
     if (event.key === "Escape" && E.drag) { cancelDrag(); return; }
     const step = event.shiftKey ? 1 : 1 / 30;
+    if (E.compare) {
+      if (event.key === " ") { event.preventDefault(); toggleCompare(); }
+      return;
+    }
     if (event.key === " ") { event.preventDefault(); togglePlay(); }
     else if (event.key === "ArrowLeft") { event.preventDefault(); clock().pause(); seek(E.time - step); }
     else if (event.key === "ArrowRight") { event.preventDefault(); clock().pause(); seek(E.time + step); }
@@ -1674,6 +1878,7 @@
     clearTimeout(E.previewTimer);
     clearTimeout(E.describeTimer);
     clearTimeout(E.watchTimer);
+    stopCompare(false);
     E.player.destroy();
     clearTimeout(E.exportTimer);
     document.removeEventListener("keydown", onKey);
