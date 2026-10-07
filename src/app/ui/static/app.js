@@ -22,6 +22,7 @@ const ICONS = {
   stop: '<rect x="7" y="7" width="10" height="10" rx="1.5"/>',
   back: '<path d="M15 6l-6 6 6 6"/>',
   undo: '<path d="M9 14L4 9l5-5"/><path d="M4 9h10a6 6 0 0 1 0 12h-3"/>',
+  play: '<path d="M8 5v14l11-7z"/>',
   link: '<path d="M10 14a4 4 0 0 0 5.7 0l3-3a4 4 0 0 0-5.7-5.7l-1 1M14 10a4 4 0 0 0-5.7 0l-3 3a4 4 0 0 0 5.7 5.7l1-1"/>',
   download: '<path d="M12 4v11M7 10l5 5 5-5M5 20h14"/>',
   edit: '<path d="M4 20h4L19 9l-4-4L4 16z"/><path d="M13 7l4 4"/>',
@@ -120,7 +121,7 @@ async function copyText(text, button) {
 // so no project can lose its footage to a tidy-up. Projects and the library each have
 // their own, shown the same way: a trail above, folders first, then what is filed here.
 
-const folderLink = (kind, id) => `#/${kind === "assets" ? "media" : "projects"}${id ? `/${encodeURIComponent(id)}` : ""}`;
+const folderLink = (kind, id) => `#/${kind === "assets" ? "media" : kind === "music" ? "music" : "projects"}${id ? `/${encodeURIComponent(id)}` : ""}`;
 
 function folderTrail(folders, id) {
   const byId = new Map(folders.map((folder) => [folder.id, folder]));
@@ -478,13 +479,14 @@ async function mediaPage(page, folderId) {
   await folderPage(page, folderId, {
     kind: "assets",
     opens: false,
-    load: async () => (await api("/api/assets?all=1")).assets,
+    load: async () => (await api("/api/assets?all=1&library=footage")).assets,
     head: () => head(T.media.title, T.media.subtitle,
       `${newFolderButton()}<button class="btn" data-pick="folder">${icon("folder")}${esc(T.media.addFolder)}</button>
        <button class="btn primary" data-pick="files">${icon("plus")}${esc(T.media.addFiles)}</button>`),
-    wire: (root, refresh) => { wireImport(root, refresh, folderId); wireNotes(root, refresh); wireReveal(root); },
+    wire: (root, refresh) => { wireImport(root, refresh, folderId, "footage"); wireNotes(root, refresh); wireReveal(root); wireLibrary(root, refresh); },
     tools: (asset) => `<button class="tool" data-notes="${esc(asset.id)}" title="${esc(T.media.notes)}">${icon("edit")}</button>`
-      + (asset.missing ? "" : `<button class="tool" data-reveal="${esc(asset.id)}" title="${esc(T.media.reveal)}">${icon("folder")}</button>`),
+      + (asset.missing ? "" : `<button class="tool" data-reveal="${esc(asset.id)}" title="${esc(T.media.reveal)}">${icon("folder")}</button>`)
+      + (asset.has_video ? "" : `<button class="tool" data-library="music" data-id-for="${esc(asset.id)}" title="${esc(T.musicPage.toMusic)}">${icon("music")}</button>`),
     notes: `<div class="callout">${icon("info")}<span>${esc(T.media.libraryOnly)}</span></div>
       <div class="callout warn">${icon("alert")}<span>${esc(T.media.moveWarning)}</span></div>`,
     empty: `<div class="callout">${icon("info")}<span>${esc(T.media.libraryOnly)}</span></div>
@@ -499,6 +501,75 @@ async function mediaPage(page, folderId) {
       return `<div class="card${asset.missing ? " gone" : ""}" title="${esc(asset.path)}" data-drag="item" data-id="${esc(asset.id)}">${extras}<div class="thumb">${picture}
         <span class="badge">${clock(asset.duration)}</span></div>
         <div class="card-body"><div class="card-title">${esc(asset.name)}</div><div class="card-meta"><span>${asset.width ? `${asset.width}×${asset.height}` : ""}</span>${kind}${fast}${gone}</div>
+        ${asset.notes ? `<div class="card-notes" title="${esc(asset.notes)}">${esc(asset.notes)}</div>` : ""}</div></div>`;
+    },
+    remove: removeAssets,
+  });
+}
+
+// Moving a file to the other library, from a button on its card.
+function wireLibrary(page, refresh) {
+  page.querySelectorAll("[data-library]").forEach((button) => {
+    button.addEventListener("click", async (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      try {
+        await api("/api/assets/library", { ids: [button.dataset.idFor], library: button.dataset.library });
+        toast(button.dataset.library === "music" ? T.musicPage.movedToMusic : T.musicPage.movedToFootage);
+        await refresh();
+      } catch (error) { toast(error.message, "error"); }
+    });
+  });
+}
+
+// One song plays at a time, from its card, without leaving the page.
+const listening = { audio: null, id: null };
+
+function wireListen(page) {
+  page.querySelectorAll("[data-listen]").forEach((button) => {
+    button.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      const id = button.dataset.listen;
+      listening.audio ??= new Audio();
+      const stopped = listening.id === id && !listening.audio.paused;
+      listening.audio.pause();
+      page.querySelectorAll("[data-listen]").forEach((other) => { other.innerHTML = icon("play"); });
+      if (stopped) { listening.id = null; return; }
+      listening.id = id;
+      listening.audio.src = `/media/${encodeURIComponent(id)}`;
+      listening.audio.play().catch((error) => toast(error.message, "error"));
+      button.innerHTML = icon("stop");
+      listening.audio.onended = () => { button.innerHTML = icon("play"); listening.id = null; };
+    });
+  });
+}
+
+// ---------------------------------------------------------------- music
+
+async function musicPage(page, folderId) {
+  await folderPage(page, folderId, {
+    kind: "music",
+    opens: false,
+    load: async () => (await api("/api/assets?all=1&library=music")).assets,
+    head: () => head(T.musicPage.title, T.musicPage.subtitle,
+      `${newFolderButton()}<button class="btn primary" data-pick="files">${icon("plus")}${esc(T.musicPage.add)}</button>`),
+    wire: (root, refresh) => { wireImport(root, refresh, folderId, "music"); wireNotes(root, refresh); wireReveal(root); wireLibrary(root, refresh); wireListen(root); },
+    tools: (asset) => (asset.missing ? "" : `<button class="tool" data-listen="${esc(asset.id)}" title="${esc(T.musicPage.listen)}">${icon("play")}</button>`
+      + `<button class="tool" data-reveal="${esc(asset.id)}" title="${esc(T.media.reveal)}">${icon("folder")}</button>`)
+      + `<button class="tool" data-notes="${esc(asset.id)}" title="${esc(T.media.notes)}">${icon("edit")}</button>`
+      + `<button class="tool" data-library="footage" data-id-for="${esc(asset.id)}" title="${esc(T.musicPage.toFootage)}">${icon("film")}</button>`,
+    notes: `<div class="callout">${icon("info")}<span>${esc(T.musicPage.hint)}</span></div>`,
+    empty: `<div class="callout">${icon("info")}<span>${esc(T.musicPage.hint)}</span></div>
+      <div class="empty"><div class="icon-ring">${icon("music", 28)}</div><h2>${esc(T.musicPage.emptyTitle)}</h2><p>${esc(T.musicPage.emptyBody)}</p></div>`,
+    card: (asset, extras) => {
+      const state = asset.tempo ? `<span>${esc(T.musicPage.tempo(Math.round(asset.tempo)))}</span>`
+        : asset.analyzing ? `<span class="badge">${esc(T.musicPage.analyzing)}</span>`
+        : asset.analyzed ? "" : `<span class="badge">${esc(T.musicPage.waiting)}</span>`;
+      const gone = asset.missing ? `<span class="badge warn" title="${esc(T.media.goneHint)}">${icon("alert", 13)}${esc(T.media.gone)}</span>` : "";
+      return `<div class="card${asset.missing ? " gone" : ""}" title="${esc(asset.path)}" data-drag="item" data-id="${esc(asset.id)}">${extras}<div class="thumb">${icon("music", 30)}
+        <span class="badge">${clock(asset.duration)}</span></div>
+        <div class="card-body"><div class="card-title">${esc(asset.name)}</div><div class="card-meta">${state}${gone}</div>
         ${asset.notes ? `<div class="card-notes" title="${esc(asset.notes)}">${esc(asset.notes)}</div>` : ""}</div></div>`;
     },
     remove: removeAssets,
@@ -545,16 +616,18 @@ function wireNotes(page, refresh) {
 }
 
 // Files chosen while a folder is open are filed in it.
-function wireImport(page, refresh, folderId) {
+function wireImport(page, refresh, folderId, library) {
   page.querySelectorAll("[data-pick]").forEach((button) => {
     button.onclick = async () => {
       const label = button.innerHTML;
       page.querySelectorAll("[data-pick]").forEach((other) => { other.disabled = true; });
       button.innerHTML = `<span class="spinner"></span>${esc(T.media.picking)}`;
       try {
-        const result = await api("/api/pick", { kind: button.dataset.pick, folder_id: folderId || null });
+        const result = await api("/api/pick", { kind: button.dataset.pick, folder_id: folderId || null, library });
         if (!result.chosen) toast(T.media.nothingChosen);
         else if (result.imported) toast(T.media.added(result.imported));
+        // Songs added on the footage page go to the music, where they are looked for.
+        if (library === "footage" && result.music) toast(T.musicPage.wentToMusic(result.music));
         if (result.failed.length) toast(T.media.failed(result.failed.join("、")), "error");
         await refresh();
       } catch (error) {
@@ -767,7 +840,7 @@ function renameProject(project, done, prompt = "") {
 
 // ---------------------------------------------------------------- shell
 
-const PAGES = { projects: projectsPage, media: mediaPage, ai: aiPage, storage: storagePage };
+const PAGES = { projects: projectsPage, media: mediaPage, music: musicPage, ai: aiPage, storage: storagePage };
 
 async function route() {
   const [, name = "", id] = location.hash.replace(/^#/, "").split("/");
@@ -919,7 +992,7 @@ function watchJobs() {
 function start() {
   document.title = T.appName;
   $("#brand-name").textContent = T.appName;
-  const navIcons = { projects: "film", media: "folder", ai: "sparkle", storage: "disk" };
+  const navIcons = { projects: "film", media: "folder", music: "music", ai: "sparkle", storage: "disk" };
   document.querySelectorAll(".nav-item").forEach((item) => {
     item.innerHTML = `${icon(navIcons[item.dataset.page])}<span>${esc(T.nav[item.dataset.page])}</span>`;
   });

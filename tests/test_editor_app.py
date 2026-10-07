@@ -39,7 +39,8 @@ def test_chosen_files_are_used_where_they_are_never_copied(client: TestClient, m
 
 def test_a_cancelled_window_imports_nothing(client: TestClient, monkeypatch) -> None:
     monkeypatch.setattr(dialogs, "pick", lambda kind: [])
-    assert client.post("/api/pick", json={"kind": "folder"}).json() == {"chosen": 0, "imported": 0, "failed": [], "assets": []}
+    assert client.post("/api/pick", json={"kind": "folder"}).json() == {"chosen": 0, "imported": 0, "failed": [], "assets": [],
+                                                                               "music": 0}
 
 def test_a_project_whose_footage_is_gone_says_so(client: TestClient, media: Path, tmp_path: Path) -> None:
     moved = tmp_path / "moved.mp4"

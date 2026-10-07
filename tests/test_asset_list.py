@@ -44,7 +44,7 @@ def test_the_library_can_be_searched_by_file_name(shelf: dict) -> None:
 def test_each_file_is_a_short_record_with_its_length_as_a_number(shelf: dict) -> None:
     asset = next(item for item in server.list_assets(folder_id=shelf["folder"])["assets"])
     assert isinstance(asset["duration"], float) and asset["duration"] == 12.5
-    assert {"id", "name", "duration", "has_video", "has_audio", "analyzed", "transcription", "stale",
+    assert {"id", "name", "duration", "has_video", "has_audio", "analyzed", "transcription", "stale", "library",
             "folder_id"} == set(asset)
 
 def test_seconds_leave_the_server_as_numbers(media: Path) -> None:

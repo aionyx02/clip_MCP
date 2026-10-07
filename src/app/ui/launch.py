@@ -91,11 +91,14 @@ def run(open_browser: bool = True) -> None:
 
     import uvicorn
 
+    from app import server as server_module
     from app.ui import app as editor
     from app.ui import updates
 
     # An installer a past update downloaded is done with by now.
     updates.clear_old_downloads()
+    # Files added before there were two libraries are sorted, and songs not yet analyzed queued.
+    threading.Thread(target=server_module.tend_library, name="tend-library", daemon=True).start()
 
     port = _free_port()
     url = f"http://127.0.0.1:{port}/"

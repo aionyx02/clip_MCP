@@ -21,6 +21,7 @@ from app.engine.diarize import (
 )
 from app.engine.ffmpeg import OperationCancelled, escape_filter_path, hidden_window_flags, run_ffmpeg
 from app.engine.rhythm import measure_rhythm, rhythm_model_name
+from app.engine.library import MUSIC, library_of
 from app.models.media import (
     AnalysisRecipe,
     Asset,
@@ -1214,12 +1215,13 @@ def analyze_media(
             recognition fails.
     """
     duration = float(asset.duration or 0)
-    with_speech = transcribe and asset.has_audio
+    # Music is listened to for its beat and never transcribed; everything else the other way
+    # round: a beat tracker run over somebody talking finds one in their syllables.
+    music = asset.has_audio and library_of(asset) == MUSIC
+    with_speech = transcribe and asset.has_audio and not music
     with_speakers = with_speech and diarize
     with_faces = asset.has_video
-    # Music is a file with sound and no picture. The beat is looked for there and nowhere
-    # else: a beat tracker run over somebody talking finds one in their syllables.
-    with_rhythm = asset.has_audio and not asset.has_video
+    with_rhythm = music
     shares = _shares(with_faces, with_speech, with_speakers, with_rhythm)
 
     needed: List[models.Model] = []

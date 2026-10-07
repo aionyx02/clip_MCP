@@ -27,6 +27,11 @@ class Asset(BaseModel):
         description="How this file may be used, in the user's words: 「請消音」, 「0:12 以後手入鏡，不要用」. Shown "
                     "wherever the file is read about, so an instruction does not have to live in its name",
     )
+    library: Optional[str] = Field(
+        default=None,
+        description="`footage` or `music`: which of the library's two halves the file is in. Null for a file "
+                    "added before there were two, which is placed by whether it has a picture",
+    )
 
 class Span(BaseModel):
     """A time span within a media file, in seconds."""

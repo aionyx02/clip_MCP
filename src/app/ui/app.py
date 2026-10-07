@@ -38,6 +38,7 @@ from app.engine.frames import extract_frame
 from app.engine.subtitles import captioned_clips, place_cues
 from app.models.timeline import Project
 from app.storage import housekeeping
+from app.engine.library import LIBRARIES, MUSIC, library_of
 from app.storage.repo import FOLDER_KINDS, FolderNotFoundError
 from app.ui import dialogs, updates
 
@@ -83,6 +84,7 @@ def _asset_summary(asset) -> dict:
         # Shown on the file, so the user checking captions later knows to expect misheard words.
         "fast_transcript": server.transcription_of(server.repo.transcript_model(asset.id)) == "fast",
         "notes": asset.notes,
+        "library": library_of(asset),
     }
 
 async def projects(request: Request) -> Response:
@@ -391,14 +393,37 @@ async def assets(request: Request) -> Response:
     listed too, marked `missing`, so the library page can take them out.
     """
     everything = request.query_params.get("all") == "1"
-    filed = server.repo.folder_of("assets")
+    library = request.query_params.get("library")
+    filed = {**server.repo.folder_of("assets"), **server.repo.folder_of("music")}
+    analyzing = {job.asset_id for job in server.repo.jobs_to_show(datetime.now(timezone.utc))[0]
+                 if job.kind.value == "analyze"}
     listed = []
     for asset in server.repo.list_assets():
+        if library in LIBRARIES and library_of(asset) != library:
+            continue
         present = os.path.exists(asset.path)
         if present or everything:
-            listed.append({**_asset_summary(asset), "folder_id": filed.get(asset.id), "missing": not present})
+            entry = {**_asset_summary(asset), "folder_id": filed.get(asset.id), "missing": not present}
+            if entry["library"] == MUSIC:
+                analysis = server.repo.get_analysis(asset.id)
+                entry["tempo"] = analysis.rhythm.tempo if analysis is not None and analysis.rhythm else None
+                entry["analyzed"] = analysis is not None and analysis.rhythm is not None
+                entry["analyzing"] = asset.id in analyzing
+            listed.append(entry)
     listed.sort(key=lambda asset: asset["name"].lower())
     return JSONResponse({"assets": listed})
+
+async def move_library(request: Request) -> Response:
+    """Move files to the footage or the music library."""
+    body = await request.json()
+    library = body.get("library")
+    if library not in LIBRARIES:
+        return _error("library is footage or music")
+    try:
+        result = await run_in_threadpool(server.set_asset_library, [str(item) for item in body.get("ids", [])], library)
+    except ValueError as error:
+        return _error(str(error), 404)
+    return JSONResponse(result)
 
 async def versions(request: Request) -> Response:
     """The version panel: a video's versions grouped into dots, and the branches started from it."""
@@ -610,7 +635,7 @@ async def file_items(request: Request) -> Response:
     body = await request.json()
     kind = body.get("kind")
     ids = [str(item_id) for item_id in body.get("ids", []) if item_id]
-    known = ({asset.id for asset in server.repo.list_assets()} if kind == "assets"
+    known = ({asset.id for asset in server.repo.list_assets()} if kind in ("assets", "music")
              else {project.id for project in server.repo.list_projects()} if kind == "projects" else None)
     if known is None:
         return _error("kind is assets or projects")
@@ -787,6 +812,8 @@ async def pick(request: Request) -> Response:
     """Ask Windows for files or a folder, and import what was chosen where it is."""
     body = await request.json()
     kind = body.get("kind") if body.get("kind") in ("folder", "music") else "files"
+    # Added on the music page, or as music for a project, a file is music whatever it sounds like.
+    library = MUSIC if kind == "music" or body.get("library") == MUSIC else None
     chosen = await run_in_threadpool(dialogs.pick, kind)
     imported, failed, ids = 0, [], []
     for path in chosen:
@@ -797,19 +824,25 @@ async def pick(request: Request) -> Response:
                 ids += [item["id"] for item in result["assets"]]
                 failed += [os.path.basename(item["path"]) for item in result["skipped"]]
             else:
-                ids.append(server.import_asset(path)["id"])
+                ids.append(server._register_asset(path, library).id)
                 imported += 1
         except (FileNotFoundError, ValueError, RuntimeError):
             failed.append(os.path.basename(path))
+    if library and ids:
+        server.set_asset_library(ids, library)
+    found = server.repo.get_assets(ids)
+    music = [asset_id for asset_id in ids if asset_id in found and library_of(found[asset_id]) == MUSIC]
     # Chosen with one of the library's folders open: filed there, where the user is looking.
     folder_id = body.get("folder_id")
     if folder_id and ids:
+        here = music if body.get("library") == MUSIC else [asset_id for asset_id in ids if asset_id not in music]
         try:
-            server.repo.file_items("assets", ids, str(folder_id))
+            server.repo.file_items("music" if body.get("library") == MUSIC else "assets", here, str(folder_id))
         except FolderNotFoundError:
             # The folder went while the window was open; the files are in the library all the same.
             pass
-    return JSONResponse({"chosen": len(chosen), "imported": imported, "failed": failed, "assets": ids})
+    return JSONResponse({"chosen": len(chosen), "imported": imported, "failed": failed, "assets": ids,
+                         "music": len(music)})
 
 async def storage(request: Request) -> Response:
     """What the workspace holds, or clear the kinds the user chose."""
@@ -917,7 +950,7 @@ EDITOR_DOING = (
     ("/edits", "在編輯器修改"), ("/undo", "復原上一步"), ("/captions/make", "產生字幕"),
     ("/api/projects/delete", "把專案移到垃圾桶"), ("/api/trash", "從垃圾桶放回"), ("/api/projects", "新增專案"), ("/api/assets/notes", "寫素材備註"),
     ("/api/assets/delete", "從素材庫拿掉"), ("/api/folders", "整理資料夾"), ("/api/file", "整理位置"),
-    ("/api/pick", "加入素材"), ("/versions/restore", "回到舊版本"), ("/versions/branch", "開分支"),
+    ("/api/pick", "加入素材"), ("/api/assets/library", "移動分類"), ("/versions/restore", "回到舊版本"), ("/versions/branch", "開分支"),
 )
 
 class _Stamp:
@@ -976,6 +1009,7 @@ def create_app() -> Starlette:
         Route("/api/projects/{project_id}/storage", project_storage),
         Route("/api/projects/{project_id}/storage/trim", trim, methods=["POST"]),
         Route("/api/trash", trash, methods=["GET", "POST"]),
+        Route("/api/assets/library", move_library, methods=["POST"]),
         Route("/api/words/{asset_id}", words),
         Route("/api/projects/{project_id}/captions", captions),
         Route("/api/projects/{project_id}/captions/make", make_captions, methods=["POST"]),

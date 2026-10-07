@@ -160,6 +160,16 @@ also write these into file names (`0901(請消音).mp4`); follow those the same
 way, and ask whether to keep them as notes with `edit_asset`, where the
 editor shows them too.
 
+### Footage and music
+
+The library has two halves: footage — what was shot, and recordings of
+people talking — and music. `list_assets` with `kind: "music"` lists the
+songs, each with its `tempo` once analyzed. A file without a picture goes to
+one when it is added, by whether it is mostly speech; a song is analyzed for
+its beat in the background by itself and is never transcribed. When a file
+is in the wrong half — a song with a long spoken intro, a recording of
+somebody singing — move it with `set_asset_library` and say so in your reply.
+
 ### Keeping the library tidy
 
 The library's folders are clip-mcp's own, so sorting footage into them is

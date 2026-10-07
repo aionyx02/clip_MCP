@@ -103,7 +103,8 @@ _MIGRATIONS: List[List[str]] = [
         "mark TEXT NOT NULL, PRIMARY KEY (project_id, commit_id, mark))",
     ],
 ]
-FOLDER_KINDS = ("assets", "projects")
+# Footage and music are filed apart, each in folders of its own; projects in theirs.
+FOLDER_KINDS = ("assets", "music", "projects")
 SCHEMA_VERSION = len(_MIGRATIONS)
 
 class VersionConflictError(ValueError):
@@ -231,7 +232,8 @@ class Repository:
                 asset.id: {
                     "name": os.path.basename(asset.path), "path": asset.path, "fingerprint": fingerprint(asset.path),
                     "has_video": asset.has_video, "has_audio": asset.has_audio, "notes": asset.notes,
-                    "folder_id": filed.get(("assets", asset.id)),
+                    "library": asset.library,
+                    "folder_id": filed.get(("assets", asset.id)) or filed.get(("music", asset.id)),
                 }
                 for asset in self.list_assets()
             },
@@ -245,6 +247,35 @@ class Repository:
         """Tell the history the library changed: a file added, moved, noted, filed or taken out."""
         if self.history is not None:
             self.history.write("library.json", canonical(self._library()), said)
+
+    def move_to_library(self, asset_ids: Iterable[str], library: str, kind: str) -> List[Asset]:
+        """Put files in the footage or the music library, at the top of its folders.
+
+        Args:
+            asset_ids: The files.
+            library: `footage` or `music`.
+            kind: The folder kind of that library, `assets` or `music`.
+
+        Returns:
+            The files that moved; one already there is left as it is.
+        """
+        moved = []
+        with self._transaction() as conn:
+            for asset_id in asset_ids:
+                row = conn.execute("SELECT data FROM assets WHERE id = ?", (asset_id,)).fetchone()
+                if not row:
+                    continue
+                asset = Asset.model_validate_json(row[0])
+                if asset.library == library:
+                    continue
+                asset.library = library
+                conn.execute("UPDATE assets SET data = ? WHERE id = ?", (asset.model_dump_json(), asset_id))
+                # Filed in the other library's folders, it would be nowhere in this one's.
+                conn.execute("DELETE FROM folder_items WHERE item_id = ? AND kind != ?", (asset_id, kind))
+                moved.append(asset)
+        if moved:
+            self._kept_library(f"{len(moved)} 個檔案移到{'音樂' if library == 'music' else '素材'}")
+        return moved
 
     def save_asset(self, asset: Asset) -> None:
         """Insert an asset, or replace the stored asset with the same ID.

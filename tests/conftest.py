@@ -229,3 +229,12 @@ def playback_unprepared() -> Iterator[None]:
     kept, server.PREPARE_PLAYBACK = server.PREPARE_PLAYBACK, False
     yield
     server.PREPARE_PLAYBACK = kept
+
+@pytest.fixture(autouse=True)
+def music_unanalyzed() -> Iterator[None]:
+    """Start no analysis when a song is added unless a test turns it on, for the same reason."""
+    from app import server
+
+    kept, server.ANALYZE_MUSIC_ON_ADD = server.ANALYZE_MUSIC_ON_ADD, False
+    yield
+    server.ANALYZE_MUSIC_ON_ADD = kept

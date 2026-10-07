@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 import re
 import shutil
 import subprocess
+import threading
 import time
 import uuid
 from decimal import Decimal
@@ -66,6 +67,7 @@ from app.engine.ffmpeg import graph_from_file, hidden_window_flags
 from app.engine.probe import picture_size, probe_file, recorded_at, speech_loudness, timecode_start
 from app.engine.reframe import Framing, centre_at, frame_project
 from app.engine import playback
+from app.engine.library import FOOTAGE, LIBRARIES, MUSIC, classify, library_of
 from app.engine.builder import DEFAULT_LOUDNESS_TARGET, FFmpegRenderer, Talking, voice_keys
 from app.engine.levels import song_level, talking_in
 from app.engine.delivery import CHECKS, chapter_metadata, chapters, check_delivery, clock, cover_candidates
@@ -319,7 +321,7 @@ DOING = {
     "revert_plan": "計畫回到舊版", "copy_plan": "複製計畫", "generate_subtitles": "上字幕",
     "create_project": "建立專案", "import_asset": "加入素材", "import_folder": "加入資料夾", "edit_asset": "寫素材備註",
     "restore_version": "回到舊版本", "branch_project": "開分支", "mark_version": "標記版本",
-    "organize_library": "整理素材庫", "move_files": "搬動檔案",
+    "organize_library": "整理素材庫", "move_files": "搬動檔案", "set_asset_library": "移動分類",
 }
 # What the AI programs call themselves when they connect, as a person would name them.
 CLIENT_NAMES = {
@@ -455,15 +457,22 @@ def _natural_key(name: str) -> List[object]:
     """
     return [int(part) if part.isdigit() else part.lower() for part in re.split(r"(\d+)", name)]
 
-def _register_asset(filepath: str) -> Asset:
-    """Probe a media file and save it as an asset.
+def _register_asset(filepath: str, library: Optional[str] = None) -> Asset:
+    """Probe a media file and save it as an asset, in the footage or the music library.
+
+    A new file without a picture is listened to: mostly somebody talking, it
+    is footage; otherwise music, and a song is analyzed in the background
+    straight away.
 
     Args:
         filepath: Path to the media file, absolute or relative to the server's
             working directory.
+        library: Put it in this library rather than the one it sounds like,
+            as when it is added on the editor's music page.
 
     Returns:
-        The saved asset. A path that was imported before keeps its asset ID.
+        The saved asset. A path that was imported before keeps its asset ID
+        and its library.
 
     Raises:
         FileNotFoundError: If the file does not exist.
@@ -491,8 +500,61 @@ def _register_asset(filepath: str) -> Asset:
     asset.recorded_at = recorded_at(info, path)
     if existing is not None:
         asset.notes = existing.notes
+        asset.library = existing.library
+    if library in LIBRARIES:
+        asset.library = library
+    elif asset.library is None:
+        asset.library = classify(asset)
     repo.save_asset(asset)
+    _queue_music([asset])
     return asset
+
+# Whether a song added to the music library starts being analyzed. Off where nothing should
+# run in the background unasked, such as a test run.
+ANALYZE_MUSIC_ON_ADD = True
+
+def _queue_music(assets: Iterable[Asset]) -> List[str]:
+    """Start analyzing songs of the music library that have no current analysis, behind other work.
+
+    Args:
+        assets: Files just added, moved to the music library, or found
+            waiting; anything else among them is left alone.
+
+    Returns:
+        The IDs of the jobs started.
+    """
+    if not ANALYZE_MUSIC_ON_ADD:
+        return []
+    busy = {job.asset_id for job in repo.jobs_to_show(datetime.now(timezone.utc))[0] if job.kind == JobKind.ANALYZE}
+    started = []
+    for asset in assets:
+        if library_of(asset) != MUSIC or asset.duration is None or asset.id in busy:
+            continue
+        existing = repo.get_analysis(asset.id)
+        if existing is not None and existing.rhythm is not None and not _is_stale(existing):
+            continue
+        # Behind the footage somebody asked about: a song can wait until it is wanted.
+        started.append(_start_analysis(asset, False, "accurate", priority=1).job_id)
+    return started
+
+def tend_library() -> None:
+    """Sort the files added before there were two libraries, and queue the songs not yet analyzed.
+
+    Run once when the server or the editor starts, in the background: listening
+    takes a moment per file. Whichever starts first does it; the other finds
+    it taken and leaves it.
+    """
+    from filelock import FileLock, Timeout
+
+    try:
+        with FileLock(os.path.join(WORKSPACE_DIR, "library.lock"), timeout=0):
+            for asset in repo.list_assets():
+                if asset.library is None and os.path.exists(asset.path):
+                    asset.library = classify(asset)
+                    repo.save_asset(asset)
+            _queue_music(repo.list_assets())
+    except Timeout:
+        return
 
 def _dated(assets: Mapping[str, Asset]) -> Dict[str, Asset]:
     """Make sure every asset knows when it was recorded, where anything says.
@@ -598,6 +660,7 @@ def _plain(value):
 
 @mcp.tool()
 def list_assets(
+    kind: Optional[Literal["footage", "music"]] = None,
     folder_id: Optional[str] = None,
     text: Optional[str] = None,
     limit: Annotated[int, Field(ge=1, le=200)] = 50,
@@ -609,6 +672,9 @@ def list_assets(
     by the folders they made in the editor, or by part of a file name.
 
     Args:
+        kind: `footage` — what was shot, and recordings of people talking —
+            or `music`; omit for both. A song is listed with its `tempo` in
+            beats per minute once analyzed, or `analyzing` while it is.
         folder_id: Only the files filed in this folder, from `folders`. Its
             sub-folders are their own; ask for them by their own IDs.
         text: Only files whose name contains this.
@@ -619,21 +685,25 @@ def list_assets(
         A dictionary with `assets`, one short record per file — `id`, `name`,
         `duration` in seconds, `has_video`, `has_audio`, `analyzed`,
         `transcription` (`fast`, `accurate`, or null when speech was not
-        transcribed), `stale`, `folder_id` and, where the file has them,
-        its `notes` — how it may be used — in name order; `total`, how
-        many match; `offset`; and `folders`, every folder of the library with
-        its `id`, `name` and `parent_id`. `stale` is true for an asset analyzed
+        transcribed), `stale`, `library`, `folder_id` and, where the file has
+        them, its `notes` — how it may be used — in name order; `total`, how
+        many match; `offset`; and `folders`, every folder of that library (the
+        footage's when `kind` is omitted) with its `id`, `name` and
+        `parent_id`. `stale` is true for an asset analyzed
         with detection settings or a speech model the server no longer uses:
         its analysis still works, but analyze those assets again before
         comparing them with each other. `inspect_media` has a file's full path,
         size and frame rate.
     """
-    filed = repo.folder_of("assets")
+    filed = {**repo.folder_of("assets"), **repo.folder_of("music")}
     matching = [
         asset for asset in repo.list_assets()
-        if (folder_id is None or filed.get(asset.id) == folder_id)
+        if (kind is None or library_of(asset) == kind)
+        and (folder_id is None or filed.get(asset.id) == folder_id)
         and (not text or text.lower() in os.path.basename(asset.path).lower())
     ]
+    analyzing = {job.asset_id for job in repo.jobs_to_show(datetime.now(timezone.utc))[0]
+                 if job.kind == JobKind.ANALYZE}
     matching.sort(key=lambda asset: _natural_key(os.path.basename(asset.path)))
     assets = []
     for asset in matching[offset:offset + limit]:
@@ -647,10 +717,46 @@ def list_assets(
             "analyzed": analysis is not None,
             "transcription": _transcription(analysis),
             "stale": analysis is not None and _is_stale(analysis),
+            "library": library_of(asset),
             "folder_id": filed.get(asset.id),
             **({"notes": asset.notes} if asset.notes else {}),
+            **({"tempo": analysis.rhythm.tempo} if analysis is not None and analysis.rhythm is not None else {}),
+            **({"analyzing": True} if asset.id in analyzing else {}),
         })
-    return {"assets": assets, "total": len(matching), "offset": offset, "folders": repo.list_folders("assets")}
+    return {"assets": assets, "total": len(matching), "offset": offset,
+            "folders": repo.list_folders(_folder_kind(kind or FOOTAGE))}
+
+def _folder_kind(library: str) -> str:
+    """The kind of folder a library's files are filed in."""
+    return "music" if library == MUSIC else "assets"
+
+@mcp.tool()
+def set_asset_library(asset_ids: List[str], library: Literal["footage", "music"], note: str = "") -> dict:
+    """Move files between the footage and the music library.
+
+    A file without a picture is put in one when it is added, by whether it is
+    mostly somebody talking; that can be wrong — a song that is mostly a
+    spoken intro, a recording of somebody singing. Move it when the user says
+    so or when what you hear says otherwise, and say in your reply that you
+    did. A song moved to music is analyzed for its beat in the background;
+    footage is transcribed when analyzed, music never is.
+
+    Args:
+        asset_ids: The files.
+        library: `footage` or `music`.
+        note: The user's words for why, kept in the library's history.
+
+    Returns:
+        `moved`, the names of the files moved; a file already there is not
+        among them. Each now sits at the top of that library's folders.
+
+    Raises:
+        ValueError: If a file is not in the library.
+    """
+    assets = [_get_asset(asset_id) for asset_id in asset_ids]
+    moved = repo.move_to_library([asset.id for asset in assets], library, _folder_kind(library))
+    _queue_music(moved)
+    return {"moved": [os.path.basename(asset.path) for asset in moved]}
 
 @mcp.tool()
 def edit_asset(asset_id: str, notes: str, note: str = "") -> dict:
@@ -681,6 +787,7 @@ class CreateFolder(BaseModel):
 
     action: Literal["create_folder"]
     name: str = Field(..., description="What to call it, in the user's words")
+    library: Literal["footage", "music"] = Field(default="footage", description="Which library it is a folder of")
     parent_id: Optional[str] = Field(default=None, description="The folder it goes in; omit for the top")
     asset_ids: List[str] = Field(default_factory=list, description="Files to put in it straight away")
 
@@ -724,20 +831,21 @@ def organize_library(steps: List[LibraryStep], note: str = "") -> dict:
         note: The user's words for why, kept in the library's history.
 
     Returns:
-        `done`, each step in words, and `folders`, every folder now.
+        `done`, each step in words, and `folders` and `music_folders`, every
+        folder of each library now.
 
     Raises:
         ValueError: If a folder or file is unknown, or a name is taken.
     """
-    names = {folder["id"]: folder["name"] for folder in repo.list_folders("assets")}
+    names = {folder["id"]: folder["name"] for kind in ("assets", "music") for folder in repo.list_folders(kind)}
     done = []
     for step in steps:
         try:
             if isinstance(step, CreateFolder):
-                made = repo.create_folder(uuid.uuid4().hex, "assets", step.name, step.parent_id)
+                made = repo.create_folder(uuid.uuid4().hex, _folder_kind(step.library), step.name, step.parent_id)
                 names[made["id"]] = made["name"]
                 if step.asset_ids:
-                    repo.file_items("assets", [_get_asset(asset_id).id for asset_id in step.asset_ids], made["id"])
+                    _file_in(step.asset_ids, made["id"], step.library)
                 done.append(f"新增資料夾「{made['name']}」" + (f"，放進 {len(step.asset_ids)} 個檔案" if step.asset_ids else ""))
             elif isinstance(step, RenameFolder):
                 old = names.get(step.folder_id, step.folder_id)
@@ -749,13 +857,26 @@ def organize_library(steps: List[LibraryStep], note: str = "") -> dict:
                 done.append(f"把資料夾「{names.get(step.folder_id, step.folder_id)}」移到"
                             + (f"「{names.get(step.parent_id, step.parent_id)}」裡" if step.parent_id else "最上層"))
             else:
-                repo.file_items("assets", [_get_asset(asset_id).id for asset_id in step.asset_ids], step.folder_id)
+                _file_in(step.asset_ids, step.folder_id)
                 done.append(f"把 {len(step.asset_ids)} 個檔案放進"
                             + (f"「{names.get(step.folder_id, step.folder_id)}」" if step.folder_id else "最上層"))
         except LookupError as exc:
             raise ValueError(str(exc).strip("'\"")) from exc
     _say_in_history("；".join(done))
-    return {"done": done, "folders": repo.list_folders("assets")}
+    return {"done": done, "folders": repo.list_folders("assets"), "music_folders": repo.list_folders("music")}
+
+def _file_in(asset_ids: List[str], folder_id: Optional[str], library: Optional[str] = None) -> None:
+    """File footage or songs in a folder of their own library, or at its top.
+
+    Raises:
+        ValueError: If the files are of both libraries, or the folder is of the other one.
+    """
+    assets = [_get_asset(asset_id) for asset_id in asset_ids]
+    kinds = {library_of(asset) for asset in assets} | ({library} if library else set())
+    if len(kinds) > 1:
+        raise ValueError("footage and music are filed in folders of their own: file them in separate steps, or "
+                         "move a file to the other library first with set_asset_library")
+    repo.file_items(_folder_kind(kinds.pop() if kinds else FOOTAGE), [asset.id for asset in assets], folder_id)
 
 class FileMove(BaseModel):
     """One file to move on disk."""
@@ -959,6 +1080,38 @@ def _transcription(analysis: Optional[MediaAnalysis]) -> Optional[str]:
     """Say how an asset's speech was transcribed: `fast`, `accurate`, or None when it was not."""
     return transcription_of(None if analysis is None or analysis.transcript is None else analysis.transcript.model)
 
+def _transcribed(asset: Asset, transcribe: bool) -> bool:
+    """Whether an analysis of this file transcribes it: never a song, whatever was asked."""
+    return transcribe and asset.has_audio and library_of(asset) != MUSIC
+
+def _start_analysis(asset: Asset, transcribe: bool, transcription: str, language: Optional[str] = None,
+                    prompt: Optional[str] = None, chinese_variant: Optional[str] = None, diarize: bool = True,
+                    speakers: Optional[int] = None, priority: int = 0) -> Job:
+    """Queue one file's analysis.
+
+    Returns:
+        The job.
+    """
+    job = Job(kind=JobKind.ANALYZE, asset_id=asset.id, priority=priority)
+    job.work_dir = os.path.join(WORKSPACE_DIR, "jobs", job.job_id)
+    with_speech = _transcribed(asset, transcribe)
+    job.memory_estimate = resources.analysis_memory_bytes(
+        with_speech,
+        whisper_model_for(transcription),
+        duration=float(asset.duration),
+        diarize=with_speech and diarize,
+        detect_faces=asset.has_video,
+    )
+    return job_manager.start_job(job, {
+        "transcribe": transcribe,
+        "transcription": transcription,
+        "language": language,
+        "prompt": prompt,
+        "chinese_variant": chinese_variant,
+        "diarize": diarize,
+        "speakers": speakers,
+    })
+
 def _plan_analyses(
     assets: Sequence[Asset], transcribe: bool, transcription: str, again: bool,
 ) -> Tuple[List[Tuple[Asset, str]], List[str], List[str]]:
@@ -986,7 +1139,7 @@ def _plan_analyses(
     for asset in assets:
         existing = repo.get_analysis(asset.id)
         had = _transcription(existing)
-        upgrade = transcribe and asset.has_audio and transcription == "accurate" and had == "fast"
+        upgrade = _transcribed(asset, transcribe) and transcription == "accurate" and had == "fast"
         if not again and not upgrade and existing is not None and not _is_stale(existing):
             skipped.append(asset.id)
             continue
@@ -1000,7 +1153,7 @@ def _estimate(to_start: Sequence[Tuple[Asset, str]], transcribe: bool, diarize: 
     """How long the files about to be analyzed take here, or None when nothing in them is transcribed."""
     footage: Dict[str, float] = {"accurate": 0.0, "fast": 0.0}
     for asset, transcription in to_start:
-        if transcribe and asset.has_audio:
+        if _transcribed(asset, transcribe):
             footage[transcription] += float(asset.duration)
     if not any(footage.values()):
         return None
@@ -1133,25 +1286,7 @@ def analyze_asset(
     started: List[dict] = []
     to_start, skipped, upgrading = _plan_analyses(assets, transcribe, transcription, again)
     for asset, chosen in to_start:
-        job = Job(kind=JobKind.ANALYZE, asset_id=asset.id)
-        job.work_dir = os.path.join(WORKSPACE_DIR, "jobs", job.job_id)
-        with_speech = transcribe and asset.has_audio
-        job.memory_estimate = resources.analysis_memory_bytes(
-            with_speech,
-            whisper_model_for(chosen),
-            duration=float(asset.duration),
-            diarize=with_speech and diarize,
-            detect_faces=asset.has_video,
-        )
-        job = job_manager.start_job(job, {
-            "transcribe": transcribe,
-            "transcription": chosen,
-            "language": language,
-            "prompt": prompt,
-            "chinese_variant": chinese_variant,
-            "diarize": diarize,
-            "speakers": speakers,
-        })
+        job = _start_analysis(asset, transcribe, chosen, language, prompt, chinese_variant, diarize, speakers)
         started.append({"asset_id": asset.id, "job_id": job.job_id, "status": job.status.value, "stage": job.stage})
     result: dict = {"jobs": started, "skipped": skipped, "upgrading": upgrading}
     found = _estimate(to_start, transcribe, diarize, upgrading)
@@ -5607,6 +5742,7 @@ def tidy_old_outputs(confirm: bool = False) -> dict:
 
 def main():
     """Run the MCP server over the stdio transport."""
+    threading.Thread(target=tend_library, name="tend-library", daemon=True).start()
     # The banner goes to stderr, which every client keeps as its server log; a box of
     # ASCII art in it on every start is noise, and on a console that is not UTF-8 it
     # arrives mangled.

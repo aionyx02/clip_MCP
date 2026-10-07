@@ -1,7 +1,25 @@
 // Every word the editor shows, in one place, so another language is one more file like this.
 window.T = {
   appName: "clip-mcp 剪輯",
-  nav: { projects: "專案", media: "素材", ai: "連接 AI", storage: "儲存空間" },
+  nav: { projects: "專案", media: "素材", music: "音樂", ai: "連接 AI", storage: "儲存空間" },
+
+  musicPage: {
+    title: "音樂",
+    subtitle: "配樂用的歌。加進來就會在背景分析拍點，AI 挑歌時看得到。",
+    add: "加入音樂",
+    hint: "檔案不會被複製或移動，clip-mcp 只記住它在哪裡。歌只量拍點、不聽打字幕。",
+    emptyTitle: "還沒有音樂",
+    emptyBody: "按右上角「加入音樂」，或把歌放進素材，沒有畫面又不是在講話的檔案會自動放到這裡。",
+    tempo: (bpm) => `${bpm} BPM`,
+    analyzing: "分析中",
+    waiting: "等待分析",
+    listen: "試聽",
+    toMusic: "移到音樂",
+    toFootage: "移到素材（這是講話的錄音）",
+    movedToMusic: "已移到音樂，會在背景分析拍點",
+    movedToFootage: "已移到素材",
+    wentToMusic: (n) => `其中 ${n} 個是歌，放到了「音樂」`,
+  },
 
   jobs: {
     title: (n) => `工作中（${n}）`,
