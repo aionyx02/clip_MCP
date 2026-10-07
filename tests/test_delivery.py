@@ -463,6 +463,17 @@ def test_where_the_camera_started_is_not_a_cut_anybody_made() -> None:
 def test_a_muted_clip_is_not_cut_in_the_middle_of_anything() -> None:
     assert checks(project_of(clip("a", "x", 0, 1.5, 0, volume=0.0)), {"x": talking()}) == []
 
+def test_a_cut_that_takes_the_edge_off_a_measured_sound_is_found_without_a_transcript() -> None:
+    # Nobody transcribed it, but the silences say a sound rises at 4.0s and falls at 6.0s.
+    heard = MediaAnalysis(asset_id="x", duration=10.0, silences=[Span(start=0.0, end=4.0), Span(start=6.0, end=10.0)])
+    found = checks(project_of(clip("a", "x", 4.3, 9.0, 0)), {"x": heard})
+    assert [check for check, _ in found] == ["mid_speech"] and "Start at 4.00s" in found[0][1]
+    found = checks(project_of(clip("a", "x", 1.0, 5.8, 0)), {"x": heard})
+    assert "End at 6.00s" in found[0][1]
+    # In a silence, or in the middle of a sound that runs on, nothing is cut off at its edge.
+    assert checks(project_of(clip("a", "x", 3.5, 6.5, 0)), {"x": heard}) == []
+    assert checks(project_of(clip("a", "x", 5.0, 9.0, 0)), {"x": heard}) == []
+
 def test_the_same_shot_shown_twice_is_found() -> None:
     project = project_of(clip("a", "y", 0, 36, 0), clip("b", "y", 2, 16, 36))
     found = checks(project, {})
@@ -482,6 +493,21 @@ def test_a_line_the_recogniser_wrote_over_silence_is_not_cut_into() -> None:
     analysis = talking()
     analysis.silences = [Span(start=0.5, end=5.5)]
     assert checks(project_of(clip("a", "x", 0, 1.5, 0)), {"x": analysis}) == []
+
+def test_a_line_the_recogniser_made_up_over_other_sound_is_not_speech() -> None:
+    from app.engine.semantic import was_made_up
+
+    # 「3D列印、炒麵」 over a drone taking off: sound, but every word a guess near zero.
+    analysis = talking()
+    for word in analysis.transcript.segments[0].words:
+        word.probability = 0.02
+    assert was_made_up(analysis.transcript.segments[0])
+    assert checks(project_of(clip("a", "x", 0, 1.5, 0)), {"x": analysis}) == []
+    # One word heard clearly is enough for it to have been said.
+    analysis.transcript.segments[0].words[1].probability = 0.9
+    assert not was_made_up(analysis.transcript.segments[0])
+    # A transcript made before probabilities were kept is never judged.
+    assert not was_made_up(talking().transcript.segments[0])
 
 def test_a_cut_in_a_real_silence_is_clean_whatever_the_word_timings_say() -> None:
     # The transcript runs 天氣 on to 很好 with 0.05s between; the microphone heard half a

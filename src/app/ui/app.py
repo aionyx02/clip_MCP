@@ -937,6 +937,10 @@ async def update(request: Request) -> Response:
         return _error(str(error))
     return JSONResponse({"installing": installing})
 
+async def update_progress(request: Request) -> Response:
+    """How much of the newer installer has been downloaded, while the user waits for it."""
+    return JSONResponse(updates.download_progress())
+
 async def ping(request: Request) -> Response:
     """Say this is the editor, and for which workspace, so a second start opens this one instead of another.
 
@@ -1037,6 +1041,7 @@ def create_app() -> Starlette:
         Route("/api/clients/open", open_client, methods=["POST"]),
         Route("/api/ping", ping),
         Route("/api/update", update, methods=["GET", "POST"]),
+        Route("/api/update/progress", update_progress),
         Route("/api/jobs/{job_id}", job),
         Route("/media/{asset_id}", media),
         Route("/proxy/{name}", proxy),

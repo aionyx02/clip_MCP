@@ -439,7 +439,8 @@ window.T = {
     later: "稍後",
     now: "立即更新",
     busy: "正在輸出或更新成品畫面，完成後再更新",
-    installing: "正在下載並安裝更新，完成後會自動重新開啟…",
+    downloading: (percent) => percent == null ? "下載中…" : `下載中 ${percent}%`,
+    installing: "正在安裝更新，完成後會自動重新開啟…",
   },
 
   common: {

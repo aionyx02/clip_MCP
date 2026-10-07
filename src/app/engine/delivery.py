@@ -20,7 +20,7 @@ from typing import List, Mapping, Optional, Sequence, Tuple
 from app.engine.builder import DUCK_DEPTH_DB, Talking
 from app.engine.continuity import Shot, strays
 from app.engine.plan import LENGTH_TOLERANCE
-from app.engine.semantic import clean_cuts, share_covered, was_audible
+from app.engine.semantic import clean_cuts, share_covered, was_audible, was_made_up
 from app.engine.subtitles import caption_overflow, captioned_clips
 from app.models.media import MediaAnalysis
 from app.models.timeline import CaptionStyle, Clip, PlacedCue, Project
@@ -56,6 +56,13 @@ CLEAN_SILENCE_SECONDS = 0.3
 # How much of the same stretch of a file has to come back before it is the same shot shown
 # twice rather than two neighbouring moments. Provisional.
 REPEAT_SECONDS = 1.0
+# A cut this close after a sound rises out of a measured silence, or this close before it
+# falls back into one, takes the start or the end of that sound off — a word's first
+# consonant or its tail — whatever the transcript says. The transcript's word times are
+# a guess; the silences were measured. Provisional.
+SOUND_EDGE_SECONDS = 0.5
+# Under this, the sound cut off is too short to hear. Provisional.
+SOUND_EDGE_MIN_SECONDS = 0.04
 # A sequence of this many clips is an edit, and an edit with no plan has nothing that says
 # how it begins, turns and ends. Fewer is a trim. Provisional.
 UNPLANNED_CLIPS = 3
@@ -351,9 +358,10 @@ def _said(analysis: MediaAnalysis) -> list:
         stretch measured as silent — the same rule that keeps them out of the
         captions, so a cut is not said to split a line nobody spoke.
     """
-    segments = analysis.transcript.segments if analysis.transcript else []
+    segments = [segment for segment in (analysis.transcript.segments if analysis.transcript else [])
+                if not was_made_up(segment)]
     if not analysis.silences:
-        return list(segments)
+        return segments
     return [
         segment for segment in segments
         if was_audible(share_covered(segment.start, segment.end, analysis.silences), True)
@@ -410,6 +418,34 @@ def _inside_speech(analysis: MediaAnalysis, at: float, opens: bool) -> bool:
         return any(word.start < at < word.end for word in words)
     return False
 
+def _bitten_sound(analysis: MediaAnalysis, at: float, opens: bool) -> Optional[float]:
+    """Find a sound a cut takes the start or the end off, from the measured silences alone.
+
+    Args:
+        analysis: The file's analysis.
+        at: The moment, in source seconds.
+        opens: Whether the cut starts a clip rather than ending one.
+
+    Returns:
+        Where the sound begins (for a cut that opens) or ends (for one that
+        closes), when that is between `SOUND_EDGE_MIN_SECONDS` and
+        `SOUND_EDGE_SECONDS` away on the side the cut leaves out. None when
+        the cut is in a silence, nothing was measured, or the sound runs on
+        further than that — the middle of a long sound is not its edge.
+    """
+    spans = sorted((span.start, span.end) for span in analysis.silences)
+    if not spans or any(start <= at <= end for start, end in spans):
+        return None
+    if opens:
+        rises = [end for _, end in spans if end < at]
+        edge = max(rises) if rises else None
+    else:
+        falls = [start for start, _ in spans if start > at]
+        edge = min(falls) if falls else None
+    if edge is None or not SOUND_EDGE_MIN_SECONDS <= abs(at - edge) <= SOUND_EDGE_SECONDS:
+        return None
+    return edge
+
 def _speech_cuts(clips: Sequence[Clip], analyses: Mapping[str, MediaAnalysis]) -> List[Finding]:
     """Find cuts on the sequence that land in the middle of somebody talking.
 
@@ -428,14 +464,26 @@ def _speech_cuts(clips: Sequence[Clip], analyses: Mapping[str, MediaAnalysis]) -
     found: List[Finding] = []
     for clip in sorted(clips, key=lambda item: item.timeline_in):
         analysis = analyses.get(clip.asset_id)
-        if clip.volume == 0 or analysis is None or analysis.transcript is None:
+        if clip.volume == 0 or analysis is None:
             continue
         ends = (
             ("starts", float(clip.audio_source_start), float(clip.audio_timeline_in)),
             ("ends", float(clip.audio_source_end), float(clip.audio_timeline_out)),
         )
         for side, at, landed in ends:
-            if at <= 0 or at >= analysis.duration or not _inside_speech(analysis, at, side == "starts"):
+            if at <= 0 or at >= analysis.duration:
+                continue
+            opens = side == "starts"
+            if analysis.transcript is None or not _inside_speech(analysis, at, opens):
+                edge = _bitten_sound(analysis, at, opens)
+                if edge is not None:
+                    where, part, move = ("after a sound begins", "start", "Start") if opens else (
+                        "before a sound ends", "end", "End")
+                    found.append(Finding("mid_speech", (
+                        f"clip {clip.id} {side} {abs(at - edge):.2f}s {where}, at {clock(landed)} ({at:.2f}s of the "
+                        f"file), so the {part} of it is cut off — the transcript may have no word there, but the "
+                        f"sound was measured. {move} at {edge:.2f}s of the file to keep all of it"
+                    )))
                 continue
             near = [point for point in _clean_points(analysis) if abs(point - at) <= CLEAN_SEARCH_SECONDS]
             advice = (

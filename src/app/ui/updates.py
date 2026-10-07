@@ -30,6 +30,9 @@ TIMEOUT = 5
 
 _cache: dict = {}
 _lock = threading.Lock()
+# How much of the installer has arrived, for the editor to show while the user waits.
+_progress = {"done": 0, "total": 0}
+CHUNK = 256 * 1024
 
 def current_version() -> str:
     """The version running now."""
@@ -104,8 +107,12 @@ def start_update(on_started) -> str:
     DOWNLOADS.mkdir(parents=True, exist_ok=True)
     target = DOWNLOADS / f"clip-mcp-setup-{found['version']}.exe"
     request = urllib.request.Request(found["url"], headers={"User-Agent": "clip-mcp-editor"})
+    _progress.update(done=0, total=int(found.get("size") or 0))
     with urllib.request.urlopen(request, timeout=60) as response, open(target, "wb") as handle:
-        shutil.copyfileobj(response, handle)
+        _progress["total"] = _progress["total"] or int(response.headers.get("Content-Length") or 0)
+        while chunk := response.read(CHUNK):
+            handle.write(chunk)
+            _progress["done"] += len(chunk)
     if found.get("size") and target.stat().st_size != found["size"]:
         target.unlink(missing_ok=True)
         raise RuntimeError("the download did not arrive whole; try again")
@@ -120,3 +127,11 @@ def start_update(on_started) -> str:
 
     threading.Thread(target=close_soon, daemon=True).start()
     return found["version"]
+
+def download_progress() -> dict:
+    """How much of the installer has arrived so far.
+
+    Returns:
+        `done` and `total` in bytes; `total` is 0 until the size is known.
+    """
+    return dict(_progress)

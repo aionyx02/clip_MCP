@@ -25,7 +25,8 @@ from mcp.types import TextContent
 from pydantic import BaseModel, Field, TypeAdapter
 from app.models.media import Asset, Measured, MediaAnalysis, Source, Span, SpeakerTurn, Transcript
 from app.models.plan import (
-    EditPlan, PlanAmendment, apply_amendment, describe_amendment, short_clip_ids, whole_clip_id, with_whole_clip_ids,
+    EditPlan, PlanAmendment, TrimKind, apply_amendment, describe_amendment, short_clip_ids, whole_clip_id,
+    with_whole_clip_ids,
 )
 from app.models.semantic import (
     ClipDescription, ClipKind, ClipLevel, SectionChoice, SemanticClip, SemanticTimeline, Tag, TagSource,
@@ -3250,6 +3251,12 @@ def copy_plan(plan_id: str, timeline_id: Optional[str] = None, version: Optional
     if the same sections were set on both. Every reason, trim, cue and beat
     is carried as it is.
 
+    After the footage is transcribed again, sentences start and end a little
+    elsewhere, so a clip with no exact match takes the one from the same file
+    and level that covers most of it. Those are listed in `matched_nearby`
+    with both stretches: read them back, since a sentence that was split or
+    joined may now say a little more or less.
+
     Args:
         plan_id: The plan to copy.
         timeline_id: Timeline to move the copy onto; omit to keep the plan's
@@ -3275,16 +3282,10 @@ def copy_plan(plan_id: str, timeline_id: Optional[str] = None, version: Optional
         if repo.get_semantic_timeline(target) is None:
             raise ValueError(f"semantic timeline {target} not found")
         everything = 1_000_000
-
-        def place(clip: SemanticClip) -> tuple:
-            """Say which moment of which file a clip is, whatever timeline it sits in."""
-            return (clip.asset_id, clip.level, round(clip.source_range.start, 3), round(clip.source_range.end, 3))
-
-        there = {place(clip): clip.id for clip in repo.query_semantic_clips(target, limit=everything)}
-        mapping = {
-            clip.id: there.get(place(clip))
-            for clip in repo.query_semantic_clips(plan.timeline_id, limit=everything)
-        }
+        mapping, nearby, shifts = _matched_clips(
+            repo.query_semantic_clips(plan.timeline_id, limit=everything),
+            repo.query_semantic_clips(target, limit=everything),
+        )
         used = [
             *(item.clip_id for item in copy.selections),
             *(kept for item in copy.selections for kept in item.trim.keep_clip_ids),
@@ -3298,6 +3299,12 @@ def copy_plan(plan_id: str, timeline_id: Optional[str] = None, version: Optional
                 "timeline that has them"
             )
         for item in copy.selections:
+            shift = shifts.get(item.clip_id, 0.0)
+            if shift and item.trim.kind == TrimKind.RANGE:
+                # A range is counted from the clip's own start, which moved.
+                item.trim.from_seconds = max(0.0, round((item.trim.from_seconds or 0.0) + shift, 3))
+                if item.trim.to_seconds is not None:
+                    item.trim.to_seconds = max(0.001, round(item.trim.to_seconds + shift, 3))
             item.clip_id = mapping[item.clip_id]
             item.trim.keep_clip_ids = [mapping[kept] for kept in item.trim.keep_clip_ids]
         for shot in copy.broll:
@@ -3307,8 +3314,62 @@ def copy_plan(plan_id: str, timeline_id: Optional[str] = None, version: Optional
             for item in copy.rejected if mapping.get(item.clip_id)
         ]
         copy.timeline_id = target
+    else:
+        nearby = []
     said = f"copied from {plan.id} v{plan.version}" + (f" onto {target}" if target != plan.timeline_id else "")
-    return save_plan(copy, f"{said}: {note}" if note else said)
+    saved = save_plan(copy, f"{said}: {note}" if note else said)
+    used = {item.clip_id for item in plan.selections} | {clip for shot in plan.broll for clip in
+                                                         (shot.clip_id, shot.over_clip_id)}
+    nearby = [match for match in nearby if match["clip_id"] in used]
+    if nearby:
+        saved["matched_nearby"] = nearby
+    return saved
+
+# Provisional (roadmap §13): how much of a clip the one in another timeline must cover to
+# stand in for it, when the same seconds are not there — a sentence a second transcription moved.
+NEARBY_SHARE = 0.5
+
+def _matched_clips(here: List[SemanticClip], there: List[SemanticClip]) -> tuple[dict, list, dict]:
+    """Match each clip to the same moment of the same file in another timeline.
+
+    Args:
+        here: The clips the plan uses IDs from.
+        there: The clips of the timeline it moves onto.
+
+    Returns:
+        The new ID for each old one (None when nothing matches), the matches
+        that are not exact, and how far each of those clips' start moved.
+    """
+    def place(clip: SemanticClip) -> tuple:
+        """Say which moment of which file a clip is, whatever timeline it sits in."""
+        return (clip.asset_id, clip.level, round(clip.source_range.start, 3), round(clip.source_range.end, 3))
+
+    exact = {place(clip): clip for clip in there}
+    alike: dict[tuple, List[SemanticClip]] = {}
+    for clip in there:
+        alike.setdefault((clip.asset_id, clip.level), []).append(clip)
+    mapping, nearby, shifts = {}, [], {}
+    for clip in here:
+        found = exact.get(place(clip))
+        if found is None:
+            start, end = clip.source_range.start, clip.source_range.end
+
+            def covered(other: SemanticClip) -> float:
+                """Say how many of this clip's seconds the other one covers."""
+                return max(0.0, min(end, other.source_range.end) - max(start, other.source_range.start))
+
+            best = max(alike.get((clip.asset_id, clip.level), []), key=covered, default=None)
+            if best is not None and covered(best) >= NEARBY_SHARE * max(end - start, 0.001):
+                found = best
+                shifts[clip.id] = round(start - best.source_range.start, 3)
+                nearby.append({
+                    "clip_id": clip.id, "now": best.id,
+                    "was": [round(start, 2), round(end, 2)],
+                    "is": [round(best.source_range.start, 2), round(best.source_range.end, 2)],
+                    "text": best.text,
+                })
+        mapping[clip.id] = found.id if found else None
+    return mapping, nearby, shifts
 
 @mcp.tool()
 def amend_plan(plan_id: str, expected_version: int, amendments: list[PlanAmendment], note: str = "") -> dict:
@@ -4856,8 +4917,8 @@ def check_render(
     reaches the screen; `clipping`, a recording squared off at the ceiling,
     which no amount of turning down undoes; `music`, music heard too close
     under somebody talking; `mid_speech`, a cut that lands
-    inside a word or between two words of one phrase, with the nearest pause
-    to move it to; `repeated`, the same stretch of a file shown twice;
+    inside a word or between two words of one phrase, or takes the start or
+    the end off a sound the microphone measured, with where to move it; `repeated`, the same stretch of a file shown twice;
     `continuity`, a clip put on by hand between two shot at another
     moment; `unplanned`, a sequence of three or more clips put together by hand
     rather than compiled from a plan, so nothing says how it opens, turns
@@ -5845,8 +5906,9 @@ def get_job(
         `progress` (0.0 to 1.0), the current `stage`, the `asset_id` of an
         analysis or the `output_path` of a render, `remaining_seconds` once a
         running job has gone far enough for its pace to say, `ahead` — how
-        many queued jobs go before a queued one — and for a failed job its
-        `error_message`; and a summary over all of them: `finished` and
+        many queued jobs go before a queued one — for a failed job its
+        `error_message`, and for a finished analysis worth a second look a
+        `note` to pass on; and a summary over all of them: `finished` and
         `total` counts, `failed` counting those that failed or were
         cancelled, and `progress`, the average.
 
@@ -5918,8 +5980,21 @@ def _job_states(job_ids: List[str]) -> List[dict]:
             entry["ahead"] = ahead[job.job_id]
         if job.error_message:
             entry["error_message"] = job.error_message
+        if job.kind == JobKind.ANALYZE and job.status == JobStatus.COMPLETED and job.asset_id:
+            heard = repo.get_analysis(job.asset_id)
+            voices = len({turn.speaker for turn in heard.speakers}) if heard else 0
+            if voices > MANY_VOICES:
+                entry["note"] = (
+                    f"heard {voices} different voices, more than a video usually has — noisy talk splits one "
+                    "person into many. If you know how many people talk, ask the user and analyze it again "
+                    "with `speakers` and `again`"
+                )
         listed.append(entry)
     return listed
+
+# Provisional (roadmap §13): more voices than this in one file is far more likely a noisy
+# recording split apart than that many people — 40 for two friends talking over traffic.
+MANY_VOICES = 8
 
 @mcp.tool()
 def cancel_job(job_id: str) -> dict:

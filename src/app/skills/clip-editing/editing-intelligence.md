@@ -55,7 +55,9 @@ without the whole thing being redone from memory.
    change the copy, and use `diff_plan` to tell the user what actually
    differs. `copy_plan` with a `timeline_id` also carries a plan onto a
    timeline built over a different set of files, where the same moments have
-   other clip IDs. `get_plan` reads one
+   other clip IDs — or over the same files transcribed again, where every
+   sentence edge moved a little. Read `matched_nearby` back to the user: a
+   sentence that was split or joined may now say more or less. `get_plan` reads one
    back, with the other plans listed for comparison.
 
 Compiling again is safe. A compiled clip remembers which plan and which

@@ -879,20 +879,59 @@ async function checkForUpdate() {
   item.innerHTML = `${icon("download")}<span>${esc(T.update.badge(found.version))}</span>`;
   item.hidden = false;
   item.onclick = () => modal(`<h2>${esc(T.update.title(found.version))}</h2><p>${esc(T.update.body)}</p>
-    ${found.notes ? `<div class="field"><label>${esc(T.update.notes)}</label><div class="notes-box">${esc(found.notes)}</div></div>` : ""}
+    ${found.notes ? `<div class="field"><label>${esc(T.update.notes)}</label><div class="notes-box">${releaseNotes(found.notes)}</div></div>` : ""}
     <div class="foot"><button class="btn" data-later>${esc(T.update.later)}</button><button class="btn primary" data-now>${esc(T.update.now)}</button></div>`,
   (box, close) => {
     $("[data-later]", box).onclick = close;
-    $("[data-now]", box).onclick = async () => {
+    const now = $("[data-now]", box);
+    now.onclick = async () => {
+      // The installer takes a while to arrive; say how far it has got rather than sit still.
+      now.disabled = true;
+      $("[data-later]", box).disabled = true;
+      now.innerHTML = `<span class="spinner"></span>${esc(T.update.downloading(null))}`;
+      const watch = setInterval(async () => {
+        try {
+          const got = await api("/api/update/progress");
+          if (got.total) now.lastChild.textContent = T.update.downloading(Math.min(99, Math.floor(got.done / got.total * 100)));
+        } catch { /* the next look will do */ }
+      }, 500);
       try {
         await api("/api/update", {});
+        clearInterval(watch);
         close();
         document.body.innerHTML = `<div class="updating"><span class="spinner"></span>${esc(T.update.installing)}</div>`;
       } catch (error) {
+        clearInterval(watch);
+        now.disabled = false;
+        $("[data-later]", box).disabled = false;
+        now.textContent = T.update.now;
         toast(error.message === "busy" ? T.update.busy : error.message, "error");
       }
     };
   });
+}
+
+// Release notes are written in Markdown; show their headings, lists and bold, never raw marks.
+function releaseNotes(text) {
+  const inline = (line) => esc(line).replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>").replace(/`([^`]+)`/g, "<code>$1</code>");
+  const out = [];
+  let list = null;
+  for (const raw of text.split("\n")) {
+    const line = raw.trim();
+    const item = line.match(/^(?:[-*]|\d+\.)\s+(.*)$/);
+    if (item) {
+      const kind = /^\d/.test(line) ? "ol" : "ul";
+      if (list !== kind) { if (list) out.push(`</${list}>`); out.push(`<${kind}>`); list = kind; }
+      out.push(`<li>${inline(item[1])}</li>`);
+      continue;
+    }
+    if (list) { out.push(`</${list}>`); list = null; }
+    const heading = line.match(/^#{1,6}\s+(.*)$/);
+    if (heading) out.push(`<h4>${inline(heading[1])}</h4>`);
+    else if (line) out.push(`<p>${inline(line)}</p>`);
+  }
+  if (list) out.push(`</${list}>`);
+  return out.join("");
 }
 
 // ---------------------------------------------------------------- work going on

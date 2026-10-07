@@ -8,7 +8,7 @@ from decimal import Decimal
 from functools import lru_cache
 from typing import Callable, Dict, Iterator, List, Mapping, Optional, Sequence, Tuple, Union
 
-from app.engine.semantic import share_covered, speaker_at, was_audible
+from app.engine.semantic import share_covered, speaker_at, was_audible, was_made_up
 from app.models.media import Span, SpeakerTurn, Transcript, TranscriptSegment, TranscriptWord
 from app.models.timeline import (
     CaptionStyle,
@@ -991,6 +991,8 @@ def timeline_cues(
                 continue
             # A sentence the recogniser invented over an empty shot is not a caption.
             if quiet and not was_audible(share_covered(segment.start, segment.end, quiet), True):
+                continue
+            if was_made_up(segment):
                 continue
             for piece_start, piece_end, text, timed in _pieces(
                 segment, start, end, max_characters, max_seconds, max_units,

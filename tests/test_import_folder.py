@@ -98,3 +98,14 @@ def test_a_batch_of_jobs_is_read_back_with_one_summary() -> None:
     assert (result["finished"], result["failed"], result["total"]) == (2, 1, 3)
     assert result["jobs"][1]["error_message"] == "no audio"
     assert "error_message" not in result["jobs"][0]
+
+def test_a_file_split_into_too_many_voices_is_pointed_out(media: Path) -> None:
+    from app.models.media import SpeakerTurn
+
+    asset = server.import_asset(str(media / "wide.mp4"))["id"]
+    server.repo.save_analysis(MediaAnalysis(asset_id=asset, duration=40.0, speakers=[
+        SpeakerTurn(speaker=f"S{index}", start=index, end=index + 1) for index in range(40)
+    ]))
+    done = Job(kind=JobKind.ANALYZE, status=JobStatus.COMPLETED, progress=1.0, asset_id=asset)
+    server.repo.add_job(done)
+    assert "heard 40 different voices" in server.get_job([done.job_id])["jobs"][0]["note"]

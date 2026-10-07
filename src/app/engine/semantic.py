@@ -29,7 +29,7 @@ from app.models.semantic import ClipKind, ClipLevel, SemanticClip, SemanticTimel
 
 # Bumped whenever the rules below change, so timelines built by an older
 # version are recognised as out of date rather than silently reused.
-DERIVATION_VERSION = 6
+DERIVATION_VERSION = 7
 # A stretch without speech shorter than this is not a thing on its own; it is the
 # breath between two sentences, and it is already described by their headroom.
 MIN_UTTERANCE_SECONDS = 0.4
@@ -326,6 +326,31 @@ def speaker_at(
     spoken = sum(held.values())
     longest = max(sorted(held), key=lambda speaker: held[speaker])
     return longest if held[longest] / spoken >= majority else None
+
+# Provisional (roadmap §13): a sentence whose words the speech model gave, on average, less
+# than this chance of being right was made up — the recogniser writing 「3D列印、炒麵」 over a
+# shot of a drone taking off. Real mumbling still averages well above it.
+MADE_UP_PROBABILITY = 0.1
+
+def was_made_up(segment: TranscriptSegment) -> bool:
+    """Decide whether the speech model invented a sentence nobody said.
+
+    The silence detector catches sentences written over silence; this catches
+    the ones written over sound that is not talking — wind, engines, music —
+    which the model hands back with almost no confidence in a single word.
+
+    Args:
+        segment: The sentence.
+
+    Returns:
+        True when every word carries a probability and they average under
+        `MADE_UP_PROBABILITY`. A transcript made before probabilities were
+        kept is never judged.
+    """
+    chances = [word.probability for word in segment.words]
+    if not chances or any(chance is None for chance in chances):
+        return False
+    return sum(chances) / len(chances) < MADE_UP_PROBABILITY
 
 def was_audible(silence_share: float, has_audio: bool) -> bool:
     """Decide whether words transcribed over a stretch were ever actually said.
@@ -648,7 +673,7 @@ def build_timeline(
                 source_range=Span(start=round(start, 3), end=round(end, 3)),
                 safe_in=round(safe_in, 3),
                 safe_out=round(safe_out, 3),
-                kind=_kind(bool(text), asset.has_audio, scores),
+                kind=_kind(bool(text) and not was_made_up(segment), asset.has_audio, scores),
                 text=text,
                 speaker=voices.get((asset_id, said_by)) if (
                     said_by := speaker_at(analysis.speakers, start, end)
@@ -1040,7 +1065,9 @@ def clean_cuts(analysis: MediaAnalysis) -> CleanCuts:
         nothing is known rather than nothing is there.
     """
     transcript = analysis.transcript
-    segments = transcript.segments if transcript is not None else []
+    # A sentence the recogniser made up is not somebody talking, and a cut through it bites nothing.
+    segments = [segment for segment in (transcript.segments if transcript is not None else [])
+                if not was_made_up(segment)]
     return CleanCuts(
         words=tuple(
             (word.start, word.end)

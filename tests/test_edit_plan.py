@@ -2335,6 +2335,22 @@ def test_a_plan_is_copied_onto_a_timeline_built_over_more_files(planned: dict, m
         assert get_semantic_clip(after.clip_id)["source_range"] == get_semantic_clip(before.clip_id)["source_range"]
     assert copied["problems"] == []
 
+def test_a_plan_follows_its_sentences_after_the_footage_is_transcribed_again(planned: dict) -> None:
+    from app.server import build_semantic_timeline, copy_plan, get_semantic_clip
+
+    asset_id = planned["clips"][0]["asset_id"]
+    # The second listen puts every sentence edge a little elsewhere.
+    server_repo.save_analysis(analysis(asset_id=asset_id, duration=20.0, segments=[
+        (0.8, 3.1, "第一句話"), (3.5, 5.0, "第二句話"), (8.2, 10.4, "第三句話。"), (12.0, 14.0, "第四句話"),
+    ], silences=[(0.0, 0.8), (3.1, 3.5), (5.0, 8.2), (10.4, 12.0), (14.0, 20.0)]))
+    again = build_semantic_timeline([asset_id], rebuild=True)["timeline_id"]
+    copied = copy_plan(planned["plan_id"], timeline_id=again)
+    plan = EditPlan.model_validate(get_plan(copied["plan_id"])["plan"])
+    assert [get_semantic_clip(item.clip_id)["source_range"]["start"] for item in plan.selections] == [0.8, 8.2]
+    assert [match["is"] for match in copied["matched_nearby"]] == [[0.8, 3.1], [8.2, 10.4]]
+    # The rejected sentence did not move, so it is carried exactly and not listed.
+    assert len(plan.rejected) == 1
+
 def test_a_start_the_transcript_placed_late_is_moved_back_onto_the_sound() -> None:
     # 「抽杯」: the sound rises out of silence at 6.35, the transcript's first word is at 6.74.
     made = analysis(duration=12.0, segments=[(6.74, 9.0, "抽杯")], silences=[(0.0, 6.35), (9.0, 12.0)])
