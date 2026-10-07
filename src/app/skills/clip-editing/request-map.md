@@ -27,6 +27,12 @@ feedback are mapped in their own files.
 | 「音樂淡出」「音樂比影片長／短」 / fade the music, fit it | `fit_track` with `fade_out: 2` |
 | 「拿掉背景音樂」 / remove the music | `delete_clip` every clip on the audio track |
 | 「人聲出現時音樂小聲一點」 / duck the music under the talking | `set_track_audio` on the music track with `duck_under_speech: true` |
+| 「找一首輕快的歌」「配首溫暖的鋼琴」 / find a song | `find_music` with it in English and the part's length as `min_seconds`; read the top few back with how each sounds |
+| 「這首歌是講話，不是音樂」 / move a file between footage and music | `set_asset_library`, and say so |
+| 「從 Pixabay 抓這首」 / take a song from the web | `add_music_from_url` without `confirm_plan`, tell the user its licence and credit, then with it once they agree |
+| 「說明欄要標什麼出處」 / credits for the description | `music_credits` |
+| 「回到我標星號那版」 / back to the starred version | `project_history`, the version with `starred` in its `marks`, then `restore_version` |
+| 「把素材分資料夾」 / sort the library | `organize_library`, then say what was made and filed |
 | 「把影片原音關掉」 / mute the original sound | `set_clip_audio` `volume: 0` on every video clip |
 | 「聲音先進來」「上一句講完再切」 / J cut, L cut | `set_clip_audio` with `audio_lead` on the incoming clip, or `audio_lag` on the outgoing one |
 | 「每段音量差很多」 / the volume jumps between clips | Nothing where the footage is transcribed: every clip's talking is brought to one level and the places nobody talks in are kept under it. Otherwise `render_project` normalizes the finished mix |
