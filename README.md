@@ -1,342 +1,131 @@
 # clip-mcp
 
-以時間軸為核心的影片剪輯 MCP 伺服器，底層是 FFmpeg。
+以時間軸為核心、底層為 FFmpeg 的影片剪輯 MCP 伺服器，附本機瀏覽器編輯器。
+分析、轉錄、說話者切分、人臉偵測與語意檢索全部在本機執行；素材檔案不會離開這台電腦。
 
-把「把這三支接起來」「剪掉講錯的地方」「加背景音樂、配字幕」這類說法，
-交給支援 MCP 的 AI 客戶端，由它呼叫本伺服器的工具完成剪輯並輸出 MP4。
-分析、轉檔、語音辨識、說話者切分、人臉偵測、依意思搜尋全部在本機跑，**素材檔案本身不會被上傳到任何地方**。
+## 設計原則
 
-## 資料留在哪裡
+- **判斷交給模型，算術交給伺服器。** 模型只決定選哪些片段與理由；剪點位置、呼吸長度、段落合併、成片長度
+  都由確定性的純函式計算。同一份計畫必定編出同一條時間軸。
+- **計畫是來源，時間軸是產物。** 模型寫宣告式 plan（目標、段落、選材與理由、排除理由），由編譯器產生時間軸。
+  手動改過的片段視為鎖定，重編時保留；新計畫若會丟掉鎖定片段則拒絕編譯。
+- **驗證失敗即退回，不默默修正。** 錯誤附理由回傳；做不到的功能明講，不以近似結果冒充。
+- **量測，不評價。** 分析輸出數值（曝光、模糊、抖動、響度、人臉位置），判斷留給呼叫端。
 
-剪輯由你接的 AI 決定，但它碰不到你的檔案：它只能呼叫工具，向本機的分析結果發問，
-拿回它問的那一小部分。分成三層：AI 決定「要什麼」，本機的檢索回答「有哪些」，
-FFmpeg 在本機「實際剪」。
+## 架構
 
-| 留在這台電腦 | 會回傳給 AI 客戶端 |
+```
+MCP client ──stdio──> server.py ──> engine/ ──> FFmpeg
+                         │            (不依賴 MCP，可單獨使用)
+editor (ui/) ──HTTP──────┤
+                         └──> storage/  SQLite（現況） + git 歷史（dulwich，所有版本）
+```
+
+| 模組 | 職責 |
 |---|---|
-| 影片與聲音檔本身、預覽與成品 | 檔名、路徑、長度、解析度 |
-| 聽打、說話者分辨、人臉偵測、畫質與音量的量測（都在本機算） | 它搜尋到的片段：講了什麼、在第幾秒、量測數值 |
-| 依意思搜尋的模型與每段的向量（`query_clips` 的 `about`） | 搜尋結果是排好序的一小串片段，不是整份逐字稿（但見下方） |
-| 專案、計畫、版本紀錄（工作區裡的 SQLite） | 它要求看畫面時的縮圖拼貼（`view_frames`、`frames_for_clips`、`preview_project`、`propose_covers`），以及音量圖 |
+| `server.py` | MCP 工具介面與參數驗證 |
+| `engine/` | 分析、語意時間軸、計畫編譯、filtergraph 建構、render、字幕、交換格式 |
+| `models/` | Pydantic 領域模型（素材、語意片段、計畫、時間軸、工作） |
+| `storage/` | SQLite 持久化、版本歷史、儲存空間管理 |
+| `ui/` | 編輯器：與 AI 共用同一組工具與驗證規則 |
+| `benchmark/` | 剪輯結果的確定性評分 |
 
-- 沒有任何工具會回傳影片或聲音本身。
-- 搜尋只是不必讀完全部；AI 仍然可以選擇讀完整的逐字稿：一行一句讀過整批素材（`query_clips` 的 `brief`，
-  例如沒有計畫、要先了解素材時）、讀某個檔案的分析（`get_analysis`，含逐字稿）、讀專案的字幕（`get_subtitles`）。
-  那時它看到的就是完整的文字。
-- 如果你接的是雲端模型（Claude、ChatGPT、Gemini…），右欄的東西會送到那個服務；伺服器不主動上傳任何東西，
-  但管不到客戶端拿到結果之後送去哪裡。接電腦上跑的模型（LM Studio）就什麼都不會離開這台電腦。
-- 對外連線只有三種：第一次用到某個模型時下載權重（GitHub、Hugging Face，固定版本並核對 SHA-256，
-  之後留在工作區）、安裝程式下載 FFmpeg，以及編輯器檢查 GitHub 上有沒有新版本（只有安裝版會檢查）。
+詳見 [docs/architecture.md](docs/architecture.md)。
 
-## 設計上的一句話
+## 功能概要
 
-**判斷交給模型與使用者，算術交給伺服器。** 模型決定選哪些片段、為什麼；
-從那裡開始的每一件事——剪點落在哪、留多少呼吸、哪些併成一段、成片多長——
-都是確定性的純函式。所以同一份計畫必定編出同一個結果，
-而模型最糟的錯誤是「段落分得不好」，不會是「切到字中間」。
+| 領域 | 內容 |
+|---|---|
+| 分析 | 單次解碼完成換場、黑畫面、凍結、靜音、逐鏡頭畫質、逐秒音訊品質與人臉；faster-whisper 詞級逐字稿（zh-TW / zh-HK / zh-Hans）；ONNX 說話者切分，跨檔案一致標籤；分析帶配方，設定變更即標為過期 |
+| 語意時間軸 | 句子／鏡頭／停頓為單位的可檢索片段，各帶實測安全剪點；條件與語意檢索；由實測訊號產生候選段落邊界，模型只能在候選內裁決 |
+| 剪輯 | 磁性時間軸、J/L cut、轉場、變速（保留音高）、B-roll、子母畫面、逐片段調色；轉場與 J/L cut 不改變成片長度；修剪吸附詞邊界 |
+| 計畫 | 宣告式 plan、單項修改、整體修改（節奏、配樂音量、整段移除）、版本比較與視覺化差異、回退 |
+| 聲音 | 多軌配樂、人聲 ducking、隨段落換曲、剪點對拍、語音修復、逐講者響度、輸出統一 -14 LUFS |
+| 字幕 | 綁定素材時間而非成片時間，隨剪輯移動；依詞斷行、平台安全區樣式、逐字亮、雙語、講者標色；ASS 燒錄 / SRT |
+| 輸出 | render 前檢查（黑畫面、爆音、字幕出界、長度）；橫／直／方形三比例，跟臉裁切；章節、封面；FCPXML / OTIO / EDL 匯出並列出無法攜帶的屬性 |
+| 版本 | 專案、計畫、字幕的每次變更都是 git commit，可讀、可回退、可分支、可標記 |
+| 執行 | render 與分析在獨立 worker 執行，依工作數與可用記憶體排隊，可查進度、可取消、跨重啟持續 |
 
-驗證不過的東西原樣退回並附上理由，不默默修正。
+目前不支援：靜態圖片、字幕以外的文字圖形、調色以外的濾鏡、同軌畫面重疊。
 
-## 它能做什麼
+## 資料邊界
 
-- **看懂素材**：換場、黑畫面、靜止畫面、靜音偵測，加上詞級時間戳的本機逐字稿
-  （faster-whisper，可轉成 zh-TW / zh-HK / zh-Hans）。
-- **量出拍得好不好**：同一次解碼順便逐鏡頭量曝光、對比、模糊、動態與鏡頭抖動，
-  逐秒量響度、峰值、底噪與削波，並逐秒偵測畫面裡有幾張臉、最大的那張佔多少、在哪。
-  這些是量測不是評價——伺服器不告訴你哪顆算太暗，它給你數字，
-  讓 `query_clips` 可以直接下「她在講話、鏡頭是穩的、而且人在畫面左邊」。
-  分析帶著**配方**（版本、偵測參數、用了哪些模型），換過設定的素材會被標成過期。
-- **誰在講話**：對談與訪談會自動切分說話者，而且**跨檔案認人**——兩台機拍同一場訪談，
-  同一個人在兩支檔案裡都是 `V1`，片段與字幕用的是同一組標籤。
-  跨到中間換人的片段**不給標籤**——寧可空著，也不要給一個會被燒進字幕的錯名字。
-  知道有幾個人就告訴它（`speakers`），它就只會找出那麼多個。
-- **看見畫面**：把抽出的影格拼成一張標了時間的縮圖總覽（`view_frames`，一次可以吃多支
-  素材），或把剪好的序列拼成 storyboard（`preview_project`），幾秒就能確認再決定要不要 render。
-- **語意時間軸**：把分析結果拆成可檢索的語意片段——一句話、一顆鏡頭、一段停頓，
-  每段都帶著自己實測的安全剪點（`build_semantic_timeline`、`query_clips`）。
-  再往上由客戶端模型把片段裁決成段落與主題（`propose_sections`、`set_sections`）——
-  伺服器用實測訊號**過量產生**候選邊界，模型只能在候選裡挑選與命名，
-  所以段落永遠長在量出來的靜音邊緣上。看圖寫回的描述會標明出處
-  （`frames_for_clips`、`set_clip_tags`）。
-- **剪輯的基本盤**：J / L cut（聲音先進或後留）、三種轉場（溶接、擦劃、過一個顏色）、
-  變速（保留音高或跟著變調）、段落標記。J / L cut 與轉場都**不移動任何 clip**——
-  剪點留在原地，多出來的媒體從片段的來源範圍之外取，所以成片長度不變。
-  段落標記由 `compile_plan` 從 plan 的 beats 寫上去，手加的那些不會被下一次編譯洗掉。
-- **剪輯計畫**：先寫一份宣告式的 plan——目標、段落、選了哪些片段、為什麼、
-  哪些看過沒用——再由伺服器編譯成時間軸（`save_plan`、`validate_plan`、`compile_plan`）。
-  同一份 plan 必定編出同一個結果，要改某一項用 `amend_plan` 就好，不必整份重送，
-  兩種剪法可以用 `diff_plan` 直接比較。編譯時順便做完粗剪的清理：拿掉氣口、
-  同一句講好幾次只留最後講完的那次、頭尾修乾淨、剪點避開黑畫面與凍結畫面。
-- **回饋與版本**：每一版 plan 都留著，`revert_plan` 回到任何一版（回退本身也是新的一版，
-  什麼都不會丟）。「整體節奏太慢」「音樂太大聲」「這整段不要」各有一個一次改整支的修改，
-  不必逐段改——節奏可以拿掉更多空氣，也可以整支加速（人聲保持音高，段落標記、B-roll、
-  配樂、對拍都跟著重算）。`preview_plan_diff` 把這一輪改了什麼畫在一張 storyboard 上。
-- **B-roll**：在剪好的序列上蓋畫面、底下的聲音繼續跑。`propose_broll` 指出畫面停太久的地方，
-  覆蓋規則（每段多長、一段最多蓋幾成、不能蓋掉標為關鍵的鏡頭）寫在編譯器裡，違規就退回。
-- **出身與鎖定**：編譯出來的每個片段都記得它從哪份計畫、哪些語意片段來。
-  **手動改過就等於鎖定**，重新編譯時你的修改原樣保留（序列、B-roll、配樂都是），
-  只有位置由新計畫決定；
-  新計畫如果不再用到某個鎖定片段的素材，整個編譯會被拒絕並列出擋路的片段——
-  丟掉使用者的工作比停下來糟。
-- **磁性剪輯**：插入、修剪、刪除、搬移、切開、重排，後面的片段會自己讓位或補上空隙，
-  不用自己算秒數。支援倒敍這類非線性順序。
-- **剪點不落在字中間**：`head` / `tail` 這種會落在任意秒數的修剪會吸附到最近的詞邊界，
-  「呼吸」把剪點推進詞裡時會把呼吸還回去。修不掉的會回報，不會默默留著。
-  句子沒講完就切掉的地方也會回報還差幾秒——那會改變成片長度，是人要決定的事。
-- **聲音**：多條音軌背景音樂、逐片段音量與淡入淡出、`duck_under_speech`
-  讓音樂在人聲出現時自動退下、`fit_track` 把音樂對齊影片長度（裁切、接續、循環、搬移淡出）。
-  plan 裡的配樂可以**隨段落換曲**（頭尾相接，或明確指定長度的交叉淡化），
-  也可以要求**剪點對到拍上**（節拍在分析時量出來，剪點只在靜音裡移動，不會切到字）。語音修復（低頻轟聲、嘶聲、齒音，一律明確開啟）
-  與**逐講者響度一致**（兩個人錄得一大一小時各自調）。
-- **統一響度**：每次輸出都正規化到 -14 LUFS，不同裝置錄的素材不會一段大聲一段小聲。
-- **畫面處理**：逐片段亮度／對比／飽和度／色溫（含黑白）、淡入淡出黑、
-  畫中畫（以畫面比例定位的子母畫面或跳接畫面）。
-- **一支剪輯出三種比例**：同一個專案 render 成橫式、直式、方形，形狀不合的鏡頭**跟著臉裁**
-  而不是硬裁中間——臉移出去時用切的換構圖，不推鏡。
-- **字幕**：從逐字稿產生字幕，**綁在素材的秒數上而不是成片的秒數上**——
-  剪輯搬動時字幕自己跟著走，刪掉的片段會把它的字幕一起帶走，
-  從一句話中間切開則兩邊各出現一次。依詞斷行，YouTube／Reels／TikTok 各有一組
-  避開平台按鈕的樣式，可以一個字一個字亮、雙語兩行、標出誰在講話並換色。
-  輸出 ASS 並可燒錄進畫面，也能匯出 SRT。改錯字只要改那一句。
-- **預覽**：storyboard 幾秒就出來，而且裁切方式跟 render 一樣。預覽 render 會記住每顆鏡頭的畫面，
-  改一個剪點只重算那一顆。`preview_sound` 只算聲音，給一張人聲對配樂的圖和一個可以聽的檔案——
-  AI 聽不到，這是它確認音樂有沒有蓋過講話的方法。
-- **出片**：render 前先檢查黑畫面、爆音、字幕出界、長度不符，有問題就擋下來等使用者決定；
-  章節從段落長出來（也寫進 MP4），封面候選一顆鏡頭一張；剪輯可以匯出成
-  FCPXML／OTIO／EDL，給 Premiere、DaVinci Resolve、Final Cut 接手細修——
-  帶著變速、照素材自己的 timecode 對位，OTIO 另外帶轉場、FCPXML 帶音量；
-  帶不過去的（調色、淡入淡出、語音修復、子母畫面位置）會逐項列出來。
-- **背景工作**：render 與分析在獨立 worker 行程執行，有進度可查、可取消，伺服器重啟也不會中斷。
-- **持久化**：專案、素材、分析結果、計畫、工作狀態都存在 SQLite，隔幾天回來還能接著剪。
-- **內建使用指南**：`clip-editing` skill 以 MCP resource 提供，不綁特定模型，
-  教 AI 如何把需求翻成工具呼叫、什麼時候該先問、預設值怎麼挑。
+| 留在本機 | 回傳給 MCP 客戶端 |
+|---|---|
+| 影音原檔、預覽、成品 | 檔名、路徑、規格 |
+| 逐字稿、量測、向量索引、模型權重 | 查詢命中的片段文字與量測值 |
+| 專案、計畫、版本歷史 | 模型要求時的縮圖拼貼與音量圖 |
 
-目前還不支援：靜態圖片、字幕以外的文字與圖形，以及調色以外的濾鏡。
-需要這些時伺服器會明講做不到，並提出最接近的做法，而不是假裝做了。
-
-功能都做齊了，**還沒做的是證明剪得好**：下一步是用真實素材做 benchmark。
-這件事、以及刻意不做的事為什麼不做，見 [docs/roadmap.md](docs/roadmap.md)。
-
-## 需求
-
-- Python 3.14+
-- [uv](https://docs.astral.sh/uv/)
-- FFmpeg 與 ffprobe 7.0 以上，且在 `PATH` 上（長時間軸的濾鏡圖從檔案讀入，要 7.0 的 `-/選項` 寫法）
+- 沒有工具回傳影音本體。模型仍可主動讀取完整逐字稿（`get_analysis`、`query_clips` 的 `brief`、`get_subtitles`）。
+- 回傳內容的去向由客戶端決定；搭配本機模型（如 LM Studio）則完全離線。
+- 對外連線僅限：模型權重下載（固定版本、驗證 SHA-256）、安裝程式下載 FFmpeg、安裝版的更新檢查。
 
 ## 安裝
+
+需求：Python 3.14+、[uv](https://docs.astral.sh/uv/)、FFmpeg / ffprobe 7.0+ 位於 `PATH`。
+Windows 另有安裝程式（`installer/`），自帶 Python 與 FFmpeg。
 
 ```bash
 git clone https://github.com/aionyx02/clip_MCP.git
 cd clip_MCP
-uv tool install --editable .   # 裝成全域指令 clip-mcp，有自己的環境
-clip-mcp setup                 # 選工作區，並逐一詢問要連接哪些 AI 客戶端
-clip-mcp check                 # 確認：用哪個工作區、FFmpeg 在不在、各客戶端註冊了沒
+uv tool install --editable .
+clip-mcp setup        # 選擇工作區，逐一確認要註冊的客戶端（--dry-run 預覽、--all、--client <name>）
+clip-mcp check        # 檢查工作區、FFmpeg 與各客戶端註冊狀態
+clip-mcp ui           # 開啟編輯器
 ```
 
-`setup` 不會自動改任何程式的設定：它找出這台電腦裝了哪些客戶端，逐一問你要不要連接（預設是不要）。
-也可以直接指定：`--client gemini-cli`（可重複）只連接指定的，`--all` 連接全部已安裝的，
-`--shortcuts` 加上編輯器的桌面與開始選單捷徑。沒辦法詢問的時候（例如被腳本呼叫）就什麼都不連。
-連接後在編輯器的「連接 AI」頁也能逐一中斷連接。支援的客戶端：
+支援自動註冊：Claude Code、Claude Desktop、Codex（含 ChatGPT 桌面版 Codex 分頁）、opencode、Gemini CLI、
+LM Studio、Cherry Studio（一鍵安裝連結）。修改前備份為 `<檔名>.clip-mcp.bak`；重複執行為冪等。
+其他 stdio 客戶端將 command 設為 `clip-mcp`（完整路徑見 `clip-mcp check`），不需參數。
 
-| 客戶端 | 寫到哪裡 |
-|---|---|
-| **Claude Code** | 使用者層級（`claude mcp add --scope user`），任何資料夾都能用 |
-| **Claude Desktop** | `%APPDATA%\Claude\claude_desktop_config.json` |
-| **Codex／ChatGPT 桌面版** | `~/.codex/config.toml`；ChatGPT 桌面版讀同一份，但要在 **Codex 分頁**用，一般聊天模式不能用本機 MCP |
-| **opencode** | `~/.config/opencode/opencode.json[c]` |
-| **Gemini CLI** | `~/.gemini/settings.json` |
-| **LM Studio** | `~/.lmstudio/mcp.json`，存檔後自動載入 |
-| **Cherry Studio** | 不寫檔：它把設定放在自己的資料庫裡，只接受一鍵安裝連結。到編輯器的「連接 AI」頁按「加入 Cherry Studio」，在 Cherry Studio 按允許，再到 MCP 設定把 clip-mcp 打開（`clip-mcp setup` 也會印出這個連結） |
+不要以 `uv run clip-mcp` 註冊：每次啟動會重寫 `.venv` 內的執行檔，多客戶端同時使用時會因檔案鎖定失敗。
 
-改之前會先備份成同一個資料夾裡的 `<檔名>.clip-mcp.bak`（只留一份，下次改動時覆蓋）；先看會改什麼用
-`clip-mcp setup --dry-run`。重跑是安全的，沒變就不動。
-LM Studio 與 Cherry Studio 要選支援工具呼叫（tool use）的模型；電腦上跑的小模型判斷剪輯會弱很多。
+移除：`clip-mcp uninstall`（只移除自己加入的設定；工作區先詢問，成品不動），再 `uv tool uninstall clip-mcp`。
 
-### 移除
-
-```bash
-clip-mcp uninstall             # 從每個 AI 客戶端移除 clip-mcp、刪掉捷徑與它自己的設定檔
-uv tool uninstall clip-mcp     # 最後移除程式本身
-```
-
-`uninstall` 只拿掉 clip-mcp 自己加的那一項，其他設定都不動；Cherry Studio 例外，它的設定在自己的資料庫裡，
-要到 Cherry Studio 的設定 → MCP 伺服器自己刪。工作區（專案、分析、模型）會先問你，要刪的話丟到資源回收筒
-（`--delete-data` 不問直接丟）；輸出到「影片\clip-mcp」的成品永遠不碰。先看會改什麼用 `--dry-run`。
-
-`--editable` 表示指令直接跑這份原始碼：`git pull` 之後重開客戶端就生效；
-相依套件有變時再跑一次 `uv tool install --editable . --reinstall`。
-不要讓客戶端用 `uv run clip-mcp`：`uv run` 每次啟動都會重寫專案 `.venv` 裡的
-`clip-mcp.exe`，只要有另一個客戶端正在跑它，就會因檔案被占用而啟動失敗。
-
-第一次執行語音辨識時會下載 `large-v3-turbo` 模型。
-
-### 手動設定其他客戶端
-
-任何支援 stdio 的 MCP 客戶端，命令都只要 `clip-mcp` 本身（`clip-mcp check` 會印出完整路徑），
-不需要參數、不需要工作目錄，也不需要告訴它工作區在哪：
-
-```json
-{ "mcpServers": { "clip-mcp": { "command": "C:\\Users\\you\\.local\\bin\\clip-mcp.exe", "args": [] } } }
-```
-
-ChatGPT 的一般聊天（網頁與 App）只接受透過 HTTPS 連線的遠端 MCP 伺服器，無法啟動你電腦上的程式；
-而這個伺服器能讀寫本機檔案，不適合直接開到網路上。要用 OpenAI 的模型，請用 ChatGPT 桌面版的
-Codex 分頁或 Codex CLI，兩者都讀上面那份 `~/.codex/config.toml`。
-
-除錯：`uv run fastmcp dev fastmcp.json` 開 MCP Inspector。
+除錯：`uv run fastmcp dev fastmcp.json` 開啟 MCP Inspector。
 
 ## 工具
 
-**素材與分析**
+使用指南以 MCP resource `skill://clip-editing/SKILL.md` 提供（不支援 resource 的客戶端用 `read_resource`）。
 
-| 工具 | 用途 |
+| 類別 | 工具 |
 |---|---|
-| `inspect_media` | 讀取檔案的解析度、長度、幀率等技術資訊 |
-| `import_asset` / `import_folder` | 把檔案或整個資料夾註冊成素材（可遞迴、自然排序） |
-| `list_assets` | 列出已匯入的素材，並標明哪些分析過、哪些已過期 |
-| `analyze_asset` | 一次送一批檔案（已分析過的跳過）背景分析：一次解碼跑完換場、黑畫面、靜止、靜音、逐鏡頭畫質、逐秒音訊品質與人臉，之後接逐字稿與說話者切分 |
-| `get_analysis` | 依時間區間讀取分析結果，含逐鏡頭量測、該區間的音訊與人臉摘要、說話者段落 |
-| `view_frames` | 抽幀拼成標時間的縮圖總覽，一次可吃多支素材 |
-| `list_resources` / `read_resource` | 讀內建的使用指南（給不支援 MCP resource 的客戶端） |
+| 素材庫 | `inspect_media` `import_asset` `import_folder` `list_assets` `edit_asset` `organize_library` `move_files` |
+| 分析 | `analyze_asset` `listen_again` `get_analysis` `view_frames` |
+| 語意時間軸 | `build_semantic_timeline` `query_clips` `get_semantic_clip` `propose_sections` `set_sections` `frames_for_clips` `set_clip_tags` |
+| 計畫 | `save_plan` `amend_plan` `copy_plan` `get_plan` `validate_plan` `compile_plan` `diff_plan` `preview_plan_diff` `list_plan_versions` `revert_plan` `propose_broll` |
+| 專案 | `create_project` `list_projects` `get_project` `apply_edits` `preview_project` `preview_sound` |
+| 字幕 | `generate_subtitles` `get_subtitles` |
+| 輸出 | `check_render` `render_project` `view_render` `get_chapters` `propose_covers` `export_cover` `export_timeline` |
+| 版本 | `project_history` `restore_version` `branch_project` `mark_version` |
+| 工作與儲存 | `get_job` `cancel_job` `storage_usage` `clean_storage` `tidy_old_outputs` |
 
-**語意時間軸**
+## 工作區
 
-| 工具 | 用途 |
-|---|---|
-| `build_semantic_timeline` | 由分析結果推導可檢索的語意片段（同樣輸入必得同一組 ID） |
-| `query_clips` | 依種類、文字、標籤、長度、分數等條件檢索片段；`about` 依意思排序（本機模型）；`brief` 一行一句讀完整批素材，`offset` 翻頁 |
-| `get_semantic_clip` | 讀單一片段的完整文字，可含每個詞的時間 |
-| `propose_sections` / `set_sections` | 產生候選邊界，由模型在候選裡裁決並命名段落與主題 |
-| `frames_for_clips` / `set_clip_tags` | 看圖並把描述寫回片段，標明出處 |
-
-**剪輯計畫**
-
-| 工具 | 用途 |
-|---|---|
-| `save_plan` | 存下一份計畫：目標、段落（含段落間的轉場）、選材與理由（含取中間一段、快轉、音量）、被排除的理由、配樂、B-roll、節奏 |
-| `amend_plan` | 只改其中一項（剪法、快轉與音量、段落間的轉場與先聽後見），或一次改整支（節奏、配樂音量、目標、整段拿掉） |
-| `copy_plan` | 複製一份計畫試另一種剪法，或搬到涵蓋不同檔案的時間軸上（片段按同一檔案同一段時間對應） |
-| `get_plan` / `diff_plan` | 讀回計畫（任何一版），或比較兩份計畫、兩個版本實際差在哪 |
-| `list_plan_versions` / `revert_plan` | 列出每一版改了什麼，回到其中一版 |
-| `preview_plan_diff` | 把兩個版本的差異畫在一張 storyboard 上 |
-| `validate_plan` | 編譯前檢查，附上問題與提醒 |
-| `propose_broll` | 指出畫面停太久、值得蓋 B-roll 的地方 |
-| `compile_plan` | 把計畫編譯成時間軸 |
-
-**專案與輸出**
-
-| 工具 | 用途 |
-|---|---|
-| `create_project` / `list_projects` / `get_project` | 建立與讀取專案（名稱、輸出尺寸、幀率、軌道、片段、版本） |
-| `apply_edits` | 以樂觀鎖批次套用編輯操作 |
-| `preview_project` | 剪輯後序列的 storyboard（可選其他比例） |
-| `preview_sound` | 只算聲音：人聲對配樂的圖與可以聽的混音檔 |
-| `generate_subtitles` / `get_subtitles` | 產生並存下字幕（優先用同一段素材校對過的版本、套用全工作區的錯字表），一行一句回傳供校對；讀取字幕 |
-| `check_render` | render 前檢查黑畫面、爆音、字幕出界、長度 |
-| `render_project` | 背景輸出 MP4（預覽只重算改過的鏡頭；可選比例、燒字幕、響度目標） |
-| `get_chapters` | 從段落產生 YouTube 章節 |
-| `propose_covers` / `export_cover` | 封面候選與全尺寸封面 |
-| `export_timeline` | 匯出 FCPXML／OTIO／EDL（含變速與素材 timecode），或把字幕匯出成 SRT |
-| `get_job` / `cancel_job` | 一次查一批工作的進度（含完成數與平均進度）、取消背景工作 |
-
-`apply_edits` 接受的操作：`add_track`、`add_clip`、`insert_clip`、`trim_clip`、
-`delete_clip`、`move_clip`、`split_clip`、`reorder_clip`、`fit_track`、
-`set_clip_look`、`set_clip_audio`、`set_clip_speed`、`set_track_audio`、`set_clip_pinned`、
-`set_markers`、`set_subtitles`、`edit_subtitle`、`add_subtitle`、`set_caption_style`、`rename_project`。
-
-## 典型流程
-
-1. `import_folder` 匯入素材，`view_frames` 一次看幾支，快速把整批掃過。
-2. 需要依內容剪輯時，`analyze_asset` 分析（不需要逐字稿就關掉 `transcribe`，快很多）。
-3. `build_semantic_timeline` 之後用 `query_clips` 找素材，不要從頭讀逐字稿。
-4. 素材多的時候先 `propose_sections` / `set_sections` 分段，再從段落裡挑句子。
-5. `save_plan` 寫下要剪什麼、為什麼，`validate_plan` 檢查，`compile_plan` 編譯成時間軸。
-6. `preview_project` 看 storyboard 確認剪點，有配樂就再用 `preview_sound` 確認聲音。
-7. `generate_subtitles` 產生並存下字幕，逐行校對，錯的用 `edit_subtitle` 改。
-8. `check_render` 看有沒有要先處理的，`render_project` 先出 `is_preview: true` 預覽，
-   滿意後再輸出完整品質；要發到多個平台就每個比例各 render 一次。
-
-改主意時改計畫再重編，不要直接推時間軸上的片段——理由記在計畫裡，
-時間軸只是計畫掉出來的結果。手改過的片段重編時不會被洗掉。
-
-短一點的剪輯可以跳過計畫，直接 `create_project` 加軌道、用 `insert_clip` 排序列。
-
-## 工作區與環境變數
-
-素材資料庫、暫存與成品都放在工作區。伺服器由哪個客戶端、從哪個資料夾啟動都一樣，
-工作區依序這樣決定（`clip-mcp check` 會說是哪一條選中的）：
-
-1. 環境變數 `CLIP_MCP_WORKSPACE`：臨時指到別處用。
-2. 指標檔：`clip-mcp setup` 寫的一行設定，Windows 在 `%APPDATA%\clip-mcp\config.toml`，
-   macOS 在 `~/Library/Application Support/clip-mcp/config.toml`，Linux 在 `~/.config/clip-mcp/config.toml`。
-   要搬工作區：把資料夾搬走，再跑 `clip-mcp setup --workspace <新位置>`。
-3. 都沒有：從原始碼執行（git clone，含 `--editable` 安裝）就用專案裡的 `workspace/`；
-   以一般套件安裝則用使用者資料夾（Windows `%LOCALAPPDATA%\clip-mcp\workspace`）。
-
-工作區的內容：
-
-```
-workspace/
-├── clip_mcp.db        # 專案、素材、分析、計畫、工作狀態（SQLite）
-├── models/            # 所有模型權重，用到才下載
-│   ├── whisper/       #   語音辨識（large-v3-turbo 約 1.5 GB）
-│   ├── diarization/   #   說話者切分（約 33 MB）
-│   └── faces/         #   人臉偵測（約 0.2 MB）
-├── outputs/<job_id>/  # 每次 render 各自一個目錄，不會互相覆蓋；
-│                      #   檔名用專案名稱（`EP1 台北_output.mp4`），不是 UUID
-└── jobs/<job_id>/     # 分析工作的暫存
-```
-
-**模型跟著專案走。** 權重不寫進家目錄的共用快取，而是放在工作區裡，
-所以刪掉 `workspace/` 就等於刪掉模型，專案佔多少空間就是它看起來佔的那麼多。
-每個模型都釘住 SHA-256，抓下來對不上就整個丟掉並說明理由，不會留下半個檔案
-讓下一次誤以為抓好了。要把幾 GB 挪到別的磁碟、或讓多個工作區共用一份，
-就設 `CLIP_MCP_MODELS`——代價就是失去上面那個好處。
+解析順序：`CLIP_MCP_WORKSPACE` → `clip-mcp setup` 寫入的指標檔 → 原始碼安裝用 `./workspace`，
+套件安裝用使用者資料夾。模型權重預設存放於工作區內（`models/`），刪除工作區即一併移除。
 
 | 變數 | 預設 | 說明 |
 |---|---|---|
-| `CLIP_MCP_WORKSPACE` | 見上 | 工作區路徑；優先於指標檔 |
-| `CLIP_MCP_MODELS` | `<工作區>/models` | 模型權重放哪。預設在工作區內，刪專案就一起刪掉 |
-| `CLIP_MCP_WHISPER_MODEL` | `large-v3-turbo` | 語音辨識模型 |
-| `CLIP_MCP_WHISPER_DEVICE` | `auto` | `cuda` 或 `cpu`；auto 會偵測 CUDA，失敗時退回 CPU |
-| `CLIP_MCP_SUBTITLE_FONT` | `Arial` | 燒錄字幕的字型 |
-| `CLIP_MCP_MAX_JOBS` | `2` | 同時執行的 render／分析工作數上限 |
-| `CLIP_MCP_MEMORY_RESERVE_MB` | `2048` | 保留給系統、工作不得動用的實體記憶體 |
-| `CLIP_MCP_MAX_DECODERS` | `4` | 縮圖抽幀同時開啟的解碼行程上限（整個伺服器共用）|
+| `CLIP_MCP_WORKSPACE` | 見上 | 工作區路徑 |
+| `CLIP_MCP_MODELS` | `<workspace>/models` | 模型權重位置，可指向共用目錄 |
+| `CLIP_MCP_WHISPER_MODEL` | `large-v3-turbo`(自動偵測電腦性能並選擇) | 語音辨識模型 |
+| `CLIP_MCP_WHISPER_DEVICE` | `auto` | `cuda` / `cpu` |
+| `CLIP_MCP_SUBTITLE_FONT` | `Arial` | 燒錄字幕字型 |
+| `CLIP_MCP_MAX_JOBS` | `2` | 同時執行的工作上限 |
+| `CLIP_MCP_MEMORY_RESERVE_MB` | `2048` | 保留給系統的實體記憶體 |
+| `CLIP_MCP_MAX_DECODERS` | `4` | 抽幀解碼行程上限 |
 
-### 記憶體與排隊
-
-render 與分析都是重工作：一次 render 會為每個片段各開一個解碼器，一次轉錄要載入數 GB
-的語音模型。所以工作不是「呼叫就跑」，而是先排隊——只有在工作數與剩餘實體記憶體
-都夠時才真正啟動 worker。排隊中的工作只佔一筆資料庫紀錄，`get_job` 的 `stage`
-會說明它在等什麼；等待是正常的，照常輪詢即可。
-
-機器記憶體不足時，**唯一**一個工作仍然會啟動：全部拒絕比慢慢跑更糟。真正跑不動的情況
-（例如 CPU 轉錄但可用記憶體低於模型需求）會直接失敗並告訴你改用哪個較小的模型，
-而不是把整台電腦拖垮。
-
-## 測試與評測
+## 測試
 
 ```bash
 uv run pytest
 ```
 
-測試會用 FFmpeg 即時產生素材，並在暫存目錄開獨立工作區執行，不會動到 `workspace/`。
-部分測試會實際 render 後量測——響度與 ducking、調色、轉場、影音同步、字幕位置、
-跟臉裁切有沒有把臉留在畫面上、節拍偵測準不準——所以需要 FFmpeg 在 `PATH` 上。
+測試以 FFmpeg 即時產生素材並使用暫存工作區；部分測試實際 render 後量測（響度、ducking、轉場、同步、字幕位置、跟臉裁切、節拍）。
 
-`src/app/benchmark/` 是另一層：不 render，直接替一份編譯好的剪輯打分——
-切到字的剪點、落在壞幀上的剪點、成片長度誤差、必留段落覆蓋率、必剔段落洩漏率，
-以及每個剪點還有多少餘裕。全是純函式，所以同一份計畫對同一批素材永遠得到同一個分數。
-量不到的東西（例如沒分析過的素材）會被點名，不會混進「沒問題」裡。
-語料庫目前只有三支，而且都還是草稿（`corpus/`），所以**現在一分都還算不出來**；
-更上層的成片評分也還沒做。這是下一個工作項目，見 [docs/roadmap.md](docs/roadmap.md) §11。
-
-## 架構
-
-各模組職責見 [docs/architecture.md](docs/architecture.md)。
-引擎層（`src/app/engine/`）不依賴 MCP，可以單獨使用。
-2.0 的方向與里程碑見 [docs/roadmap.md](docs/roadmap.md)。
+`src/app/benchmark/` 對編譯結果做確定性評分（切字剪點、壞幀剪點、長度誤差、必留覆蓋率、必剔洩漏率、剪點餘裕）。
+語料庫（`corpus/`）尚在建立，目前尚無基準分數；進度見 [docs/roadmap.md](docs/roadmap.md)。
 
 ## 授權
 
