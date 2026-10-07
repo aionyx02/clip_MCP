@@ -5858,6 +5858,7 @@ def restore_version(project_id: str, commit: str, expected_version: int, note: s
         "id": project_id, "version": current.version + 1, "branched_from": current.branched_from,
     })
     repo.update_project(restored, current.version)
+    prepare_playback(repo.get_project(project_id))
     return {
         "new_version": restored.version,
         "restored": {"commit": chosen.commit[:10], "what": chosen.subject} if chosen else {"commit": commit},
@@ -5905,6 +5906,7 @@ def branch_project(project_id: str, name: str, commit: Optional[str] = None, not
     })
     _say_in_history(f"從「{current.name or project_id}」開分支「{branch.name}」")
     repo.add_project(branch)
+    prepare_playback(branch)
     folder = repo.folder_of("projects").get(project_id)
     if folder:
         repo.file_items("projects", [branch.id], folder)
@@ -6045,6 +6047,7 @@ def merge_versions(project_id: str, commit_a: str, commit_b: Optional[str], pick
                                        "name": current.name, "branched_from": current.branched_from})
     validate_project(result, repo.get_assets({clip.asset_id for track in result.tracks for clip in track.clips}))
     repo.update_project(result, current.version)
+    prepare_playback(repo.get_project(project_id))
     said = {"new_version": result.version, "seconds": round(float(result.duration), 3), "from_a": taken}
     if plan_said:
         said["plan"] = plan_said

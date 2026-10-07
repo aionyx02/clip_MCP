@@ -41,6 +41,8 @@ def _detached_process_options() -> Dict[str, Any]:
     return {"start_new_session": True}
 
 ABANDONED = "worker stopped reporting; it may have been terminated"
+# What a background preparation says while an export runs.
+EXPORT_FIRST = "waiting for the export to finish"
 
 def _abandoned(job: Job, now: datetime) -> bool:
     """Whether a job's worker is gone: it was running, or let in to run, and has gone quiet.
@@ -75,6 +77,7 @@ def _fail_if_active(message: str) -> Callable[[Job], None]:
             job.status = JobStatus.FAILED
             job.error_message = message
     return change
+
 
 class JobManager:
     """Admits background jobs into detached worker processes and reports their state.
@@ -177,9 +180,17 @@ class JobManager:
             )
 
         busy, behind = len(running), 0
+        exporting = any(job.kind == JobKind.RENDER for job in running)
         # Oldest first within a priority: preparing playback waits behind the work somebody asked for.
         for job in sorted(jobs, key=lambda queued: queued.priority):
             if job.admitted_at is not None or job.status != JobStatus.QUEUED or job.cancel_requested:
+                continue
+            if exporting and job.kind == JobKind.PREPARE and job.priority > 0:
+                # Getting a version ready to watch in the background never slows an export down.
+                # Nobody is waiting on it, so nothing waits behind it either.
+                if job.stage != EXPORT_FIRST:
+                    job.stage = EXPORT_FIRST
+                    changed.append(job.job_id)
                 continue
             if behind:
                 reason = f"queued behind {behind} job(s)"

@@ -97,6 +97,36 @@ def test_somebody_waiting_to_watch_goes_ahead_of_the_other_work(monkeypatch: pyt
     assert all(job.status == JobStatus.QUEUED for job in (older, behind, watched))
 
 
+def test_a_version_is_got_ready_in_the_background_but_never_while_exporting(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(renderer.resources, "max_concurrent_jobs", lambda: 4)
+    monkeypatch.setattr(renderer.resources, "spare_bytes", lambda: None)
+    now = datetime.now(timezone.utc)
+    export = Job(kind=JobKind.RENDER, status=JobStatus.RUNNING, admitted_at=now)
+    background = Job(kind=JobKind.PREPARE, priority=1, created_at=now - timedelta(seconds=20))
+    song = Job(kind=JobKind.ANALYZE, priority=1, created_at=now)
+    watched = Job(kind=JobKind.PREPARE, priority=-1, created_at=now)
+    renderer.JobManager(server.repo)._plan([export, background, song, watched])
+    assert background.admitted_at is None and background.stage == renderer.EXPORT_FIRST
+    # Nothing waits behind it, and somebody waiting to watch still goes ahead.
+    assert song.admitted_at is not None and watched.admitted_at is not None
+    renderer.JobManager(server.repo)._plan([background])
+    assert background.admitted_at is not None
+
+
+def test_going_back_to_a_version_gets_it_ready_to_play(media: Path, monkeypatch: pytest.MonkeyPatch,
+                                                         kept_history) -> None:
+    from helpers import build_project, edit, insert, video_track
+
+    asked = []
+    project = build_project([video_track(), insert("a", server.import_asset(str(media / "wide.mp4"))["id"], 0, 4)],
+                            name="準備好")
+    first = server.project_history(project)["versions"][0]["commit"]
+    edit(project, [{"action": "delete_clip", "track_id": "main", "clip_id": "a"}])
+    monkeypatch.setattr(server, "prepare_playback", lambda cut, urgent=False: asked.append((cut.id, urgent)))
+    server.restore_version(project, first, server.repo.get_project(project).version)
+    assert asked == [(project, False)]
+
+
 def test_a_proxy_is_named_after_the_file_as_it_is(media: Path, tmp_path: Path) -> None:
     import shutil
 

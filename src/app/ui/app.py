@@ -185,6 +185,7 @@ async def undo(request: Request) -> Response:
         _, before = stack.pop()
         restored = before.model_copy(update={"version": current.version + 1})
         server.repo.update_project(restored, current.version)
+        server.prepare_playback(restored)
         # The states further back now follow this version, not the one they were saved after.
         if stack:
             stack[-1] = (restored.version, stack[-1][1])
