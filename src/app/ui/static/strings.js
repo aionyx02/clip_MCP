@@ -248,7 +248,7 @@ window.T = {
     branchedFrom: (name, what) => `這支是從「${name}」的「${what}」那一版分出來的。`,
     openParent: "打開原本那支",
     marks: { starred: "標星號", published: "已發布", exported: "已輸出", removed: "未輸出（成品已刪除）" },
-    markIcons: { starred: "⭐", published: "📣", exported: "📤", removed: "📭" },
+    markIcons: { starred: "★", published: "➔", exported: "↗", removed: "✕" },
     revealOutput: "在資料夾中顯示這個成品",
     restoredWithCopy: (what) => `已回到「${what}」那一版；它的剪輯計畫也被別支影片用著，所以另存了一份給這支，另一支不受影響`,
     trimNeedsName: "先替這支影片取個名字，確認時要輸入它",
