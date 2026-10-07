@@ -162,6 +162,9 @@
 
   // ------------------------------------------------------------------ versions
 
+  // The page the next editor opens on, when a link on the version page leads to another video.
+  let keptView = null;
+
   // The graph is read again when the cut has moved on, or when it is older than this.
   const GRAPH_FRESH_MS = 15000;
 
@@ -177,7 +180,7 @@
 
   function nodeHtml(node, { current, branch } = {}) {
     const chosen = E.chosenVersion?.commit && node.versions.some((version) => version.commit === E.chosenVersion.commit);
-    const thumb = node.thumb ? `<img class="vthumb" loading="lazy" src="${thumbUrl(node.thumb.asset_id, node.thumb.t, 96)}" alt="">` : '<span class="vthumb"></span>';
+    const thumb = node.thumb ? `<img class="vthumb" loading="lazy" src="${thumbUrl(node.thumb.asset_id, node.thumb.t, 180)}" alt="">` : '<span class="vthumb"></span>';
     const many = node.versions.length > 1 ? ` · ${esc(T.versions.changes(node.versions.length))}` : "";
     const length = node.seconds ? ` · ${fmt(node.seconds)}` : "";
     return `<li class="vnode${chosen ? " sel" : ""}${current ? " current" : ""}" data-node="${esc(node.commit)}"${branch ? ` data-branch="${esc(branch)}"` : ""}>
@@ -186,13 +189,19 @@
         <span>${esc(node.by)} · ${esc(node.when)}${length}${many}${current ? ` · ${esc(T.versions.now)}` : ""}</span></div></li>`;
   }
 
-  async function drawVersions(panel) {
-    panel.innerHTML = `<p class="hint">${esc(T.versions.loading)}</p>`;
+  // The version page: the chosen version plays big on the left, the tree runs down the right,
+  // and what can be done with the chosen one sits under the player.
+  async function drawVersions() {
+    if (!E || E.view !== "versions") return;
+    const panel = $("[data-versions]", E.root);
+    if (!E.graph) panel.innerHTML = `<p class="hint">${esc(T.versions.loading)}</p>`;
     let graph;
     try { graph = await loadGraph(false); } catch (error) { panel.innerHTML = `<p class="hint">${esc(error.message)}</p>`; return; }
-    if (!E || E.tab !== "versions" || !panel.isConnected) return;
+    if (!E || E.view !== "versions") return;
     const nodes = graph.nodes;
     const parent = graph.branched_from;
+    // Something is always chosen on this page: the cut as it is now, until another is clicked.
+    if (!E.chosenVersion && nodes.length) E.chosenVersion = { commit: nodes[0].commit, node: nodes[0] };
     let list = "";
     nodes.forEach((node, index) => {
       list += nodeHtml(node, { current: index === 0 });
@@ -204,19 +213,49 @@
           ${branch.nodes.length > 3 ? `<span class="hint">${esc(T.versions.more(branch.nodes.length - 3))}</span>` : ""}</div></li>`;
       }
     });
-    panel.innerHTML = `${parent ? `<p class="hint">${esc(T.versions.branchedFrom(parent.name || "", parent.what || ""))}
-        <a href="#/project/${encodeURIComponent(parent.project_id)}">${esc(T.versions.openParent)}</a></p>` : ""}
-      ${E.viewing ? `<div class="vviewing"><span>${esc(T.versions.viewing(E.viewing.what))}</span><button class="btn small" data-now>${esc(T.versions.backToNow)}</button></div>` : ""}
+    const scrolled = panel.scrollTop;
+    const total = nodes.reduce((sum, node) => sum + node.versions.length, 0);
+    panel.innerHTML = `<div class="label">${esc(T.versions.treeTitle(total))}</div>
+      ${parent ? `<p class="hint">${esc(T.versions.branchedFrom(parent.name || "", parent.what || ""))}
+        <a href="#/project/${encodeURIComponent(parent.project_id)}" data-keep-view>${esc(T.versions.openParent)}</a></p>` : ""}
       <ol class="vgraph">${list || `<p class="hint">${esc(T.versions.none)}</p>`}</ol>
-      <div class="vdetail" data-detail></div>
       <div class="vdisk" data-disk></div>`;
+    panel.scrollTop = scrolled;
     panel.querySelectorAll("[data-node]").forEach((item) => {
       item.onclick = () => chooseVersion(item.dataset.branch || E.id, item.dataset.node);
     });
-    const now = $("[data-now]", panel);
-    if (now) now.onclick = () => viewVersion(null);
-    drawVersionDetail($("[data-detail]", panel));
+    panel.querySelectorAll("[data-keep-view], .vbranch-name").forEach((link) => {
+      link.addEventListener("click", () => { keptView = "versions"; });
+    });
+    drawVersionDetail($("[data-vdetail]", E.root));
     drawDisk($("[data-disk]", panel));
+  }
+
+  // Edit or versions: one page each, the same player in both.
+  function setView(view) {
+    if (!E || E.view === view) return;
+    clock().pause();
+    E.view = view;
+    const editor = $(".editor", E.root);
+    editor.classList.toggle("view-versions", view === "versions");
+    E.root.querySelectorAll("[data-view]").forEach((button) => button.classList.toggle("on", button.dataset.view === view));
+    if (view === "edit") {
+      // Editing is always of the cut as it is now.
+      if (E.viewing) viewVersion(null);
+      if (E.mode === "exact") showLive();
+      drawInspector();
+      drawLanes();
+      drawRuler();
+    } else {
+      if (E.mode === "exact") showLive();
+      drawVersions();
+    }
+    requestAnimationFrame(() => { if (E) fitStage(); });
+    drawTime();
+  }
+
+  function redrawVersions() {
+    if (E?.view === "versions") drawVersions();
   }
 
   // What this video takes on disk, and the one button that lets its other versions go.
@@ -236,7 +275,7 @@
         const done = await api(`/api/projects/${encodeURIComponent(E.id)}/storage/trim`, { name });
         toast(T.versions.trimmed(size(done.freed_megabytes)));
         await loadGraph(true);
-        drawInspector();
+        redrawVersions();
       } catch (error) { toast(error.message, "error"); }
     };
   }
@@ -248,7 +287,7 @@
   }
 
   function chooseVersion(projectId, commit) {
-    if (projectId !== E.id) { location.hash = `#/project/${encodeURIComponent(projectId)}`; return; }
+    if (projectId !== E.id) { keptView = "versions"; location.hash = `#/project/${encodeURIComponent(projectId)}`; return; }
     const node = findNode(projectId, commit);
     E.chosenVersion = { commit, node };
     // The newest version is the cut as it is; anything older is watched in its place.
@@ -260,19 +299,24 @@
     E.viewing = version;
     if (!version && E.chosenVersion?.commit !== E.graph?.nodes[0]?.commit) E.chosenVersion = null;
     $(".editor", E.root).classList.toggle("viewing-old", Boolean(version));
+    E.time = 0;
     refreshPlayback();
-    drawInspector();
+    redrawVersions();
   }
 
   function drawVersionDetail(box) {
     const chosen = E.chosenVersion;
-    if (!chosen?.node) { box.innerHTML = `<p class="hint">${esc(T.versions.pick)}</p>`; return; }
+    if (!chosen?.node) {
+      box.innerHTML = `<p class="hint">${esc(T.versions.pick)}</p>`;
+      return;
+    }
     const { node, commit } = chosen;
     const version = node.versions.find((item) => item.commit === commit) || node.versions[0];
     const newest = commit === E.graph.nodes[0]?.commit;
     const isMarked = (mark) => commit === node.commit && node.marks.includes(mark);
-    box.innerHTML = `<h2>${esc(version.what)}</h2>
-      <p class="hint">${esc(node.by)} · ${esc(version.when)}</p>
+    box.innerHTML = `${E.viewing ? `<div class="vviewing"><span>${esc(T.versions.viewing(E.viewing.what))}</span><button class="btn small" data-now>${esc(T.versions.backToNow)}</button></div>` : ""}
+      <div class="vdetail-head"><div><h2>${markIcons(commit === node.commit ? node.marks : [])}${esc(version.what)}</h2>
+      <p class="hint">${esc(node.by)} · ${esc(version.when)}${node.seconds ? ` · ${fmt(node.seconds)}` : ""}</p></div></div>
       ${node.versions.length > 1 ? `<ol class="vmembers">${node.versions.map((item) =>
         `<li class="${item.commit === commit ? "on" : ""}" data-member="${esc(item.commit)}"><span>${esc(item.when)}</span>${esc(item.what)}</li>`).join("")}</ol>` : ""}
       ${commit === node.commit && node.outputs.length ? `<div class="vouts">${node.outputs.map((output) =>
@@ -284,6 +328,8 @@
           <button class="btn small${isMarked("starred") ? " on" : ""}" data-mark="starred">${T.versions.markIcons.starred} ${esc(T.versions.marks.starred)}</button>
           <button class="btn small${isMarked("published") ? " on" : ""}" data-mark="published">${T.versions.markIcons.published} ${esc(T.versions.marks.published)}</button></div>` : ""}
       </div>`;
+    const now = $("[data-now]", box);
+    if (now) now.onclick = () => viewVersion(null);
     box.querySelectorAll("[data-member]").forEach((item) => { item.onclick = () => chooseVersion(E.id, item.dataset.member); });
     box.querySelectorAll("[data-reveal-output]").forEach((button) => {
       button.onclick = () => api("/api/reveal", { job_id: button.dataset.revealOutput }).catch((error) => toast(error.message, "error"));
@@ -298,7 +344,7 @@
             { commit, mark: button.dataset.mark, on: !button.classList.contains("on") });
           await loadGraph(true);
           E.chosenVersion = { commit, node: findNode(E.id, commit) };
-          drawInspector();
+          redrawVersions();
         } catch (error) { toast(error.message, "error"); }
       };
     });
@@ -319,6 +365,7 @@
     await loadGraph(true);
     drawAll();
     refreshPlayback();
+    redrawVersions();
     // A plan another video shares was copied for this one, which the user should know.
     toast(restored.plan_copied ? T.versions.restoredWithCopy(what) : T.versions.restored(what));
   }
@@ -338,7 +385,7 @@
           const made = await api(`/api/projects/${encodeURIComponent(E.id)}/versions/branch`, { commit, name: name.value.trim() });
           close();
           await loadGraph(true);
-          drawInspector();
+          redrawVersions();
           toast(T.versions.branched(made.name));
         } catch (error) { toast(error.message, "error"); }
       };
@@ -447,15 +494,19 @@
       <header class="ed-top">
         <a class="icon-btn" href="#/" title="${esc(T.editor.back)}">${icon("back", 16)}</a>
         <span class="crumb">${esc(T.editor.back)} /</span><h1 data-title></h1>
+        <div class="seg" data-views>
+          <button type="button" data-view="edit">${esc(T.editor.views.edit)}</button>
+          <button type="button" data-view="versions">${esc(T.editor.views.versions)}</button>
+        </div>
         <span class="state warn" data-stale hidden>${esc(T.editor.previewStale)}</span>
         <span class="state" data-locked hidden>${esc(T.editor.playingLocked)}</span>
         <div class="grow"></div>
         <span class="state" data-live-chip hidden></span>
         <span class="state" data-preview-chip hidden></span>
-        <button class="btn small" data-exact title="${esc(T.editor.exactTitle)}">${esc(T.editor.exact)}</button>
-        <button class="btn small" data-live hidden>${esc(T.editor.backToLive)}</button>
+        <button class="btn small edit-only" data-exact title="${esc(T.editor.exactTitle)}">${esc(T.editor.exact)}</button>
+        <button class="btn small edit-only" data-live hidden>${esc(T.editor.backToLive)}</button>
         <span class="state busy" data-export-chip hidden></span>
-        <button class="btn primary small" data-export>${icon("download", 15)}${esc(T.exporting.button)}</button>
+        <button class="btn primary small edit-only" data-export>${icon("download", 15)}${esc(T.exporting.button)}</button>
       </header>
       <section class="ed-viewer">
         <div class="viewer-bar"><b>${esc(T.editor.viewerTitle)}</b><span data-format></span><span class="approx" data-approximate hidden>${esc(T.editor.approximateTag)}</span></div>
@@ -468,6 +519,7 @@
             <div class="notice" data-notice hidden></div>
           </div>
         </div>
+        <div class="scrub-row"><input type="range" class="scrub" data-scrub min="0" max="1000" step="1" value="0" title="${esc(T.versions.scrub)}"></div>
         <div class="transport">
           <span class="timecode" data-time></span>
           <div class="controls">
@@ -480,6 +532,8 @@
         </div>
       </section>
       <aside class="ed-inspector" data-inspector></aside>
+      <aside class="ed-versions" data-versions></aside>
+      <section class="ed-vdetail" data-vdetail></section>
       <section class="ed-timeline">
         <div class="tl-resize" data-resize></div>
         <div class="tl-tools">
@@ -708,8 +762,13 @@
     $("[data-playhead]", E.root).style.left = `${(E.time || 0) * E.pps}px`;
   }
 
+  const shownLength = () => (E.mode === "live" && E.described ? E.described.duration : E.project.duration);
+
   function drawTime() {
-    $("[data-time]", E.root).innerHTML = `${timecode(E.time)} <span>/ ${timecode(E.project.duration)}</span>`;
+    const length = shownLength();
+    $("[data-time]", E.root).innerHTML = `${timecode(E.time)} <span>/ ${timecode(length)}</span>`;
+    const scrub = $("[data-scrub]", E.root);
+    if (scrub && !E.scrubbing) scrub.value = length > 0 ? String(Math.round((E.time / length) * 1000)) : "0";
   }
 
   // ------------------------------------------------------------------ inspector
@@ -720,16 +779,15 @@
     const clip = E.selected && findClip(E.selected.track, E.selected.clip);
     const track = clip && E.project.tracks.find((entry) => entry.id === E.selected.track);
     const available = [...(E.selectedCaption ? ["captions"] : !clip ? [] : track.track_type === "audio" ? ["sound"]
-      : (E.project.assets[clip.asset_id]?.has_audio === false ? ["picture"] : ["picture", "sound"])), "versions"];
+      : (E.project.assets[clip.asset_id]?.has_audio === false ? ["picture"] : ["picture", "sound"]))];
     if (!available.includes(E.tab)) E.tab = available.length > 1 ? available[0] : null;
-    root.innerHTML = `<div class="tabs">${["picture", "sound", "captions", "versions"].map((tab) =>
+    root.innerHTML = `<div class="tabs">${["picture", "sound", "captions"].map((tab) =>
       `<button type="button" data-tab="${tab}" class="${tab === E.tab ? "on" : ""}" ${available.includes(tab) ? "" : "disabled"}>${esc(T.editor.tabs[tab])}</button>`).join("")}</div>
       <div class="props" data-props></div>`;
     root.querySelectorAll("[data-tab]").forEach((button) => {
       button.onclick = () => { E.tab = button.dataset.tab; drawInspector(); };
     });
     const panel = $("[data-props]", root);
-    if (E.tab === "versions") return drawVersions(panel);
     if (E.selectedCaption) return drawCaptionInspector(panel);
     if (clip && track.track_type === "audio") return drawSoundInspector(panel, clip, track);
     if (clip && E.tab === "sound") return drawClipSound(panel, clip);
@@ -829,7 +887,6 @@
 
   function selectCaption(cueId, jump) {
     E.selectedCaption = cueId;
-    if (E.tab === "versions") E.tab = null;
     E.selected = null;
     const cue = E.captions.find((entry) => entry.cue_id === cueId);
     if (jump && cue) {
@@ -1144,8 +1201,7 @@
   // ------------------------------------------------------------------ playback
 
   function seek(seconds) {
-    const length = E.mode === "live" && E.described ? E.described.duration : E.project.duration;
-    E.time = Math.max(0, Math.min(seconds, length));
+    E.time = Math.max(0, Math.min(seconds, shownLength()));
     clock().seek(E.time);
     drawPlayhead();
     drawTime();
@@ -1250,7 +1306,6 @@
       const trackId = clipElement.dataset.track, clipId = clipElement.dataset.clip;
       const clip = findClip(trackId, clipId);
       E.selected = { track: trackId, clip: clipId };
-      if (E.tab === "versions") E.tab = null;
       E.selectedCaption = null;
       if (lockedWhilePlaying()) {
         drawLanes();
@@ -1387,7 +1442,8 @@
     else if (event.key === "ArrowLeft") { event.preventDefault(); clock().pause(); seek(E.time - step); }
     else if (event.key === "ArrowRight") { event.preventDefault(); clock().pause(); seek(E.time + step); }
     else if (event.key === "Home") seek(0);
-    else if (event.key === "End") seek(E.project.duration);
+    else if (event.key === "End") seek(shownLength());
+    else if (E.view === "versions") return;
     else if (event.key.toLowerCase() === "s" && !event.ctrlKey) split();
     else if (event.key.toLowerCase() === "b" && event.ctrlKey) { event.preventDefault(); split(); }
     else if (event.key === "Delete" || event.key === "Backspace") remove();
@@ -1405,6 +1461,7 @@
           await loadProject();
           drawAll();
           refreshPlayback();
+          if (E.view === "versions") { await loadGraph(true); redrawVersions(); }
           toast(T.editor.aiUpdated);
         }
       } catch { /* the next look will try again */ }
@@ -1434,7 +1491,7 @@
     close();
     document.body.classList.add("editing");
     page.innerHTML = html();
-    E = { id, root: page, pps: 40, time: 0, waves: {}, words: {}, selected: null };
+    E = { id, root: page, pps: 40, time: 0, waves: {}, words: {}, selected: null, view: "edit" };
     E.video = $("[data-video]", page);
     E.scroll = $("[data-scroll]", page);
     E.mode = "live";
@@ -1470,6 +1527,14 @@
     page.querySelectorAll("[data-zoom]").forEach((button) => { button.onclick = () => setZoom(E.pps * (num(button.dataset.zoom) > 0 ? 1.5 : 1 / 1.5)); });
     $("[data-zoom-range]", page).oninput = (event) => setZoom(2 * Math.pow(200, num(event.target.value) / 100));
     $("[data-fit]", page).onclick = fitZoom;
+    page.querySelectorAll("[data-view]").forEach((button) => { button.onclick = () => setView(button.dataset.view); });
+    const scrub = $("[data-scrub]", page);
+    scrub.addEventListener("input", () => {
+      E.scrubbing = true;
+      clock().pause();
+      seek((num(scrub.value) / 1000) * shownLength());
+    });
+    scrub.addEventListener("change", () => { if (E) E.scrubbing = false; });
     E.scroll.addEventListener("pointerdown", onPointerDown);
     E.scroll.addEventListener("pointermove", onPointerMove);
     E.scroll.addEventListener("pointerup", onPointerUp);
@@ -1498,6 +1563,9 @@
     fitZoom();
     setPlayIcon();
     refreshPlayback();
+    $('[data-view="edit"]', page).classList.add("on");
+    // Opening a branch, or the project a branch came from, from the version page stays on it.
+    if (keptView) { setView(keptView); keptView = null; }
     api(`/api/projects/${encodeURIComponent(id)}/export`).then((state) => {
       if (!E || !state.job_id) return;
       // One already finished was announced when it finished; only a running one is followed.
