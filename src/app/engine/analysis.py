@@ -1106,7 +1106,7 @@ def discard_scratch(work_dir: str) -> None:
             pass
 
 def _shares(
-    with_faces: bool, with_speech: bool, with_speakers: bool, with_rhythm: bool = False,
+    with_faces: bool, with_speech: bool, with_speakers: bool, with_rhythm: bool = False, with_scan: bool = True,
 ) -> Dict[str, Tuple[float, float]]:
     """Divide one progress bar among the stages this analysis will actually run.
 
@@ -1119,12 +1119,14 @@ def _shares(
         with_speech: Whether speech will be transcribed.
         with_speakers: Whether voices will be told apart.
         with_rhythm: Whether the beat will be looked for.
+        with_scan: Whether the picture and sound will be measured, rather
+            than kept from an earlier analysis.
 
     Returns:
         `(start, span)` of the bar for each stage that will run, keyed by
         stage name, covering 0.0 to 1.0 between them.
     """
-    weights = [("scan", 4.0)]
+    weights = [("scan", 4.0)] if with_scan else []
     if with_faces:
         weights.append(("faces", 2.0))
     if with_speech:
@@ -1182,8 +1184,14 @@ def analyze_media(
     speakers: Optional[int] = None,
     on_measured: Optional[Callable[[str, str, str, float], None]] = None,
     speech_model: Optional[str] = None,
+    earlier: Optional[MediaAnalysis] = None,
 ) -> MediaAnalysis:
     """Describe an asset's content so that edits can be planned from it.
+
+    Given the file's earlier analysis, whatever it measured with the same
+    instruments as now is kept rather than measured again: transcribing a
+    file again with the accurate model, or with a prompt, then costs the
+    transcription alone, not the scan, the faces and the voices as well.
 
     Args:
         asset: Asset to analyze.
@@ -1209,6 +1217,9 @@ def analyze_media(
         speech_model: The speech model to transcribe with; the configured
             one when not given.
 
+        earlier: The file's analysis from before, whose measurements are
+            kept where they were taken the way they would be now. Speaker
+            turns are found again when `speakers` is given.
     Returns:
         The analysis: scenes, black and frozen frames, silences, how each shot
         was shot, what the sound was like second by second, who was on screen,
@@ -1229,14 +1240,21 @@ def analyze_media(
     with_speakers = with_speech and diarize
     with_faces = asset.has_video
     with_rhythm = music
-    shares = _shares(with_faces, with_speech, with_speakers, with_rhythm)
+    now = current_recipe(speech_model, ffmpeg_bin, speaker_model_name(), rhythm_model_name(), clap.MODEL_ID)
+    before = earlier.recipe if earlier is not None and earlier.recipe is not None else None
+    keep_scan = before is not None and (before.version, before.detectors) == (now.version, now.detectors)
+    keep_speakers = keep_scan and with_speakers and speakers is None and before.speaker_model == now.speaker_model
+    keep_music = keep_scan and with_rhythm and earlier.rhythm is not None and earlier.music is not None and (
+        before.rhythm_model, before.clap_model) == (now.rhythm_model, now.clap_model)
+    shares = _shares(with_faces and not keep_scan, with_speech, with_speakers and not keep_speakers,
+                     with_rhythm and not keep_music, not keep_scan)
 
     needed: List[models.Model] = []
-    if with_faces:
+    if with_faces and not keep_scan:
         needed.append(models.FACE_DETECTION)
-    if with_speakers:
+    if with_speakers and not keep_speakers:
         needed += [models.SPEAKER_SEGMENTATION, models.SPEAKER_EMBEDDING]
-    if music:
+    if music and not keep_music:
         needed += clap.needed()
     _fetch_models(needed, on_progress)
 
@@ -1256,19 +1274,24 @@ def analyze_media(
     # Everything the pass writes for itself is thrown away on the way out, whichever way
     # out it takes. Cancelling during the scan is the likeliest moment of all, and it is
     # the only stage there is for footage analysed without speech.
-    try:
-        scan = scan_media(
-            asset,
-            work_dir,
-            report("scan", "detecting scenes, silences and unusable frames, and measuring picture and sound"),
-            is_cancelled,
-            ffmpeg_bin,
-        )
-        on_screen: List[FaceMeasurement] = []
-        if with_faces:
-            on_screen = faces.detect_faces(work_dir, duration, report("faces", "looking for faces"), is_cancelled)
-    finally:
-        discard_scratch(work_dir)
+    if keep_scan:
+        scan = Scan(scenes=earlier.scenes, black_frames=earlier.black_frames, frozen_frames=earlier.frozen_frames,
+                    silences=earlier.silences, shots=earlier.shots, sound=earlier.sound)
+        on_screen: List[FaceMeasurement] = list(earlier.faces)
+    else:
+        try:
+            scan = scan_media(
+                asset,
+                work_dir,
+                report("scan", "detecting scenes, silences and unusable frames, and measuring picture and sound"),
+                is_cancelled,
+                ffmpeg_bin,
+            )
+            on_screen = []
+            if with_faces:
+                on_screen = faces.detect_faces(work_dir, duration, report("faces", "looking for faces"), is_cancelled)
+        finally:
+            discard_scratch(work_dir)
 
     transcript = None
     turns: List[SpeakerTurn] = []
@@ -1287,7 +1310,9 @@ def analyze_media(
             on_measured,
             speech_model,
         )
-    if with_speakers:
+    if keep_speakers:
+        turns, voices = list(earlier.speakers), list(earlier.voices)
+    elif with_speakers:
         turns, voices = find_speakers(
             asset.path, report("speakers", "telling the voices apart"), is_cancelled, speakers, ffmpeg_bin,
             on_measured=None if on_measured is None else (
@@ -1295,7 +1320,9 @@ def analyze_media(
         )
     rhythm: Optional[Rhythm] = None
     sense: Optional[MusicSense] = None
-    if with_rhythm:
+    if keep_music:
+        rhythm, sense = earlier.rhythm, earlier.music
+    elif with_rhythm:
         rhythm = measure_rhythm(asset.path, report("rhythm", "finding the beat"), is_cancelled, ffmpeg_bin)
         report("mood", "listening for mood and style")(0.0)
         vector, moods, styles = clap.listen(asset.path, duration, ffmpeg_bin)

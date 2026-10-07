@@ -109,3 +109,21 @@ def test_music_laid_by_hand_that_stops_early_is_said(media: Path) -> None:
                              {"action": "insert_clip", "track_id": "music", "clip_id": "m", "asset_id": song,
                               "source_range": {"start": 0, "end": 4}}], name="音樂太短")
     assert "stops at 4.0s" in server._music_ends_early(server.repo.get_project(project))
+
+
+def test_analyzing_again_measures_only_what_would_come_out_different(media: Path, tmp_path: Path,
+                                                                     monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.engine import analysis
+
+    shot = Asset(id="w", path=str(media / "wide.mp4"), duration=4, has_video=True, has_audio=True)
+    first = analyze_media(shot, str(tmp_path), False, None, None, None, lambda *_: None, lambda: False, "ffmpeg")
+    monkeypatch.setattr(analysis, "scan_media", lambda *_: pytest.fail("measured the file again"))
+    monkeypatch.setattr(analysis.faces, "detect_faces", lambda *_: pytest.fail("looked for faces again"))
+    again = analyze_media(shot, str(tmp_path), False, None, None, None, lambda *_: None, lambda: False, "ffmpeg",
+                          earlier=first)
+    assert (again.silences, again.sound, again.faces) == (first.silences, first.sound, first.faces)
+    # Measured some other way, it is measured again.
+    stale = first.model_copy(update={"recipe": first.recipe.model_copy(update={"detectors": "older"})})
+    with pytest.raises(pytest.fail.Exception, match="measured the file again"):
+        analyze_media(shot, str(tmp_path), False, None, None, None, lambda *_: None, lambda: False, "ffmpeg",
+                      earlier=stale)

@@ -1493,7 +1493,9 @@ def analyze_asset(
             scripts.
         again: Analyze files that already have a current analysis too,
             replacing it — for example with a `prompt` or `speakers` the first
-            run did not have.
+            run did not have. Only what would come out different is redone:
+            the transcript, the voices when `speakers` is given; the scan and
+            the faces are kept.
         transcription: "accurate", the default, or "fast": about twice as
             quick on a computer without an NVIDIA card, but with noticeably
             more misheard words and looser word timings, so cuts land less

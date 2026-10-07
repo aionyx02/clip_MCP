@@ -525,6 +525,7 @@ def _run_analysis(repo: Repository, job: Job, spec: Dict[str, Any], context: Job
         speakers=spec.get("speakers"),
         on_measured=lambda *run: runs.append(speed.Measured(*run)),
         speech_model=whisper_model_for(spec.get("transcription", "accurate")),
+        earlier=repo.get_analysis(asset.id),
     )
     repo.save_analysis(analysis)
     # Only once the analysis is kept: a cancelled or failed run says nothing about the next.
