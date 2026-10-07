@@ -27,3 +27,28 @@ def test_a_clip_at_another_speed_touches_the_next_rather_than_overlapping_it() -
 def test_a_real_overlap_is_still_refused() -> None:
     with pytest.raises(ValueError, match="overlaps the previous clip"):
         _layout([clip("a", "0", "5", "0"), clip("b", "0", "5", "4.9")], Fraction(30))
+
+
+def test_a_cut_kept_to_the_millisecond_still_passes_its_own_checks() -> None:
+    # What 抽杯架 had once saved: a clip played 1.1x ends at 2.49345…s, the next is kept as
+    # starting at 2.493; the last ends at 2.042s of a file that is 2.0416s long; and a dissolve
+    # joins two clips that touch to within half a millisecond.
+    from app.models.media import Asset
+    from app.models.timeline import Dissolve, Project, Track, TrackType, validate_project
+
+    first = clip("a", "0", "2.7428", "0", speed=1.1)
+    second = clip("b", "0", "2", "2.493")
+    third = clip("c", "1", "2.042", "4.4927").model_copy(update={"transition_in": Dissolve(kind="dissolve", seconds=0.5)})
+    project = Project(id="p", tracks=[Track(id="main", track_type=TrackType.VIDEO, clips=[first, second, third])])
+    validate_project(project, {"x": Asset(id="x", path="x.mp4", duration=10.0, has_video=True, has_audio=True)})
+    short = Asset(id="x", path="x.mp4", duration=2.0416, has_video=True, has_audio=True)
+    validate_project(project.model_copy(update={"tracks": [Track(id="main", track_type=TrackType.VIDEO,
+                                                                 clips=[third.model_copy(update={
+                                                                     "transition_in": None,
+                                                                     "timeline_in": Decimal("0")})])]}),
+                     {"x": short})
+    # Two clips that really overlap are still refused.
+    with pytest.raises(ValueError, match="overlaps"):
+        validate_project(project.model_copy(update={"tracks": [Track(id="main", track_type=TrackType.VIDEO, clips=[
+            first, clip("b", "0", "2", "2.4")])]}),
+            {"x": Asset(id="x", path="x.mp4", duration=10.0, has_video=True, has_audio=True)})

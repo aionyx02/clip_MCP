@@ -427,6 +427,10 @@ Transition = Annotated[Union[Dissolve, Wipe, Dip], Field(discriminator="kind")]
 
 # What the renderer can stretch sound to without stacking filters on top of each other
 # past the point where anybody would want to listen to the result.
+# Times are kept to the millisecond, while a clip played at another speed ends wherever its length
+# divides out to and a file ends wherever its last frame does. Within this, two clips touch rather
+# than overlap, and a clip ends at the end of its file rather than past it.
+TOUCHING_SECONDS = Decimal("0.001")
 MIN_SPEED = 0.25
 MAX_SPEED = 8.0
 
@@ -1890,14 +1894,14 @@ def validate_project(project: Project, assets: Mapping[str, Asset]) -> None:
                     f"clip {clip.id}: a layout box only means something on a video track above the base one; "
                     f"track {track.id} is not drawn on top of anything, so its clips fill the frame"
                 )
-            if asset.duration is not None and clip.source_range.end > asset.duration:
+            if asset.duration is not None and clip.source_range.end > Decimal(str(asset.duration)) + TOUCHING_SECONDS:
                 raise ValueError(
                     f"clip {clip.id}: source range ends at {clip.source_range.end}s, "
                     f"but asset {asset.id} is only {asset.duration}s long"
                 )
             if clip.transition_in is not None:
                 transition = clip.transition_in
-                if previous is None or previous.timeline_out != clip.timeline_in:
+                if previous is None or abs(previous.timeline_out - clip.timeline_in) > TOUCHING_SECONDS:
                     raise ValueError(
                         f"clip {clip.id}: a {transition.kind} runs this clip in over the one before it, and there "
                         f"is no clip ending where this one starts on track {track.id}. To come up from black, "
@@ -1938,7 +1942,7 @@ def validate_project(project: Project, assets: Mapping[str, Asset]) -> None:
                     f"clip {clip.id}: a lead of {clip.audio_lead}s reaches back to "
                     f"{clip.audio_source_start}s of asset {asset.id}, before the file starts"
                 )
-            if asset.duration is not None and clip.audio_source_end > asset.duration:
+            if asset.duration is not None and clip.audio_source_end > Decimal(str(asset.duration)) + TOUCHING_SECONDS:
                 raise ValueError(
                     f"clip {clip.id}: a lag of {clip.audio_lag}s reaches to "
                     f"{clip.audio_source_end}s of asset {asset.id}, which is only {asset.duration}s long"
@@ -1955,7 +1959,7 @@ def validate_project(project: Project, assets: Mapping[str, Asset]) -> None:
                     f"clip {clip.id}: video fades ({clip.video_fade_in}s in + {clip.video_fade_out}s out) "
                     f"are longer than the clip ({clip.timeline_duration}s)"
                 )
-            if previous is not None and clip.timeline_in < previous.timeline_out:
+            if previous is not None and clip.timeline_in < previous.timeline_out - TOUCHING_SECONDS:
                 raise ValueError(
                     f"clip {clip.id} starts at {clip.timeline_in}s and overlaps clip {previous.id}, "
                     f"which ends at {previous.timeline_out}s on track {track.id}"
