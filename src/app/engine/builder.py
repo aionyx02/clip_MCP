@@ -2,6 +2,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import uuid
 from dataclasses import dataclass, field
 from decimal import Decimal
@@ -15,6 +16,10 @@ from app.models.media import Asset, MediaAnalysis
 from app.models.timeline import TOUCHING_SECONDS, Clip, Dip, Project, TrackType, Transition, VoiceCleanup, Wipe
 
 AUDIO_SAMPLE_RATE = 48000
+# Provisional (roadmap §13): how a shot shown whole sits on its blurred copy — how hard the copy
+# is blurred, and how much darker, so the shot itself reads as the picture.
+WHOLE_BLUR = 30
+WHOLE_DIM = -0.12
 # Streaming platforms normalize to about -14 LUFS, so delivering at that level avoids being turned down.
 DEFAULT_LOUDNESS_TARGET = -14.0
 # Ducking where the transcripts say who is talking: the music drops this many decibels,
@@ -526,10 +531,27 @@ def _picture_chain(
         The filters, without input or output labels.
     """
     rate = f"{fps.numerator}/{fps.denominator}"
+    if framing is not None and framing.whole:
+        # All of the picture, fitted inside the box, over a copy of itself enlarged to cover the
+        # box, blurred and dimmed so it reads as background. Labelled by clip and place, since the
+        # two halves have to meet again inside one graph.
+        tag = re.sub(r"[^0-9A-Za-z]", "", clip.id) + f"_{round(float(clip.timeline_in) * 1000)}"
+        placed = (
+            f"split[wa{tag}][wb{tag}];"
+            f"[wa{tag}]scale={width}:{height}:force_original_aspect_ratio=increase,crop={width}:{height},"
+            f"boxblur={WHOLE_BLUR}:2,eq=brightness={WHOLE_DIM}[wbg{tag}];"
+            f"[wb{tag}]scale={width}:{height}:force_original_aspect_ratio=decrease[wfg{tag}];"
+            f"[wbg{tag}][wfg{tag}]overlay=(W-w)/2:(H-h)/2"
+        )
+    else:
+        zoom = framing.zoom if framing is not None else 1.0
+        # Scaled past covering the box by the zoom, to whole even pixels, then cropped to it.
+        wide, high = 2 * math.ceil(width * zoom / 2), 2 * math.ceil(height * zoom / 2)
+        placed = (f"scale={wide}:{high}:force_original_aspect_ratio=increase,"
+                  f"{crop_filter(width, height, framing)}")
     return (
         f"setpts=PTS-STARTPTS{_speed_video_filter(clip)},fps={rate},"
-        f"scale={width}:{height}:force_original_aspect_ratio=increase,"
-        f"{crop_filter(width, height, framing)},setsar=1,format=yuv420p,"
+        f"{placed},setsar=1,format=yuv420p,"
         f"tpad=stop_mode=clone:stop_duration=1,trim=end_frame={frames},setpts=PTS-STARTPTS"
         f"{_clip_video_filter(clip, frames, fps)}"
     )

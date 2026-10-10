@@ -16,6 +16,8 @@
   const CANVAS_SHORT_SIDE = 720;
   // How many files not playing anything are kept open, to be used again without opening them.
   const KEEP_OPEN = 8;
+  // How much darker the blurred copy behind a shot shown whole is: the render's `WHOLE_DIM`.
+  const WHOLE_DIM = -0.12;
   const FONTS = '"Microsoft JhengHei", "PingFang TC", "Noto Sans TC", sans-serif';
 
   const dbToGain = (db) => Math.pow(10, (db || 0) / 20);
@@ -371,21 +373,35 @@
         return;
       }
       const vw = element.videoWidth, vh = element.videoHeight;
-      // Scaled to cover its box, and the rest cropped, where the framing says the crop sits.
-      const cover = Math.max(w / vw, h / vh);
+      // Scaled to cover its box, closer when zoomed, and the rest cropped where the framing says.
+      const zoom = clip.crop?.zoom || 1;
+      const cover = Math.max(w / vw, h / vh) * zoom;
       const sw = w / cover, sh = h / cover;
       let centre = 0.5;
       const steps = clip.crop?.steps || [];
       const into = time - pictureStart(clip);
       for (const [at, value] of steps) if (at <= into + 1e-6) centre = value;
       const axis = clip.crop?.axis;
-      const sx = axis === "x" ? clamp(centre * vw - sw / 2, 0, vw - sw) : (vw - sw) / 2;
-      const sy = axis === "y" ? clamp(centre * vh - sh / 2, 0, vh - sh) : (vh - sh) / 2;
+      const cross = clip.crop?.cross ?? 0.5;
+      const sx = clamp((axis === "x" ? centre : cross) * vw - sw / 2, 0, vw - sw);
+      const sy = clamp((axis === "y" ? centre : cross) * vh - sh / 2, 0, vh - sh);
       ctx.save();
       ctx.globalAlpha = alpha;
       const color = clip.color;
-      if (color) ctx.filter = `brightness(${1 + color.brightness}) contrast(${color.contrast}) saturate(${color.saturation})`;
-      ctx.drawImage(element, sx, sy, sw, sh, x, y, w, h);
+      const look = color ? `brightness(${1 + color.brightness}) contrast(${color.contrast}) saturate(${color.saturation})` : "";
+      if (clip.crop?.whole) {
+        // All of it, fitted inside, over a blurred and dimmed copy covering the box — as the render does.
+        const base = Math.max(w / vw, h / vh), fit = Math.min(w / vw, h / vh);
+        const bw = w / base, bh = h / base;
+        ctx.filter = `${look} blur(${Math.max(4, Math.round(Math.min(w, h) / 30))}px) brightness(${1 + WHOLE_DIM})`;
+        ctx.drawImage(element, (vw - bw) / 2, (vh - bh) / 2, bw, bh, x, y, w, h);
+        ctx.filter = look || "none";
+        const fw = vw * fit, fh = vh * fit;
+        ctx.drawImage(element, 0, 0, vw, vh, x + (w - fw) / 2, y + (h - fh) / 2, fw, fh);
+      } else {
+        if (look) ctx.filter = look;
+        ctx.drawImage(element, sx, sy, sw, sh, x, y, w, h);
+      }
       ctx.filter = "none";
       if (color?.temperature) {
         // Warmer below daylight, cooler above it: a tint, where a render shifts the white point.

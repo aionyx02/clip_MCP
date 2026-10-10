@@ -40,6 +40,10 @@ REFRAME_HOLD_SECONDS = 2.0
 REFRAME_MIN_SHOT_SECONDS = 1.5
 # A crop covering nearly the whole of an axis has nowhere to go.
 SLACK = 0.001
+# Provisional (roadmap §13): a shot with no face that a crop would cut down to less than this
+# share of its width (or height) is shown whole instead, over a blurred copy of itself — a
+# landscape shot in a vertical video keeps a third. A smaller difference, 4:3 in 16:9, is cropped.
+WHOLE_BELOW_SPAN = 0.7
 
 @dataclass(frozen=True)
 class Framing:
@@ -53,10 +57,18 @@ class Framing:
             width or height. The first always starts at frame 0. Frames are
             counted from the first frame the clip reads, which is before its
             in point when a transition runs it in.
+        whole: Show the whole picture over a blurred copy of itself instead
+            of cropping it; the positions are then unused.
+        zoom: How much closer than covering the box the crop is; above 1 the
+            other axis is cropped too.
+        cross: Where the crop is centred along the other axis, when zoomed.
     """
 
     axis: str
     positions: Tuple[Tuple[int, float], ...]
+    whole: bool = False
+    zoom: float = 1.0
+    cross: float = 0.5
 
 def _span(source: Tuple[int, int], box: Tuple[int, int]) -> Tuple[str, float]:
     """Work out which axis a crop moves along, and how much of it the crop covers.
@@ -167,6 +179,40 @@ def centre_at(framing: Framing, clip: Clip, seconds: float, fps: Fraction) -> fl
     frame = round(Fraction(str(seconds - float(clip.video_source_start))) / Fraction(str(clip.speed)) * fps)
     return [where for start, where in framing.positions if start <= frame][-1]
 
+@dataclass(frozen=True)
+class Placement:
+    """How one frame of a clip sits in its box, for a still drawn the way the render draws it.
+
+    Attributes:
+        centre: Where the crop is centred along the axis it crops.
+        whole: Shown whole over a blurred copy instead of cropped.
+        zoom: How much closer than covering the box.
+        cross: Where the crop is centred along the other axis, when zoomed.
+    """
+
+    centre: float = 0.5
+    whole: bool = False
+    zoom: float = 1.0
+    cross: float = 0.5
+
+def placement_at(framing: Optional[Framing], clip: Clip, seconds: float, fps: Fraction) -> Optional[Placement]:
+    """Say how a clip sits in its box at one moment of its source.
+
+    Args:
+        framing: The clip's framing, or None for a crop from the middle.
+        clip: The clip.
+        seconds: A moment of its source, in seconds.
+        fps: The output frame rate.
+
+    Returns:
+        The placement, or None for a crop from the middle.
+    """
+    if framing is None:
+        return None
+    if framing.whole:
+        return Placement(whole=True)
+    return Placement(centre=centre_at(framing, clip, seconds, fps), zoom=framing.zoom, cross=framing.cross)
+
 def box_of(clip: Clip, width: int, height: int) -> Tuple[int, int]:
     """Say what size a clip is drawn at.
 
@@ -186,17 +232,67 @@ def box_of(clip: Clip, width: int, height: int) -> Tuple[int, int]:
     _, _, box_width, box_height = overlay_box(clip, width, height)
     return box_width, box_height
 
+def place_clip(
+    clip: Clip,
+    source: Tuple[int, int],
+    box: Tuple[int, int],
+    faces: Sequence[FaceMeasurement],
+    fps: Fraction,
+    follow_faces: bool = True,
+) -> Optional[Framing]:
+    """Decide how one clip sits in its box: where its crop goes, or whether it is shown whole.
+
+    What the clip was told wins: `whole`, or `fill` with a centre and a zoom
+    of somebody's choosing. Otherwise a face is followed; a shot with no face
+    that would lose most of its width is shown whole; anything else is
+    cropped from the middle.
+
+    Args:
+        clip: The clip.
+        source: Its picture's `(width, height)`.
+        box: The `(width, height)` it is drawn at.
+        faces: The per-second face measurements of its file.
+        fps: The output frame rate.
+        follow_faces: Whether a face may be followed.
+
+    Returns:
+        The framing, or None to crop from the middle.
+    """
+    fit = clip.fit
+    axis, span = _span(source, box)
+    zoom = fit.zoom if fit is not None and fit.mode == "fill" else 1.0
+    if span >= 1 - SLACK and zoom <= 1:
+        return None
+    if fit is not None and fit.mode == "whole":
+        return Framing(axis=axis, positions=((0, 0.5),), whole=True)
+    if fit is not None and (fit.center_x is not None or fit.center_y is not None or zoom > 1):
+        # Placed by hand: it stays where it was put. Zooming in narrows both axes.
+        along, other = (fit.center_x, fit.center_y) if axis == "x" else (fit.center_y, fit.center_x)
+        narrowed = span / zoom
+        return Framing(axis=axis, positions=((0, _clamped(0.5 if along is None else along, narrowed)),),
+                       zoom=zoom, cross=_clamped(0.5 if other is None else other, 1 / zoom))
+    followed = frame_clip(clip, source, box, faces, fps) if follow_faces else None
+    if followed is not None or fit is not None:
+        return followed
+    seen = any(second.faces for second in faces
+               if second.end > float(clip.video_source_start) and second.start < float(clip.source_range.end))
+    if not seen and span < WHOLE_BELOW_SPAN:
+        return Framing(axis=axis, positions=((0, 0.5),), whole=True)
+    return None
+
 def frame_project(
     project: Project,
     assets: Mapping[str, Asset],
     faces: Mapping[str, Sequence[FaceMeasurement]],
+    follow_faces: bool = True,
 ) -> Dict[str, Framing]:
-    """Work out the framing of every picture clip in a project.
+    """Work out how every picture clip in a project sits in its box.
 
     Args:
         project: The project, at the size it is being rendered at.
         assets: Its files, sized.
         faces: Each file's face measurements, keyed by asset ID.
+        follow_faces: Whether faces may be followed.
 
     Returns:
         A framing for each clip that has one, keyed by clip ID. Clips left out
@@ -209,9 +305,9 @@ def frame_project(
             asset = assets.get(clip.asset_id)
             if asset is None or not asset.width or not asset.height:
                 continue
-            framing = frame_clip(
+            framing = place_clip(
                 clip, (asset.width, asset.height), box_of(clip, project.width, project.height),
-                faces.get(clip.asset_id, ()), fps,
+                faces.get(clip.asset_id, ()), fps, follow_faces,
             )
             if framing is not None:
                 framed[clip.id] = framing
@@ -236,6 +332,11 @@ def crop_filter(width: int, height: int, framing: Optional[Framing]) -> str:
     if framing is None:
         return f"crop={width}:{height}"
     size, out = ("iw", "ow") if framing.axis == "x" else ("ih", "oh")
+    cross = ""
+    if framing.zoom > 1:
+        # Zoomed in, the other axis has room too, and its centre is where it was put.
+        other, other_out, name = ("ih", "oh", "y") if framing.axis == "x" else ("iw", "ow", "x")
+        cross = rf":{name}=max(0\,min({other}-{other_out}\,{framing.cross:g}*{other}-{other_out}/2))"
     # if(lt(n,f1), c0, if(lt(n,f2), c1, ... ck)), built from the last framing inwards.
     centre = f"{framing.positions[-1][1]:g}"
     for (frame, _), (_, before) in zip(reversed(framing.positions[1:]), reversed(framing.positions[:-1])):
@@ -243,4 +344,4 @@ def crop_filter(width: int, height: int, framing: Optional[Framing]) -> str:
     # Escaped rather than quoted, the way the rest of the graph is: inside quotes the
     # backslashes would reach the expression parser and it would refuse them.
     offset = rf"max(0\,min({size}-{out}\,{centre}*{size}-{out}/2))"
-    return f"crop={width}:{height}:{framing.axis}={offset}"
+    return f"crop={width}:{height}:{framing.axis}={offset}{cross}"

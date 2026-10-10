@@ -68,7 +68,7 @@ from app.engine.semantic import (
 )
 from app.engine.ffmpeg import graph_from_file, hidden_window_flags
 from app.engine.probe import picture_size, probe_file, recorded_at, speech_loudness, timecode_start
-from app.engine.reframe import Framing, centre_at, frame_project
+from app.engine.reframe import Framing, frame_project, placement_at
 from app.engine import playback
 from app.engine.library import FOLDER_KINDS, FOOTAGE, LIBRARIES, MUSIC, classify, library_of
 from app.engine import clap
@@ -4061,7 +4061,7 @@ def preview_project(
                 "put audio-only assets on an audio track"
             )
 
-    framing = _framing(project, assets) if follow_faces else {}
+    framing = _framing(project, assets, follow_faces)
     fps = Fraction(project.fps_num, project.fps_den)
 
     # Where the picture really goes black, found over the whole sequence rather than over
@@ -4125,7 +4125,7 @@ def preview_project(
             framed = framing.get(clip.id)
             shots.append((
                 asset.path, seconds, f"#{number}  {format_timestamp(at)}  {label}",
-                centre_at(framed, clip, seconds, fps) if framed else None,
+                placement_at(framed, clip, seconds, fps),
             ))
             listing.append(
                 f"#{number}: clip {clip.id} | edit {format_timestamp(at)} | "
@@ -4642,22 +4642,24 @@ def _reshaped(project: Project, frame: Optional[str]) -> Project:
         width, height = short, even(short * down / across)
     return project.model_copy(update={"width": width, "height": height})
 
-def _framing(project: Project, assets: Mapping[str, Asset]) -> Dict[str, Framing]:
-    """Work out where each clip's crop sits, following the faces in it.
+def _framing(project: Project, assets: Mapping[str, Asset], follow_faces: bool = True) -> Dict[str, Framing]:
+    """Work out how each clip sits in the frame: where its crop goes, or whether it is shown whole.
 
     Args:
         project: The project, at the size it is being rendered at.
         assets: Its files.
+        follow_faces: Whether a crop may follow the face in a shot.
 
     Returns:
-        A framing per clip that has a face to follow, keyed by clip ID.
+        A framing per clip that is not simply cropped from the middle, keyed
+        by clip ID.
     """
     faces = {}
     for asset_id in assets:
         analysis = repo.get_analysis(asset_id)
         if analysis is not None and analysis.faces:
             faces[asset_id] = analysis.faces
-    return frame_project(project, _sized(assets), faces) if faces else {}
+    return frame_project(project, _sized(assets), faces, follow_faces)
 
 @mcp.tool()
 def render_project(
@@ -4827,7 +4829,7 @@ def _start_render(
             handle.write(chapter_metadata(listed))
 
     assets = _referenced_assets(project)
-    framing = _framing(project, assets) if follow_faces else None
+    framing = _framing(project, assets, follow_faces)
     voices = _voices(project)
     talking = _talking(project, voices)
     pieces: list = []
@@ -5077,14 +5079,14 @@ def propose_covers(
     if not offered:
         raise ValueError(f"project {project_id} has no picture to take a cover from")
     assets = _referenced_assets(project)
-    framing = _framing(project, assets) if follow_faces else {}
+    framing = _framing(project, assets, follow_faces)
     fps = Fraction(project.fps_num, project.fps_den)
     shots, listing = [], []
     for number, (clip, seconds) in enumerate(offered, start=1):
         at = float(clip.timeline_in) + (seconds - float(clip.source_range.start)) / clip.speed
         framed = framing.get(clip.id)
         shots.append((assets[clip.asset_id].path, seconds, f"#{number}  {format_timestamp(at)}",
-                      centre_at(framed, clip, seconds, fps) if framed else None))
+                      placement_at(framed, clip, seconds, fps)))
         listing.append(f"#{number}: edit {at:.3f}s ({format_timestamp(at)}) | clip {clip.id}")
     header = f"{len(offered)} cover candidate(s) for project {project_id}, {project.width}x{project.height}:"
     return ToolResult(content=[
@@ -5133,10 +5135,10 @@ def export_cover(
     clip = on_screen[-1]
     assets = _referenced_assets(project)
     source = float(clip.source_range.start) + (seconds - float(clip.timeline_in)) * clip.speed
-    framed = (_framing(project, assets) if follow_faces else {}).get(clip.id)
+    framed = _framing(project, assets, follow_faces).get(clip.id)
     fps = Fraction(project.fps_num, project.fps_den)
     picture = still(assets[clip.asset_id].path, source, project.width, project.height,
-                    centre_at(framed, clip, source, fps) if framed else None)
+                    placement_at(framed, clip, source, fps))
     folder = str(output_dir())
     os.makedirs(folder, exist_ok=True)
     path = housekeeping.unique_path(folder, _delivery_name(project, "cover" + (f"-{frame}" if frame else ""), ".jpg"))

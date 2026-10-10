@@ -189,6 +189,9 @@ def _crop(framing: Optional[Framing], clip: Clip, fps: Fraction) -> Optional[dic
     return {
         "axis": framing.axis,
         "steps": [[round(frame / float(fps), 3), centre] for frame, centre in framing.positions],
+        "whole": framing.whole,
+        "zoom": framing.zoom,
+        "cross": framing.cross,
     }
 
 
