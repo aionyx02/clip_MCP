@@ -34,9 +34,10 @@ jobs:
       uses: astral-sh/setup-uv@v10.1.0
       with:
         enable-cache: true
-
-    # pyproject.toml pins requires-python to >=3.14; uv fetches it if the
-    # runner does not have it.
+        # The version the app is built and tested on. pyproject only says >=3.14, and
+        # .python-version is not committed, so without this uv takes the newest Python —
+        # 3.15, which onnxruntime has no wheels for yet.
+        python-version: "3.14"
     - name: Install dependencies
       run: uv sync --locked
 
