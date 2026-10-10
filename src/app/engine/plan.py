@@ -29,7 +29,7 @@ from app.models.media import Asset
 from app.models.plan import STRUCTURES, Beat, BeatRole, EditPlan, MusicCue, Selection, Structure, TrimKind
 from app.engine.semantic import EDGE_TOLERANCE_SECONDS, CleanCuts
 from app.models.semantic import ClipKind, SemanticClip, SemanticTimeline
-from app.models.timeline import MAX_SPEED, MIN_SPEED, Clip, Project
+from app.models.timeline import MAX_SPEED, MIN_SPEED, Clip, Project, TitleCard
 
 # Air left around a cut, taken from the clip's measured headroom, so a line does not
 # begin the instant the picture does. Never more than the headroom allows. The default
@@ -204,6 +204,12 @@ class Piece:
             beat has one.
         sound_lead: Seconds its sound starts before its picture, already
             shortened to the sound the file has.
+        card: Set on a title card: the card. Its window is then only its
+            length, from 0, and the file is the one behind it.
+        card_from: For a card that was on the cut before this compile —
+            made by hand, or the plan's and changed by hand — the plan it came
+            from, if any, and whether it is pinned; None for one the plan
+            makes now.
     """
 
     asset_id: str
@@ -216,6 +222,8 @@ class Piece:
     keep_level: bool = False
     transition: Optional[Tuple[str, float, str, str]] = None
     sound_lead: float = 0.0
+    card: Optional[TitleCard] = None
+    card_from: Optional[Tuple[Optional[str], bool]] = None
 
     @property
     def duration(self) -> float:
@@ -2188,7 +2196,8 @@ def as_left(pieces: Sequence[Piece], project: Optional[Project]) -> Tuple[List[P
     """
     kept = {
         tuple(clip.from_clip_ids): clip
-        for track_id, clip in _compiled_clips(project) if track_id == VIDEO_TRACK_ID and clip.pinned
+        for track_id, clip in _compiled_clips(project)
+        if track_id == VIDEO_TRACK_ID and clip.pinned and clip.card is None
     }
     laid: List[Piece] = []
     hand: List[bool] = []
@@ -2298,6 +2307,9 @@ def check_recompile(
         # was the first stretch, and is taken as the first stretch now.
         available.add(())
     for track_id, clip in _compiled_clips(project):
+        if clip.card is not None:
+            # Title cards come back on their own: the plan's are rebuilt, any other is put back.
+            continue
         if clip.pinned and track_id in (MUSIC_TRACK_ID, MUSIC_B_TRACK_ID) and beds:
             ordered = sorted((bed for bed in beds if bed.track_id == track_id), key=lambda bed: bed.timeline_in)
             match = next((index for index, bed in enumerate(ordered) if bed.key == tuple(clip.from_clip_ids)),
@@ -2633,6 +2645,166 @@ def _as_made(pinned: Clip) -> dict:
         "layout": pinned.layout.model_dump() if pinned.layout else None,
     }
 
+def _with_cards(plan: EditPlan, pieces: List[Piece], project: Optional[Project]) -> List[Piece]:
+    """Put the title cards into a compile's windows, where they will play.
+
+    A card is a window of its own, so everything laid out by where windows
+    fall — markers, B-roll, music — makes room for it. A part the plan gives
+    a card opens on it, and the part's transition comes in on the card. A
+    card that was on the cut already and not made by the plan, or made by it
+    and changed by hand since, comes back as it was: the plan's in front of
+    its part, one made by hand in front of the shot whose frame it shows, or
+    failing that wherever it was nearest.
+
+    Args:
+        plan: The plan being compiled.
+        pieces: Its windows, as laid out.
+        project: What is on the timeline now.
+
+    Returns:
+        The windows with the cards among them.
+    """
+    beats = {beat.id: beat for beat in plan.beats}
+    old = sorted((clip for track_id, clip in _compiled_clips(project)
+                  if track_id == VIDEO_TRACK_ID and clip.card is not None), key=lambda clip: clip.timeline_in)
+    held = {clip.card.beat_id: clip for clip in old
+            if clip.from_plan_id == plan.id and clip.pinned and clip.card.beat_id in beats}
+    by_hand = [clip for clip in old if clip not in held.values() and (clip.from_plan_id != plan.id or clip.pinned)]
+
+    def from_clip(clip: Clip, beat_id: str) -> Piece:
+        length = float(clip.timeline_duration)
+        return Piece(asset_id=clip.asset_id, start=0.0, end=length, from_clip_ids=(), beat_id=beat_id,
+                     card=clip.card, card_from=(clip.from_plan_id, clip.pinned))
+
+    out: List[Piece] = []
+    opened: set = set()
+    for piece in pieces:
+        beat = beats.get(piece.beat_id)
+        if beat is not None and piece.beat_id not in opened:
+            opened.add(piece.beat_id)
+            card: Optional[Piece] = None
+            if piece.beat_id in held:
+                card = from_clip(held[piece.beat_id], piece.beat_id)
+            elif beat.title_card is not None:
+                wanted = beat.title_card
+                photo = wanted.photo_asset_id
+                card = Piece(
+                    asset_id=photo or piece.asset_id, start=0.0, end=wanted.seconds, from_clip_ids=(),
+                    beat_id=piece.beat_id,
+                    card=TitleCard(
+                        title=wanted.title, subtitle=wanted.subtitle,
+                        background=wanted.background or ("picture" if photo else "blur"),
+                        at=0 if photo else piece.start, beat_id=piece.beat_id,
+                        **({"colour": wanted.colour} if wanted.colour else {}),
+                    ),
+                )
+            if card is not None:
+                # The part comes in on its card, and its first shot follows the card on a cut.
+                out.append(replace(card, transition=piece.transition))
+                piece = replace(piece, transition=None)
+        out.append(piece)
+
+    for clip in by_hand:
+        at = float(clip.card.at)
+        shows = next((index for index, piece in enumerate(out) if piece.card is None
+                      and piece.asset_id == clip.asset_id and piece.start - 0.05 <= at <= piece.end + 0.05), None)
+        if shows is None:
+            starts, position = [], 0.0
+            for piece in out:
+                starts.append(position)
+                position += piece.played
+            was = float(clip.timeline_in)
+            shows = min(range(len(out)), key=lambda index: abs(starts[index] - was)) if out else 0
+        beat_id = out[shows].beat_id if shows < len(out) else ""
+        out.insert(shows, from_clip(clip, beat_id))
+    return out
+
+def _card_operation(clip_id: str, piece: Piece) -> dict:
+    """Write the operation that puts one title card on the sequence."""
+    placed = {
+        "action": "insert_clip", "track_id": VIDEO_TRACK_ID, "clip_id": clip_id, "asset_id": piece.asset_id,
+        "source_range": {"start": 0.0, "end": round(piece.end, 3)}, "volume": 0.0,
+        "card": piece.card.model_dump(mode="json"),
+    }
+    if piece.transition is not None:
+        kind, seconds, through, direction = piece.transition
+        placed["transition_in"] = {"kind": kind, "seconds": seconds}
+        if kind == "dip":
+            placed["transition_in"]["through"] = through
+        elif kind == "wipe":
+            placed["transition_in"]["direction"] = direction
+    return placed
+
+def _text_operations(
+    plan: EditPlan,
+    operations: Sequence[dict],
+    provenance: Mapping[str, dict],
+    project: Optional[Project],
+    children: Mapping[str, List[SemanticClip]],
+) -> List[dict]:
+    """Write the words over a compiled cut: the plan's, and every other set kept from before.
+
+    Words are pinned to footage, so they find their clips by it: the plan's
+    over the windows its selections became, and words put on by hand — or the
+    plan's, changed by hand since — over whichever new clip plays the footage
+    they were over.
+
+    Args:
+        plan: The plan being compiled.
+        operations: The compile's operations so far, which say what each new
+            clip plays.
+        provenance: What each new clip was made from, by its ID.
+        project: What is on the timeline now.
+        children: Each section's own clips, so a selection of a section
+            finds the windows made from its parts.
+
+    Returns:
+        `add_text` operations.
+    """
+    made = [
+        (op["track_id"], op["clip_id"], op["asset_id"], float(op["source_range"]["start"]),
+         float(op["source_range"]["end"]), set(provenance.get(op["clip_id"], {}).get("from_clip_ids", ())))
+        for op in operations
+        if op["action"] in ("insert_clip", "add_clip") and op["track_id"] in (VIDEO_TRACK_ID, BROLL_TRACK_ID)
+        and "card" not in op
+    ]
+    texts: List[dict] = []
+    taken: set = set()
+
+    def put(track_id: str, clip_id: str, text_id: str, start: float, end: float, fields: dict) -> None:
+        name, number = text_id, 2
+        while (clip_id, name) in taken:
+            name, number = f"{text_id}-{number}", number + 1
+        taken.add((clip_id, name))
+        texts.append({"action": "add_text", "track_id": track_id, "clip_id": clip_id, "text_id": name,
+                      "start": round(start, 3), "end": round(end, 3), **fields})
+
+    for selection in plan.selections:
+        if not selection.texts:
+            continue
+        own = {selection.clip_id} | {child.id for child in children.get(selection.clip_id, [])}
+        windows = [entry for entry in made if entry[0] == VIDEO_TRACK_ID and entry[5] & own]
+        for number, text in enumerate(selection.texts, start=1):
+            fields = {"text": text.text, "second": text.second, "style": text.style, "x": text.x, "y": text.y,
+                      "by_plan": True}
+            for track_id, clip_id, _, start, end, _ in windows:
+                low = max(start, text.start if text.start is not None else start)
+                high = min(end, text.end if text.end is not None else end)
+                if high > low:
+                    put(track_id, clip_id, f"plan-{selection.clip_id}-{number}", low, high, fields)
+
+    old = [clip for track_id, clip in _compiled_clips(project) if track_id in (VIDEO_TRACK_ID, BROLL_TRACK_ID)]
+    for clip in old:
+        for text in clip.texts:
+            if text.by_plan:
+                continue
+            fields = {"text": text.text, "second": text.second, "style": text.style, "x": text.x, "y": text.y}
+            for track_id, clip_id, asset_id, start, end, _ in made:
+                low, high = max(start, float(text.start)), min(end, float(text.end))
+                if asset_id == clip.asset_id and high > low:
+                    put(track_id, clip_id, text.id, low, high, fields)
+    return texts
+
 def compile_operations(
     plan: EditPlan,
     clips: Mapping[str, SemanticClip],
@@ -2672,8 +2844,9 @@ def compile_operations(
     # two semantic clips take the B-roll's hand-made settings.
     kept = {
         (track_id, tuple(clip.from_clip_ids)): clip
-        for track_id, clip in _compiled_clips(project) if clip.pinned
+        for track_id, clip in _compiled_clips(project) if clip.pinned and clip.card is None
     }
+    pieces = _with_cards(plan, pieces, project)
 
     operations: List[dict] = [
         # Everything the compiler owns comes down first, so the cut is rebuilt rather than
@@ -2691,6 +2864,11 @@ def compile_operations(
         # Taken rather than read: taking a pause out of the middle of a shot leaves two
         # windows carrying the clip IDs one of them had, and one hand-made range must
         # not be stamped onto both of them. The earlier window keeps it.
+        if piece.card is not None:
+            operations.append(_card_operation(clip_id, piece))
+            made_by, held = piece.card_from or (plan.id, False)
+            provenance[clip_id] = {"from_plan_id": made_by, "from_clip_ids": [], "pinned": held}
+            continue
         pinned = kept.pop((VIDEO_TRACK_ID, piece.from_clip_ids), None)
         placed = {
             "action": "insert_clip",
@@ -2758,6 +2936,8 @@ def compile_operations(
                 "from_clip_ids": list(identity),
                 "pinned": pinned is not None,
             }
+
+    operations += _text_operations(plan, operations, provenance, project, children)
 
     # The compiler owns the markers it made and nothing else: one somebody added by hand
     # has no beat behind it, so it is carried across rather than rebuilt.

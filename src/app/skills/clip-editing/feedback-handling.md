@@ -25,6 +25,10 @@ retyped to do it, and those reasons are the part that cannot be rebuilt.
   picture.
 - Between two parts: `set_beat_join` puts a transition or a J-cut on the
   beat that comes in.
+- Words in the plan, only when the user asked: `set_beat_title` opens a
+  part on a title card, `set_selection_texts` puts a name, a place or a
+  headline over a piece. Cards and words added by hand stay through a
+  recompile.
 - The whole video: `set_pacing` makes every cut tighter or looser at once —
   a lower `pause_seconds` takes out more dead air between sentences — a
   pause inside a sentence is how somebody talks, and stays — a lower `breath_seconds`
