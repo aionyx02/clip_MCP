@@ -83,6 +83,9 @@ def test_the_editor_writes_reopens_and_deletes_comments(media: Path) -> None:
 
 def test_comments_are_kept_in_the_history_beside_the_project(media: Path, kept_history) -> None:
     project = two_shots(media)
-    server.add_comment(project, "換一首歌", 2.0)
+    written = server.add_comment(project, "換一首歌", 2.0)
     kept = kept_history.read(f"comments/{project}.json", kept_history.head())
     assert json.loads(kept)[0]["text"] == "換一首歌"
+    # Closed, it says which version it was dealt with in.
+    closed = server.change_comment(project, written["id"], "AI（測試）", "換成 Sunny", "resolved")
+    assert closed["resolved_in"] == server.project_history(project)["versions"][0]["commit"]

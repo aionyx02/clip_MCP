@@ -13,10 +13,10 @@ from typing import Dict, List, Mapping, Optional, Tuple
 
 from app.engine.compare import Part, clips_in, match_clips, parts_of
 from app.models.plan import EditPlan
-from app.models.timeline import Clip, Marker, Project, Track, TrackType
+from app.models.timeline import TOUCHING_SECONDS, Clip, Marker, Project, Track, TrackType
 
 # What can be picked for the video as a whole, besides its parts.
-WHOLE = ("music", "captions", "caption_style")
+WHOLE_PICKS = ("music", "captions", "caption_style", "frame")
 
 
 def _middle(clip: Clip) -> float:
@@ -55,8 +55,8 @@ def merge(before: Project, after: Project, picks: Mapping[str, str]) -> Project:
         before: The left version.
         after: The right version, which the result is built on: its ID,
             name, size and everything not picked stay.
-        picks: `a` or `b` for each part name and for `music`, `captions`
-            and `caption_style`; anything left out is the right side's.
+        picks: `a` or `b` for each part name and for `music`, `captions`,
+            `caption_style` and `frame`; anything left out is the right side's.
 
     Returns:
         The merged cut, laid end to end in the right side's order of parts,
@@ -127,7 +127,8 @@ def merge(before: Project, after: Project, picks: Mapping[str, str]) -> Project:
         sequence[0] = sequence[0].model_copy(update={"transition_in": None})
     for index in range(1, len(sequence)):
         previous, clip = sequence[index - 1], sequence[index]
-        if clip.transition_in is not None and abs(float(previous.timeline_out) - float(clip.timeline_in)) > 0.001:
+        if clip.transition_in is not None and \
+                abs(float(previous.timeline_out) - float(clip.timeline_in)) > float(TOUCHING_SECONDS):
             sequence[index] = clip.model_copy(update={"transition_in": None})
 
     music_from = before if side("music") == "a" else after
@@ -152,7 +153,9 @@ def merge(before: Project, after: Project, picks: Mapping[str, str]) -> Project:
                 tracks.append(track.model_copy(update={"clips": clips}))
     captions_from = before if side("captions") == "a" else after
     style_from = before if side("caption_style") == "a" else after
+    frame_from = before if side("frame") == "a" else after
     return after.model_copy(update={
+        "width": frame_from.width, "height": frame_from.height,
         "tracks": tracks,
         "markers": markers if (before.markers or after.markers) else [],
         "subtitles": [cue.model_copy() for cue in captions_from.subtitles],
@@ -164,7 +167,8 @@ def merge_plans(left: EditPlan, right: EditPlan, beats_from_left: List[str]) -> 
     """Make one plan of two, the named beats' footage, reasons and trims from the left.
 
     Both plans must be over the same timeline, so their clip IDs mean the
-    same moments.
+    same moments. A beat only the left plan has comes in after the beat it
+    followed there, as the merged cut has it.
 
     Args:
         left: The left version's plan.
@@ -172,22 +176,37 @@ def merge_plans(left: EditPlan, right: EditPlan, beats_from_left: List[str]) -> 
         beats_from_left: Names of the beats to take from the left.
 
     Returns:
-        The right plan with those beats' selections, covering shots and
-        rejections replaced by the left's.
+        The right plan with those beats' selections and covering shots
+        replaced by the left's, and the rejections of both, less anything the
+        merged plan now uses.
     """
     chosen = set(beats_from_left)
-    right_ids = {beat.name: beat.id for beat in right.beats}
-    left_ids = {beat.id: beat.name for beat in left.beats}
-    replaced = {right_ids[name] for name in chosen if name in right_ids}
-    taken = [selection.model_copy(update={"beat_id": right_ids[left_ids[selection.beat_id]]})
-             for selection in left.selections
-             if left_ids.get(selection.beat_id) in chosen and left_ids[selection.beat_id] in right_ids]
+    beats = list(right.beats)
+    taken_ids = {beat.id for beat in beats}
+    for index, beat in enumerate(left.beats):
+        if beat.name not in chosen or any(other.name == beat.name for other in beats):
+            continue
+        new_id = beat.id
+        while new_id in taken_ids:
+            new_id = f"{new_id}a"
+        taken_ids.add(new_id)
+        before = left.beats[index - 1].name if index else None
+        at = next((place + 1 for place, other in enumerate(beats) if other.name == before), 0)
+        beats.insert(at, beat.model_copy(update={"id": new_id}))
+    ids = {beat.name: beat.id for beat in beats}
+    left_names = {beat.id: beat.name for beat in left.beats}
+    replaced = {ids[name] for name in chosen if name in ids}
+    taken = [selection.model_copy(update={"beat_id": ids[left_names[selection.beat_id]]})
+             for selection in left.selections if left_names.get(selection.beat_id) in chosen]
     kept = [selection for selection in right.selections if selection.beat_id not in replaced]
-    # In the order the right plan's beats come in.
-    order = {beat.id: index for index, beat in enumerate(right.beats)}
+    order = {beat.id: index for index, beat in enumerate(beats)}
     selections = sorted(kept + taken, key=lambda selection: order.get(selection.beat_id, len(order)))
     used = {selection.clip_id for selection in selections}
     left_over = {selection.clip_id for selection in taken}
-    broll = [shot for shot in right.broll if shot.over_clip_id in used and shot.over_clip_id not in left_over] + \
-        [shot for shot in left.broll if shot.over_clip_id in left_over]
-    return right.model_copy(update={"selections": selections, "broll": broll})
+    broll = [shot for shot in right.broll if shot.over_clip_id in used and shot.over_clip_id not in left_over] +         [shot for shot in left.broll if shot.over_clip_id in left_over]
+    rejected, seen = [], set()
+    for rejection in right.rejected + left.rejected:
+        if rejection.clip_id not in used and rejection.clip_id not in seen:
+            seen.add(rejection.clip_id)
+            rejected.append(rejection)
+    return right.model_copy(update={"beats": beats, "selections": selections, "broll": broll, "rejected": rejected})

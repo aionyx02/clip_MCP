@@ -75,3 +75,23 @@ def test_the_plans_are_merged_beat_by_beat_with_their_reasons() -> None:
     assert [(item.clip_id, item.beat_id, item.rationale) for item in merged.selections] == \
         [("u1", "x1", "舊的開場比較直接"), ("u5", "x2", "新結尾")]
     assert merged.id == "R"
+
+
+def test_a_beat_only_the_left_plan_has_comes_in_where_it_was() -> None:
+    from app.models.plan import Rejection
+
+    left = EditPlan(id="L", timeline_id="t", timeline_input_hash="", beats=[
+        Beat(id="b1", name="開場"), Beat(id="b2", name="插曲"), Beat(id="b3", name="結尾")], selections=[
+        Selection(clip_id="u1", beat_id="b1"), Selection(clip_id="u7", beat_id="b2", rationale="舊版才有的插曲"),
+        Selection(clip_id="u9", beat_id="b3")], rejected=[Rejection(clip_id="u5", reason="重複")])
+    right = EditPlan(id="R", timeline_id="t", timeline_input_hash="", beats=[
+        Beat(id="b1", name="開場"), Beat(id="x3", name="結尾")], selections=[
+        Selection(clip_id="u2", beat_id="b1"), Selection(clip_id="u5", beat_id="x3")],
+        rejected=[Rejection(clip_id="u7", reason="拿掉插曲")])
+    merged = merge_plans(left, right, ["插曲"])
+    assert [beat.name for beat in merged.beats] == ["開場", "插曲", "結尾"]
+    assert [(item.clip_id, item.rationale) for item in merged.selections] == \
+        [("u2", ""), ("u7", "舊版才有的插曲"), ("u5", "")]
+    # The left's interlude is used again, and what the right now uses is not rejected.
+    assert merged.rejected == []
+    assert len({beat.id for beat in merged.beats}) == 3

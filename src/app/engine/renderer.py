@@ -78,7 +78,6 @@ def _fail_if_active(message: str) -> Callable[[Job], None]:
             job.error_message = message
     return change
 
-
 class JobManager:
     """Admits background jobs into detached worker processes and reports their state.
 
@@ -180,7 +179,11 @@ class JobManager:
             )
 
         busy, behind = len(running), 0
-        exporting = any(job.kind == JobKind.RENDER for job in running)
+        def exports(job: Job) -> bool:
+            """Whether a job is a finished video being made, which background preparation waits for."""
+            return job.kind == JobKind.RENDER and not job.preview
+
+        exporting = any(exports(job) for job in running)
         # Oldest first within a priority: preparing playback waits behind the work somebody asked for.
         for job in sorted(jobs, key=lambda queued: queued.priority):
             if job.admitted_at is not None or job.status != JobStatus.QUEUED or job.cancel_requested:
@@ -204,6 +207,7 @@ class JobManager:
             else:
                 job.admitted_at, job.stage = now, None
                 slots, busy = slots - 1, busy + 1
+                exporting = exporting or exports(job)
                 if spare is not None:
                     spare = max(0, spare - job.memory_estimate)
                 changed.append(job.job_id)

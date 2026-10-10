@@ -79,7 +79,7 @@ from app.engine.levels import song_level, talking_in
 from app.engine.comments import anchor_at, where_now
 from app.engine.compare import compare
 from app.engine.compare import parts_of as cut_parts
-from app.engine.merge import WHOLE as MERGE_WHOLE, merge, merge_plans
+from app.engine.merge import WHOLE_PICKS, merge, merge_plans
 from app.engine.delivery import CHECKS, chapter_metadata, chapters, check_delivery, clock, cover_candidates
 from app.engine.frames import format_timestamp, still, storyboard_sheet
 from app.engine.interchange import write_edl, write_fcpxml, write_otio, write_srt
@@ -409,6 +409,8 @@ class OpenComments(Middleware):
         try:
             waiting = open_comments(project_id)
         except Exception:
+            # A reminder must never cost the tool its answer: whatever went wrong reading the
+            # comments, the tool's own result still goes back as it was.
             return result
         if not waiting:
             return result
@@ -4785,7 +4787,8 @@ def _start_render(
     if is_preview:
         _make_room()
     housekeeping.sweep_renders(WORKSPACE_DIR, _delivered)
-    job = Job(kind=JobKind.RENDER, project_id=project_id, project_version=project.version, captioned=burn_subtitles)
+    job = Job(kind=JobKind.RENDER, project_id=project_id, project_version=project.version, captioned=burn_subtitles,
+              preview=is_preview)
     delivered: Optional[str] = None
     if is_preview:
         job.work_dir = os.path.join(housekeeping.preview_dir(WORKSPACE_DIR, project_id), job.job_id)
@@ -5912,6 +5915,12 @@ def branch_project(project_id: str, name: str, commit: Optional[str] = None, not
         repo.file_items("projects", [branch.id], folder)
     return {"project_id": branch.id, "name": branch.name, "branched_from": branch.branched_from.model_dump()}
 
+# Provisional (roadmap §13): a word counts as said in a stretch only when this much of it is
+# inside, so a word the cut just grazes does not name the stretch.
+WORD_INSIDE_SECONDS = 0.05
+# Provisional (roadmap §13): a comment dragged over less than this is a moment, not a stretch.
+SHORTEST_STRETCH_SECONDS = 0.05
+
 def _said_between(asset_id: str, start: float, end: float) -> str:
     """What the transcript has said in a file between two of its seconds; empty when nothing was."""
     analysis = repo.get_analysis(asset_id)
@@ -5919,11 +5928,18 @@ def _said_between(asset_id: str, start: float, end: float) -> str:
         return ""
     return "".join(
         word.text for segment in analysis.transcript.segments if not was_made_up(segment) for word in segment.words
-        if word.start < end - 0.05 and word.end > start + 0.05
+        if word.start < end - WORD_INSIDE_SECONDS and word.end > start + WORD_INSIDE_SECONDS
     ).strip()
 
 def _version_at(project_id: str, commit: Optional[str]) -> Tuple[Project, dict]:
     """A project at one of its versions, or as it is now, with that version as the AI reads it.
+
+    Args:
+        project_id: The video.
+        commit: The version, or a prefix of it; empty for the video as it is.
+
+    Returns:
+        The project as it was, and the version as `project_history` shows it.
 
     Raises:
         ValueError: If the project or the version does not exist.
@@ -5940,7 +5956,15 @@ def _version_at(project_id: str, commit: Optional[str]) -> Tuple[Project, dict]:
     return _project_at(project_id, chosen.commit), _version_record(chosen)
 
 def compare_projects(before: Project, after: Project) -> dict:
-    """What changed from one cut to another, files named by name and stretches by their words."""
+    """What changed from one cut to another, files named by name and stretches by their words.
+
+    Args:
+        before: The left cut.
+        after: The right cut.
+
+    Returns:
+        What `compare.compare` returns.
+    """
     names = {asset_id: os.path.basename(asset.path) for asset_id, asset in repo.get_assets(
         {clip.asset_id for project in (before, after) for track in project.tracks for clip in track.clips}).items()}
     return compare(before, after, _said_between, lambda asset_id: names.get(asset_id, asset_id))
@@ -5974,16 +5998,33 @@ def compare_versions(project_id: str, commit_a: str, commit_b: Optional[str] = N
     compared.pop("aligned")
     return {"a": a, "b": b, **compared}
 
-def _merged_plan(before: Project, after: Project, commit_a: Optional[str], merged: Project,
+def _merged_plan(before: Project, after: Project, commits: Tuple[Optional[str], Optional[str]], merged: Project,
                  from_left: List[str], name: str) -> Tuple[Project, str]:
     """Merge the plans the two sides were compiled from, beat by beat, when they can be.
 
+    Each side's plan is read as it was at that side's version, so merging two
+    old versions does not mix in the plan as it is today.
+
+    Args:
+        before: The left version.
+        after: The right version.
+        commits: The two versions, left and right; None for the video as it is.
+        merged: The merged cut.
+        from_left: Names of the parts taken from the left.
+        name: The video's name, for a plan saved under a new ID.
+
     Returns:
         The merged cut with its compiled clips naming the plan they now come
-        from, and what happened to the plans, in words.
+        from, and what happened to the plans, in words; empty words when no
+        plan was involved.
     """
     def plan_ids(project: Project) -> set:
+        """The plans a cut's clips were compiled from."""
         return {clip.from_plan_id for track in project.tracks for clip in track.clips if clip.from_plan_id}
+
+    def plan_at(project: Project, plan_id: str, commit: Optional[str]) -> Optional[EditPlan]:
+        """A plan as it was at a version, or as it is."""
+        return _plans_at(project, commit).get(plan_id) if commit else repo.get_plan(plan_id)
 
     left_ids, right_ids = plan_ids(before), plan_ids(after)
     if not from_left or not left_ids:
@@ -5991,20 +6032,21 @@ def _merged_plan(before: Project, after: Project, commit_a: Optional[str], merge
     if len(left_ids) != 1 or len(right_ids) != 1:
         return merged, "沒有合併剪輯計畫：兩邊不是各從一份計畫剪出來的"
     left_id, right_id = next(iter(left_ids)), next(iter(right_ids))
-    left = _plans_at(before, commit_a).get(left_id) if commit_a else repo.get_plan(left_id)
-    right = repo.get_plan(right_id)
+    left, right = plan_at(before, left_id, commits[0]), plan_at(after, right_id, commits[1])
     if left is None or right is None:
         return merged, "沒有合併剪輯計畫：找不到其中一份"
     if left.timeline_id != right.timeline_id:
         return merged, "沒有合併剪輯計畫：兩份計畫用的是不同的素材時間軸"
     combined = merge_plans(left, right, from_left)
+    stored = repo.get_plan(right_id)
     shared = any(clip.from_plan_id == right_id for other in repo.list_projects() if other.id != merged.id
                  for track in other.tracks for clip in track.clips)
-    if shared:
+    if shared or stored is None:
         plan_id = _copied_plan(combined, f"「{name}」合成兩版時另存的計畫")
-        said = "剪輯計畫也合併了；原本的計畫有別支影片在用，所以另存了一份"
+        said = "剪輯計畫也合併了；原本的計畫有別支影片在用，所以另存了一份" if shared else "剪輯計畫也依段落合併了"
     else:
-        plan_id = repo.save_plan(combined, "合成兩版").id
+        # Saved on top of the plan as it is now, whichever version the right side was.
+        plan_id = repo.save_plan(combined.model_copy(update={"version": stored.version}), "合成兩版").id
         said = "剪輯計畫也依段落合併了"
     relinked = merged.model_copy(update={"tracks": [
         track.model_copy(update={"clips": [
@@ -6016,6 +6058,22 @@ def _merged_plan(before: Project, after: Project, commit_a: Optional[str], merge
 def merge_versions(project_id: str, commit_a: str, commit_b: Optional[str], picks: Mapping[str, str],
                    expected_version: int) -> dict:
     """Make the video one cut of two of its versions, a part from each, as a new version on top.
+
+    The editor's comparison view and `merge_version_parts` both come here.
+
+    Args:
+        project_id: The video.
+        commit_a: The left version.
+        commit_b: The right version, which everything not picked comes
+            from; None for the video as it is.
+        picks: `a` or `b` for part names and the whole-video picks in
+            `WHOLE_PICKS`; anything left out is `b`.
+        expected_version: The version the video is at now.
+
+    Returns:
+        `new_version`, the merged cut's length in `seconds`, `from_a` — what
+        was taken from the left — and `plan` when a plan was merged or could
+        not be.
 
     Raises:
         ValueError: If the project or a version does not exist, a pick is
@@ -6029,17 +6087,17 @@ def merge_versions(project_id: str, commit_a: str, commit_b: Optional[str], pick
                          f"not {expected_version}")
     before, a = _version_at(project_id, commit_a)
     after, b = _version_at(project_id, commit_b)
-    names = {part.name for part in cut_parts(before) + cut_parts(after)} | set(MERGE_WHOLE)
+    names = {part.name for part in cut_parts(before) + cut_parts(after)} | set(WHOLE_PICKS)
     unknown = sorted(set(picks) - names)
     if unknown:
         raise ValueError(f"nothing called {', '.join(unknown)} to pick: the parts are "
-                         f"{', '.join(sorted(names - set(MERGE_WHOLE)))}, and the whole video's "
-                         f"{', '.join(MERGE_WHOLE)}")
+                         f"{', '.join(sorted(names - set(WHOLE_PICKS)))}, and the whole video's "
+                         f"{', '.join(WHOLE_PICKS)}")
     if any(side not in ("a", "b") for side in picks.values()):
         raise ValueError("each pick is a (the first version) or b (the second)")
     merged = merge(before, after, picks)
-    from_left = [name for name, side in picks.items() if side == "a" and name not in MERGE_WHOLE]
-    merged, plan_said = _merged_plan(before, after, a.get("commit") and commit_a, merged, from_left,
+    from_left = [name for name, side in picks.items() if side == "a" and name not in WHOLE_PICKS]
+    merged, plan_said = _merged_plan(before, after, (commit_a or None, commit_b), merged, from_left,
                                      current.name or project_id)
     taken = [name for name, side in picks.items() if side == "a"]
     _say_in_history(f"合成兩版：{'、'.join(taken) or '全部'}用「{a.get('what')}」" if taken else "合成兩版")
@@ -6068,7 +6126,7 @@ def merge_version_parts(project_id: str, commit_a: str, picks: Dict[str, Literal
     Args:
         project_id: The video.
         commit_a: The other version, from `project_history`.
-        picks: `a` for each part, or `music`/`captions`/`caption_style`, to
+        picks: `a` for each part, or `music`/`captions`/`caption_style`/`frame`, to
             take from `commit_a`; anything left out comes from `commit_b`.
         expected_version: The project's current version.
         commit_b: The version the rest comes from; omit for the video as it is.
@@ -6134,12 +6192,22 @@ def _comment_said(project: Project, comment: Comment) -> dict:
         "file": os.path.basename(asset.path) if asset else None,
         "file_seconds": comment.start_anchor.source if comment.start_anchor else None,
         "written": comment.created_at.isoformat(timespec="seconds"),
-        "replies": [{"by": reply.by, "text": reply.text, "at": reply.at.isoformat(timespec="seconds")}
+        "replies": [{"by": reply.by, "text": reply.text, "at": reply.at.isoformat(timespec="seconds"),
+                     "commit": reply.commit[:10] if reply.commit else None}
                     for reply in comment.replies],
+        # The version it was dealt with in, to watch what was done about it.
+        "resolved_in": comment.resolved_commit[:10] if comment.resolved_commit else None,
     }
 
 def open_comments(project_id: str) -> int:
-    """How many things the user said about a project are still waiting."""
+    """How many things the user said about a project are still waiting.
+
+    Args:
+        project_id: The video.
+
+    Returns:
+        The number of open comments.
+    """
     return sum(comment.status == "open" for comment in repo.comments(project_id))
 
 def add_comment(project_id: str, text: str, start: float, end: Optional[float] = None) -> dict:
@@ -6166,7 +6234,7 @@ def add_comment(project_id: str, text: str, start: float, end: Optional[float] =
         raise ValueError("a comment needs something said")
     if end is not None and end < start:
         start, end = end, start
-    if end is not None and end - start < 0.05:
+    if end is not None and end - start < SHORTEST_STRETCH_SECONDS:
         end = None
     comment = Comment(
         id="c" + uuid.uuid4().hex[:7], project_id=project_id, text=text.strip(), commit=_current_commit(project_id),
@@ -6225,8 +6293,9 @@ def get_comments(project_id: str, include_resolved: bool = False) -> dict:
         include_resolved: Also list the ones already dealt with.
 
     Returns:
-        `comments`, oldest first, each with its `id`, `text`, `status` and
-        `replies`; and `open`, how many are waiting.
+        `comments`, oldest first, each with its `id`, `text`, `status`,
+        `replies` and, once closed, `resolved_in` — the version it was dealt
+        with in; and `open`, how many are waiting.
 
     Raises:
         ValueError: If the project does not exist.

@@ -279,6 +279,16 @@
 
   // ------------------------------------------------------------------ two versions side by side
 
+  // Provisional (roadmap §13): a change is jumped to a frame inside where it starts — clip edges
+  // are kept to the millisecond, and landing exactly on one can show the black between two clips
+  // that only touch.
+  const INSIDE = 0.02;
+  // Provisional (roadmap §13): how far the right side may drift from where the left says it should
+  // be before it is put back, and how often and how patiently a side not ready to play is asked again.
+  const RESYNC_SECONDS = 0.25;
+  const LOAD_TRIES = 30;
+  const LOAD_RETRY_MS = 1500;
+
   // Left is A, right is B (null: the cut as it is). One clock, the left's; the right follows it by
   // what is on screen, and only one side is heard.
   async function compareWith(a, b) {
@@ -330,8 +340,8 @@
       if (!E?.compare || (side === "a" ? E.compare.a : E.compare.b) !== commit) return;
       E.compare.players[side].load(described);
       drawCompareBar();
-      if (described.waiting.length && tries < 30) setTimeout(() => loadSide(side, commit, tries + 1), 1500 + tries * 500);
-    } catch { if (tries < 30) setTimeout(() => loadSide(side, commit, tries + 1), 2000); }
+      if (described.waiting.length && tries < LOAD_TRIES) setTimeout(() => loadSide(side, commit, tries + 1), LOAD_RETRY_MS * (1 + tries / 3));
+    } catch { if (tries < LOAD_TRIES) setTimeout(() => loadSide(side, commit, tries + 1), LOAD_RETRY_MS * (1 + tries / 3)); }
   }
 
   function stopCompare(redraw = true) {
@@ -358,15 +368,11 @@
     if (!a.paused) {
       const wanted = rightAt(a.time);
       // Only where the same footage is in both; elsewhere the right side runs on by itself.
-      if (wanted !== null && Math.abs(b.time - wanted) > 0.25) b.seek(wanted);
+      if (wanted !== null && Math.abs(b.time - wanted) > RESYNC_SECONDS) b.seek(wanted);
       drawCompareTime();
     }
     E.compare.frame = requestAnimationFrame(compareTick);
   }
-
-  // A change is jumped to a frame inside where it starts: clip edges are kept to the millisecond,
-  // and landing exactly on one can show the black between two clips that only touch.
-  const INSIDE = 0.02;
 
   function seekCompare(aAt, bAt) {
     const { a, b } = E.compare.players;
@@ -440,7 +446,7 @@
       <div class="cpart-head"><b>${esc(part.name)}</b>${part.same ? `<span class="hint">${esc(T.compare.same)}</span>` : part.order ? "" : pick(part.name)}</div>
       ${part.changes.length ? `<ul>${part.changes.map((change) => `<li><button class="cchange" ${at(change)}>${esc(change.what)}</button></li>`).join("")}</ul>` : ""}</li>`).join("");
     const whole = data.whole.map((change) => `<li class="cpart${picks[change.key] === "a" ? " left" : ""}"><div class="cpart-head"><button class="cchange" ${at(change)}>${esc(change.what)}</button>
-      ${["music", "captions", "caption_style"].includes(change.key) ? pick(change.key) : ""}</div></li>`).join("");
+      ${["music", "captions", "caption_style", "frame"].includes(change.key) ? pick(change.key) : ""}</div></li>`).join("");
     const unchanged = data.parts.every((part) => part.same) && !data.whole.length;
     const taken = Object.keys(picks).filter((key) => picks[key] === "a");
     box.innerHTML = `<div class="cmp-head"><h2>${esc(T.compare.title)}</h2><span class="hint">${esc(T.compare.hint)}</span></div>
@@ -1231,6 +1237,16 @@
     });
   }
 
+  // The version a comment was dealt with in, shown on the version page.
+  async function openVersion(prefix) {
+    setView("versions");
+    try { await loadGraph(false); } catch (error) { toast(error.message, "error"); return; }
+    const commit = E.graph.nodes.flatMap((node) => node.versions).map((version) => version.commit)
+      .find((full) => full.startsWith(prefix));
+    if (!commit) { toast(T.comments.versionGone, "error"); return; }
+    chooseVersion(E.id, commit);
+  }
+
   function focusComment(id, jump) {
     const comment = (E.comments || []).find((item) => item.id === id);
     if (!comment) return;
@@ -1251,7 +1267,8 @@
     return `<li class="citem ${comment.status}${comment.id === E.focusComment ? " on" : ""}" data-cid="${esc(comment.id)}">
       <div class="chead"><button class="ctime" data-jump ${comment.gone ? "disabled" : ""}>${esc(where)}</button>
         ${comment.gone ? `<span class="badge warn">${esc(T.comments.gone)}</span>` : ""}
-        ${comment.status === "resolved" ? `<span class="badge">${esc(T.comments.resolvedTag)}</span>` : ""}</div>
+        ${comment.status === "resolved" ? `<span class="badge">${esc(T.comments.resolvedTag)}</span>` : ""}
+        ${comment.resolved_in ? `<button class="ctime" data-open-version="${esc(comment.resolved_in)}">${esc(T.comments.seeVersion)}</button>` : ""}</div>
       <p class="ctext">${esc(comment.text)}</p>
       ${replies ? `<ul class="creplies">${replies}</ul>` : ""}
       <div class="cactions">
@@ -1288,6 +1305,8 @@
       const id = item.dataset.cid;
       item.onclick = (event) => { if (!event.target.closest("button, textarea, summary")) focusComment(id, true); };
       $("[data-jump]", item).onclick = () => focusComment(id, true);
+      const fixed = $("[data-open-version]", item);
+      if (fixed) fixed.onclick = () => openVersion(fixed.dataset.openVersion);
       $("[data-reply]", item).onclick = () => {
         const box = $("[data-reply-box]", item);
         box.hidden = !box.hidden;

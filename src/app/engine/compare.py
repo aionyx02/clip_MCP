@@ -13,10 +13,13 @@ from typing import Callable, Dict, List, Tuple
 
 from app.models.timeline import Clip, Project, TrackType
 
-# Shorter than this, a change in where a clip starts or ends is rounding, not an edit.
+# Provisional (roadmap §13): shorter than this, a change in where a clip starts or ends is
+# rounding or a nudge nobody would notice, not an edit worth reading out.
 NOTICED_SECONDS = 0.05
+# Provisional (roadmap §13): how much of what is said a stretch is named by before 「…」.
+QUOTE_CHARACTERS = 16
 # What a part is called when the cut has no markers: the whole of it.
-WHOLE = "全片"
+WHOLE_PART = "全片"
 
 Said = Callable[[str, float, float], str]
 Named = Callable[[str], str]
@@ -43,7 +46,7 @@ def parts_of(project: Project) -> List[Part]:
     length = float(project.duration)
     markers = sorted(project.markers or [], key=lambda marker: marker.timeline_in)
     if not markers:
-        return [Part(WHOLE, 0.0, length)]
+        return [Part(WHOLE_PART, 0.0, length)]
     starts = [0.0 if index == 0 else float(marker.timeline_in) for index, marker in enumerate(markers)]
     return [Part(marker.name, start, starts[index + 1] if index + 1 < len(starts) else length)
             for index, (marker, start) in enumerate(zip(markers, starts))]
@@ -61,6 +64,15 @@ def clips_in(part: Part, clips: List[Clip], last: bool) -> List[Clip]:
     The middle rather than the start: a trim by hand moves the clips after
     it but not the markers, and a clip that slid a second earlier still
     belongs to the part it was in.
+
+    Args:
+        part: The part.
+        clips: The sequence's clips.
+        last: Whether it is the cut's last part, which also takes anything
+            running past its end.
+
+    Returns:
+        The part's clips, in the order given.
     """
     def middle(clip: Clip) -> float:
         return float(clip.timeline_in) + float(clip.timeline_duration) / 2
@@ -107,7 +119,7 @@ def match_clips(before: List[Clip], after: List[Clip]) -> List[Tuple[Clip, Clip]
 def _quote(said: Said, clip: Clip, start: float, end: float) -> str:
     """What is heard over a stretch of a clip's file, short, for naming it; empty when nothing is."""
     text = said(clip.asset_id, start, end).strip()
-    return f"「{text[:16]}{'…' if len(text) > 16 else ''}」" if text else ""
+    return f"「{text[:QUOTE_CHARACTERS]}{'…' if len(text) > QUOTE_CHARACTERS else ''}」" if text else ""
 
 
 def _seconds(value: float) -> str:
@@ -122,15 +134,13 @@ def _clip_changes(one: Clip, other: Clip, said: Said, named: Named) -> List[str]
     tail = float(other.source_range.end) - float(one.source_range.end)
     where = _quote(said, one, float(one.source_range.start), float(one.source_range.end)) or f"{named(one.asset_id)} 那段"
     if head > NOTICED_SECONDS:
-        changes.append(f"{where}開頭剪掉 {_seconds(head)}"
-                       + (f"（{_quote(said, one, float(one.source_range.start), float(other.source_range.start))}）"
-                          if _quote(said, one, float(one.source_range.start), float(other.source_range.start)) else ""))
+        lost = _quote(said, one, float(one.source_range.start), float(other.source_range.start))
+        changes.append(f"{where}開頭剪掉 {_seconds(head)}" + (f"（{lost}）" if lost else ""))
     elif head < -NOTICED_SECONDS:
         changes.append(f"{where}開頭多留 {_seconds(-head)}")
     if tail < -NOTICED_SECONDS:
-        changes.append(f"{where}結尾剪掉 {_seconds(-tail)}"
-                       + (f"（{_quote(said, one, float(other.source_range.end), float(one.source_range.end))}）"
-                          if _quote(said, one, float(other.source_range.end), float(one.source_range.end)) else ""))
+        lost = _quote(said, one, float(other.source_range.end), float(one.source_range.end))
+        changes.append(f"{where}結尾剪掉 {_seconds(-tail)}" + (f"（{lost}）" if lost else ""))
     elif tail > NOTICED_SECONDS:
         changes.append(f"{where}結尾多留 {_seconds(tail)}")
     if abs((other.speed or 1) - (one.speed or 1)) > 0.001:

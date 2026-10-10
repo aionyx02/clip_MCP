@@ -480,6 +480,7 @@ async def compare_versions(request: Request) -> Response:
     project_id = request.path_params["project_id"]
     try:
         def compared():
+            """Both versions read and compared, off the event loop."""
             before, a = server._version_at(project_id, request.query_params.get("a"))
             after, b = server._version_at(project_id, request.query_params.get("b"))
             return {"a": a, "b": b, **server.compare_projects(before, after)}

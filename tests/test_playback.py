@@ -111,6 +111,16 @@ def test_a_version_is_got_ready_in_the_background_but_never_while_exporting(monk
     assert song.admitted_at is not None and watched.admitted_at is not None
     renderer.JobManager(server.repo)._plan([background])
     assert background.admitted_at is not None
+    # An exact preview is not an export: the background goes on beside it.
+    preview = Job(kind=JobKind.RENDER, status=JobStatus.RUNNING, admitted_at=now, preview=True)
+    later = Job(kind=JobKind.PREPARE, priority=1, created_at=now)
+    renderer.JobManager(server.repo)._plan([preview, later])
+    assert later.admitted_at is not None
+    # An export starting in the same pass holds it back too.
+    queued_export = Job(kind=JobKind.RENDER, created_at=now - timedelta(seconds=5))
+    held = Job(kind=JobKind.PREPARE, priority=1, created_at=now)
+    renderer.JobManager(server.repo)._plan([queued_export, held])
+    assert queued_export.admitted_at is not None and held.admitted_at is None
 
 
 def test_going_back_to_a_version_gets_it_ready_to_play(media: Path, monkeypatch: pytest.MonkeyPatch,

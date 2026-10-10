@@ -7,7 +7,9 @@ the same comment always give the same place.
 from typing import Optional, Tuple
 
 from app.models.comment import Anchor, Comment
-from app.models.timeline import Clip, Project
+from app.models.timeline import TOUCHING_SECONDS, Clip, Project
+
+TOUCHING = float(TOUCHING_SECONDS)
 
 
 def anchor_at(project: Project, seconds: float) -> Optional[Anchor]:
@@ -50,7 +52,7 @@ def place(project: Project, anchor: Anchor) -> Optional[Tuple[float, str]]:
     holding = [
         clip for clip in (base.clips if base else [])
         if clip.asset_id == anchor.asset_id
-        and float(clip.source_range.start) - 0.001 <= anchor.source <= float(clip.source_range.end) + 0.001
+        and float(clip.source_range.start) - TOUCHING <= anchor.source <= float(clip.source_range.end) + TOUCHING
     ]
     if not holding:
         return None

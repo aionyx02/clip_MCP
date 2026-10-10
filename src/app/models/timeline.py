@@ -425,12 +425,13 @@ class Dip(_Transition):
 
 Transition = Annotated[Union[Dissolve, Wipe, Dip], Field(discriminator="kind")]
 
-# What the renderer can stretch sound to without stacking filters on top of each other
-# past the point where anybody would want to listen to the result.
 # Times are kept to the millisecond, while a clip played at another speed ends wherever its length
 # divides out to and a file ends wherever its last frame does. Within this, two clips touch rather
-# than overlap, and a clip ends at the end of its file rather than past it.
+# than overlap, and a clip ends at the end of its file rather than past it. The one tolerance every
+# part of the server uses for it.
 TOUCHING_SECONDS = Decimal("0.001")
+# What the renderer can stretch sound to without stacking filters on top of each other
+# past the point where anybody would want to listen to the result.
 MIN_SPEED = 0.25
 MAX_SPEED = 8.0
 

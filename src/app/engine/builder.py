@@ -12,7 +12,7 @@ from app.engine import loudness, resources
 from app.engine.ffmpeg import escape_filter_path
 from app.engine.reframe import Framing, crop_filter
 from app.models.media import Asset, MediaAnalysis
-from app.models.timeline import Clip, Dip, Project, TrackType, Transition, VoiceCleanup, Wipe
+from app.models.timeline import TOUCHING_SECONDS, Clip, Dip, Project, TrackType, Transition, VoiceCleanup, Wipe
 
 AUDIO_SAMPLE_RATE = 48000
 # Streaming platforms normalize to about -14 LUFS, so delivering at that level avoids being turned down.
@@ -262,9 +262,8 @@ def _format_seconds(value: Fraction) -> str:
     """
     return f"{float(value):.6f}"
 
-# Clips this close are touching, not overlapping: a clip's end worked out from its speed carries
-# more digits than the next clip's start, which is kept to the millisecond.
-TOUCHING_SECONDS = Fraction(1, 1000)
+# Clips this close are touching, not overlapping: the timeline's own tolerance, as a fraction.
+TOUCHING = Fraction(str(TOUCHING_SECONDS))
 
 def _layout(clips: List[Clip], fps: Fraction) -> List[Segment]:
     """Lay out a track's clips as consecutive clip and gap segments.
@@ -291,7 +290,8 @@ def _layout(clips: List[Clip], fps: Fraction) -> List[Segment]:
     for clip in sorted(clips, key=lambda c: c.timeline_in):
         start = _round_half_up(Fraction(clip.timeline_in) * fps)
         end = _round_half_up(Fraction(clip.timeline_out) * fps)
-        if start < cursor and ended - Fraction(clip.timeline_in) <= TOUCHING_SECONDS and segments                 and segments[-1].clip is not None and start > segments[-1].start_frame:
+        touching = ended - Fraction(clip.timeline_in) <= TOUCHING
+        if start < cursor and touching and segments and segments[-1].clip is not None                 and start > segments[-1].start_frame:
             # A clip played at another speed ends a fraction of a millisecond past the next one's
             # start, which rounding can turn into a whole frame: the two touch, they do not overlap.
             segments[-1] = Segment(segments[-1].start_frame, start, segments[-1].clip)
