@@ -48,7 +48,7 @@ from app.models.timeline import (
 )
 from app.models.comment import Comment, Reply
 from app.models.job import Job, JobKind, JobStatus
-from app.engine import cards, loudness, machine, meaning, resources, speed, stills
+from app.engine import cards, texts, loudness, machine, meaning, resources, speed, stills
 from app.engine.analysis import listen_again as listen_again_in_file
 from app.engine.analysis import (
     current_recipe, doubtful_spots, marked_text, marked_words, sound_note, transcription_of, unsure_words,
@@ -155,8 +155,9 @@ mcp = FastMCP(
         "user has heard what the check found, how one cut is delivered in "
         "several shapes and handed to other editing programs, "
         "and the current limits: no overlapping picture on a "
-        "track, and no graphics beyond captions and title cards. Photos go in "
-        "like videos and are shown for as long as their clip runs. "
+        "track, and no graphics beyond words: captions, title cards and text "
+        "over the footage. Photos go in like videos and are shown for as long "
+        "as their clip runs. "
         "Transitions end on the cut rather than straddling it, so adding one "
         "never changes how long the video runs. The person using this server is "
         "editing their own video, not writing code: reply in plain language "
@@ -3036,7 +3037,8 @@ def apply_edits(project_id: str, expected_version: int, operations: list[EditOpe
             `add_track`, `add_clip`, `insert_clip`, `trim_clip`, `move_clip`,
             `delete_clip`, `split_clip`, `reorder_clip`, `fit_track`,
             `set_clip_audio`, `set_clip_look`, `set_track_audio`,
-            `add_title_card`, `set_title_card`,
+            `add_title_card`, `set_title_card`, `add_text`, `set_text`,
+            `remove_text`,
             `set_subtitles`, `edit_subtitle`, or `add_subtitle`. Captions stored
             or corrected here are also remembered against the file they belong
             to, and the next `generate_subtitles` over that file, in any
@@ -4149,9 +4151,12 @@ def preview_project(
                 asset.path, seconds, f"#{number}  {format_timestamp(at)}  {label}",
                 placement_at(framed, clip, seconds, fps),
             ))
+            # Drawn over the render, not over this tile: said instead.
+            over = [text.text for text in clip.texts if text.start <= seconds < text.end]
             listing.append(
                 f"#{number}: clip {clip.id} | edit {format_timestamp(at)} | "
                 f"source {seconds:.3f}s ({format_timestamp(seconds)})"
+                + (f" | text on screen: {' / '.join(f'「{words}」' for words in over)}" if over else "")
             )
 
     # Sampling can stop short of the last clip, so say what runs on past the final tile.
@@ -4838,13 +4843,15 @@ def _start_render(
                 f"project {project_id} has captions, but none of the footage they transcribe is in the cut; "
                 "run generate_subtitles again against the sequence as it stands"
             )
-    # Title cards' words go through the same file as the captions, burned or not.
-    titles = cards.ass_events(project, project.caption_style)
+    # Title cards' words and the words over the footage go through the same file as the
+    # captions, burned or not.
+    titles = cards.ass_events(project, project.caption_style) + texts.ass_events(project, project.caption_style)
     if placed or titles:
         os.makedirs(job.work_dir, exist_ok=True)
         subtitle_path = os.path.join(job.work_dir, "subtitles.ass")
         with open(subtitle_path, "w", encoding="utf-8") as handle:
-            handle.write(build_ass(placed, project.width, project.height, project.caption_style, titles))
+            handle.write(build_ass(placed, project.width, project.height, project.caption_style, titles,
+                                   texts.ass_styles(project, project.caption_style)))
 
     chapters_path = None
     listed, _ = chapters(project)

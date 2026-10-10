@@ -488,6 +488,32 @@ class TitleCard(BaseModel):
     colour: str = Field(default="#111114", pattern=COLOUR, description="The colour for a `colour` background")
     at: Decimal = Field(default=Decimal(0), ge=0, description="Which second of the file behind it is shown")
 
+TextStyle = Literal["name", "place", "headline", "free"]
+
+class TextLayer(BaseModel):
+    """Words over a stretch of footage, pinned to what is on screen rather than to a time in the cut.
+
+    The stretch is seconds of the clip's own file, so the words go wherever
+    that footage goes: moved, trimmed, sped up or cut out, they follow it,
+    and they show only for as much of the stretch as the cut still plays.
+    """
+
+    id: str
+    text: str = Field(..., min_length=1, max_length=60)
+    second: Optional[str] = Field(
+        default=None, max_length=60,
+        description="A smaller second line: who a named person is, or what a place is",
+    )
+    style: TextStyle = Field(
+        default="name",
+        description="`name`: a name bar low on the left; `place`: a place, high on the left; `headline`: large in "
+                    "the middle; `free`: wherever `x` and `y` put it",
+    )
+    start: Decimal = Field(..., ge=0, description="First second of the clip's file it is shown over")
+    end: Decimal = Field(..., gt=0, description="Second of the clip's file it stops at")
+    x: Optional[float] = Field(default=None, ge=0, le=1, description="For `free`: its centre across the frame, 0 to 1")
+    y: Optional[float] = Field(default=None, ge=0, le=1, description="For `free`: its centre down the frame, 0 to 1")
+
 class Clip(BaseModel):
     """A segment of a source asset placed on a track.
 
@@ -571,6 +597,10 @@ class Clip(BaseModel):
         default=None,
         description="Set on a title card: what it says and how its background looks. A card is silent, and its "
                     "source range is only its length: it shows one frame of its file, at `card.at`",
+    )
+    texts: List[TextLayer] = Field(
+        default_factory=list,
+        description="Words over this clip's footage, each pinned to seconds of its file",
     )
 
     @property
@@ -1282,6 +1312,54 @@ class SetTitleCardOp(BaseModel):
     colour: Optional[str] = Field(default=None, pattern=COLOUR)
     photo_asset_id: Optional[str] = Field(default=None, description="A photo from the library to put behind it")
 
+class _TextTimes(BaseModel):
+    """When a text layer shows: seconds of the clip's file, or seconds of the cut."""
+
+    start: Optional[Decimal] = Field(default=None, ge=0, description="First second of the clip's file it covers")
+    end: Optional[Decimal] = Field(default=None, gt=0, description="Second of the clip's file it stops at")
+    timeline_start: Optional[Decimal] = Field(
+        default=None, ge=0, description="Or: where it starts in the cut, in seconds; turned into the file's own",
+    )
+    timeline_end: Optional[Decimal] = Field(default=None, gt=0, description="Or: where it stops in the cut")
+
+class AddTextOp(_TextTimes):
+    """Edit operation that puts words over a clip, pinned to its footage.
+
+    Only when the user asks for words on screen. Left without times it
+    covers the whole clip.
+    """
+
+    action: Literal["add_text"] = "add_text"
+    track_id: str
+    clip_id: str = Field(..., description="The clip whose footage it goes over")
+    text_id: str = Field(..., description="ID of the new text; unique within the clip")
+    text: str = Field(..., min_length=1, max_length=60)
+    second: Optional[str] = Field(default=None, max_length=60, description="A smaller second line, if any")
+    style: TextStyle = "name"
+    x: Optional[float] = Field(default=None, ge=0, le=1, description="For `free`: centre across, 0 to 1")
+    y: Optional[float] = Field(default=None, ge=0, le=1, description="For `free`: centre down, 0 to 1")
+
+class SetTextOp(_TextTimes):
+    """Edit operation that changes a text layer: its words, its style, where or when it shows."""
+
+    action: Literal["set_text"] = "set_text"
+    track_id: str
+    clip_id: str
+    text_id: str
+    text: Optional[str] = Field(default=None, min_length=1, max_length=60)
+    second: Optional[str] = Field(default=None, max_length=60, description="An empty string takes it away")
+    style: Optional[TextStyle] = None
+    x: Optional[float] = Field(default=None, ge=0, le=1)
+    y: Optional[float] = Field(default=None, ge=0, le=1)
+
+class RemoveTextOp(BaseModel):
+    """Edit operation that takes a text layer off a clip."""
+
+    action: Literal["remove_text"] = "remove_text"
+    track_id: str
+    clip_id: str
+    text_id: str
+
 class SetClipLookOp(BaseModel):
     """Edit operation that changes a clip's picture: how it comes in, its colour, and where it sits.
 
@@ -1467,7 +1545,7 @@ EditOperation = Annotated[
         AddTrackOp, AddClipOp, InsertClipOp, TrimClipOp, DeleteOp, MoveClipOp,
         SplitClipOp, ReorderClipOp, RenameProjectOp, SetTrackAudioOp, SetClipAudioOp,
         SetClipLookOp, SetClipPinnedOp, SetClipSpeedOp, SetMarkersOp, SetSubtitlesOp, EditSubtitleOp, AddSubtitleOp,
-        SetCaptionStyleOp, FitTrackOp, AddTitleCardOp, SetTitleCardOp,
+        SetCaptionStyleOp, FitTrackOp, AddTitleCardOp, SetTitleCardOp, AddTextOp, SetTextOp, RemoveTextOp,
     ],
     Field(discriminator="action"),
 ]
@@ -1588,6 +1666,60 @@ def _new_clip(track: Track, spec: _NewClipSpec, timeline_in: Decimal) -> Clip:
         color=spec.color,
         layout=spec.layout,
     )
+
+def _find_text(clip: Clip, text_id: str) -> TextLayer:
+    """Find a text layer on a clip.
+
+    Raises:
+        ValueError: If the clip has no text with that ID.
+    """
+    for text in clip.texts:
+        if text.id == text_id:
+            return text
+    known = ", ".join(text.id for text in clip.texts) or "none"
+    raise ValueError(f"clip {clip.id} has no text {text_id}; its texts: {known}")
+
+def _text_times(clip: Clip, op: _TextTimes, start: Decimal, end: Decimal) -> Tuple[Decimal, Decimal]:
+    """Work out the stretch of a clip's file a text layer covers.
+
+    Times in the cut are turned into the file's own seconds through the clip,
+    so the words stay with the footage when the cut changes around it.
+
+    Args:
+        clip: The clip the text is on.
+        op: The operation, with file times, cut times, or neither.
+        start: The start to keep when the operation gives none.
+        end: The end to keep when the operation gives none.
+
+    Returns:
+        `(start, end)` in seconds of the clip's file.
+
+    Raises:
+        ValueError: If the stretch is empty or misses the clip's footage altogether.
+    """
+    speed = Decimal(str(clip.speed))
+
+    def from_cut(seconds: Decimal) -> Decimal:
+        return clip.source_range.start + (seconds - clip.timeline_in) * speed
+
+    if op.timeline_start is not None:
+        start = from_cut(op.timeline_start)
+    if op.timeline_end is not None:
+        end = from_cut(op.timeline_end)
+    if op.start is not None:
+        start = op.start
+    if op.end is not None:
+        end = op.end
+    start = max(start, Decimal(0))
+    if end <= start:
+        raise ValueError(f"clip {clip.id}: a text has to end after it starts ({start}s to {end}s of the file)")
+    if end <= clip.source_range.start or start >= clip.source_range.end:
+        raise ValueError(
+            f"clip {clip.id}: {start}s to {end}s of the file is not in the clip, which plays "
+            f"{clip.source_range.start}s to {clip.source_range.end}s of it ({clip.timeline_in}s to "
+            f"{clip.timeline_out}s of the cut)"
+        )
+    return start, end
 
 def _card_backdrop(
     track: Track,
@@ -1933,6 +2065,35 @@ def apply_operation(project: Project, op: EditOperation, assets: Mapping[str, As
             clip.source_range = TimeRange(start=clip.source_range.start, end=clip.source_range.start + op.seconds)
             clip.speed = 1.0
             _shift_clips(track, old_out, clip.timeline_out - old_out)
+    elif isinstance(op, AddTextOp):
+        clip = _find_clip(track, op.clip_id)
+        if track.track_type != TrackType.VIDEO or clip.card is not None:
+            raise ValueError(f"clip {clip.id}: words go over footage on a video track; a title card has its own")
+        if any(text.id == op.text_id for text in clip.texts):
+            raise ValueError(f"clip {clip.id} already has a text {op.text_id}")
+        start, end = _text_times(clip, op, clip.source_range.start, clip.source_range.end)
+        clip.texts.append(TextLayer(id=op.text_id, text=op.text, second=op.second or None, style=op.style,
+                                    start=start, end=end, x=op.x, y=op.y))
+    elif isinstance(op, SetTextOp):
+        clip = _find_clip(track, op.clip_id)
+        layer = _find_text(clip, op.text_id)
+        start, end = _text_times(clip, op, layer.start, layer.end)
+        changed = layer.model_copy(update={"start": start, "end": end})
+        if op.text is not None:
+            changed.text = op.text
+        if op.second is not None:
+            changed.second = op.second or None
+        if op.style is not None:
+            changed.style = op.style
+        if op.x is not None:
+            changed.x = op.x
+        if op.y is not None:
+            changed.y = op.y
+        clip.texts = [changed if text.id == layer.id else text for text in clip.texts]
+    elif isinstance(op, RemoveTextOp):
+        clip = _find_clip(track, op.clip_id)
+        layer = _find_text(clip, op.text_id)
+        clip.texts = [text for text in clip.texts if text.id != layer.id]
     elif isinstance(op, TrimClipOp):
         clip = _find_clip(track, op.clip_id)
         old_out = clip.timeline_out
@@ -1970,9 +2131,14 @@ def apply_operation(project: Project, op: EditOperation, assets: Mapping[str, As
             # A fade-out belongs to the end of the original clip, which is now the end of the tail.
             audio_fade_out=clip.audio_fade_out,
             video_fade_out=clip.video_fade_out,
-            # The halves are the same shot, so they keep the same look and the same origin.
+            # The halves are the same shot, so they keep the same look and the same origin —
+            # and the same words over it, each half showing what falls in its own stretch.
             color=clip.color,
             layout=clip.layout,
+            fit=clip.fit,
+            motion=clip.motion,
+            card=clip.card,
+            texts=[text.model_copy() for text in clip.texts],
             from_plan_id=clip.from_plan_id,
             from_clip_ids=list(clip.from_clip_ids),
         )

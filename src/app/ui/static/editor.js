@@ -1142,6 +1142,7 @@
       <div class="group"><div class="label">${esc(T.editor.length)}<b>${clipLength(clip).toFixed(2)} ${esc(T.editor.seconds)}</b></div></div>
       ${fitGroup(clip, asset)}
       ${motionGroup(clip, asset)}
+      ${textsGroup(clip)}
       <div class="group stack-buttons edit-action">
         <button class="btn" data-split>${svg("split")}${esc(T.editor.split)}</button>
         <button class="btn danger" data-delete>${icon("trash", 16)}${esc(T.editor.delete)}</button>
@@ -1154,6 +1155,7 @@
     $("[data-split]", panel).onclick = split;
     $("[data-delete]", panel).onclick = remove;
     wireFit(panel, clip);
+    wireTexts(panel, clip);
     panel.querySelectorAll("[data-motion]").forEach((button) => {
       button.onclick = () => {
         if (button.dataset.motion === (clip.motion || "push")) return;
@@ -1185,6 +1187,108 @@
       ${mode === "fill" ? `<div class="label">${esc(T.fit.zoom)}<b data-zoom-value>${zoom}%</b></div>
         <input type="range" min="100" max="400" step="5" value="${zoom}" data-fit-zoom>` : ""}
       ${clip.fit?.center_x != null || clip.fit?.center_y != null ? `<button class="btn small" data-fit-free>${esc(T.fit.free)}</button>` : ""}</div>`;
+  }
+
+  // ------------------------------------------------------------------ words over the footage
+
+  // The words on a clip: a row each, the chosen one opened up to change.
+  function textsGroup(clip) {
+    if (clip.card) return "";
+    const open = (clip.texts || []).find((text) => text.id === E.selectedText);
+    const rows = (clip.texts || []).map((text) =>
+      `<button class="btn small ${text.id === E.selectedText ? "primary" : ""}" data-text-pick="${esc(text.id)}">${esc(T.texts.styles[text.style])}・${esc(text.text)}</button>`).join("");
+    const style = (value) => `<button class="${open?.style === value ? "on" : ""}" data-text-style="${value}">${esc(T.texts.styles[value])}</button>`;
+    return `<div class="group edit-action"><div class="label">${esc(T.texts.title)}</div>
+      <div class="stack-buttons">${rows || `<p class="hint" style="margin:0">${esc(T.texts.none)}</p>`}</div>
+      ${open ? `<input class="card-text" data-text-words maxlength="60" value="${esc(open.text)}">
+        <input class="card-text" data-text-second maxlength="60" placeholder="${esc(T.texts.second)}" value="${esc(open.second || "")}">
+        <div class="seg fit-seg">${["name", "place", "headline", "free"].map(style).join("")}</div>
+        <p class="hint">${esc(T.texts.hints[open.style])}</p>
+        <div class="label">${esc(T.texts.when)}</div>
+        <div class="nudges"><button data-text-from>${esc(T.texts.fromHere)}</button><button data-text-to>${esc(T.texts.toHere)}</button></div>
+        <button class="btn small danger" data-text-remove>${icon("trash", 14)}${esc(T.texts.remove)}</button>` : ""}
+      <button class="btn small" data-text-add>${icon("plus", 14)}${esc(T.texts.add)}</button></div>`;
+  }
+
+  function textEdit(clip, action, fields) {
+    return edit([{ action, track_id: E.selected.track, clip_id: clip.id, ...fields }]);
+  }
+
+  function wireTexts(panel, clip) {
+    panel.querySelectorAll("[data-text-pick]").forEach((button) => {
+      button.onclick = () => {
+        E.selectedText = E.selectedText === button.dataset.textPick ? null : button.dataset.textPick;
+        const text = clip.texts.find((item) => item.id === E.selectedText);
+        // Onto the words, so what is being changed is what the viewer shows.
+        if (text) {
+          const start = num(clip.timeline_in) + (Math.max(num(text.start), num(clip.source_range.start)) - num(clip.source_range.start)) / (clip.speed || 1);
+          if (E.time < start || E.time >= clipEnd(clip)) seek(start + 0.25);
+        }
+        drawInspector();
+      };
+    });
+    const add = $("[data-text-add]", panel);
+    if (add) add.onclick = async () => {
+      const id = `text-${Math.random().toString(36).slice(2, 7)}`;
+      const from = Math.max(num(clip.timeline_in), Math.min(E.time, clipEnd(clip) - 0.5));
+      const to = Math.min(clipEnd(clip), from + 3);
+      if (await textEdit(clip, "add_text", { text_id: id, text: T.texts.defaultText,
+        timeline_start: Number(from.toFixed(3)), timeline_end: Number(to.toFixed(3)) })) {
+        E.selectedText = id;
+        seek(from + 0.25);
+        drawAll();
+        toast(T.texts.added);
+        $("[data-text-words]", E.root)?.select();
+      }
+    };
+    const open = (clip.texts || []).find((text) => text.id === E.selectedText);
+    if (!open) return;
+    const commit = (input, field) => {
+      input.onchange = () => {
+        const value = input.value.trim();
+        if (field === "text" && !value) { input.value = open.text; return; }
+        if (value !== (open[field] || "")) textEdit(clip, "set_text", { text_id: open.id, [field]: value });
+      };
+      input.onkeydown = (event) => { if (event.key === "Enter") input.blur(); event.stopPropagation(); };
+    };
+    commit($("[data-text-words]", panel), "text");
+    commit($("[data-text-second]", panel), "second");
+    panel.querySelectorAll("[data-text-style]").forEach((button) => {
+      button.onclick = () => { if (button.dataset.textStyle !== open.style) textEdit(clip, "set_text", { text_id: open.id, style: button.dataset.textStyle }); };
+    });
+    $("[data-text-from]", panel).onclick = () => textEdit(clip, "set_text", { text_id: open.id, timeline_start: Number(E.time.toFixed(3)) });
+    $("[data-text-to]", panel).onclick = () => textEdit(clip, "set_text", { text_id: open.id, timeline_end: Number(E.time.toFixed(3)) });
+    $("[data-text-remove]", panel).onclick = async () => {
+      if (await textEdit(clip, "remove_text", { text_id: open.id })) { E.selectedText = null; drawInspector(); }
+    };
+  }
+
+  // Dragging the chosen words on the picture puts them where they are dropped, as free words.
+  function startTextDrag(event) {
+    const clip = E.selected && findClip(E.selected.track, E.selected.clip);
+    const text = clip?.texts?.find((item) => item.id === E.selectedText);
+    if (!text || E.viewing || !clock().paused) return false;
+    const event_ = E.described?.texts?.events.find((item) => item.text_id === text.id && item.clip_id === clip.id
+      && E.time >= item.start && E.time < item.end);
+    if (!event_) return false;
+    if (!E.textHinted) { E.textHinted = true; toast(T.texts.dragHint); }
+    const stage = $("[data-stage]", E.root).getBoundingClientRect();
+    let moved = null;
+    const move = (moveEvent) => {
+      moved = { x: clamp((moveEvent.clientX - stage.left) / stage.width, 0.02, 0.98),
+                y: clamp((moveEvent.clientY - stage.top) / stage.height, 0.02, 0.98) };
+      $("[data-stage]", E.root).style.cursor = "grabbing";
+    };
+    const up = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      $("[data-stage]", E.root).style.cursor = "";
+      if (moved) textEdit(clip, "set_text", { text_id: text.id, style: "free",
+        x: Math.round(moved.x * 1000) / 1000, y: Math.round(moved.y * 1000) / 1000 });
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+    return true;
   }
 
   // A photo moves while it is on screen; null is the slow push the render gives it.
@@ -1951,6 +2055,7 @@
     } else {
       const trackId = clipElement.dataset.track, clipId = clipElement.dataset.clip;
       const clip = findClip(trackId, clipId);
+      if (E.selected?.clip !== clipId) E.selectedText = null;
       E.selected = { track: trackId, clip: clipId };
       if (E.tab === "comments") E.tab = null;
       E.selectedCaption = null;
@@ -2179,7 +2284,7 @@
 
     $("[data-play]", page).onclick = togglePlay;
     $("[data-stage]", page).addEventListener("pointerdown", (event) => {
-      if (event.button === 0 && E.view === "edit" && startCropDrag(event)) event.preventDefault();
+      if (event.button === 0 && E.view === "edit" && (startTextDrag(event) || startCropDrag(event))) event.preventDefault();
     });
     $("[data-comment-btn]", page).onclick = () => writeComment(E.time);
     $("[data-replay]", page).onclick = replay;
