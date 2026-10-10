@@ -1,8 +1,10 @@
 # An AI's first read of every pull request, before a person reviews and merges it.
 # It needs two things set on the repository (Settings → Secrets and variables → Actions):
-#   - secret LLM_API_KEY: an API key for the model's provider (Anthropic, OpenAI or Google)
-#   - variable LLM_MODEL: one of the model names the action knows, such as o4-mini,
-#     gpt-4.1-mini or claude-3-7-sonnet-20250219; the action refuses any other name
+#   - secret LLM_API_KEY: an API key for the model's provider
+#   - variable LLM_MODEL: one of the model names the action knows. Its newest release (v0.0.8,
+#     May 2025) knows only older models: the Claude ones on its list have been retired, so use
+#     an OpenAI one, gpt-4.1-mini or o4-mini, with an OpenAI key. It refuses any other name.
+# Until both are set the check still runs, passes, and says on the pull request what is missing.
 name: AI review
 
 on:
@@ -17,10 +19,25 @@ jobs:
   review:
     runs-on: ubuntu-latest
     timeout-minutes: 15
-    # Without a key there is nobody to ask; the check is skipped rather than failed.
-    if: ${{ vars.LLM_MODEL != '' }}
     steps:
+      - name: Check the reviewer is set up
+        id: setup
+        env:
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+          LLM_MODEL: ${{ vars.LLM_MODEL }}
+        run: |
+          missing=""
+          [ -n "$LLM_API_KEY" ] || missing="the secret LLM_API_KEY"
+          [ -n "$LLM_MODEL" ] || missing="${missing:+$missing and }the variable LLM_MODEL"
+          if [ -z "$missing" ]; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          message="AI review did not run: $missing is not set. Set it under Settings → Secrets and variables → Actions (LLM_MODEL: gpt-4.1-mini or o4-mini, with an OpenAI key)."
+          echo "::warning title=AI review is off::$message"
+          echo "$message" >> "$GITHUB_STEP_SUMMARY"
       - name: codereview.ai
+        if: steps.setup.outputs.ready == 'true'
         # Pinned to the commit of v0.0.8, so the code that reads this repository cannot change under it.
         uses: MalarCB/ai-reviewer@c7a2adf1ad58b55d617b285af8c16ca8817cbbb5
         env:
