@@ -487,6 +487,9 @@ class TitleCard(BaseModel):
     )
     colour: str = Field(default="#111114", pattern=COLOUR, description="The colour for a `colour` background")
     at: Decimal = Field(default=Decimal(0), ge=0, description="Which second of the file behind it is shown")
+    beat_id: Optional[str] = Field(
+        default=None, description="The part of the plan it opens, when the plan put it there",
+    )
 
 TextStyle = Literal["name", "place", "headline", "free"]
 
@@ -513,6 +516,10 @@ class TextLayer(BaseModel):
     end: Decimal = Field(..., gt=0, description="Second of the clip's file it stops at")
     x: Optional[float] = Field(default=None, ge=0, le=1, description="For `free`: its centre across the frame, 0 to 1")
     y: Optional[float] = Field(default=None, ge=0, le=1, description="For `free`: its centre down the frame, 0 to 1")
+    by_plan: bool = Field(
+        default=False,
+        description="Put there by the plan and rebuilt with it; false once anybody changes it, and then kept",
+    )
 
 class Clip(BaseModel):
     """A segment of a source asset placed on a track.
@@ -899,6 +906,8 @@ class _NewClipSpec(BaseModel):
     video_fade_out: SkipJsonSchema[Decimal] = Field(default=Decimal(0), ge=0)
     color: SkipJsonSchema[Optional[ColorAdjust]] = None
     layout: SkipJsonSchema[Optional[ClipLayout]] = None
+    # A title card the compiler puts in, or one made by hand that it puts back.
+    card: SkipJsonSchema[Optional[TitleCard]] = None
 
 class AddClipOp(_NewClipSpec):
     """Edit operation that places a clip at an absolute timeline position without moving other clips.
@@ -1338,6 +1347,7 @@ class AddTextOp(_TextTimes):
     style: TextStyle = "name"
     x: Optional[float] = Field(default=None, ge=0, le=1, description="For `free`: centre across, 0 to 1")
     y: Optional[float] = Field(default=None, ge=0, le=1, description="For `free`: centre down, 0 to 1")
+    by_plan: SkipJsonSchema[bool] = False
 
 class SetTextOp(_TextTimes):
     """Edit operation that changes a text layer: its words, its style, where or when it shows."""
@@ -1665,6 +1675,7 @@ def _new_clip(track: Track, spec: _NewClipSpec, timeline_in: Decimal) -> Clip:
         video_fade_out=spec.video_fade_out,
         color=spec.color,
         layout=spec.layout,
+        card=spec.card,
     )
 
 def _find_text(clip: Clip, text_id: str) -> TextLayer:
@@ -2073,12 +2084,13 @@ def apply_operation(project: Project, op: EditOperation, assets: Mapping[str, As
             raise ValueError(f"clip {clip.id} already has a text {op.text_id}")
         start, end = _text_times(clip, op, clip.source_range.start, clip.source_range.end)
         clip.texts.append(TextLayer(id=op.text_id, text=op.text, second=op.second or None, style=op.style,
-                                    start=start, end=end, x=op.x, y=op.y))
+                                    start=start, end=end, x=op.x, y=op.y, by_plan=op.by_plan))
     elif isinstance(op, SetTextOp):
         clip = _find_clip(track, op.clip_id)
         layer = _find_text(clip, op.text_id)
         start, end = _text_times(clip, op, layer.start, layer.end)
-        changed = layer.model_copy(update={"start": start, "end": end})
+        # Changed by somebody, so the next compile keeps it rather than rebuilding it from the plan.
+        changed = layer.model_copy(update={"start": start, "end": end, "by_plan": False})
         if op.text is not None:
             changed.text = op.text
         if op.second is not None:

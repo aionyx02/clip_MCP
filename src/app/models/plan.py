@@ -244,6 +244,31 @@ STRUCTURES = {
     ),
 }
 
+class PlanTitleCard(BaseModel):
+    """A title card opening a part of the video, written into the plan."""
+
+    title: str = Field(..., min_length=1, max_length=60)
+    subtitle: Optional[str] = Field(default=None, max_length=80)
+    seconds: float = Field(default=2.5, ge=0.5, le=10, description="How long it stays up")
+    background: Optional[Literal["blur", "picture", "colour"]] = Field(
+        default=None, description="Null: `picture` with a photo, else the part's first shot blurred",
+    )
+    colour: Optional[str] = Field(default=None, pattern=r"^(#[0-9a-fA-F]{6}|black|white)$")
+    photo_asset_id: Optional[str] = Field(default=None, description="A photo from the library to put behind it")
+
+class PlanText(BaseModel):
+    """Words over a selected piece of footage, written into the plan."""
+
+    text: str = Field(..., min_length=1, max_length=60)
+    second: Optional[str] = Field(default=None, max_length=60, description="A smaller second line")
+    style: Literal["name", "place", "headline", "free"] = "name"
+    start: Optional[float] = Field(
+        default=None, ge=0, description="First second of the file it covers; null from the start of the piece",
+    )
+    end: Optional[float] = Field(default=None, gt=0, description="Where it stops; null at the end of the piece")
+    x: Optional[float] = Field(default=None, ge=0, le=1, description="For `free`")
+    y: Optional[float] = Field(default=None, ge=0, le=1, description="For `free`")
+
 class Beat(BaseModel):
     """One part of the finished video, and what it is there to do."""
 
@@ -273,6 +298,10 @@ class Beat(BaseModel):
         description="Let this beat's sound start this many seconds before its picture does, under the end of the "
                     "beat before (a J-cut): the next place is heard before it is seen. Shortened, with a note, "
                     "where the footage has less sound before the shot",
+    )
+    title_card: Optional[PlanTitleCard] = Field(
+        default=None,
+        description="A title card opening this part. Only when the user asked for one; suggest it otherwise",
     )
 
 class BeatTransition(BaseModel):
@@ -322,6 +351,10 @@ class Selection(BaseModel):
         default=False,
         description="Leave this piece's talking at the level it was recorded instead of bringing it to the level "
                     "of the rest: a whisper, a shout, somebody far from the microphone on purpose",
+    )
+    texts: List[PlanText] = Field(
+        default_factory=list,
+        description="Words over this piece — a name, a place, a headline. Only when the user asked for them",
     )
     hold_picture: bool = Field(
         default=False,
@@ -599,10 +632,25 @@ class SetBeatJoinOp(BaseModel):
     transition_in: Optional[BeatTransition] = Field(default=None, description="As on a beat; null for a straight cut")
     sound_lead: Optional[float] = Field(default=None, gt=0, le=3, description="As on a beat; null for none")
 
+class SetBeatTitleOp(BaseModel):
+    """Amendment that gives a beat a title card, changes it, or takes it away."""
+
+    action: Literal["set_beat_title"] = "set_beat_title"
+    beat_id: str
+    title_card: Optional[PlanTitleCard] = Field(default=None, description="The card; null takes it away")
+
+class SetSelectionTextsOp(BaseModel):
+    """Amendment that sets the words over a selected piece, replacing the ones it had."""
+
+    action: Literal["set_selection_texts"] = "set_selection_texts"
+    clip_id: str = Field(..., description="Semantic clip the selection uses")
+    texts: List[PlanText] = Field(default_factory=list, description="Its words; empty takes them all away")
+
 PlanAmendment = Annotated[
     Union[
         SetTrimOp, SetRationaleOp, AddSelectionOp, DropSelectionOp, AddBrollOp, DropBrollOp,
         SetPacingOp, SetMusicLevelOp, SetTargetOp, DropBeatOp, SetPlaybackOp, SetBeatJoinOp,
+        SetBeatTitleOp, SetSelectionTextsOp,
     ],
     Field(discriminator="action"),
 ]
@@ -641,6 +689,11 @@ def describe_amendment(op: "PlanAmendment") -> str:
         return f"{op.beat_id} comes in on {joined}" + (f", sound {op.sound_lead:g}s early" if op.sound_lead else "")
     if isinstance(op, SetTargetOp):
         return f"target {op.target.seconds or 'none'}s" + (f" for {op.target.platform}" if op.target.platform else "")
+    if isinstance(op, SetBeatTitleOp):
+        return f"{op.beat_id} opens on 「{op.title_card.title}」" if op.title_card else f"{op.beat_id} has no title card"
+    if isinstance(op, SetSelectionTextsOp):
+        shown = "、".join(f"「{text.text}」" for text in op.texts)
+        return f"words over {op.clip_id}: {shown}" if shown else f"no words over {op.clip_id}"
     return f"dropped the part {op.beat_id}" + (f" ({op.reason})" if op.reason else "")
 
 def _selection_index(plan: EditPlan, clip_id: str) -> int:
@@ -703,6 +756,18 @@ def apply_amendment(plan: EditPlan, op: PlanAmendment) -> None:
     if isinstance(op, SetPlaybackOp):
         selection = plan.selections[_selection_index(plan, op.clip_id)]
         selection.speed, selection.volume, selection.keep_level = op.speed, op.volume, op.keep_level
+        return
+
+    if isinstance(op, SetBeatTitleOp):
+        beat = next((beat for beat in plan.beats if beat.id == op.beat_id), None)
+        if beat is None:
+            known = ", ".join(beat.id for beat in plan.beats) or "none"
+            raise ValueError(f"the plan has no beat {op.beat_id}; its beats are {known}")
+        beat.title_card = op.title_card
+        return
+
+    if isinstance(op, SetSelectionTextsOp):
+        plan.selections[_selection_index(plan, op.clip_id)].texts = list(op.texts)
         return
 
     if isinstance(op, SetBeatJoinOp):
