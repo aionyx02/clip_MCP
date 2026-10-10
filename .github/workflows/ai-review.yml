@@ -1,0 +1,29 @@
+# An AI's first read of every pull request, before a person reviews and merges it.
+# It needs two things set on the repository (Settings → Secrets and variables → Actions):
+#   - secret LLM_API_KEY: an API key for the model's provider (Anthropic, OpenAI or Google)
+#   - variable LLM_MODEL: one of the model names the action knows, such as o4-mini,
+#     gpt-4.1-mini or claude-3-7-sonnet-20250219; the action refuses any other name
+name: AI review
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  review:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    # Without a key there is nobody to ask; the check is skipped rather than failed.
+    if: ${{ vars.LLM_MODEL != '' }}
+    steps:
+      - name: codereview.ai
+        # Pinned to the commit of v0.0.8, so the code that reads this repository cannot change under it.
+        uses: MalarCB/ai-reviewer@c7a2adf1ad58b55d617b285af8c16ca8817cbbb5
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY }}
+          LLM_MODEL: ${{ vars.LLM_MODEL }}
