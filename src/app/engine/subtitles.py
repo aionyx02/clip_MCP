@@ -759,6 +759,7 @@ def build_ass(
     width: int,
     height: int,
     style: Optional[CaptionStyle] = None,
+    extra_events: Sequence[str] = (),
 ) -> str:
     """Render subtitle cues as a complete ASS subtitle file.
 
@@ -772,6 +773,8 @@ def build_ass(
         width: Output width in pixels.
         height: Output height in pixels.
         style: How to draw them; the plain style when not given.
+        extra_events: More `Dialogue` lines to draw in the same pass, such
+            as title cards' words, which place and style themselves.
 
     Returns:
         The ASS file contents.
@@ -817,6 +820,7 @@ def build_ass(
         lines.append(
             f"Dialogue: 0,{format_ass_time(cue.start)},{format_ass_time(cue.end)},Default,,0,0,0,,{text}"
         )
+    lines.extend(extra_events)
     return "\n".join(lines) + "\n"
 
 def drawn_captions(cues: Sequence[PlacedCue], width: int, height: int, style: CaptionStyle) -> dict:

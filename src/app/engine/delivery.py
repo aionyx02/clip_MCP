@@ -570,7 +570,8 @@ def cover_candidates(
         `(clip, source_seconds)` per shot, in timeline order. Full-frame
         covering picture counts as a shot: a good cover is often B-roll.
     """
-    clips = list(project.base_video_track.clips) if project.base_video_track else []
+    # A title card is a frame borrowed from a shot, blurred: never what a cover should be.
+    clips = [clip for clip in project.base_video_track.clips if clip.card is None] if project.base_video_track else []
     clips += [clip for track in project.video_tracks[1:] for clip in track.clips if clip.layout is None]
     offered: List[Tuple[Clip, float]] = []
     for clip in sorted(clips, key=lambda item: item.timeline_in):

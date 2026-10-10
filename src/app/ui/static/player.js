@@ -320,6 +320,12 @@
       for (const slot of this.slots.values()) {
         const { clip, track, picture, sound } = slot;
         if (clip.still) continue;
+        if (clip.card) {
+          this.route(picture, track.id);
+          if (this.audio) this.setLevel(picture, 0);
+          this.follow(picture, clip.card.at, 1, false, true);
+          continue;
+        }
         const live = !this.paused && time >= firstNeeded(clip) - 0.05 && time < lastNeeded(clip);
         const heard = sound || picture;
         this.route(picture, track.id);
@@ -360,7 +366,31 @@
           && time >= clip.timeline_in - clip.transition.seconds);
         if (incoming) this.drawTransition(track, incoming, time);
       }
+      this.drawCards(time);
       this.drawCaptions(time);
+    }
+
+    // A title card's words, where the render puts them, fading in and out as they do there.
+    drawCards(time) {
+      const style = this.described.cards;
+      const event = style?.events.find((item) => time >= item.start && time < item.end);
+      if (!event) return;
+      const { ctx } = this;
+      const font = this.described.captions.font;
+      const shown = clamp(Math.min((time - event.start) / event.fade, (event.end - time) / event.fade), 0, 1);
+      ctx.save();
+      ctx.globalAlpha = shown;
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      for (const row of event.rows) {
+        ctx.font = `bold ${row.size}px "${font}", ${FONTS}`;
+        const shadow = Math.max(1, Math.floor(row.size / 24));
+        ctx.fillStyle = "rgba(0,0,0,.5)";
+        ctx.fillText(row.text, this.described.width / 2 + shadow, row.y + shadow);
+        ctx.fillStyle = "#ffffff";
+        ctx.fillText(row.text, this.described.width / 2, row.y);
+      }
+      ctx.restore();
     }
 
     drawTransition(track, clip, time) {
@@ -432,8 +462,18 @@
         ctx.translate(-x, -y);
       }
       const color = clip.color;
-      const look = color ? `brightness(${1 + color.brightness}) contrast(${color.contrast}) saturate(${color.saturation})` : "";
-      if (clip.crop?.whole) {
+      let look = color ? `brightness(${1 + color.brightness}) contrast(${color.contrast}) saturate(${color.saturation})` : "";
+      // A title card's background: its frame blurred and darkened, darkened only, or a plain colour.
+      const card = clip.card, cardStyle = this.described.cards;
+      if (card?.background === "blur") {
+        look += ` blur(${Math.max(2, Math.round(Math.min(w, h) * cardStyle.blur_share))}px) brightness(${1 + cardStyle.blur_dim})`;
+      } else if (card?.background === "picture") {
+        look += ` brightness(${1 + cardStyle.picture_dim})`;
+      }
+      if (card?.background === "colour") {
+        ctx.fillStyle = card.colour;
+        ctx.fillRect(x, y, w, h);
+      } else if (clip.crop?.whole) {
         // All of it, fitted inside, over a blurred and dimmed copy covering the box — as the render does.
         const base = Math.max(w / vw, h / vh), fit = Math.min(w / vw, h / vh);
         const bw = w / base, bh = h / base;

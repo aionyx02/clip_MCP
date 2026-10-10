@@ -6,7 +6,7 @@ from typing import Optional, Sequence, Tuple
 
 from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageFont
 
-from app.engine import resources, stills
+from app.engine import cards, resources, stills
 from app.engine.builder import WHOLE_DIM
 from app.engine.ffmpeg import hidden_window_flags
 from app.engine.reframe import Placement
@@ -197,7 +197,8 @@ def storyboard_sheet(
     Args:
         shots: One `(path, seconds, label)` per tile, in the order to show
             them, optionally with a fourth item: how the render places that
-            tile, as `reframe.placement_at` says.
+            tile, as `reframe.placement_at` says; and a fifth: the title card
+            the tile is, whose background it is then shown as.
         aspect: Output width divided by height. When given, every tile is
             cropped to it, so the sheet shows the framing the render will have
             rather than the framing of the source files.
@@ -220,4 +221,6 @@ def storyboard_sheet(
             _crop_to_aspect(frame, aspect, shot[3] if len(shot) > 3 else None).resize(size, Image.LANCZOS)
             for frame, shot in zip(frames, shots)
         ]
+    frames = [cards.backdrop_image(frame, shot[4]) if len(shot) > 4 and shot[4] is not None else frame
+              for frame, shot in zip(frames, shots)]
     return _compose_sheet(frames, [shot[2] for shot in shots], columns, borders)

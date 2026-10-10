@@ -54,11 +54,18 @@ clip runs for as long as its `source_range` says — 0 to 4 seconds unless the
 user wants it longer — and it moves slowly while on screen; `set_clip_look`
 `motion` changes how (see request-map.md).
 
-Not supported yet: free text and graphics other than captions, and filters
-beyond the colour controls. When a request needs one of these, say so plainly,
-offer the closest supported result, and never pretend it was done. For
-example:
-「目前還不能在畫面上加文字。這句話我可以先放進字幕裡，可以嗎？」
+A title card is a few seconds of its own: a title, and a smaller line if
+wanted, over the shot it leads into, blurred — or over a photo, or a plain
+colour. Add one only when the user asks for it; while planning you may
+suggest one, but do not add it unasked. A card is silent, and a storyboard
+shows its background with the words in the listing. `add_title_card` puts
+one in, `set_title_card` changes it (see request-map.md).
+
+Not supported yet: text over the footage other than captions and title
+cards, and filters beyond the colour controls. When a request needs one of
+these, say so plainly, offer the closest supported result, and never pretend
+it was done. For example:
+「目前還不能在畫面上疊文字。這句話我可以做成一張標題卡放在這段前面，可以嗎？」
 
 Transitions end on the cut rather than straddling it, so adding one never
 changes how long the video runs or moves anything after it. A transition needs

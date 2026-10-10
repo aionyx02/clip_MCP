@@ -48,7 +48,7 @@ from app.models.timeline import (
 )
 from app.models.comment import Comment, Reply
 from app.models.job import Job, JobKind, JobStatus
-from app.engine import loudness, machine, meaning, resources, speed, stills
+from app.engine import cards, loudness, machine, meaning, resources, speed, stills
 from app.engine.analysis import listen_again as listen_again_in_file
 from app.engine.analysis import (
     current_recipe, doubtful_spots, marked_text, marked_words, sound_note, transcription_of, unsure_words,
@@ -155,8 +155,8 @@ mcp = FastMCP(
         "user has heard what the check found, how one cut is delivered in "
         "several shapes and handed to other editing programs, "
         "and the current limits: no overlapping picture on a "
-        "track, and no graphics beyond captions. Photos go in like videos and "
-        "are shown for as long as their clip runs. "
+        "track, and no graphics beyond captions and title cards. Photos go in "
+        "like videos and are shown for as long as their clip runs. "
         "Transitions end on the cut rather than straddling it, so adding one "
         "never changes how long the video runs. The person using this server is "
         "editing their own video, not writing code: reply in plain language "
@@ -3036,6 +3036,7 @@ def apply_edits(project_id: str, expected_version: int, operations: list[EditOpe
             `add_track`, `add_clip`, `insert_clip`, `trim_clip`, `move_clip`,
             `delete_clip`, `split_clip`, `reorder_clip`, `fit_track`,
             `set_clip_audio`, `set_clip_look`, `set_track_audio`,
+            `add_title_card`, `set_title_card`,
             `set_subtitles`, `edit_subtitle`, or `add_subtitle`. Captions stored
             or corrected here are also remembered against the file they belong
             to, and the next `generate_subtitles` over that file, in any
@@ -3174,7 +3175,9 @@ def _apply(
         )
 
     # Assets are looked up first so operations that need source lengths, such as fit_track, can use them.
-    known = repo.get_assets({clip.asset_id for track in project.tracks for clip in track.clips})
+    # A photo a title card is to stand on is not in the cut until the card puts it there.
+    known = repo.get_assets({clip.asset_id for track in project.tracks for clip in track.clips}
+                            | {op.photo_asset_id for op in operations if getattr(op, "photo_asset_id", None)})
     for op in operations:
         apply_operation(project, op, known)
     if stamp is not None:
@@ -4122,6 +4125,16 @@ def preview_project(
         asset = assets[clip.asset_id]
         start, end = float(clip.source_range.start), float(clip.source_range.end)
         step = (end - start) / frames
+        if clip.card is not None:
+            # One tile: the card's background. Its words are in the listing, not on the tile.
+            number = len(shots) + 1
+            at = float(clip.timeline_in)
+            shots.append((asset.path, float(clip.card.at), f"#{number}  {format_timestamp(at)}  title card",
+                          placement_at(framing.get(clip.id), clip, float(clip.card.at), fps), clip.card))
+            words = clip.card.title + (f" / {clip.card.subtitle}" if clip.card.subtitle else "")
+            listing.append(f"#{number}: clip {clip.id} | edit {format_timestamp(at)} | title card 「{words}」 "
+                           f"for {end - start:g}s on {clip.card.background} (words not drawn on the tile)")
+            continue
         for offset in range(frames):
             # Sample the middle of each interval, and stay clear of the very last frame, which may not decode.
             seconds = start + step * (offset + 0.5)
@@ -4812,6 +4825,7 @@ def _start_render(
     render_path = os.path.join(job.work_dir, _output_name(project, kind))
 
     subtitle_path = None
+    placed: list = []
     if burn_subtitles:
         if not project.subtitles:
             raise ValueError(
@@ -4824,10 +4838,13 @@ def _start_render(
                 f"project {project_id} has captions, but none of the footage they transcribe is in the cut; "
                 "run generate_subtitles again against the sequence as it stands"
             )
+    # Title cards' words go through the same file as the captions, burned or not.
+    titles = cards.ass_events(project, project.caption_style)
+    if placed or titles:
         os.makedirs(job.work_dir, exist_ok=True)
         subtitle_path = os.path.join(job.work_dir, "subtitles.ass")
         with open(subtitle_path, "w", encoding="utf-8") as handle:
-            handle.write(build_ass(placed, project.width, project.height, project.caption_style))
+            handle.write(build_ass(placed, project.width, project.height, project.caption_style, titles))
 
     chapters_path = None
     listed, _ = chapters(project)
@@ -5144,6 +5161,8 @@ def export_cover(
     clip = on_screen[-1]
     assets = _referenced_assets(project)
     source = float(clip.source_range.start) + (seconds - float(clip.timeline_in)) * clip.speed
+    if clip.card is not None:
+        raise ValueError(f"{seconds:g}s of project {project_id} is a title card; take the cover from a shot")
     framed = _framing(project, assets, follow_faces).get(clip.id)
     fps = Fraction(project.fps_num, project.fps_den)
     picture = still(assets[clip.asset_id].path, source, project.width, project.height,
@@ -5224,8 +5243,18 @@ def export_timeline(
         if project.base_video_track is None or not project.base_video_track.clips:
             raise ValueError(f"project {project_id} has nothing on its sequence to export")
         writer = {"edl": write_edl, "otio": write_otio, "fcpxml": write_fcpxml}[format]
-        assets = _referenced_assets(project)
-        text, behind = writer(project, assets, _timecodes(assets))
+        # A title card is a frame and words this server draws; another program would read it as
+        # footage of the file behind it. It goes across as the gap it fills, and is said to.
+        titled = cards.cards_of(project)
+        shown = project.model_copy(deep=True)
+        if titled:
+            base = shown.base_video_track
+            base.clips = [clip for clip in base.clips if clip.card is None]
+        assets = _referenced_assets(shown)
+        text, behind = writer(shown, assets, _timecodes(assets))
+        if titled:
+            behind.append("title cards (they come across as gaps; add them as titles there): "
+                          + ", ".join(clip.card.title for clip in titled[:6]) + (" …" if len(titled) > 6 else ""))
         # Decided at render time from the recordings, so the writers, which never see an
         # analysis, cannot say it. Only which tracks, not how loud: nothing is measured.
         if voice_keys(project, _analyses(project), lambda clip: None):

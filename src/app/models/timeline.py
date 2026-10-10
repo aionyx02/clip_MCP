@@ -463,6 +463,31 @@ TOUCHING_SECONDS = Decimal("0.001")
 MIN_SPEED = 0.25
 MAX_SPEED = 8.0
 
+# Provisional (roadmap §13): how long a title card stays up when nothing says otherwise.
+TITLE_CARD_SECONDS = Decimal("2.5")
+# The shortest and longest a title card can be: under half a second nobody reads it, and a
+# card that stays ten seconds is a slide, not a title.
+TITLE_CARD_SHORTEST = Decimal("0.5")
+TITLE_CARD_LONGEST = Decimal(10)
+
+class TitleCard(BaseModel):
+    """A title on a picture of its own, taking up time in the cut.
+
+    A card has no file of its own. Its clip reads one frame of the file behind
+    it — the shot it leads into, unless it was given a photo — and the card
+    says how that frame is shown and what is written over it.
+    """
+
+    title: str = Field(..., min_length=1, max_length=60, description="The main line, large and centred")
+    subtitle: Optional[str] = Field(default=None, max_length=80, description="A smaller line under it, if any")
+    background: Literal["blur", "picture", "colour"] = Field(
+        default="blur",
+        description="`blur`: the frame behind it blurred and darkened; `picture`: that frame as it is, darkened a "
+                    "little so the words read; `colour`: a plain colour",
+    )
+    colour: str = Field(default="#111114", pattern=COLOUR, description="The colour for a `colour` background")
+    at: Decimal = Field(default=Decimal(0), ge=0, description="Which second of the file behind it is shown")
+
 class Clip(BaseModel):
     """A segment of a source asset placed on a track.
 
@@ -541,6 +566,11 @@ class Clip(BaseModel):
         default=None,
         description="For a photo: `push` closer, `pull` back, `pan_left`, `pan_right`, or `none` to hold it "
                     "still; null is a slow push. Ignored for video",
+    )
+    card: Optional[TitleCard] = Field(
+        default=None,
+        description="Set on a title card: what it says and how its background looks. A card is silent, and its "
+                    "source range is only its length: it shows one frame of its file, at `card.at`",
     )
 
     @property
@@ -1212,6 +1242,46 @@ class SetCaptionStyleOp(BaseModel):
             raise ValueError("give a preset, a style, or both")
         return self
 
+class AddTitleCardOp(BaseModel):
+    """Edit operation that puts a title card into the sequence, shifting later clips to make room.
+
+    Only when the user asks for one. Its background is the shot it leads into,
+    blurred, unless it is given a photo or a colour.
+    """
+
+    action: Literal["add_title_card"] = "add_title_card"
+    track_id: str = Field(..., description="The main video track")
+    clip_id: str = Field(..., description="ID of the new card; must be unique within the track")
+    before_clip_id: Optional[str] = Field(
+        default=None,
+        description="Put it at the start of this clip; omit to put it after the last clip",
+    )
+    title: str = Field(..., min_length=1, max_length=60)
+    subtitle: Optional[str] = Field(default=None, max_length=80)
+    seconds: Decimal = Field(default=TITLE_CARD_SECONDS, ge=TITLE_CARD_SHORTEST, le=TITLE_CARD_LONGEST)
+    background: Optional[Literal["blur", "picture", "colour"]] = Field(
+        default=None,
+        description="Null: `picture` with a photo, else `blur` of the shot next to it",
+    )
+    colour: Optional[str] = Field(default=None, pattern=COLOUR, description="For a `colour` background")
+    photo_asset_id: Optional[str] = Field(default=None, description="A photo from the library to put behind it")
+
+class SetTitleCardOp(BaseModel):
+    """Edit operation that changes a title card: its words, its background or its length."""
+
+    action: Literal["set_title_card"] = "set_title_card"
+    track_id: str
+    clip_id: str
+    title: Optional[str] = Field(default=None, min_length=1, max_length=60)
+    subtitle: Optional[str] = Field(default=None, max_length=80, description="An empty string takes it away")
+    seconds: Optional[Decimal] = Field(
+        default=None, ge=TITLE_CARD_SHORTEST, le=TITLE_CARD_LONGEST,
+        description="Its new length; later clips move to keep up",
+    )
+    background: Optional[Literal["blur", "picture", "colour"]] = None
+    colour: Optional[str] = Field(default=None, pattern=COLOUR)
+    photo_asset_id: Optional[str] = Field(default=None, description="A photo from the library to put behind it")
+
 class SetClipLookOp(BaseModel):
     """Edit operation that changes a clip's picture: how it comes in, its colour, and where it sits.
 
@@ -1397,7 +1467,7 @@ EditOperation = Annotated[
         AddTrackOp, AddClipOp, InsertClipOp, TrimClipOp, DeleteOp, MoveClipOp,
         SplitClipOp, ReorderClipOp, RenameProjectOp, SetTrackAudioOp, SetClipAudioOp,
         SetClipLookOp, SetClipPinnedOp, SetClipSpeedOp, SetMarkersOp, SetSubtitlesOp, EditSubtitleOp, AddSubtitleOp,
-        SetCaptionStyleOp, FitTrackOp,
+        SetCaptionStyleOp, FitTrackOp, AddTitleCardOp, SetTitleCardOp,
     ],
     Field(discriminator="action"),
 ]
@@ -1407,6 +1477,7 @@ EditOperation = Annotated[
 # alternative is a feedback loop that wipes their work every time it comes round.
 _EDITS_BY_HAND = (
     TrimClipOp, MoveClipOp, SplitClipOp, ReorderClipOp, SetClipLookOp, SetClipAudioOp, SetClipSpeedOp,
+    SetTitleCardOp,
 )
 
 CueOrder = Tuple[str, Decimal, Decimal]
@@ -1517,6 +1588,48 @@ def _new_clip(track: Track, spec: _NewClipSpec, timeline_in: Decimal) -> Clip:
         color=spec.color,
         layout=spec.layout,
     )
+
+def _card_backdrop(
+    track: Track,
+    before_clip_id: Optional[str],
+    photo_asset_id: Optional[str],
+    assets: Mapping[str, Asset],
+) -> Tuple[str, Decimal]:
+    """Choose the file a title card shows behind its words, and which second of it.
+
+    Args:
+        track: The track the card goes on.
+        before_clip_id: The clip the card leads into, or None for the end.
+        photo_asset_id: A photo asked for, which wins.
+        assets: Registered assets.
+
+    Returns:
+        `(asset_id, at)`: a photo from its start; else the first frame of the
+        shot the card leads into; else, at the end, the last frame of the
+        shot before it.
+
+    Raises:
+        ValueError: If the photo is not a picture, or there is no shot to
+            borrow a frame from and no photo was given.
+    """
+    if photo_asset_id is not None:
+        photo = assets.get(photo_asset_id)
+        if photo is None:
+            raise ValueError(f"asset {photo_asset_id} not found")
+        if not photo.has_video:
+            raise ValueError(f"asset {photo_asset_id} has no picture to put behind a title card")
+        return photo.id, Decimal(0)
+    shots = [clip for clip in sorted(track.clips, key=lambda c: c.timeline_in) if clip.card is None]
+    if before_clip_id is not None:
+        following = [clip for clip in shots if clip.timeline_in >= _find_clip(track, before_clip_id).timeline_in]
+        if following:
+            return following[0].asset_id, following[0].source_range.start
+    if shots:
+        last = shots[-1]
+        # A frame just inside its end: its very last instant may be past its last frame.
+        return last.asset_id, max(last.source_range.start, last.source_range.end - Decimal("0.1"))
+    raise ValueError("a title card borrows its background from a shot next to it, and there is none yet; "
+                     "give it a photo with photo_asset_id")
 
 def _shift_clips(track: Track, starting_at: Decimal, delta: Decimal) -> None:
     """Move every clip that starts at or after a position by the same amount.
@@ -1779,6 +1892,47 @@ def apply_operation(project: Project, op: EditOperation, assets: Mapping[str, As
         clip = _new_clip(track, op, position)
         _shift_clips(track, position, clip.timeline_duration)
         track.clips.append(clip)
+    elif isinstance(op, AddTitleCardOp):
+        if track is not project.base_video_track:
+            raise ValueError(f"a title card goes on the main video track, not {track.id}")
+        if op.before_clip_id is None:
+            position = max((clip.timeline_out for clip in track.clips), default=Decimal(0))
+        else:
+            position = _find_clip(track, op.before_clip_id).timeline_in
+        asset_id, at = _card_backdrop(track, op.before_clip_id, op.photo_asset_id, assets)
+        background = op.background or ("picture" if op.photo_asset_id else "blur")
+        clip = _new_clip(track, _NewClipSpec(
+            track_id=track.id, clip_id=op.clip_id, asset_id=asset_id,
+            source_range=TimeRange(start=Decimal(0), end=op.seconds),
+        ), position)
+        clip.card = TitleCard(title=op.title, subtitle=op.subtitle or None, background=background,
+                              at=at, **({"colour": op.colour} if op.colour else {}))
+        # A card is silent: whatever the file behind it says belongs to the shot.
+        clip.volume = 0.0
+        _shift_clips(track, position, clip.timeline_duration)
+        track.clips.append(clip)
+    elif isinstance(op, SetTitleCardOp):
+        clip = _find_clip(track, op.clip_id)
+        if clip.card is None:
+            raise ValueError(f"clip {clip.id} is not a title card; set_title_card only changes cards")
+        card = clip.card.model_copy()
+        if op.title is not None:
+            card.title = op.title
+        if op.subtitle is not None:
+            card.subtitle = op.subtitle or None
+        if op.photo_asset_id is not None:
+            clip.asset_id, card.at = _card_backdrop(track, None, op.photo_asset_id, assets)
+            card.background = "picture"
+        if op.background is not None:
+            card.background = op.background
+        if op.colour is not None:
+            card.colour = op.colour
+        clip.card = card
+        if op.seconds is not None:
+            old_out = clip.timeline_out
+            clip.source_range = TimeRange(start=clip.source_range.start, end=clip.source_range.start + op.seconds)
+            clip.speed = 1.0
+            _shift_clips(track, old_out, clip.timeline_out - old_out)
     elif isinstance(op, TrimClipOp):
         clip = _find_clip(track, op.clip_id)
         old_out = clip.timeline_out
@@ -1950,7 +2104,17 @@ def validate_project(project: Project, assets: Mapping[str, Asset]) -> None:
                     f"clip {clip.id}: a layout box only means something on a video track above the base one; "
                     f"track {track.id} is not drawn on top of anything, so its clips fill the frame"
                 )
-            if asset.duration is not None and clip.source_range.end > Decimal(str(asset.duration)) + TOUCHING_SECONDS:
+            if clip.card is not None:
+                if track is not base:
+                    raise ValueError(f"clip {clip.id}: a title card goes on the main video track, not {track.id}")
+                if clip.volume != 0:
+                    raise ValueError(f"clip {clip.id}: a title card is silent; its sound cannot be turned up")
+                if asset.duration is not None and clip.card.at > Decimal(str(asset.duration)) + TOUCHING_SECONDS:
+                    raise ValueError(
+                        f"clip {clip.id}: the card shows {clip.card.at}s of asset {asset.id}, "
+                        f"which is only {asset.duration}s long"
+                    )
+            elif asset.duration is not None and clip.source_range.end > Decimal(str(asset.duration)) + TOUCHING_SECONDS:
                 raise ValueError(
                     f"clip {clip.id}: source range ends at {clip.source_range.end}s, "
                     f"but asset {asset.id} is only {asset.duration}s long"
@@ -1968,7 +2132,7 @@ def validate_project(project: Project, assets: Mapping[str, Asset]) -> None:
                         f"clip {clip.id}: a {transition.seconds}s {transition.kind} is longer than clip "
                         f"{previous.id}, which runs {previous.timeline_duration}s and is what it would run over"
                     )
-                if clip.video_source_start < 0:
+                if clip.video_source_start < 0 and clip.card is None:
                     raise ValueError(
                         f"clip {clip.id}: a {transition.seconds}s {transition.kind} reaches back to "
                         f"{clip.video_source_start}s of asset {asset.id}, before the file starts"
