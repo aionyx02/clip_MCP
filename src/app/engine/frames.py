@@ -6,7 +6,7 @@ from typing import Optional, Sequence, Tuple
 
 from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageFont
 
-from app.engine import resources
+from app.engine import resources, stills
 from app.engine.builder import WHOLE_DIM
 from app.engine.ffmpeg import hidden_window_flags
 from app.engine.reframe import Placement
@@ -49,13 +49,15 @@ def extract_frame(path: str, seconds: float, max_size: int = TILE_SIZE, ffmpeg_b
     Raises:
         RuntimeError: If FFmpeg cannot decode a frame at that time.
     """
+    # A photo is the same picture at every moment, and seeking into one finds nothing.
+    seek = [] if stills.is_image(path) else ["-ss", f"{max(seconds, 0):.3f}"]
     # Wait for a slot, then decode on one thread: a single frame is wanted, and frame
     # threading would hold several decoded pictures of a 4K source in memory to produce it.
     with resources.decoder_slot():
         result = subprocess.run(
             [
                 ffmpeg_bin, "-hide_banner", "-loglevel", "error", "-nostdin",
-                "-threads", "1", "-ss", f"{max(seconds, 0):.3f}", "-i", path,
+                "-threads", "1", *seek, "-i", path,
                 "-map", "0:V:0", "-frames:v", "1",
                 "-vf", f"scale={max_size}:{max_size}:force_original_aspect_ratio=decrease",
                 "-f", "image2pipe", "-c:v", "png", "-",

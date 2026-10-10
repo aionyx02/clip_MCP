@@ -76,9 +76,10 @@ def _asset_summary(asset) -> dict:
         "id": asset.id,
         "name": os.path.basename(asset.path),
         "path": asset.path,
-        "duration": float(asset.duration) if asset.duration is not None else None,
+        "duration": float(asset.duration) if asset.duration is not None and not asset.still else None,
         "has_video": asset.has_video,
         "has_audio": asset.has_audio,
+        "still": asset.still,
         "width": asset.width,
         "height": asset.height,
         # Shown on the file, so the user checking captions later knows to expect misheard words.

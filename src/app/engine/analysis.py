@@ -11,7 +11,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional, Sequence, Tuple
 
-from app.engine import faces, machine, models, resources
+from app.engine import faces, machine, models, resources, stills
 from app.engine.diarize import (
     MIN_PAUSE_SECONDS as SPEAKER_MIN_PAUSE_SECONDS,
     MIN_SPEECH_SECONDS as SPEAKER_MIN_SPEECH_SECONDS,
@@ -631,6 +631,61 @@ def scan_media(
         sound=_sound_measurements(_frame_records(os.path.join(work_dir, SOUND_FILE_NAME)), duration),
     )
 
+def scan_photo(
+    asset: Asset,
+    work_dir: str,
+    on_progress: Callable[[float], None],
+    is_cancelled: Callable[[], bool],
+    ffmpeg_bin: str = "ffmpeg",
+) -> Tuple[List[ShotMeasurement], List[FaceMeasurement]]:
+    """Measure a photo: how it was taken, and who is in it.
+
+    A photo has no cuts, no sound and no frames that differ, so of
+    everything the scan measures in a video only the picture itself and the
+    faces are left. One pass measures the picture the way a video's shots
+    are measured and writes it where the face detector reads its stills;
+    what both find holds for as long as anybody shows the photo.
+
+    Args:
+        asset: The photo.
+        work_dir: Directory the detector's still is written to.
+        on_progress: Called with the completed fraction.
+        is_cancelled: Polled to stop early.
+        ffmpeg_bin: Path to, or name of, the FFmpeg executable.
+
+    Returns:
+        `(shots, faces)`: one record of each at most, from the start of the
+        photo to the longest it can be shown. Exposure, contrast and blur
+        are measured; motion and shake are not, since nothing in a photo
+        moves.
+
+    Raises:
+        OperationCancelled: If cancellation was requested.
+        RuntimeError: If FFmpeg cannot read the picture.
+    """
+    os.makedirs(faces.frames_dir(work_dir), exist_ok=True)
+    picture = escape_filter_path(os.path.join(work_dir, PICTURE_FILE_NAME))
+    result = subprocess.run(
+        [ffmpeg_bin, "-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-i", asset.path,
+         "-filter_complex",
+         f"[0:V:0]split=2[picture][still];"
+         f"[picture]scale={PICTURE_WIDTH}:-2:out_range=full,signalstats,blurdetect,"
+         f"metadata=mode=print:file='{picture}',nullsink;"
+         f"[still]scale={faces.FRAME_WIDTH}:-2[face]",
+         "-map", "[face]", "-frames:v", "1", "-q:v", str(STILL_QUALITY),
+         os.path.join(faces.frames_dir(work_dir), faces.FRAME_PATTERN % 1)],
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        creationflags=hidden_window_flags(),
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"could not read the photo: {result.stderr.decode('utf-8', errors='replace').strip()[-300:]}")
+    shown = {"end": float(stills.STILL_LONGEST)}
+    shots = _shot_measurements([Span(start=0.0, end=1.0)], _frame_records(os.path.join(work_dir, PICTURE_FILE_NAME)), [])
+    found = faces.detect_faces(work_dir, 1.0, on_progress, is_cancelled)
+    return ([shot.model_copy(update=shown) for shot in shots],
+            [measurement.model_copy(update=shown) for measurement in found])
+
 def _nearest(values: List[float], target: float) -> Optional[float]:
     """Find the value closest to a target in a sorted list.
 
@@ -1232,6 +1287,23 @@ def analyze_media(
         RuntimeError: If FFmpeg fails, a model cannot be downloaded, or speech
             recognition fails.
     """
+    if asset.still:
+        _fetch_models([models.FACE_DETECTION], on_progress)
+        try:
+            shots, on_screen = scan_photo(asset, work_dir, lambda fraction: on_progress(fraction, "looking for faces"),
+                                          is_cancelled, ffmpeg_bin)
+        finally:
+            discard_scratch(work_dir)
+        # A photo lasts as long as it is shown; the timeline built from it offers it at the length
+        # it is shown for when nothing says otherwise.
+        return MediaAnalysis(
+            asset_id=asset.id,
+            duration=stills.STILL_SECONDS,
+            scenes=[Span(start=0.0, end=stills.STILL_SECONDS)],
+            shots=shots,
+            faces=on_screen,
+            recipe=current_recipe(None, ffmpeg_bin, None, None, None),
+        )
     duration = float(asset.duration or 0)
     # Music is listened to for its beat and never transcribed; everything else the other way
     # round: a beat tracker run over somebody talking finds one in their syllables.

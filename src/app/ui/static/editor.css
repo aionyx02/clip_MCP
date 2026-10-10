@@ -272,7 +272,7 @@ ul.points { margin: 0 0 10px; padding-left: 18px; color: var(--muted); display: 
 .seg button + button { border-left: 1px solid var(--line-2); }
 .seg button:hover { color: var(--text); }
 .seg button.on { background: var(--panel-3); color: var(--text); }
-.fit-seg { margin: 4px 0 2px; }
+.fit-seg { margin: 4px 0 2px; flex-wrap: wrap; }
 .fit-seg button { padding: 3px 10px; }
 .group input[data-fit-zoom] { width: 100%; accent-color: var(--accent); }
 .ed-versions, .ed-vdetail, .scrub-row, .ed-compare { display: none; }

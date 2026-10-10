@@ -49,11 +49,16 @@ question comes up, not before; `list_resources` shows everything published.
 - A check before rendering, chapters, covers, and export for Premiere,
   Resolve and Final Cut.
 
-Not supported yet: still images, free text and graphics other than captions,
-and filters beyond the colour controls. When a request needs one of these,
-say so plainly, offer the closest supported result, and never pretend it was
-done. For example:
-「目前還放不進靜態圖片。這一段我可以用附近的空鏡蓋過去，可以嗎？」
+Photos go into a cut like videos. A photo has no length of its own: its
+clip runs for as long as its `source_range` says — 0 to 4 seconds unless the
+user wants it longer — and it moves slowly while on screen; `set_clip_look`
+`motion` changes how (see request-map.md).
+
+Not supported yet: free text and graphics other than captions, and filters
+beyond the colour controls. When a request needs one of these, say so plainly,
+offer the closest supported result, and never pretend it was done. For
+example:
+「目前還不能在畫面上加文字。這句話我可以先放進字幕裡，可以嗎？」
 
 Transitions end on the cut rather than straddling it, so adding one never
 changes how long the video runs or moves anything after it. A transition needs

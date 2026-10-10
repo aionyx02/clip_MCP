@@ -9,7 +9,7 @@ from decimal import Decimal
 from fractions import Fraction
 from statistics import median
 from typing import Callable, Dict, List, Mapping, Optional, Sequence, Tuple
-from app.engine import loudness, resources
+from app.engine import loudness, resources, stills
 from app.engine.ffmpeg import escape_filter_path
 from app.engine.reframe import Framing, crop_filter
 from app.models.media import Asset, MediaAnalysis
@@ -329,8 +329,11 @@ def _input_args(clip: Clip, asset: Asset, frames: int, fps: Fraction) -> List[st
         `video_source_start`, which is the clip's own in point unless a
         transition runs it in, in which case it is that much earlier. The length is in
         source seconds, so a clip running at double speed reads twice as much
-        of the file as it occupies on the timeline.
+        of the file as it occupies on the timeline. A photo is one picture,
+        read whole; its chain makes the frames.
     """
+    if asset.still:
+        return ["-i", asset.path]
     return [
         "-ss", _format_seconds(Fraction(clip.video_source_start)),
         "-t", _format_seconds(Fraction(frames + 1) * Fraction(str(clip.speed)) / fps),
@@ -505,6 +508,36 @@ def _speed_audio_filters(clip: Clip) -> List[str]:
     # and they measure it correctly. The other branch ends in one already.
     return [f"atempo={float(step):.6f}" for step in steps] + [f"aresample={AUDIO_SAMPLE_RATE}"]
 
+def _placed(clip: Clip, width: int, height: int, framing: Optional[Framing]) -> str:
+    """Build the filters that put a picture into a box: cropped to it, or whole over its own blur.
+
+    Args:
+        clip: The clip, which names the labels a whole picture needs.
+        width: Width of the box.
+        height: Height of the box.
+        framing: Where its crop sits, or None for the middle.
+
+    Returns:
+        The filters, without input or output labels.
+    """
+    if framing is not None and framing.whole:
+        # All of the picture, fitted inside the box, over a copy of itself enlarged to cover the
+        # box, blurred and dimmed so it reads as background. Labelled by clip and place, since the
+        # two halves have to meet again inside one graph.
+        tag = re.sub(r"[^0-9A-Za-z]", "", clip.id) + f"_{round(float(clip.timeline_in) * 1000)}"
+        return (
+            f"split[wa{tag}][wb{tag}];"
+            f"[wa{tag}]scale={width}:{height}:force_original_aspect_ratio=increase,crop={width}:{height},"
+            f"boxblur={WHOLE_BLUR}:2,eq=brightness={WHOLE_DIM}[wbg{tag}];"
+            f"[wb{tag}]scale={width}:{height}:force_original_aspect_ratio=decrease[wfg{tag}];"
+            f"[wbg{tag}][wfg{tag}]overlay=(W-w)/2:(H-h)/2"
+        )
+    zoom = framing.zoom if framing is not None else 1.0
+    # Scaled past covering the box by the zoom, to whole even pixels, then cropped to it.
+    wide, high = 2 * math.ceil(width * zoom / 2), 2 * math.ceil(height * zoom / 2)
+    return (f"scale={wide}:{high}:force_original_aspect_ratio=increase,"
+            f"{crop_filter(width, height, framing)}")
+
 def _picture_chain(
     clip: Clip,
     frames: int,
@@ -512,6 +545,7 @@ def _picture_chain(
     height: int,
     fps: Fraction,
     framing: Optional[Framing],
+    still: bool = False,
 ) -> str:
     """Build everything that turns a clip's decoded source into its picture.
 
@@ -526,32 +560,24 @@ def _picture_chain(
         height: Height of the box it fills.
         fps: Output frame rate.
         framing: Where its crop sits, or None for the middle.
+        still: The source is a photo: one picture, placed at twice the box
+            so the move over it stays sharp, then moved for as many frames
+            as the clip has. Its speed means nothing.
 
     Returns:
         The filters, without input or output labels.
     """
     rate = f"{fps.numerator}/{fps.denominator}"
-    if framing is not None and framing.whole:
-        # All of the picture, fitted inside the box, over a copy of itself enlarged to cover the
-        # box, blurred and dimmed so it reads as background. Labelled by clip and place, since the
-        # two halves have to meet again inside one graph.
-        tag = re.sub(r"[^0-9A-Za-z]", "", clip.id) + f"_{round(float(clip.timeline_in) * 1000)}"
-        placed = (
-            f"split[wa{tag}][wb{tag}];"
-            f"[wa{tag}]scale={width}:{height}:force_original_aspect_ratio=increase,crop={width}:{height},"
-            f"boxblur={WHOLE_BLUR}:2,eq=brightness={WHOLE_DIM}[wbg{tag}];"
-            f"[wb{tag}]scale={width}:{height}:force_original_aspect_ratio=decrease[wfg{tag}];"
-            f"[wbg{tag}][wfg{tag}]overlay=(W-w)/2:(H-h)/2"
+    if still:
+        return (
+            f"{_placed(clip, 2 * width, 2 * height, framing)},"
+            f"{stills.zoompan(clip.motion, frames, width, height, rate)},setsar=1,format=yuv420p,"
+            f"trim=end_frame={frames},setpts=PTS-STARTPTS"
+            f"{_clip_video_filter(clip, frames, fps)}"
         )
-    else:
-        zoom = framing.zoom if framing is not None else 1.0
-        # Scaled past covering the box by the zoom, to whole even pixels, then cropped to it.
-        wide, high = 2 * math.ceil(width * zoom / 2), 2 * math.ceil(height * zoom / 2)
-        placed = (f"scale={wide}:{high}:force_original_aspect_ratio=increase,"
-                  f"{crop_filter(width, height, framing)}")
     return (
         f"setpts=PTS-STARTPTS{_speed_video_filter(clip)},fps={rate},"
-        f"{placed},setsar=1,format=yuv420p,"
+        f"{_placed(clip, width, height, framing)},setsar=1,format=yuv420p,"
         f"tpad=stop_mode=clone:stop_duration=1,trim=end_frame={frames},setpts=PTS-STARTPTS"
         f"{_clip_video_filter(clip, frames, fps)}"
     )
@@ -695,7 +721,7 @@ class FFmpegRenderer:
                 if track.track_type == TrackType.AUDIO and not asset.has_audio:
                     raise ValueError(f"clip {clip.id}: asset {asset.id} has no audio stream, so it cannot be used on audio track {track.id}")
                 if asset.duration is None:
-                    raise ValueError(f"clip {clip.id}: asset {asset.id} has no known duration; still images are not supported yet")
+                    raise ValueError(f"clip {clip.id}: asset {asset.id} has no known duration")
             _layout(track.clips, fps)
 
     def _picture(
@@ -740,7 +766,7 @@ class FFmpegRenderer:
             sound in it.
         """
         args = _input_args(clip, asset, frames, fps)
-        chain = _picture_chain(clip, frames, box[0], box[1], fps, framing)
+        chain = _picture_chain(clip, frames, box[0], box[1], fps, framing, still=asset.still)
         index = len(inputs)
         if cache_dir is None:
             inputs.append(args)

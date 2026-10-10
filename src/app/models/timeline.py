@@ -291,6 +291,10 @@ class ClipFit(BaseModel):
     )
     zoom: float = Field(default=1.0, ge=1, le=4, description="For `fill`: how much closer than filling the frame")
 
+# How a photo moves while it is on screen. A photo held perfectly still reads as the video
+# having stopped; a slow push in reads as somebody looking at it.
+Motion = Literal["push", "pull", "pan_left", "pan_right", "none"]
+
 class ClipLayout(BaseModel):
     """Where a clip is drawn in the frame, as fractions of the output size.
 
@@ -532,6 +536,11 @@ class Clip(BaseModel):
     fit: Optional[ClipFit] = Field(
         default=None,
         description="How a shot of another shape than the frame sits in it; null lets the shot decide",
+    )
+    motion: Optional[Motion] = Field(
+        default=None,
+        description="For a photo: `push` closer, `pull` back, `pan_left`, `pan_right`, or `none` to hold it "
+                    "still; null is a slow push. Ignored for video",
     )
 
     @property
@@ -1236,6 +1245,10 @@ class SetClipLookOp(BaseModel):
                     "blurred copy",
     )
     clear_fit: bool = Field(default=False, description="Let the shot decide again: crop around a face, else show it whole")
+    motion: Optional[Motion] = Field(
+        default=None,
+        description="For a photo: how it moves while on screen — `push`, `pull`, `pan_left`, `pan_right` or `none`",
+    )
 
     @model_validator(mode="after")
     def validate_intent(self):
@@ -1859,6 +1872,8 @@ def apply_operation(project: Project, op: EditOperation, assets: Mapping[str, As
             clip.fit = None
         elif op.fit is not None:
             clip.fit = op.fit
+        if op.motion is not None:
+            clip.motion = op.motion
     elif isinstance(op, SetClipAudioOp):
         clip = _find_clip(track, op.clip_id)
         for field in ("volume", "audio_fade_in", "audio_fade_out", "audio_lead", "audio_lag", "keep_level"):

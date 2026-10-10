@@ -30,6 +30,18 @@
   const firstNeeded = (clip) => Math.min(pictureStart(clip), soundStart(clip));
   const lastNeeded = (clip) => Math.max(clip.timeline_out, soundEnd(clip));
   // Where in its file a clip is at a time on the timeline; negative before the file starts.
+  // How close in a photo is and where across it the view sits, part of the way through its clip:
+  // the render's `stills.motion_at`.
+  const motionAt = (clip, progress) => {
+    const moved = clamp(progress, 0, 1), amount = clip.motion_amount || 0;
+    switch (clip.motion) {
+      case "push": return [1 + amount * moved, 0.5];
+      case "pull": return [1 + amount * (1 - moved), 0.5];
+      case "pan_left": return [1 + amount, moved];
+      case "pan_right": return [1 + amount, 1 - moved];
+      default: return [1, 0.5];
+    }
+  };
   const sourceAt = (clip, time) => clip.source_start + (time - clip.timeline_in) * clip.speed;
   // Where its repaired sound starts in the file: the render cuts it from the same place.
   const repairedFrom = (clip) => Math.max(0, clip.source_start - clip.audio_lead * clip.speed);
@@ -209,6 +221,20 @@
       return element;
     }
 
+    // A photo, loaded once and kept: it is one picture, with no time in it to follow.
+    photo(src) {
+      this.photos = this.photos || new Map();
+      let image = this.photos.get(src);
+      if (!image) {
+        image = new Image();
+        image.decoding = "async";
+        image.addEventListener("load", () => { this.dirty = true; });
+        image.src = src;
+        this.photos.set(src, image);
+      }
+      return image;
+    }
+
     // Open the files of the clips playing now or soon, and let go of the rest.
     gather() {
       const wanted = new Map();
@@ -237,6 +263,10 @@
       }
       for (const [key, { track, clip }] of wanted) {
         if (this.slots.has(key)) continue;
+        if (clip.still) {
+          this.slots.set(key, { track, clip, picture: this.photo(clip.proxy), sound: null, elements: [] });
+          continue;
+        }
         const picture = this.element("VIDEO", clip.proxy);
         const sound = clip.repaired ? this.element("AUDIO", clip.repaired) : null;
         this.slots.set(key, { track, clip, picture, sound, elements: sound ? [picture, sound] : [picture] });
@@ -264,6 +294,7 @@
       for (const slot of this.slots.values()) {
         const { clip } = slot;
         if (this.time < firstNeeded(clip) || this.time >= lastNeeded(clip)) continue;
+        if (clip.still && !slot.picture.complete) return false;
         for (const element of slot.elements) if (!element.ended && (element.readyState < 3 || element.seeking)) return false;
       }
       return true;
@@ -288,6 +319,7 @@
       if (this.audio) this.master.gain.setTargetAtTime(dbToGain(this.described.gain_db), this.audio.currentTime, 0.05);
       for (const slot of this.slots.values()) {
         const { clip, track, picture, sound } = slot;
+        if (clip.still) continue;
         const live = !this.paused && time >= firstNeeded(clip) - 0.05 && time < lastNeeded(clip);
         const heard = sound || picture;
         this.route(picture, track.id);
@@ -363,7 +395,8 @@
       const [x, y, w, h] = clip.box;
       const slot = this.slots.get(`${track.id}/${clip.id}`);
       const element = slot?.picture;
-      if (!element || element.readyState < 2 || !element.videoWidth) {
+      const vw = element?.videoWidth || element?.naturalWidth, vh = element?.videoHeight || element?.naturalHeight;
+      if (!element || (!clip.still && element.readyState < 2) || !vw) {
         // Not there yet: its copy is still being made, or still opening.
         ctx.save();
         ctx.globalAlpha = alpha;
@@ -372,7 +405,6 @@
         ctx.restore();
         return;
       }
-      const vw = element.videoWidth, vh = element.videoHeight;
       // Scaled to cover its box, closer when zoomed, and the rest cropped where the framing says.
       const zoom = clip.crop?.zoom || 1;
       const cover = Math.max(w / vw, h / vh) * zoom;
@@ -387,6 +419,18 @@
       const sy = clamp((axis === "y" ? centre : cross) * vh - sh / 2, 0, vh - sh);
       ctx.save();
       ctx.globalAlpha = alpha;
+      if (clip.still) {
+        // A photo moves over the placed picture, the way the render's zoompan does: closer by the
+        // zoom, the view's left edge `across` of the way along the room the zoom leaves.
+        const [z, across] = motionAt(clip, (time - pictureStart(clip)) / Math.max(1e-3, clip.timeline_out - pictureStart(clip)));
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(x, y, w, h);
+        ctx.clip();
+        ctx.translate(x - (w * z - w) * across, y - (h * z - h) / 2);
+        ctx.scale(z, z);
+        ctx.translate(-x, -y);
+      }
       const color = clip.color;
       const look = color ? `brightness(${1 + color.brightness}) contrast(${color.contrast}) saturate(${color.saturation})` : "";
       if (clip.crop?.whole) {
@@ -403,6 +447,7 @@
         ctx.drawImage(element, sx, sy, sw, sh, x, y, w, h);
       }
       ctx.filter = "none";
+      if (clip.still) ctx.restore();
       if (color?.temperature) {
         // Warmer below daylight, cooler above it: a tint, where a render shifts the white point.
         const warm = color.temperature < 6500;
