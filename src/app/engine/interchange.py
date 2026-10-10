@@ -119,6 +119,8 @@ def left_behind(project: Project, carried: Sequence[str] = ()) -> List[str]:
                 uses.setdefault("voice repair", []).append(clip.id)
             if clip.layout is not None:
                 uses.setdefault("where an inset sits (it comes across full frame)", []).append(clip.id)
+            if clip.texts:
+                uses.setdefault("words over the footage (add them as titles there)", []).append(clip.id)
     lines = [f"{kind}: {', '.join(clips[:6])}{' …' if len(clips) > 6 else ''}" for kind, clips in uses.items()]
     if project.subtitles:
         lines.append("captions (export them separately as SRT)")

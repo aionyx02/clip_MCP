@@ -51,6 +51,9 @@ feedback are mapped in their own files.
 | 「放這張照片」 / put a photo in | `insert_clip` with `source_range` `{start: 0, end: 4}`; longer when asked |
 | 「開頭加個標題」「每段前面加標題卡」 / add a title card | `add_title_card` with `title` (and `subtitle`), `before_clip_id` the shot it leads into; 2.5 s unless `seconds` says |
 | 「標題卡改成黑底／用這張照片當底」「標題留久一點」 / change a card | `set_title_card` with `background: "colour"` and `colour`, `photo_asset_id`, `seconds`, `title` or `subtitle` (`""` removes it) |
+| 「這裡打上他的名字」「標一下這是哪裡」 / a name or a place | `add_text` on the clip with `style: "name"` (`second`: their role) or `"place"`, `timeline_start`/`timeline_end` where it should show |
+| 「這句話用大字打出來」 / a headline | `add_text` with `style: "headline"` over that stretch |
+| 「字移到右上」「名字晚一點出來」「字拿掉」 / change words | `set_text` with `style: "free"`, `x`, `y`; or `timeline_start`; `remove_text` |
 | 「照片不要動」「照片慢慢拉遠／往左移」 / how a photo moves | `set_clip_look` with `motion`: `none`, `pull`, `pan_left`, `pan_right`, or `push` (the default) |
 | 「右上角放一個小視窗」 / an inset in the top right | `add_track` a second video track, then `add_clip` with `timeline_in` and a `layout` box |
 | 「小視窗拿掉」 / drop the inset | `delete_clip` it, or `set_clip_look` with `clear_layout: true` to cover the frame |

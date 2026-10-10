@@ -152,6 +152,21 @@ def _clip_changes(one: Clip, other: Clip, said: Said, named: Named) -> List[str]
         changes.append(f"{where}速度 {one.speed:g}× → {other.speed:g}×")
     if abs(float(other.volume) - float(one.volume)) > 0.001:
         changes.append(f"{where}音量 {round(float(one.volume) * 100)}% → {round(float(other.volume) * 100)}%")
+    before_words = {text.id: text for text in one.texts}
+    after_words = {text.id: text for text in other.texts}
+    for text_id, text in after_words.items():
+        if text_id not in before_words:
+            changes.append(f"{where}加上文字「{text.text}」")
+        elif (text.text, text.second, text.style, text.x, text.y) != (
+                before_words[text_id].text, before_words[text_id].second, before_words[text_id].style,
+                before_words[text_id].x, before_words[text_id].y):
+            changes.append(f"{where}的文字「{before_words[text_id].text}」改成「{text.text}」"
+                           if text.text != before_words[text_id].text else f"{where}的文字「{text.text}」換了樣子或位置")
+        elif (text.start, text.end) != (before_words[text_id].start, before_words[text_id].end):
+            changes.append(f"{where}的文字「{text.text}」換了出現時間")
+    for text_id, text in before_words.items():
+        if text_id not in after_words:
+            changes.append(f"{where}拿掉文字「{text.text}」")
     before_join = one.transition_in.kind if one.transition_in else None
     after_join = other.transition_in.kind if other.transition_in else None
     if before_join != after_join:

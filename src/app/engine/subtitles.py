@@ -760,6 +760,7 @@ def build_ass(
     height: int,
     style: Optional[CaptionStyle] = None,
     extra_events: Sequence[str] = (),
+    extra_styles: Sequence[str] = (),
 ) -> str:
     """Render subtitle cues as a complete ASS subtitle file.
 
@@ -775,6 +776,7 @@ def build_ass(
         style: How to draw them; the plain style when not given.
         extra_events: More `Dialogue` lines to draw in the same pass, such
             as title cards' words, which place and style themselves.
+        extra_styles: More `Style` lines those events name.
 
     Returns:
         The ASS file contents.
@@ -806,6 +808,7 @@ def build_ass(
         f"Style: Default,{font},{font_size},&H00FFFFFF,{waiting},&H00000000,&H80000000,"
         # The shadow goes with the outline: a caption asked for with no outline is plain white text.
         f"-1,0,0,0,100,100,0,0,1,{outline},{max(1, outline // 2) if outline else 0},2,{margin_h},{margin_h},{margin_v},1",
+        *extra_styles,
         "",
         "[Events]",
         "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text",
