@@ -91,7 +91,14 @@ Where a shot is a different shape from the frame, the crop follows the face
 the analysis found; it holds still, and cuts to a new framing when the face
 has stayed near the edge for a while rather than panning after it. Only the
 largest face is followed, so in a two-shot interview rendered portrait one of
-the two will be out of frame — say so. Look at `preview_project` with the same
+the two will be out of frame — say so. A shot with no face that a crop would
+cut to under 70% — scenery, hands at work, a screen in a vertical video — is
+shown whole instead, over a blurred copy of itself. The same holds for a
+landscape shot in a vertical project, or the other way round. Each shot can be
+told otherwise with `set_clip_look` `fit`: `{"mode": "whole"}` for
+「整個畫面都要看到」, `{"mode": "fill"}` to crop it anyway, with `center_x` /
+`center_y` (0–1 of the picture) for 「往左一點」 and `zoom` for 「拉近一點」;
+`clear_fit` gives the choice back. Look at `preview_project` with the same
 `frame` first — the tiles are cropped the way the render will be. Check
 captions again for a portrait version: lines that fit across a landscape frame
 can stack too tall in a narrow one.

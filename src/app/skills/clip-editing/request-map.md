@@ -46,6 +46,10 @@ feedback are mapped in their own files.
 | 「改成黑白」 / black and white | `set_clip_look` with `color` `{"saturation": 0}` |
 | 「色溫暖一點／冷一點」 / warmer or cooler | `set_clip_look` with `color` `temperature`, below 6500 for warmer |
 | 「調色拿掉」 / undo the grade | `set_clip_look` with `clear_color: true` |
+| 「這段整個畫面都要看到」「直式裡橫的畫面被切掉了」 / show a shot whole | `set_clip_look` with `fit: {"mode": "whole"}` |
+| 「這段往左一點」「拉近一點」 / move or zoom the crop | `set_clip_look` with `fit: {"mode": "fill", "center_x": 0.3}` or `"zoom": 1.5` |
+| 「放這張照片」 / put a photo in | `insert_clip` with `source_range` `{start: 0, end: 4}`; longer when asked |
+| 「照片不要動」「照片慢慢拉遠／往左移」 / how a photo moves | `set_clip_look` with `motion`: `none`, `pull`, `pan_left`, `pan_right`, or `push` (the default) |
 | 「右上角放一個小視窗」 / an inset in the top right | `add_track` a second video track, then `add_clip` with `timeline_in` and a `layout` box |
 | 「小視窗拿掉」 / drop the inset | `delete_clip` it, or `set_clip_look` with `clear_layout: true` to cover the frame |
 | 「中間插一段別的畫面蓋掉原本的」 / cut away over the same sound | `add_clip` on the upper video track with no `layout` and `volume: 0` (in a plan: `add_broll`) |

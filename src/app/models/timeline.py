@@ -267,6 +267,34 @@ CAPTION_PRESETS: Dict[str, CaptionStyle] = {
                              outline_fraction=1 / 10),
 }
 
+class ClipFit(BaseModel):
+    """How a shot of another shape sits in the frame: cropped to fill it, or shown whole.
+
+    A landscape shot in a vertical video, or a vertical one in a landscape
+    video. Left unset, the shot decides for itself: one with a face in it is
+    cropped around the face; one without — scenery, hands at work, a screen —
+    is shown whole over a blurred, enlarged copy of itself.
+    """
+
+    mode: Literal["fill", "whole"] = Field(
+        ...,
+        description="`fill` crops the shot to fill the frame; `whole` shows all of it, small, over a blurred "
+                    "copy of itself",
+    )
+    center_x: Optional[float] = Field(
+        default=None, ge=0, le=1,
+        description="For `fill`: where the crop is centred across the picture, 0 the left edge and 1 the right. "
+                    "Set, the crop stays there instead of following a face",
+    )
+    center_y: Optional[float] = Field(
+        default=None, ge=0, le=1, description="For `fill`: the same down the picture, 0 the top",
+    )
+    zoom: float = Field(default=1.0, ge=1, le=4, description="For `fill`: how much closer than filling the frame")
+
+# How a photo moves while it is on screen. A photo held perfectly still reads as the video
+# having stopped; a slow push in reads as somebody looking at it.
+Motion = Literal["push", "pull", "pan_left", "pan_right", "none"]
+
 class ClipLayout(BaseModel):
     """Where a clip is drawn in the frame, as fractions of the output size.
 
@@ -504,6 +532,15 @@ class Clip(BaseModel):
     layout: Optional[ClipLayout] = Field(
         default=None,
         description="Where the clip is drawn, for clips on a video track above the first; null fills the frame",
+    )
+    fit: Optional[ClipFit] = Field(
+        default=None,
+        description="How a shot of another shape than the frame sits in it; null lets the shot decide",
+    )
+    motion: Optional[Motion] = Field(
+        default=None,
+        description="For a photo: `push` closer, `pull` back, `pan_left`, `pan_right`, or `none` to hold it "
+                    "still; null is a slow push. Ignored for video",
     )
 
     @property
@@ -1201,6 +1238,17 @@ class SetClipLookOp(BaseModel):
     clear_color: bool = Field(default=False, description="Remove the clip's picture adjustments and leave it as shot")
     layout: Optional[ClipLayout] = Field(default=None, description="Where the clip is drawn in the frame")
     clear_layout: bool = Field(default=False, description="Make the clip fill the frame again")
+    fit: Optional[ClipFit] = Field(
+        default=None,
+        description="How a shot of another shape than the frame sits in it — a landscape shot in a vertical video: "
+                    "`fill` crops it, around a centre of your choosing or the face; `whole` shows all of it over a "
+                    "blurred copy",
+    )
+    clear_fit: bool = Field(default=False, description="Let the shot decide again: crop around a face, else show it whole")
+    motion: Optional[Motion] = Field(
+        default=None,
+        description="For a photo: how it moves while on screen — `push`, `pull`, `pan_left`, `pan_right` or `none`",
+    )
 
     @model_validator(mode="after")
     def validate_intent(self):
@@ -1215,6 +1263,7 @@ class SetClipLookOp(BaseModel):
         for value, clear, name, cleared in (
             (self.color, self.clear_color, "color", "clear_color"),
             (self.layout, self.clear_layout, "layout", "clear_layout"),
+            (self.fit, self.clear_fit, "fit", "clear_fit"),
             (self.transition_in, self.clear_transition, "transition_in", "clear_transition"),
         ):
             if value is not None and clear:
@@ -1819,6 +1868,12 @@ def apply_operation(project: Project, op: EditOperation, assets: Mapping[str, As
             clip.layout = None
         elif op.layout is not None:
             clip.layout = op.layout
+        if op.clear_fit:
+            clip.fit = None
+        elif op.fit is not None:
+            clip.fit = op.fit
+        if op.motion is not None:
+            clip.motion = op.motion
     elif isinstance(op, SetClipAudioOp):
         clip = _find_clip(track, op.clip_id)
         for field in ("volume", "audio_fade_in", "audio_fade_out", "audio_lead", "audio_lag", "keep_level"):

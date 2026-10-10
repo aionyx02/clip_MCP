@@ -109,6 +109,7 @@ window.T = {
     // Said wherever files come in: the AI, too, can only cut what is in the library.
     libraryOnly: "只有素材庫裡的檔案能放進專案，AI 也只能使用素材庫裡的檔案。要用其他影片或音樂，請先按「加入」把它加進素材庫；在 AI 對話中給它檔案路徑時，它也會先把檔案加進素材庫。",
     noSound: "無聲",
+    photo: "照片",
     audioOnly: "聲音",
     gone: "找不到原始檔",
     goneHint: "原始檔案被移動或刪除了。不需要的話可以從素材庫移除。",
@@ -286,6 +287,23 @@ window.T = {
     trimBody: (files) => `目前這版、標星號和已發布的版本會留著；其他 ${files} 個成品會移到垃圾桶（30 天內可以放回），預覽暫存會清掉。版本紀錄本身都留著，只是標成未輸出。`,
     trimAction: "刪除其他版本",
     trimmed: (size) => `已釋放 ${size}`,
+  },
+  fit: {
+    title: "畫面放法",
+    modes: { auto: "自動", fill: "裁切填滿", whole: "整張放" },
+    hints: {
+      auto: "形狀跟影片不同：有人臉就裁切並跟著臉，沒有就整張放、上下（或左右）用模糊的同一畫面填滿。",
+      fill: "裁掉多出來的部分。暫停時在播放畫面上拖曳可以移動裁切位置。",
+      whole: "整張畫面都看得到，空出來的地方用模糊的同一畫面填滿。",
+    },
+    zoom: "放大",
+    free: "交回自動位置",
+    dragHint: "拖曳後這段會固定在你放的位置，不再跟著臉",
+  },
+  motion: {
+    title: "照片怎麼動",
+    modes: { push: "慢慢推近", pull: "慢慢拉遠", pan_left: "往左移", pan_right: "往右移", none: "不動" },
+    hint: "照片在畫面上停留時的移動方式。完全不動的照片看起來像影片卡住了。",
   },
   compare: {
     start: "跟目前比較",

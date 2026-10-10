@@ -510,11 +510,12 @@ async function mediaPage(page, folderId) {
       const picture = asset.has_video && !asset.missing
         ? `<img loading="lazy" alt="" draggable="false" onerror="this.dataset.broken=1" src="${thumbUrl(asset.id, Math.min(1, (asset.duration || 0) / 2))}">`
         : icon(asset.has_video ? "film" : "music", 30);
-      const kind = asset.has_video ? (asset.has_audio ? "" : `<span class="dot-sep">${esc(T.media.noSound)}</span>`) : `<span class="dot-sep">${esc(T.media.audioOnly)}</span>`;
+      const kind = asset.still || (asset.has_video && asset.has_audio) ? ""
+        : `<span class="dot-sep">${esc(asset.has_video ? T.media.noSound : T.media.audioOnly)}</span>`;
       const gone = asset.missing ? `<span class="badge warn" title="${esc(T.media.goneHint)}">${icon("alert", 13)}${esc(T.media.gone)}</span>` : "";
       const fast = asset.fast_transcript ? `<span class="badge" title="${esc(T.media.fastTranscriptHint)}">${esc(T.media.fastTranscript)}</span>` : "";
       return `<div class="card${asset.missing ? " gone" : ""}" title="${esc(asset.path)}" data-drag="item" data-id="${esc(asset.id)}">${extras}<div class="thumb">${picture}
-        <span class="badge">${clock(asset.duration)}</span></div>
+        <span class="badge">${asset.still ? esc(T.media.photo) : clock(asset.duration)}</span></div>
         <div class="card-body"><div class="card-title">${esc(asset.name)}</div><div class="card-meta"><span>${asset.width ? `${asset.width}×${asset.height}` : ""}</span>${kind}${fast}${gone}</div>
         ${asset.notes ? `<div class="card-notes" title="${esc(asset.notes)}">${esc(asset.notes)}</div>` : ""}</div></div>`;
     },

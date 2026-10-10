@@ -23,6 +23,7 @@ from app.engine.builder import (
     DUCK_ATTACK_SECONDS, DUCK_DEPTH_DB, DUCK_HOLD_SECONDS, DUCK_RELEASE_SECONDS, Talking, _cleanup_filters,
     overlay_box,
 )
+from app.engine import stills
 from app.engine.reframe import Framing
 from app.engine.subtitles import drawn_captions, place_cues
 from app.models.media import Asset
@@ -189,6 +190,9 @@ def _crop(framing: Optional[Framing], clip: Clip, fps: Fraction) -> Optional[dic
     return {
         "axis": framing.axis,
         "steps": [[round(frame / float(fps), 3), centre] for frame, centre in framing.positions],
+        "whole": framing.whole,
+        "zoom": framing.zoom,
+        "cross": framing.cross,
     }
 
 
@@ -233,7 +237,10 @@ def describe(
             if asset is None:
                 continue
             media = prepared.proxies.get(clip.asset_id)
-            if media is None:
+            if asset.still:
+                # A photo is shown as it is: the browser draws one picture as easily as any copy of it.
+                media = f"/media/{clip.asset_id}"
+            elif media is None:
                 # Until its copy is made the clip plays from the file itself: heavier, but it plays.
                 waiting.add(clip.asset_id)
                 media = f"/media/{clip.asset_id}"
@@ -241,7 +248,7 @@ def describe(
                     + voices.get(track.id, 0.0))
             entry = {
                 "id": clip.id, "asset_id": clip.asset_id, "proxy": media, "original": clip.asset_id in waiting,
-                "has_video": asset.has_video,
+                "has_video": asset.has_video, "still": asset.still,
                 "has_audio": asset.has_audio, "source_start": _seconds(clip.source_range.start),
                 "source_end": _seconds(clip.source_range.end), "timeline_in": _seconds(clip.timeline_in),
                 "timeline_out": _seconds(clip.timeline_out), "speed": float(clip.speed),
@@ -260,6 +267,9 @@ def describe(
                 entry["box"] = [left, top, width, height]
                 entry["source_size"] = [asset.width, asset.height] if asset.width and asset.height else None
                 entry["crop"] = _crop(framing.get(clip.id), clip, fps)
+                if asset.still:
+                    entry["motion"] = stills.motion_of(clip.motion)
+                    entry["motion_amount"] = stills.MOTION_AMOUNT
             clips.append(entry)
         tracks.append({
             "id": track.id, "type": track.track_type.value, "base": base is not None and track.id == base.id,
@@ -304,7 +314,7 @@ def missing(project: Project, assets: Mapping[str, Asset], have: Sequence[str]) 
     for track in project.tracks:
         for clip in sorted(track.clips, key=lambda item: item.timeline_in):
             asset = assets.get(clip.asset_id)
-            name = proxy_name(asset) if asset is not None else None
+            name = proxy_name(asset) if asset is not None and not asset.still else None
             if name is not None and name not in existing:
                 seen.setdefault(clip.asset_id, None)
     return list(seen)

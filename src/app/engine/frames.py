@@ -4,10 +4,12 @@ import subprocess
 from concurrent.futures import ThreadPoolExecutor
 from typing import Optional, Sequence, Tuple
 
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageFont
 
-from app.engine import resources
+from app.engine import resources, stills
+from app.engine.builder import WHOLE_DIM
 from app.engine.ffmpeg import hidden_window_flags
+from app.engine.reframe import Placement
 
 TILE_SIZE = 320
 TILE_GAP = 6
@@ -47,13 +49,15 @@ def extract_frame(path: str, seconds: float, max_size: int = TILE_SIZE, ffmpeg_b
     Raises:
         RuntimeError: If FFmpeg cannot decode a frame at that time.
     """
+    # A photo is the same picture at every moment, and seeking into one finds nothing.
+    seek = [] if stills.is_image(path) else ["-ss", f"{max(seconds, 0):.3f}"]
     # Wait for a slot, then decode on one thread: a single frame is wanted, and frame
     # threading would hold several decoded pictures of a 4K source in memory to produce it.
     with resources.decoder_slot():
         result = subprocess.run(
             [
                 ffmpeg_bin, "-hide_banner", "-loglevel", "error", "-nostdin",
-                "-threads", "1", "-ss", f"{max(seconds, 0):.3f}", "-i", path,
+                "-threads", "1", *seek, "-i", path,
                 "-map", "0:V:0", "-frames:v", "1",
                 "-vf", f"scale={max_size}:{max_size}:force_original_aspect_ratio=decrease",
                 "-f", "image2pipe", "-c:v", "png", "-",
@@ -66,38 +70,46 @@ def extract_frame(path: str, seconds: float, max_size: int = TILE_SIZE, ffmpeg_b
         raise RuntimeError(f"could not read a frame at {seconds:.3f}s: {result.stderr.decode('utf-8', errors='replace').strip()[-300:]}")
     return Image.open(io.BytesIO(result.stdout)).convert("RGB")
 
-def _crop_to_aspect(frame: Image.Image, aspect: float, centre: Optional[float] = None) -> Image.Image:
-    """Crop a frame to a width-to-height ratio.
+def _crop_to_aspect(frame: Image.Image, aspect: float, placed: Optional[Placement] = None) -> Image.Image:
+    """Fit a frame to a width-to-height ratio the way the render does.
 
-    This matches how the renderer fits a source into the output format: the
-    picture is scaled to cover the frame and the overflow is cropped away —
-    evenly on both sides, or around where the render's framing puts it.
+    The picture is scaled to cover the frame and the overflow is cropped away
+    — evenly on both sides, or around where the render's framing puts it, and
+    closer in when it is zoomed. A shot shown whole is instead fitted inside,
+    over a blurred and dimmed copy of itself.
 
     Args:
-        frame: Frame to crop.
+        frame: Frame to fit.
         aspect: Target width divided by target height.
-        centre: Where along the cropped axis the crop is centred, as a
-            fraction of the picture; None for the middle.
+        placed: How the render places it; None for a crop from the middle.
 
     Returns:
-        The largest crop of `frame` with that ratio, held inside the picture.
+        A picture of `frame` with that ratio.
     """
+    placed = placed or Placement()
     width, height = frame.size
-    where = 0.5 if centre is None else centre
-    if width > height * aspect:
-        kept = max(1, round(height * aspect))
-        left = min(max(0, round(where * width - kept / 2)), width - kept)
-        return frame.crop((left, 0, left + kept, height))
-    kept = max(1, round(width / aspect))
-    top = min(max(0, round(where * height - kept / 2)), height - kept)
-    return frame.crop((0, top, width, top + kept))
+    if placed.whole:
+        cover = _crop_to_aspect(frame, aspect)
+        background = cover.filter(ImageFilter.GaussianBlur(max(2, cover.width // 40)))
+        background = ImageEnhance.Brightness(background).enhance(1 + WHOLE_DIM)
+        scale = min(background.width / width, background.height / height)
+        shown = frame.resize((max(1, round(width * scale)), max(1, round(height * scale))), Image.LANCZOS)
+        background.paste(shown, ((background.width - shown.width) // 2, (background.height - shown.height) // 2))
+        return background
+    wide = width > height * aspect
+    kept_w = max(1, round((height * aspect if wide else width) / placed.zoom))
+    kept_h = max(1, round((height if wide else width / aspect) / placed.zoom))
+    across, down = (placed.centre, placed.cross) if wide else (placed.cross, placed.centre)
+    left = min(max(0, round(across * width - kept_w / 2)), width - kept_w)
+    top = min(max(0, round(down * height - kept_h / 2)), height - kept_h)
+    return frame.crop((left, top, left + kept_w, top + kept_h))
 
 def still(
     path: str,
     seconds: float,
     width: int,
     height: int,
-    centre: Optional[float] = None,
+    placed: Optional[Placement] = None,
     ffmpeg_bin: str = "ffmpeg",
 ) -> Image.Image:
     """Take one frame at full size, framed the way the render frames it.
@@ -107,18 +119,18 @@ def still(
         seconds: Time of the frame in the file.
         width: Width to deliver it at.
         height: Height to deliver it at.
-        centre: Where the crop is centred along the axis it crops, as a
-            fraction of the picture; None for the middle.
+        placed: How the render places it, as `reframe.placement_at` says;
+            None for a crop from the middle.
         ffmpeg_bin: Path to, or name of, the FFmpeg executable.
 
     Returns:
-        The frame, cropped to the delivery shape and scaled to its size.
+        The frame, fitted to the delivery shape and scaled to its size.
 
     Raises:
         RuntimeError: If the frame cannot be decoded.
     """
     frame = extract_frame(path, seconds, max_size=max(width, height) * 2, ffmpeg_bin=ffmpeg_bin)
-    return _crop_to_aspect(frame, width / height, centre).resize((width, height), Image.LANCZOS)
+    return _crop_to_aspect(frame, width / height, placed).resize((width, height), Image.LANCZOS)
 
 def _compose_sheet(
     frames: Sequence[Image.Image],
@@ -184,8 +196,8 @@ def storyboard_sheet(
 
     Args:
         shots: One `(path, seconds, label)` per tile, in the order to show
-            them, optionally with a fourth item: where the render's crop is
-            centred for that tile, as `reframe.centre_at` says.
+            them, optionally with a fourth item: how the render places that
+            tile, as `reframe.placement_at` says.
         aspect: Output width divided by height. When given, every tile is
             cropped to it, so the sheet shows the framing the render will have
             rather than the framing of the source files.

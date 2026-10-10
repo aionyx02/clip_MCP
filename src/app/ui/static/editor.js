@@ -20,6 +20,7 @@
     return `${m}:${(s - m * 60).toFixed(1).padStart(4, "0")}`;
   };
   const fps = () => (E?.project ? E.project.fps_num / E.project.fps_den : 30);
+  const clamp = (value, low, high) => Math.min(Math.max(value, low), high);
   const timecode = (seconds) => {
     const rate = Math.round(fps());
     const frames = Math.max(0, Math.round((seconds || 0) * fps()));
@@ -1130,6 +1131,8 @@
         <p class="hint">${esc(T.editor.nudgeHint)}</p>
       </div>
       <div class="group"><div class="label">${esc(T.editor.length)}<b>${clipLength(clip).toFixed(2)} ${esc(T.editor.seconds)}</b></div></div>
+      ${fitGroup(clip, asset)}
+      ${motionGroup(clip, asset)}
       <div class="group stack-buttons edit-action">
         <button class="btn" data-split>${svg("split")}${esc(T.editor.split)}</button>
         <button class="btn danger" data-delete>${icon("trash", 16)}${esc(T.editor.delete)}</button>
@@ -1141,10 +1144,110 @@
     });
     $("[data-split]", panel).onclick = split;
     $("[data-delete]", panel).onclick = remove;
+    wireFit(panel, clip);
+    panel.querySelectorAll("[data-motion]").forEach((button) => {
+      button.onclick = () => {
+        if (button.dataset.motion === (clip.motion || "push")) return;
+        edit([{ action: "set_clip_look", track_id: E.selected.track, clip_id: clip.id, motion: button.dataset.motion }]);
+      };
+    });
     const handBack = $("[data-handback]", panel);
     if (handBack) handBack.onclick = async () => {
       if (await edit([{ action: "set_clip_pinned", track_id: E.selected.track, clip_id: clip.id, pinned: false }])) toast(T.editor.handedBack);
     };
+  }
+
+  // ------------------------------------------------------------------ a shot of another shape
+
+  // Whether a clip's picture is another shape than the frame it fills, and so has a choice to make.
+  function shapeDiffers(clip, asset) {
+    if (!asset?.width || !asset?.height || clip.layout) return false;
+    return Math.abs(asset.width / asset.height - E.project.width / E.project.height) > 0.01;
+  }
+
+  function fitGroup(clip, asset) {
+    if (!shapeDiffers(clip, asset)) return "";
+    const mode = clip.fit?.mode || "auto";
+    const choice = (value) => `<button class="${mode === value ? "on" : ""}" data-fit-mode="${value}">${esc(T.fit.modes[value])}</button>`;
+    const zoom = Math.round((clip.fit?.zoom || 1) * 100);
+    return `<div class="group edit-action"><div class="label">${esc(T.fit.title)}</div>
+      <div class="seg fit-seg">${choice("auto")}${choice("fill")}${choice("whole")}</div>
+      <p class="hint">${esc(T.fit.hints[mode])}</p>
+      ${mode === "fill" ? `<div class="label">${esc(T.fit.zoom)}<b data-zoom-value>${zoom}%</b></div>
+        <input type="range" min="100" max="400" step="5" value="${zoom}" data-fit-zoom>` : ""}
+      ${clip.fit?.center_x != null || clip.fit?.center_y != null ? `<button class="btn small" data-fit-free>${esc(T.fit.free)}</button>` : ""}</div>`;
+  }
+
+  // A photo moves while it is on screen; null is the slow push the render gives it.
+  function motionGroup(clip, asset) {
+    if (!asset?.still) return "";
+    const motion = clip.motion || "push";
+    const choice = (value) => `<button class="${motion === value ? "on" : ""}" data-motion="${value}">${esc(T.motion.modes[value])}</button>`;
+    return `<div class="group edit-action"><div class="label">${esc(T.motion.title)}</div>
+      <div class="seg fit-seg">${Object.keys(T.motion.modes).map(choice).join("")}</div>
+      <p class="hint">${esc(T.motion.hint)}</p></div>`;
+  }
+
+  function fitEdit(clip, fit) {
+    return edit([{ action: "set_clip_look", track_id: E.selected.track, clip_id: clip.id,
+      ...(fit ? { fit } : { clear_fit: true }) }]);
+  }
+
+  function wireFit(panel, clip) {
+    panel.querySelectorAll("[data-fit-mode]").forEach((button) => {
+      button.onclick = () => {
+        const mode = button.dataset.fitMode;
+        if (mode === (clip.fit?.mode || "auto")) return;
+        fitEdit(clip, mode === "auto" ? null : { mode });
+      };
+    });
+    const zoom = $("[data-fit-zoom]", panel);
+    if (zoom) {
+      zoom.oninput = () => { $("[data-zoom-value]", panel).textContent = `${zoom.value}%`; };
+      zoom.onchange = () => fitEdit(clip, { ...clip.fit, mode: "fill", zoom: Number(zoom.value) / 100 });
+    }
+    const free = $("[data-fit-free]", panel);
+    if (free) free.onclick = () => fitEdit(clip, { mode: "fill", zoom: clip.fit?.zoom || 1 });
+  }
+
+  // Dragging the picture of a cropped shot moves its crop: the shot stays where it is put,
+  // no longer following a face. Only the selected clip, only while paused.
+  function startCropDrag(event) {
+    const clip = E.selected && findClip(E.selected.track, E.selected.clip);
+    const asset = clip && E.project.assets[clip.asset_id];
+    if (!clip || !shapeDiffers(clip, asset) || clip.fit?.mode === "whole" || E.viewing || !clock().paused) return false;
+    if (E.time < num(clip.timeline_in) || E.time >= clipEnd(clip)) return false;
+    if (clip.fit?.mode !== "fill" && !E.cropHinted) { E.cropHinted = true; toast(T.fit.dragHint); }
+    const shown = E.described?.tracks.flatMap((track) => track.clips).find((item) => item.id === clip.id);
+    const crop = shown?.crop;
+    const into = E.time - num(clip.timeline_in);
+    let centre = 0.5;
+    for (const [at, value] of crop?.steps || []) if (at <= into + 1e-6) centre = value;
+    const axis = crop?.axis || (asset.width / asset.height > E.project.width / E.project.height ? "x" : "y");
+    const cross = crop?.cross ?? 0.5;
+    const zoom = clip.fit?.zoom || 1;
+    const stage = $("[data-stage]", E.root).getBoundingClientRect();
+    // What share of the picture the frame shows along each axis.
+    const cover = Math.max(E.project.width / asset.width, E.project.height / asset.height) * zoom;
+    const seenX = E.project.width / cover / asset.width, seenY = E.project.height / cover / asset.height;
+    const startX = axis === "x" ? centre : cross, startY = axis === "y" ? centre : cross;
+    const at = { x: event.clientX, y: event.clientY };
+    let moved = null;
+    const move = (moveEvent) => {
+      const x = clamp(startX - (moveEvent.clientX - at.x) / stage.width * seenX, seenX / 2, 1 - seenX / 2);
+      const y = clamp(startY - (moveEvent.clientY - at.y) / stage.height * seenY, seenY / 2, 1 - seenY / 2);
+      moved = { x, y };
+      $("[data-stage]", E.root).style.cursor = "grabbing";
+    };
+    const up = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      $("[data-stage]", E.root).style.cursor = "";
+      if (moved) fitEdit(clip, { mode: "fill", zoom, center_x: Math.round(moved.x * 1000) / 1000, center_y: Math.round(moved.y * 1000) / 1000 });
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+    return true;
   }
 
   function drawClipSound(panel, clip) {
@@ -1988,6 +2091,9 @@
     if (!E.project.name) renameProject(E.project, async () => { await loadProject(); drawAll(); }, T.project.needsName);
 
     $("[data-play]", page).onclick = togglePlay;
+    $("[data-stage]", page).addEventListener("pointerdown", (event) => {
+      if (event.button === 0 && E.view === "edit" && startCropDrag(event)) event.preventDefault();
+    });
     $("[data-comment-btn]", page).onclick = () => writeComment(E.time);
     $("[data-replay]", page).onclick = replay;
     page.querySelectorAll("[data-step]").forEach((button) => {

@@ -45,6 +45,10 @@ class Asset(BaseModel):
         description="`footage` or `music`: which of the library's two halves the file is in. Null for a file "
                     "added before there were two, which is placed by whether it has a picture",
     )
+    still: bool = Field(
+        default=False,
+        description="A photo rather than a video: one picture, shown for as long as a clip of it runs",
+    )
 
 class Span(BaseModel):
     """A time span within a media file, in seconds."""
