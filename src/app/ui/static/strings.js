@@ -109,6 +109,7 @@ window.T = {
     // Said wherever files come in: the AI, too, can only cut what is in the library.
     libraryOnly: "只有素材庫裡的檔案能放進專案，AI 也只能使用素材庫裡的檔案。要用其他影片或音樂，請先按「加入」把它加進素材庫；在 AI 對話中給它檔案路徑時，它也會先把檔案加進素材庫。",
     noSound: "無聲",
+    photo: "照片",
     audioOnly: "聲音",
     gone: "找不到原始檔",
     goneHint: "原始檔案被移動或刪除了。不需要的話可以從素材庫移除。",
@@ -298,6 +299,11 @@ window.T = {
     zoom: "放大",
     free: "交回自動位置",
     dragHint: "拖曳後這段會固定在你放的位置，不再跟著臉",
+  },
+  motion: {
+    title: "照片怎麼動",
+    modes: { push: "慢慢推近", pull: "慢慢拉遠", pan_left: "往左移", pan_right: "往右移", none: "不動" },
+    hint: "照片在畫面上停留時的移動方式。完全不動的照片看起來像影片卡住了。",
   },
   compare: {
     start: "跟目前比較",

@@ -48,7 +48,7 @@ from app.models.timeline import (
 )
 from app.models.comment import Comment, Reply
 from app.models.job import Job, JobKind, JobStatus
-from app.engine import loudness, machine, meaning, resources, speed
+from app.engine import loudness, machine, meaning, resources, speed, stills
 from app.engine.analysis import listen_again as listen_again_in_file
 from app.engine.analysis import (
     current_recipe, doubtful_spots, marked_text, marked_words, sound_note, transcription_of, unsure_words,
@@ -123,7 +123,7 @@ SUMMARY_SCORES = content_scores()
 MEDIA_EXTENSIONS = frozenset({
     ".mp4", ".mov", ".m4v", ".mkv", ".avi", ".webm", ".mpg", ".mpeg", ".mts", ".m2ts", ".wmv", ".flv", ".3gp",
     ".mp3", ".m4a", ".wav", ".aac", ".flac", ".ogg", ".opus", ".wma", ".aiff",
-})
+}) | stills.IMAGE_EXTENSIONS
 
 # Opened before the server is described: what it says about this computer's speed comes from runs kept here.
 repo = Repository(os.path.join(WORKSPACE_DIR, "clip_mcp.db"))
@@ -155,7 +155,8 @@ mcp = FastMCP(
         "user has heard what the check found, how one cut is delivered in "
         "several shapes and handed to other editing programs, "
         "and the current limits: no overlapping picture on a "
-        "track, no still images, and no graphics beyond captions. "
+        "track, and no graphics beyond captions. Photos go in like videos and "
+        "are shown for as long as their clip runs. "
         "Transitions end on the cut rather than straddling it, so adding one "
         "never changes how long the video runs. The person using this server is "
         "editing their own video, not writing code: reply in plain language "
@@ -547,9 +548,14 @@ def register_asset(filepath: str, library: Optional[str] = None) -> Asset:
     existing = repo.find_asset_by_path(path)
     streams = info.get("streams", [])
     duration = info.get("format", {}).get("duration")
+    photo = stills.is_image(path)
+    if photo:
+        # A photo is as long as it is shown.
+        duration = stills.STILL_LONGEST
     asset = Asset(
         id=existing.id if existing else str(uuid.uuid4()),
         path=path,
+        still=photo,
         duration=Decimal(duration) if duration is not None else None,
         has_video=any(
             stream.get("codec_type") == "video" and not stream.get("disposition", {}).get("attached_pic")
@@ -756,7 +762,8 @@ def list_assets(
 
     Returns:
         A dictionary with `assets`, one short record per file — `id`, `name`,
-        `duration` in seconds, `has_video`, `has_audio`, `analyzed`,
+        `duration` in seconds (null for a photo, which lasts as long as its
+        clip; `photo` is true for one), `has_video`, `has_audio`, `analyzed`,
         `transcription` (`fast`, `accurate`, or null when speech was not
         transcribed), `stale`, `library`, `folder_id` and, where the file has
         them, its `notes` — how it may be used — in name order; `total`, how
@@ -784,9 +791,11 @@ def list_assets(
         assets.append({
             "id": asset.id,
             "name": os.path.basename(asset.path),
-            "duration": None if asset.duration is None else float(asset.duration),
+            # A photo has no length of its own: it lasts as long as a clip of it is made to.
+            "duration": None if asset.duration is None or asset.still else float(asset.duration),
             "has_video": asset.has_video,
             "has_audio": asset.has_audio,
+            **({"photo": True} if asset.still else {}),
             "analyzed": analysis is not None,
             "transcription": _transcription(analysis),
             "stale": analysis is not None and _is_stale(analysis),

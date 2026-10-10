@@ -1132,6 +1132,7 @@
       </div>
       <div class="group"><div class="label">${esc(T.editor.length)}<b>${clipLength(clip).toFixed(2)} ${esc(T.editor.seconds)}</b></div></div>
       ${fitGroup(clip, asset)}
+      ${motionGroup(clip, asset)}
       <div class="group stack-buttons edit-action">
         <button class="btn" data-split>${svg("split")}${esc(T.editor.split)}</button>
         <button class="btn danger" data-delete>${icon("trash", 16)}${esc(T.editor.delete)}</button>
@@ -1144,6 +1145,12 @@
     $("[data-split]", panel).onclick = split;
     $("[data-delete]", panel).onclick = remove;
     wireFit(panel, clip);
+    panel.querySelectorAll("[data-motion]").forEach((button) => {
+      button.onclick = () => {
+        if (button.dataset.motion === (clip.motion || "push")) return;
+        edit([{ action: "set_clip_look", track_id: E.selected.track, clip_id: clip.id, motion: button.dataset.motion }]);
+      };
+    });
     const handBack = $("[data-handback]", panel);
     if (handBack) handBack.onclick = async () => {
       if (await edit([{ action: "set_clip_pinned", track_id: E.selected.track, clip_id: clip.id, pinned: false }])) toast(T.editor.handedBack);
@@ -1169,6 +1176,16 @@
       ${mode === "fill" ? `<div class="label">${esc(T.fit.zoom)}<b data-zoom-value>${zoom}%</b></div>
         <input type="range" min="100" max="400" step="5" value="${zoom}" data-fit-zoom>` : ""}
       ${clip.fit?.center_x != null || clip.fit?.center_y != null ? `<button class="btn small" data-fit-free>${esc(T.fit.free)}</button>` : ""}</div>`;
+  }
+
+  // A photo moves while it is on screen; null is the slow push the render gives it.
+  function motionGroup(clip, asset) {
+    if (!asset?.still) return "";
+    const motion = clip.motion || "push";
+    const choice = (value) => `<button class="${motion === value ? "on" : ""}" data-motion="${value}">${esc(T.motion.modes[value])}</button>`;
+    return `<div class="group edit-action"><div class="label">${esc(T.motion.title)}</div>
+      <div class="seg fit-seg">${Object.keys(T.motion.modes).map(choice).join("")}</div>
+      <p class="hint">${esc(T.motion.hint)}</p></div>`;
   }
 
   function fitEdit(clip, fit) {
