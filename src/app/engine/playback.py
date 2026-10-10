@@ -23,7 +23,7 @@ from app.engine.builder import (
     DUCK_ATTACK_SECONDS, DUCK_DEPTH_DB, DUCK_HOLD_SECONDS, DUCK_RELEASE_SECONDS, Talking, _cleanup_filters,
     overlay_box,
 )
-from app.engine import stills
+from app.engine import cards, stills
 from app.engine.reframe import Framing
 from app.engine.subtitles import drawn_captions, place_cues
 from app.models.media import Asset
@@ -267,9 +267,12 @@ def describe(
                 entry["box"] = [left, top, width, height]
                 entry["source_size"] = [asset.width, asset.height] if asset.width and asset.height else None
                 entry["crop"] = _crop(framing.get(clip.id), clip, fps)
-                if asset.still:
+                if asset.still and clip.card is None:
                     entry["motion"] = stills.motion_of(clip.motion)
                     entry["motion_amount"] = stills.MOTION_AMOUNT
+                if clip.card is not None:
+                    entry["card"] = {"background": clip.card.background, "colour": clip.card.colour,
+                                     "at": _seconds(clip.card.at)}
             clips.append(entry)
         tracks.append({
             "id": track.id, "type": track.track_type.value, "base": base is not None and track.id == base.id,
@@ -287,6 +290,9 @@ def describe(
         },
         "captions": drawn_captions(place_cues(project, project.subtitles), project.width, project.height,
                                    project.caption_style),
+        # Title cards: their words, placed as the render places them, and how their backgrounds look.
+        "cards": {"events": cards.drawn(project), "blur_share": cards.BLUR_SHARE, "blur_dim": cards.BLUR_DIM,
+                  "picture_dim": cards.PICTURE_DIM},
         "gain_db": prepared.gain_db,
         "loudness_target": LOUDNESS_TARGET,
         "approximate": {

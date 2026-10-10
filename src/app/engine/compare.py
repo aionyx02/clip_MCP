@@ -81,7 +81,10 @@ def clips_in(part: Part, clips: List[Clip], last: bool) -> List[Clip]:
 
 
 def _overlap(one: Clip, other: Clip) -> float:
-    """How many seconds of the same file two clips share."""
+    """How many seconds of the same file two clips share; a title card shares only with itself."""
+    if one.card is not None or other.card is not None:
+        same = one.card is not None and other.card is not None and one.id == other.id
+        return float(min(one.timeline_duration, other.timeline_duration)) if same else 0.0
     if one.asset_id != other.asset_id:
         return 0.0
     return max(0.0, min(float(one.source_range.end), float(other.source_range.end))
@@ -129,6 +132,8 @@ def _seconds(value: float) -> str:
 
 def _clip_changes(one: Clip, other: Clip, said: Said, named: Named) -> List[str]:
     """Say how the same footage is used differently in two versions."""
+    if one.card is not None and other.card is not None:
+        return _card_changes(one, other)
     changes = []
     head = float(other.source_range.start) - float(one.source_range.start)
     tail = float(other.source_range.end) - float(one.source_range.end)
@@ -154,8 +159,26 @@ def _clip_changes(one: Clip, other: Clip, said: Said, named: Named) -> List[str]
     return changes
 
 
+def _card_changes(one: Clip, other: Clip) -> List[str]:
+    """Say how a title card differs between two versions."""
+    where = f"標題卡「{one.card.title}」"
+    changes = []
+    if other.card.title != one.card.title:
+        changes.append(f"{where}改成「{other.card.title}」")
+    if other.card.subtitle != one.card.subtitle:
+        changes.append(f"{where}的副標 {one.card.subtitle or '沒有'} → {other.card.subtitle or '沒有'}")
+    length = float(other.timeline_duration) - float(one.timeline_duration)
+    if abs(length) > NOTICED_SECONDS:
+        changes.append(f"{where}{'加長' if length > 0 else '縮短'} {_seconds(abs(length))}")
+    if (other.card.background, other.card.colour, other.asset_id) != (one.card.background, one.card.colour, one.asset_id):
+        changes.append(f"{where}換了底")
+    return changes
+
+
 def _named_stretch(clip: Clip, said: Said, named: Named) -> str:
     """A clip as a person names it: by what is said in it, or else by its file."""
+    if clip.card is not None:
+        return f"標題卡「{clip.card.title}」"
     return _quote(said, clip, float(clip.source_range.start), float(clip.source_range.end)) or \
         f"{named(clip.asset_id)} 的一段"
 
