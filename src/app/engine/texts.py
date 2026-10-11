@@ -104,7 +104,7 @@ def placed(text: TextLayer, width: int, height: int, style: CaptionStyle) -> Lis
         low, high = geometry.margin_h + box, width - geometry.margin_h - widest + box
         if align == "center":
             low, high = geometry.margin_h + widest / 2, width - geometry.margin_h - widest / 2
-        x = min(max(width * text.x, low), high) if low <= high else width / 2
+        x = min(max(width * text.x, low), high) if low <= high else (width / 2 if align == "center" else low)
     if text.y is not None:
         top = height * text.y - total / 2
     if text.x is not None or text.y is not None:
@@ -173,13 +173,17 @@ def drawn(project: Project, style: Optional[CaptionStyle] = None) -> dict:
     """Describe a cut's text layers for the editor's player to paint, as `placed` places them.
 
     Returns:
-        `events`, each with `start`, `end`, the clip and text IDs, and its
-        `rows`; and the `fade` and the box's `opacity`.
+        `events`, each with `start`, `end`, the clip and text IDs, its
+        `rows`, and `at`, where it is drawn as the `x` and `y` that would put
+        it there, which a drag in the editor starts from; and the `fade` and
+        the box's `opacity`.
     """
     style = style or CaptionStyle()
-    return {
-        "fade": FADE_SECONDS, "box_opacity": BOX_OPACITY,
-        "events": [{"start": start, "end": end, "clip_id": clip.id, "text_id": text.id,
-                    "rows": placed(text, project.width, project.height, style)}
-                   for clip, text, (start, end) in _layers(project)],
-    }
+    events = []
+    for clip, text, (start, end) in _layers(project):
+        rows = placed(text, project.width, project.height, style)
+        top = rows[0]["y"] - rows[0]["size"] * CAPTION_LINE_HEIGHT / 2
+        bottom = rows[-1]["y"] + rows[-1]["size"] * CAPTION_LINE_HEIGHT / 2
+        at = {"x": round(rows[0]["x"] / project.width, 4), "y": round((top + bottom) / 2 / project.height, 4)}
+        events.append({"start": start, "end": end, "clip_id": clip.id, "text_id": text.id, "rows": rows, "at": at})
+    return {"fade": FADE_SECONDS, "box_opacity": BOX_OPACITY, "events": events}

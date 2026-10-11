@@ -1371,8 +1371,13 @@ class AddTextOp(_TextTimes):
     text: str = Field(..., min_length=1, max_length=60)
     second: Optional[str] = Field(default=None, max_length=60, description="A smaller second line, if any")
     style: TextStyle = "name"
-    x: Optional[float] = Field(default=None, ge=0, le=1, description="For `free`: centre across, 0 to 1")
-    y: Optional[float] = Field(default=None, ge=0, le=1, description="For `free`: centre down, 0 to 1")
+    x: Optional[float] = Field(
+        default=None, ge=0, le=1,
+        description="Put it here across instead of where its style goes, 0 to 1: the centre, or the left edge of a "
+                    "name or a place; it is kept inside the frame's margins",
+    )
+    y: Optional[float] = Field(default=None, ge=0, le=1,
+                               description="Put its middle here down the frame instead, 0 to 1; kept off the captions")
     by_plan: SkipJsonSchema[bool] = False
     hidden: SkipJsonSchema[bool] = False
 

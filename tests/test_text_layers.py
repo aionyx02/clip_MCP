@@ -144,3 +144,17 @@ def test_moved_words_stay_whole_inside_the_frame() -> None:
                 left = row["x"] - (wide / 2 if row["align"] == "center" else row["box"])
                 right = row["x"] + (wide / 2 if row["align"] == "center" else wide + row["box"])
                 assert margin - 1 <= left and right <= 1080 - margin + 1, (kind, x, row)
+
+
+def test_where_words_are_drawn_puts_them_there_again() -> None:
+    from app.engine.subtitles import CAPTION_LINE_HEIGHT
+    from app.models.timeline import CaptionStyle, TextLayer
+    style = CaptionStyle()
+    for kind in ("name", "place", "headline"):
+        layer = TextLayer(id="t", text="王小明", second="店長", style=kind, start=0, end=4, y=0.99)
+        rows = texts.placed(layer, 1080, 1920, style)
+        top = rows[0]["y"] - rows[0]["size"] * CAPTION_LINE_HEIGHT / 2
+        bottom = rows[-1]["y"] + rows[-1]["size"] * CAPTION_LINE_HEIGHT / 2
+        again = layer.model_copy(update={"x": rows[0]["x"] / 1080, "y": (top + bottom) / 2 / 1920})
+        assert [(row["x"], row["y"]) for row in texts.placed(again, 1080, 1920, style)] == \
+            [(row["x"], row["y"]) for row in rows], kind

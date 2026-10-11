@@ -1274,10 +1274,8 @@
     if (!event_) return false;
     if (!E.textHinted) { E.textHinted = true; toast(T.texts.dragHint); }
     const stage = $("[data-stage]", E.root).getBoundingClientRect();
-    // Where the words are now, as the render placed them: the row's anchor across, the block's middle down.
-    const rows = event_.rows;
-    const from = { x: text.x ?? rows[0].x / E.project.width,
-                   y: text.y ?? (rows[0].y + rows[rows.length - 1].y) / 2 / E.project.height };
+    // Where the words are drawn now, which may be short of where they were put if that was out of bounds.
+    const from = event_.at;
     let moved = null;
     const move = (moveEvent) => {
       moved = { x: clamp(from.x + (moveEvent.clientX - event.clientX) / stage.width, 0, 1),

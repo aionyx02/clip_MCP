@@ -271,8 +271,9 @@ class PlanText(BaseModel):
         default=None, ge=0, description="First second of the file it covers; null from the start of the piece",
     )
     end: Optional[float] = Field(default=None, gt=0, description="Where it stops; null at the end of the piece")
-    x: Optional[float] = Field(default=None, ge=0, le=1, description="For `free`")
-    y: Optional[float] = Field(default=None, ge=0, le=1, description="For `free`")
+    x: Optional[float] = Field(default=None, ge=0, le=1,
+                               description="Across, 0 to 1, instead of where its style goes: as `add_text`'s `x`")
+    y: Optional[float] = Field(default=None, ge=0, le=1, description="Down, 0 to 1, likewise")
 
 class Beat(BaseModel):
     """One part of the finished video, and what it is there to do."""
