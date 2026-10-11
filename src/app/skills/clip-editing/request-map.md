@@ -24,7 +24,7 @@ feedback are mapped in their own files.
 | 「音樂從第 10 秒才進來」 / start the music at 0:10 | `move_clip` the first music clip with `new_timeline_in: 10`, then `fit_track` again |
 | 「用歌的 1:05 開始」 / start from the chorus at 1:05 | Music clip `source_range.start: 65` |
 | 「音樂小聲一點／大聲一點」 / music quieter or louder | `set_clip_audio` on every music clip, `volume` × 0.6 or × 1.5 (in a plan: `set_music_level`) |
-| 「音樂淡出」「音樂比影片長／短」 / fade the music, fit it | `fit_track` with `fade_out: 2` |
+| 「音樂淡出」「音樂比影片長／短」 / fade the music, fit it | `fit_track` with `fade_out: 2`; a song too short loops by itself on a loop point on its beat, skipping its intro and ending |
 | 「拿掉背景音樂」 / remove the music | `delete_clip` every clip on the audio track |
 | 「人聲出現時音樂小聲一點」 / duck the music under the talking | `set_track_audio` on the music track with `duck_under_speech: true` |
 | 「找一首輕快的歌」「配首溫暖的鋼琴」 / find a song | `find_music` with it in English and the part's length as `min_seconds`; read the top few back with how each sounds |

@@ -38,6 +38,7 @@ from app.models.timeline import (
     Clip,
     EditOperation,
     EditSubtitleOp,
+    FitTrackOp,
     Project,
     SetSubtitlesOp,
     SubtitleCue,
@@ -3191,6 +3192,15 @@ def _apply(
         )
 
     # Assets are looked up first so operations that need source lengths, such as fit_track, can use them.
+    # Where each song on a track being fitted can loop on the beat: the timeline cannot read analyses.
+    for op in operations:
+        if isinstance(op, FitTrackOp):
+            track = next((item for item in project.tracks if item.id == op.track_id), None)
+            for asset_id in {clip.asset_id for clip in (track.clips if track else [])}:
+                analysis = repo.get_analysis(asset_id)
+                span = clean_cuts(analysis).loop if analysis is not None else None
+                if span is not None:
+                    op.loops[asset_id] = (Decimal(str(span[0])), Decimal(str(span[1])))
     # A photo a title card is to stand on is not in the cut until the card puts it there.
     known = repo.get_assets({clip.asset_id for track in project.tracks for clip in track.clips}
                             | {op.photo_asset_id for op in operations if getattr(op, "photo_asset_id", None)})

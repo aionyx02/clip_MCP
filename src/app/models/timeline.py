@@ -1022,6 +1022,9 @@ class FitTrackOp(BaseModel):
     )
     fade_in: Optional[Decimal] = Field(default=None, ge=0, description="Fade-in to put on the first clip (seconds)")
     fade_out: Optional[Decimal] = Field(default=None, ge=0, description="Fade-out to put on the new last clip (seconds)")
+    # Where each song can loop on the beat, by asset ID: filled in by the server from the
+    # songs' analyses, which the timeline has no way to read.
+    loops: SkipJsonSchema[Dict[str, Tuple[Decimal, Decimal]]] = Field(default_factory=dict)
 
 class EditSubtitleOp(BaseModel):
     """Edit operation that changes or removes one caption, leaving the rest untouched."""
@@ -1838,9 +1841,20 @@ def _fit_track(project: Project, track: Track, op: "FitTrackOp", assets: Mapping
                     end=last.source_range.end + min(room, needed),
                 )
 
-    if op.loop and kept:
+    if op.loop and kept and kept[-1].timeline_out < video_end:
         # The longest clip is the untrimmed one, so looping it repeats the whole song rather than an offcut.
         unit = max(kept, key=lambda item: item.source_range.duration)
+        # A song with a loop point turns round on it, on the beat, instead of playing its ending
+        # and starting again from the top: the clip that ran out stops at the loop's end, and
+        # every repeat is the loop.
+        span = op.loops.get(unit.asset_id)
+        last = kept[-1]
+        if (span is not None and last.asset_id == unit.asset_id
+                and last.source_range.start < span[1] <= last.source_range.end and span[0] < span[1]):
+            last.source_range = TimeRange(start=last.source_range.start, end=span[1])
+            repeat = TimeRange(start=span[0], end=span[1])
+        else:
+            repeat = unit.source_range
         copies = 1
         while kept[-1].timeline_out < video_end:
             position = kept[-1].timeline_out
@@ -1856,8 +1870,8 @@ def _fit_track(project: Project, track: Track, op: "FitTrackOp", assets: Mapping
                 id=identifier,
                 asset_id=unit.asset_id,
                 source_range=TimeRange(
-                    start=unit.source_range.start,
-                    end=unit.source_range.start + min(unit.source_range.duration, remaining),
+                    start=repeat.start,
+                    end=repeat.start + min(repeat.duration, remaining),
                 ),
                 timeline_in=position,
                 speed=unit.speed,

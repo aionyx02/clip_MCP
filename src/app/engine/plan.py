@@ -958,17 +958,46 @@ def song_entry(cue: MusicCue, song: Optional[CleanCuts]) -> float:
             return round(song.beats[at], 3)
     return round(cue.start, 3)
 
+def turnaround(
+    song: Optional[CleanCuts], entry: float, length: Optional[float], span: float,
+) -> Optional[Tuple[float, float]]:
+    """Say whether a cue's song loops on its loop point, and where.
+
+    Only when it has to: a song that lasts the cue from where it comes in
+    plays straight through, outro and all. One that runs out turns round at
+    the end of its loop, on the beat, and carries on from its start, rather
+    than playing its ending and starting over from where the cue came in.
+
+    Args:
+        song: What is known about the song.
+        entry: Where in the song the cue comes in.
+        length: How long the song is, or None when not known.
+        span: How long the cue plays on the timeline.
+
+    Returns:
+        `(start, end)` of the loop in song seconds, or None to loop the old
+        way, back to `entry` from the song's end.
+    """
+    if song is None or length is None or span <= length - entry + 0.001:
+        return None
+    loop = song.loop
+    if loop is None or entry >= loop[1] - 1.0:
+        return None
+    return loop
+
 def _beats_near(
     beats: Sequence[float],
     entry: float,
     length: Optional[float],
     entered_at: float,
     seconds: float,
+    turn: Optional[Tuple[float, float]] = None,
 ) -> List[float]:
     """Find the beats of a playing song either side of a moment of the timeline.
 
-    The song plays from `entry` and loops back there when it runs out, the way
-    `music_beds` lays it, so the beats repeat with the length of one pass.
+    The song plays from `entry` and loops the way `music_beds` lays it: back
+    to `entry` when it runs out, or, given a `turn`, from its end to its start
+    once it gets there. The beats repeat with the length of one pass.
 
     Args:
         beats: The song's beats, in song seconds.
@@ -977,12 +1006,27 @@ def _beats_near(
             taken never to loop.
         entered_at: Where on the timeline it came in.
         seconds: The moment of the timeline to look near.
+        turn: The loop the song turns round on, from `turnaround`, if any.
 
     Returns:
         The beat just before and the beat just after, on the timeline, nearer
         one first — both, because the nearer one may be out of reach where the
         other is not. Empty when the song has no beat after where it came in.
     """
+    if turn is not None:
+        start, end = turn
+        first = [entered_at + beat - entry for beat in beats if entry <= beat < end]
+        period = end - start
+        looped = [beat - start for beat in beats if start <= beat < end]
+        since = seconds - (entered_at + end - entry)
+        around = list(first)
+        if looped and period > 0:
+            for n in range(max(0, math.floor(since / period) - 1), max(0, math.floor(since / period) + 2)):
+                around += [entered_at + end - entry + n * period + beat for beat in looped]
+        before = [beat for beat in around if beat <= seconds]
+        after = [beat for beat in around if beat > seconds]
+        near = ([max(before)] if before else []) + ([min(after)] if after else [])
+        return sorted(near, key=lambda beat: abs(beat - seconds))
     heard = [beat - entry for beat in beats if beat >= entry and (length is None or beat < length)]
     if not heard:
         return []
@@ -1082,20 +1126,26 @@ def _on_the_beat(
     playing: Optional[MusicCue] = None
     song: Optional[CleanCuts] = None
     length: Optional[float] = None
+    turn: Optional[Tuple[float, float]] = None
     entry, entered_at, position = 0.0, 0.0, 0.0
+    starts = sorted(entries)
     for index in range(len(out)):
         if index in entries:
             playing = entries[index]
             song = cuts.get(playing.asset_id) if playing.asset_id else None
             length = _song_length(assets.get(playing.asset_id)) if playing.asset_id else None
             entry, entered_at = song_entry(playing, song), position
+            # How long it plays, as the windows stand: ends moved for the beat move it by a fraction.
+            following = next((at for at in starts if at > index), len(out))
+            span = sum(piece.played for piece in out[index:following])
+            turn = turnaround(song, entry, length, span)
         piece = out[index]
         on_beat = playing is not None and playing.cut_on_beat and song is not None and song.beats
         if index + 1 < len(out) and on_beat:
             closing_at = position + piece.played
             shifts = [
                 round(beat - closing_at, 3)
-                for beat in _beats_near(song.beats, entry, length, entered_at, closing_at)
+                for beat in _beats_near(song.beats, entry, length, entered_at, closing_at, turn)
             ]
             known = cuts.get(piece.asset_id)
             # A shift is timeline seconds; the window's end moves by that much of its file.
@@ -2492,16 +2542,20 @@ def music_beds(
         # Everything settled to the millisecond the timeline keeps before it is added up,
         # so a loop can neither run a hair past the file nor overlap the next one.
         last = _song_length(assets.get(cue.asset_id))
+        # A song that runs out turns round on its loop point when it has one, so it never plays
+        # its ending and starts over; otherwise it comes back to where the cue came in.
+        turn = turnaround(cuts.get(cue.asset_id) if cuts else None, entry, last, until - at)
+        stop = last if turn is None else turn[1]
         parts: List[Tuple[float, float, float]] = []
         cursor, begin = round(at - lead, 3), round(entry - lead, 3)
         while until - cursor > 0.001:
-            end = round(until - cursor + begin, 3) if last is None else min(round(until - cursor + begin, 3), last)
+            end = round(until - cursor + begin, 3) if stop is None else min(round(until - cursor + begin, 3), stop)
             if end - begin <= 0.001:
                 break
             parts.append((begin, end, round(cursor, 3)))
             cursor = round(cursor + end - begin, 3)
             # Loops come back to where the cue came in, not to the lead-in before it.
-            begin = entry
+            begin = entry if turn is None else turn[0]
         if not parts:
             sounding = False
             continue

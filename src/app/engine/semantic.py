@@ -746,6 +746,8 @@ class CleanCuts:
             have no steady pulse.
         energy: For a song, its energy each second on its own scale from 0
             to 1; None when it was not heard as one.
+        loudness: For a song, its loudness each second in dBFS, which its
+            loop is found from when its energy was never kept.
         voiced: Where the second listen's voice detector hears talking.
         heard: The words the second listen heard, each stretch transcribed on
             its own, as `(start, end, text)`; only those it was at least
@@ -764,6 +766,7 @@ class CleanCuts:
     transcribed: bool = False
     beats: Optional[Tuple[float, ...]] = None
     energy: Optional[Tuple[float, ...]] = None
+    loudness: Optional[Tuple[float, ...]] = None
     voiced: Tuple[Tuple[float, float], ...] = ()
     heard: Tuple[Tuple[float, float, str], ...] = ()
     listened: bool = False
@@ -938,6 +941,15 @@ class CleanCuts:
             if quiet > start and loud < end and loud - quiet > longer_than
             and (not self.transcribed or talked_around(quiet, loud))
         )
+
+    @property
+    def loop(self) -> Optional[Tuple[float, float]]:
+        """Where a song can loop without the jump being heard, as `music.loop_span` finds it; None when unknown."""
+        from app.engine.music import energy_curve, loop_span
+
+        # A song heard before its energy was kept still has its loudness, which the energy comes from.
+        energy = self.energy or (tuple(energy_curve(self.loudness)) if self.loudness else ())
+        return loop_span(self.beats or (), energy, self.duration)
 
     def sound_before(self, seconds: float) -> Optional[float]:
         """Find where talking the transcript missed really starts, just before a cut.
@@ -1310,6 +1322,7 @@ def clean_cuts(analysis: MediaAnalysis) -> CleanCuts:
         transcribed=transcript is not None,
         beats=None if analysis.rhythm is None else tuple(analysis.rhythm.beats),
         energy=tuple(analysis.music.energy) if analysis.music is not None and analysis.music.energy else None,
+        loudness=tuple(second.loudness for second in analysis.sound) if analysis.rhythm is not None else None,
         voiced=tuple((span.start, span.end) for span in listened.voiced) if listened else (),
         heard=tuple(
             (word.start, word.end, word.text) for word in listened.words if word.probability >= HEARD_PROBABILITY
