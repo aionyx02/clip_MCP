@@ -397,7 +397,8 @@ def _inside_speech(analysis: MediaAnalysis, at: float, opens: bool) -> bool:
         True inside a word, or between two words of one sentence closer
         together than a pause, or where sound the transcript missed runs
         right up to the cut on the side it keeps out. Never inside a measured
-        silence of `CLEAN_SILENCE_SECONDS` or more.
+        silence of `CLEAN_SILENCE_SECONDS` or more, nor where the second
+        listen hears nobody, whatever the word timings say.
     """
     if any(span.start <= at <= span.end and span.end - span.start >= CLEAN_SILENCE_SECONDS
            for span in analysis.silences):
@@ -405,6 +406,8 @@ def _inside_speech(analysis: MediaAnalysis, at: float, opens: bool) -> bool:
     known = clean_cuts(analysis)
     if (known.sound_before(at) if opens else known.sound_after(at)) is not None:
         return True
+    if known.quiet_on_second_listen(at):
+        return False
     for segment in _said(analysis):
         if not segment.start < at < segment.end:
             continue
@@ -485,14 +488,23 @@ def _speech_cuts(clips: Sequence[Clip], analyses: Mapping[str, MediaAnalysis]) -
                         f"sound was measured. {move} at {edge:.2f}s of the file to keep all of it"
                     )))
                 continue
-            near = [point for point in _clean_points(analysis) if abs(point - at) <= CLEAN_SEARCH_SECONDS]
-            advice = (
-                f"; the nearest pause is at {min(near, key=lambda point: abs(point - at)):.2f}s of the file"
-                if near else ""
-            )
+            known = clean_cuts(analysis)
+            really = known.sound_before(at) if opens else known.sound_after(at)
+            lost = known.heard_cut_off(at, opens)
+            if really is not None:
+                # What the sound says beats the nearest pause in a transcript that got this wrong.
+                advice = f"; the talking really {'starts' if opens else 'stops'} at {really:.2f}s of the file"
+            else:
+                near = [point for point in _clean_points(analysis) if abs(point - at) <= CLEAN_SEARCH_SECONDS]
+                advice = (
+                    f"; the nearest pause is at {min(near, key=lambda point: abs(point - at)):.2f}s of the file"
+                    if near else ""
+                )
             found.append(Finding("mid_speech", (
                 f"clip {clip.id} {side} in the middle of somebody talking, at {clock(landed)} "
-                f"({at:.2f}s of the file){advice}"
+                f"({at:.2f}s of the file)"
+                + (f", and takes 「{lost}」 off, heard on a second listen" if lost else "")
+                + advice
             )))
     return found
 

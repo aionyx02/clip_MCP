@@ -51,8 +51,8 @@ from app.models.job import Job, JobKind, JobStatus
 from app.engine import cards, texts, loudness, machine, meaning, resources, speed, stills
 from app.engine.analysis import listen_again as listen_again_in_file
 from app.engine.analysis import (
-    current_recipe, doubtful_spots, marked_text, marked_words, sound_note, transcription_of, unsure_words,
-    whisper_model_for, whisper_model_name,
+    current_recipe, doubtful_spots, marked_text, marked_words, second_listen, sound_note, transcription_of,
+    unsure_words, whisper_model_for, whisper_model_name,
 )
 from app.engine.diarize import speaker_model_name
 from app.engine.rhythm import rhythm_model_name
@@ -3225,7 +3225,7 @@ def _plan_context(plan: EditPlan) -> tuple:
     for asset_id in footage | songs:
         analysis = repo.get_analysis(asset_id)
         if analysis is not None:
-            cuts[asset_id] = clean_cuts(analysis)
+            cuts[asset_id] = clean_cuts(_listened_to(analysis) if asset_id in footage else analysis)
     return timeline, {clip.id: clip for clip in clips}, children, _dated(repo.get_assets(footage | songs)), cuts
 
 def _require_plan(plan_id: Optional[str]) -> EditPlan:
@@ -4950,11 +4950,13 @@ def _voices(project: Project) -> Dict[str, float]:
 
     return voice_keys(project, _analyses(project), loudness)
 
-def _analyses(project: Project) -> Dict[str, MediaAnalysis]:
+def _analyses(project: Project, listened: bool = False) -> Dict[str, MediaAnalysis]:
     """Read the analysis of every file a project plays.
 
     Args:
         project: The project.
+        listened: Whether each transcribed file has to have had its second
+            listen, which is taken now for one analyzed before there was one.
 
     Returns:
         The analyses that exist, keyed by asset ID.
@@ -4963,8 +4965,41 @@ def _analyses(project: Project) -> Dict[str, MediaAnalysis]:
     for asset_id in {clip.asset_id for track in project.tracks for clip in track.clips}:
         analysis = repo.get_analysis(asset_id)
         if analysis is not None:
-            found[asset_id] = analysis
+            found[asset_id] = _listened_to(analysis) if listened else analysis
     return found
+
+def _listened_to(analysis: MediaAnalysis) -> MediaAnalysis:
+    """Give a transcribed file its second listen, if it was analyzed before there was one.
+
+    Once per file, and kept: it takes a few seconds for a short clip and
+    about the length of a long recording divided by twenty on a GPU. Where
+    the file has gone or the listen fails, the analysis is handed back
+    without it, and the cuts are judged by the transcript alone as they were
+    before — a check that cannot run is no reason to stop an edit.
+
+    Args:
+        analysis: The file's analysis.
+
+    Returns:
+        The analysis, with its second listen when it could be taken.
+    """
+    if analysis.transcript is None or analysis.second_listen is not None:
+        return analysis
+    asset = repo.get_assets([analysis.asset_id]).get(analysis.asset_id)
+    if asset is None or not os.path.exists(asset.path):
+        return analysis
+    try:
+        listened = second_listen(asset.path, analysis.transcript, lambda fraction: None, lambda: False)
+    except (RuntimeError, OSError):
+        return analysis
+    # Read again before writing, so an analysis taken again meanwhile is not overwritten
+    # with the one this started from.
+    current = repo.get_analysis(analysis.asset_id)
+    if current is None or current.analyzed_at != analysis.analyzed_at:
+        return analysis.model_copy(update={"second_listen": listened})
+    current.second_listen = listened
+    repo.save_analysis(current)
+    return current
 
 def _plan_target(project: Project) -> Optional[float]:
     """Find how long the plan a project was compiled from asked it to run.
@@ -4996,7 +5031,7 @@ def _findings(project: Project, burn_subtitles: bool) -> list:
     placed = place_cues(project, project.subtitles) if burn_subtitles and project.subtitles else None
     dated = _dated(_referenced_assets(project))
     return check_delivery(
-        project, _analyses(project), _plan_target(project), placed, project.caption_style,
+        project, _analyses(project, listened=True), _plan_target(project), placed, project.caption_style,
         _talking(project, _voices(project)), {asset_id: asset.recorded_at for asset_id, asset in dated.items()},
     )
 
