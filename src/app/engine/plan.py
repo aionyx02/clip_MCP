@@ -16,6 +16,7 @@ making the decisions it was built to stay out of.
 """
 
 import bisect
+import hashlib
 import math
 import os
 from dataclasses import dataclass, replace
@@ -2870,8 +2871,11 @@ def _text_operations(
             continue
         own = {selection.clip_id} | {child.id for child in children.get(selection.clip_id, [])}
         windows = [entry for entry in made if entry[0] == VIDEO_TRACK_ID and entry[5] & own]
-        for number, text in enumerate(selection.texts, start=1):
-            text_id = f"plan-{selection.clip_id}-{number}"
+        for text in selection.texts:
+            # Named by its words, not its place in the list: a copy changed or taken off by hand
+            # stands in for exactly these words, and new words the plan is given come in beside it.
+            words = hashlib.sha1(f"{text.text}\n{text.second or ''}".encode("utf-8")).hexdigest()[:8]
+            text_id = f"plan-{selection.clip_id}-{words}"
             if text_id in kept:
                 continue
             fields = {"text": text.text, "second": text.second, "style": text.style, "x": text.x, "y": text.y,
@@ -2928,7 +2932,9 @@ def compile_operations(
     if any(piece.card is not None for piece in pieces):
         # The beat was found for the cut without its cards; with them in, everything after a
         # card is that much later against the music, so the cuts are put on the beat again.
-        pieces, _ = _on_the_beat(plan, pieces, assets, cuts)
+        # A clip pinned by hand is put back as it was left, so it keeps its own ends here too.
+        settled, _ = _on_the_beat(plan, pieces, assets, cuts)
+        pieces = [old if (VIDEO_TRACK_ID, old.from_clip_ids) in kept else new for old, new in zip(pieces, settled)]
 
     operations: List[dict] = [
         # Everything the compiler owns comes down first, so the cut is rebuilt rather than

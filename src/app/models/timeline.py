@@ -520,8 +520,13 @@ class TextLayer(BaseModel):
     )
     start: Decimal = Field(..., ge=0, description="First second of the clip's file it is shown over")
     end: Decimal = Field(..., gt=0, description="Second of the clip's file it stops at")
-    x: Optional[float] = Field(default=None, ge=0, le=1, description="For `free`: its centre across the frame, 0 to 1")
-    y: Optional[float] = Field(default=None, ge=0, le=1, description="For `free`: its centre down the frame, 0 to 1")
+    x: Optional[float] = Field(
+        default=None, ge=0, le=1,
+        description="Where it was moved to across the frame, 0 to 1: the centre, or the left edge of a name or a "
+                    "place; null where its style puts it",
+    )
+    y: Optional[float] = Field(default=None, ge=0, le=1,
+                               description="Where it was moved to down the frame, 0 to 1: its centre; null likewise")
     by_plan: bool = Field(
         default=False,
         description="Put there by the plan and rebuilt with it; false once anybody changes it, and then kept",
@@ -1380,9 +1385,11 @@ class SetTextOp(_TextTimes):
     text_id: str
     text: Optional[str] = Field(default=None, min_length=1, max_length=60)
     second: Optional[str] = Field(default=None, max_length=60, description="An empty string takes it away")
-    style: Optional[TextStyle] = None
-    x: Optional[float] = Field(default=None, ge=0, le=1)
-    y: Optional[float] = Field(default=None, ge=0, le=1)
+    style: Optional[TextStyle] = Field(
+        default=None, description="Changing it puts the words where the new style goes, unless x and y are given too",
+    )
+    x: Optional[float] = Field(default=None, ge=0, le=1, description="Move it: see the text's own `x`")
+    y: Optional[float] = Field(default=None, ge=0, le=1, description="Move it: see the text's own `y`")
 
 class RemoveTextOp(BaseModel):
     """Edit operation that takes a text layer off a clip."""
@@ -2132,6 +2139,9 @@ def apply_operation(project: Project, op: EditOperation, assets: Mapping[str, As
         if op.second is not None:
             changed.second = op.second or None
         if op.style is not None:
+            if op.style != layer.style and op.style != "free" and op.x is None and op.y is None:
+                # A new style puts the words where that style goes, not where the old ones were moved.
+                changed.x = changed.y = None
             changed.style = op.style
         if op.x is not None:
             changed.x = op.x

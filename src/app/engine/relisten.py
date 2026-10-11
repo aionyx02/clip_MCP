@@ -37,11 +37,12 @@ VOICE_MIN_SPEECH_MS = 100
 VOICE_MIN_SILENCE_MS = 100
 # Voiced stretches closer than this are transcribed together, so a phrase with a breath
 # in it is heard as one phrase; a stretch is never longer than the speech model's window.
+# Provisional (roadmap §13), the joining; the longest is the model's own limit.
 JOIN_SECONDS = 0.8
 LONGEST_STRETCH_SECONDS = 28.0
 # Sound taken either side of a voiced stretch before transcribing it. The detector
 # misses soft onsets — it put 「我們」 at 170.5s where it starts at 170.28s — and the
-# speech model does not.
+# speech model does not. Provisional (roadmap §13).
 STRETCH_PAD_SECONDS = 0.4
 
 @dataclass(frozen=True)

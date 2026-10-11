@@ -1264,7 +1264,7 @@
     };
   }
 
-  // Dragging the chosen words on the picture puts them where they are dropped, as free words.
+  // Dragging the chosen words on the picture puts them where they are dropped, in the style they have.
   function startTextDrag(event) {
     const clip = E.selected && findClip(E.selected.track, E.selected.clip);
     const text = clip?.texts?.find((item) => item.id === E.selectedText);
@@ -1284,7 +1284,7 @@
       window.removeEventListener("pointermove", move);
       window.removeEventListener("pointerup", up);
       $("[data-stage]", E.root).style.cursor = "";
-      if (moved) textEdit(clip, "set_text", { text_id: text.id, style: "free",
+      if (moved) textEdit(clip, "set_text", { text_id: text.id,
         x: Math.round(moved.x * 1000) / 1000, y: Math.round(moved.y * 1000) / 1000 });
     };
     window.addEventListener("pointermove", move);

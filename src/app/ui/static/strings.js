@@ -338,7 +338,7 @@ window.T = {
     fromHere: "從播放頭開始",
     toHere: "到播放頭結束",
     remove: "拿掉",
-    dragHint: "拖曳文字後會改成自由位置",
+    dragHint: "拖曳文字會把它放在你放開的地方，樣式不變",
     none: "這段還沒有文字",
   },
   motion: {

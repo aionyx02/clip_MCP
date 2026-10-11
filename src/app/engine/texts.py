@@ -19,17 +19,17 @@ from app.models.timeline import CaptionStyle, Clip, Project, TextLayer
 
 # Provisional (roadmap §13): each kind's size, as a share of the frame's short side.
 SIZES = {"name": 0.05, "place": 0.042, "headline": 0.085, "free": 0.06}
-# The second line, against the first.
+# The second line, against the first. Provisional (roadmap §13).
 SECOND_SCALE = 0.7
 # Provisional (roadmap §13): how much of the top a phone's app covers on a vertical video,
 # and how much a player's title bar might on a landscape one.
 TOP_SAFE_PORTRAIT = 0.12
 TOP_SAFE_LANDSCAPE = 0.06
-# How much of the frame's width a line may take before it wraps.
+# Provisional (roadmap §13): how much of the frame's width a line may take before it wraps.
 LINE_WIDTH = 0.8
-# How long the words take to come and go.
+# Provisional (roadmap §13): how long the words take to come and go.
 FADE_SECONDS = 0.2
-# The name bar's box: how far it reaches past the words, against their size, and how see-through it is.
+# Provisional (roadmap §13): the name bar's box — how far it reaches past the words, against their size, and how see-through it is.
 BOX_PAD = 0.3
 BOX_OPACITY = 0.62
 
@@ -95,10 +95,15 @@ def placed(text: TextLayer, width: int, height: int, style: CaptionStyle) -> Lis
     elif text.style == "headline":
         top, x, align = height / 2 - total / 2, width / 2, "center"
     else:
-        across = width * (text.x if text.x is not None else 0.5)
-        down = height * (text.y if text.y is not None else 0.5)
-        top = min(max(down - total / 2, 0), height - total)
-        x, align = across, "center"
+        top, x, align = height / 2 - total / 2, width / 2, "center"
+    # Moved by hand: there instead, in its own size and box, and still clear of the platform's
+    # buttons and the captions' margins, the same safe area the captions keep to.
+    if text.x is not None:
+        x = min(max(width * text.x, geometry.margin_h + box), width - geometry.margin_h)
+    if text.y is not None:
+        top = height * text.y - total / 2
+    if text.x is not None or text.y is not None:
+        top = min(max(top, top_safe), height - geometry.margin_v - total - box)
     rows = []
     for (line, row_size, bold), step in zip(lines, steps):
         rows.append({"text": line, "size": row_size, "x": round(x), "y": round(top + step / 2), "align": align,

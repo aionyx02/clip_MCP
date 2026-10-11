@@ -137,3 +137,16 @@ def test_a_card_of_another_plan_is_not_carried() -> None:
             clip.from_plan_id = "another"
     again = compiled(two_parts(by_id, clips), by_id, children, assets, project)
     assert not any(clip.card for clip in again.base_video_track.clips)
+
+
+def test_new_words_in_the_plan_come_in_beside_ones_changed_by_hand() -> None:
+    by_id, children, assets, clips = footage()
+    plan = plan_with_words(by_id, clips)
+    project = compiled(plan, by_id, children, assets)
+    [carrier] = [clip for clip in project.base_video_track.clips if clip.texts]
+    by_hand(project, assets, {"action": "remove_text", "track_id": "main", "clip_id": carrier.id,
+                              "text_id": carrier.texts[0].id})
+    target = plan.selections[1].clip_id
+    apply_amendment(plan, SetSelectionTextsOp(clip_id=target, texts=[PlanText(text="李大華")]))
+    again = compiled(plan, by_id, children, assets, project)
+    assert [text.text for clip in again.base_video_track.clips for text in clip.shown_texts] == ["李大華"]

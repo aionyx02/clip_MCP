@@ -1268,10 +1268,12 @@ def refine_unsure_lines(
         finally:
             if os.path.exists(piece):
                 os.remove(piece)
-        # The stretch's words are the accurate model's now; a word belongs to the stretch its middle is in.
-        words = [word for word in words if not start <= (word.start + word.end) / 2 < end]
-        words += [word.model_copy(update={"start": round(word.start + start, 3), "end": round(word.end + start, 3)})
+        better = [word.model_copy(update={"start": round(word.start + start, 3), "end": round(word.end + start, 3)})
                   for segment in heard.segments for word in segment.words]
+        # The stretch's words are the accurate model's now; a word belongs to the stretch its middle is in.
+        # Where it heard nothing the fast model's stay, so a line is never lost to being heard again.
+        if better:
+            words = [word for word in words if not start <= (word.start + word.end) / 2 < end] + better
         on_progress((index + 1) / len(stretches))
     words.sort(key=lambda word: word.start)
     snap_words_to_silences(words, silences)

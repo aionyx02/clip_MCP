@@ -88,3 +88,16 @@ def test_a_balanced_transcript_is_heard_again_with_its_accurate_model() -> None:
     from app.engine.analysis import heard_with
     assert heard_with("small+large-v3-turbo") == "large-v3-turbo"
     assert heard_with("small") == "small"
+
+
+def test_a_line_the_accurate_model_hears_nothing_in_is_kept(monkeypatch, tmp_path: Path) -> None:
+    import subprocess
+
+    monkeypatch.setattr(analysis_module, "_run_whisper", lambda device, path, duration, *rest: Transcript(
+        language="zh", model=rest[-1], segments=[]))
+    monkeypatch.setattr(analysis_module.subprocess, "run",
+                        lambda *args, **kwargs: subprocess.CompletedProcess(args, 0, "", ""))
+    transcript = fast(line(0, 2, "今天天氣"), line(3, 5, "我們出發", sure=0.2))
+    kept = refine_unsure_lines("x.mp4", transcript, 10.0, None, [], "large-v3-turbo", lambda f: None,
+                               lambda: False, str(tmp_path))
+    assert "".join(segment.text for segment in kept.segments) == "今天天氣我們出發"
