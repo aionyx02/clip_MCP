@@ -128,3 +128,19 @@ def test_a_new_style_puts_moved_words_where_it_goes(media: Path) -> None:
     edit(project, [{"action": "set_text", "track_id": "main", "clip_id": "a", "text_id": "n", "style": "headline"}])
     [layer] = clips_of(project, "main")[0]["texts"]
     assert (layer["style"], layer["x"], layer["y"]) == ("headline", None, None)
+
+
+def test_moved_words_stay_whole_inside_the_frame() -> None:
+    from app.engine.subtitles import caption_geometry, text_width
+    from app.models.timeline import CaptionStyle, TextLayer
+    style = CaptionStyle()
+    margin = caption_geometry(1080, 1920, style).margin_h
+    for kind in ("name", "place", "headline", "free"):
+        for x in (0.0, 0.99):
+            rows = texts.placed(TextLayer(id="t", text="王小明的店", style=kind, start=0, end=4, x=x, y=0.99),
+                                1080, 1920, style)
+            for row in rows:
+                wide = text_width(row["text"]) * row["size"]
+                left = row["x"] - (wide / 2 if row["align"] == "center" else row["box"])
+                right = row["x"] + (wide / 2 if row["align"] == "center" else wide + row["box"])
+                assert margin - 1 <= left and right <= 1080 - margin + 1, (kind, x, row)

@@ -131,7 +131,7 @@ def estimate(repo: Repository, here: Machine, footage: Dict[str, float], speaker
     """
     low, high, all_measured = 0.0, 0.0, True
     # A balanced transcription is a fast one over everything and an accurate one over a share of it.
-    # Every one is then listened to a second time, with its more accurate model, over all of it:
+    # Every one is then listened to a second time over all of it, with the model it ended with:
     # the talking is most of what is heard either way, so the whole length is the honest figure.
     passes: List[Tuple[str, float]] = []
     for transcription, seconds in footage.items():

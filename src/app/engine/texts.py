@@ -13,7 +13,7 @@ from decimal import Decimal
 from typing import List, Optional, Tuple
 
 from app.engine.subtitles import (
-    CAPTION_LINE_HEIGHT, DEFAULT_FONT, caption_geometry, escape_ass_text, format_ass_time, wrap_caption,
+    CAPTION_LINE_HEIGHT, DEFAULT_FONT, caption_geometry, escape_ass_text, format_ass_time, text_width, wrap_caption,
 )
 from app.models.timeline import CaptionStyle, Clip, Project, TextLayer
 
@@ -85,10 +85,11 @@ def placed(text: TextLayer, width: int, height: int, style: CaptionStyle) -> Lis
     top_safe = height * (TOP_SAFE_PORTRAIT if height > width else TOP_SAFE_LANDSCAPE)
     box = round(size * BOX_PAD) if text.style == "name" else 0
     outline = max(1, round(size / 14)) if text.style in ("headline", "free") else 0
+    # Where two lines of captions sit from: words under a caption would be covered by it, and the
+    # captions are what the viewer is reading.
+    captions_top = height - geometry.margin_v - 2 * geometry.font_size * CAPTION_LINE_HEIGHT
     if text.style == "name":
-        # Above where two lines of captions sit, with a little air: a name bar under a caption
-        # would be covered by it, and the captions are what the viewer is reading.
-        captions_top = height - geometry.margin_v - 2 * geometry.font_size * CAPTION_LINE_HEIGHT
+        # Above the captions, with a little air.
         top, x, align = captions_top - size * 0.6 - total - box, geometry.margin_h + box, "left"
     elif text.style == "place":
         top, x, align = top_safe, geometry.margin_h, "left"
@@ -96,14 +97,18 @@ def placed(text: TextLayer, width: int, height: int, style: CaptionStyle) -> Lis
         top, x, align = height / 2 - total / 2, width / 2, "center"
     else:
         top, x, align = height / 2 - total / 2, width / 2, "center"
-    # Moved by hand: there instead, in its own size and box, and still clear of the platform's
-    # buttons and the captions' margins, the same safe area the captions keep to.
+    # Moved by hand: there instead, in its own size and box, all of it inside the captions' side
+    # margins, below the platform's bar at the top and above the captions.
     if text.x is not None:
-        x = min(max(width * text.x, geometry.margin_h + box), width - geometry.margin_h)
+        widest = max(text_width(line) * row_size for line, row_size, _ in lines) + 2 * box
+        low, high = geometry.margin_h + box, width - geometry.margin_h - widest + box
+        if align == "center":
+            low, high = geometry.margin_h + widest / 2, width - geometry.margin_h - widest / 2
+        x = min(max(width * text.x, low), high) if low <= high else width / 2
     if text.y is not None:
         top = height * text.y - total / 2
     if text.x is not None or text.y is not None:
-        top = min(max(top, top_safe), height - geometry.margin_v - total - box)
+        top = max(min(top, captions_top - total - box), top_safe + box)
     rows = []
     for (line, row_size, bold), step in zip(lines, steps):
         rows.append({"text": line, "size": row_size, "x": round(x), "y": round(top + step / 2), "align": align,

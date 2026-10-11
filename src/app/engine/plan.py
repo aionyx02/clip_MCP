@@ -22,7 +22,7 @@ import os
 from dataclasses import dataclass, replace
 from datetime import timedelta
 from difflib import SequenceMatcher
-from typing import Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
+from typing import AbstractSet, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from app.engine.continuity import Shot, strays
 from app.engine.music import MIDDLE, energy_at, fullest
@@ -1093,6 +1093,7 @@ def _on_the_beat(
     pieces: Sequence[Piece],
     assets: Mapping[str, Asset],
     cuts: Optional[Mapping[str, CleanCuts]],
+    held: AbstractSet[Tuple[str, ...]] = frozenset(),
 ) -> Tuple[List[Piece], List[str]]:
     """Move each picture cut onto the beat of the music playing under it, where it can go.
 
@@ -1111,6 +1112,9 @@ def _on_the_beat(
         pieces: The windows, in order, merged.
         assets: The files they play from, keyed by asset ID.
         cuts: What is known about each file, songs included, keyed by asset ID.
+        held: What the windows that may not move were made from: clips pinned
+            by hand, which play as they were left, so every cut after them is
+            settled against where they really end.
 
     Returns:
         `(pieces, notes)`.
@@ -1143,7 +1147,7 @@ def _on_the_beat(
         piece = out[index]
         on_beat = playing is not None and playing.cut_on_beat and song is not None and song.beats
         # A title card is as long as it was asked to be; the cut out of it stays where it falls.
-        if index + 1 < len(out) and on_beat and piece.card is None:
+        if index + 1 < len(out) and on_beat and piece.card is None and piece.from_clip_ids not in held:
             closing_at = position + piece.played
             shifts = [
                 round(beat - closing_at, 3)
@@ -2773,6 +2777,7 @@ def _with_cards(plan: EditPlan, pieces: List[Piece], project: Optional[Project])
         at = float(clip.card.at)
         shows = next((index for index, piece in enumerate(out) if piece.card is None
                       and piece.asset_id == clip.asset_id and piece.start - 0.05 <= at <= piece.end + 0.05), None)
+        found = shows is not None
         if shows is None:
             starts, position = [], 0.0
             for piece in out:
@@ -2782,7 +2787,8 @@ def _with_cards(plan: EditPlan, pieces: List[Piece], project: Optional[Project])
             shows = min(range(len(out)), key=lambda index: abs(starts[index] - was)) if out else 0
         beat_id = out[shows].beat_id if shows < len(out) else ""
         # A card showing the end of its shot came after it — the closing card of a part — and goes back there.
-        if shows < len(out) and out[shows].card is None and abs(at - out[shows].end) < abs(at - out[shows].start):
+        # Only for the shot it shows: `at` is a second of that file, and means nothing against another's.
+        if found and abs(at - out[shows].end) < abs(at - out[shows].start):
             shows += 1
         out.insert(shows, from_clip(clip, beat_id))
     return out
@@ -2932,9 +2938,8 @@ def compile_operations(
     if any(piece.card is not None for piece in pieces):
         # The beat was found for the cut without its cards; with them in, everything after a
         # card is that much later against the music, so the cuts are put on the beat again.
-        # A clip pinned by hand is put back as it was left, so it keeps its own ends here too.
-        settled, _ = _on_the_beat(plan, pieces, assets, cuts)
-        pieces = [old if (VIDEO_TRACK_ID, old.from_clip_ids) in kept else new for old, new in zip(pieces, settled)]
+        held = {from_ids for track_id, from_ids in kept if track_id == VIDEO_TRACK_ID}
+        pieces, _ = _on_the_beat(plan, pieces, assets, cuts, held)
 
     operations: List[dict] = [
         # Everything the compiler owns comes down first, so the cut is rebuilt rather than

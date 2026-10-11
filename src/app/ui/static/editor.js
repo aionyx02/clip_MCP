@@ -1264,7 +1264,7 @@
     };
   }
 
-  // Dragging the chosen words on the picture puts them where they are dropped, in the style they have.
+  // Dragging the chosen words on the picture moves them by as much as the pointer moved, in the style they have.
   function startTextDrag(event) {
     const clip = E.selected && findClip(E.selected.track, E.selected.clip);
     const text = clip?.texts?.find((item) => item.id === E.selectedText);
@@ -1274,10 +1274,14 @@
     if (!event_) return false;
     if (!E.textHinted) { E.textHinted = true; toast(T.texts.dragHint); }
     const stage = $("[data-stage]", E.root).getBoundingClientRect();
+    // Where the words are now, as the render placed them: the row's anchor across, the block's middle down.
+    const rows = event_.rows;
+    const from = { x: text.x ?? rows[0].x / E.project.width,
+                   y: text.y ?? (rows[0].y + rows[rows.length - 1].y) / 2 / E.project.height };
     let moved = null;
     const move = (moveEvent) => {
-      moved = { x: clamp((moveEvent.clientX - stage.left) / stage.width, 0.02, 0.98),
-                y: clamp((moveEvent.clientY - stage.top) / stage.height, 0.02, 0.98) };
+      moved = { x: clamp(from.x + (moveEvent.clientX - event.clientX) / stage.width, 0, 1),
+                y: clamp(from.y + (moveEvent.clientY - event.clientY) / stage.height, 0, 1) };
       $("[data-stage]", E.root).style.cursor = "grabbing";
     };
     const up = () => {
