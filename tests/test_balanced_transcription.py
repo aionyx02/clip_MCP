@@ -82,3 +82,9 @@ def test_balanced_costs_more_than_fast_and_less_than_accurate(repo) -> None:  # 
     times = {choice: speed.estimate(repo, computer("mid"), {choice: 3600}, False)["transcription_minutes"][0]
              for choice in ("fast", "balanced", "accurate")}
     assert times["fast"] < times["balanced"] < times["accurate"]
+
+
+def test_a_balanced_transcript_is_heard_again_with_its_accurate_model() -> None:
+    from app.engine.analysis import heard_with
+    assert heard_with("small+large-v3-turbo") == "large-v3-turbo"
+    assert heard_with("small") == "small"

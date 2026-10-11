@@ -29,7 +29,7 @@ from app.models.media import Asset
 from app.models.plan import STRUCTURES, Beat, BeatRole, EditPlan, MusicCue, Selection, Structure, TrimKind
 from app.engine.semantic import EDGE_TOLERANCE_SECONDS, CleanCuts
 from app.models.semantic import ClipKind, SemanticClip, SemanticTimeline
-from app.models.timeline import MAX_SPEED, MIN_SPEED, Clip, Project, TitleCard
+from app.models.timeline import MAX_SPEED, MIN_SPEED, Clip, Project, TitleCard, card_background
 
 # Air left around a cut, taken from the clip's measured headroom, so a line does not
 # begin the instant the picture does. Never more than the headroom allows. The default
@@ -1141,7 +1141,8 @@ def _on_the_beat(
             turn = turnaround(song, entry, length, span)
         piece = out[index]
         on_beat = playing is not None and playing.cut_on_beat and song is not None and song.beats
-        if index + 1 < len(out) and on_beat:
+        # A title card is as long as it was asked to be; the cut out of it stays where it falls.
+        if index + 1 < len(out) and on_beat and piece.card is None:
             closing_at = position + piece.played
             shifts = [
                 round(beat - closing_at, 3)
@@ -1289,13 +1290,16 @@ def _joined_beats(
             ))
             continue
         piece, before = out[at], out[at - 1]
-        # Seconds of the timeline the file can supply before this window, at its speed.
+        # Seconds of the timeline the file can supply before this window, at its speed. A photo
+        # is the same picture before its window as in it, so it has all the picture asked for.
         room = piece.start / piece.speed
+        source = assets.get(piece.asset_id)
+        picture_room = math.inf if source is not None and source.still else room
         changes: Dict[str, object] = {}
         wanted = beat.transition_in
         if wanted is not None:
             reach = _reach(wanted.kind)
-            fits = math.floor(min(wanted.seconds, room / reach, before.played) * 1000) / 1000
+            fits = math.floor(min(wanted.seconds, picture_room / reach, before.played) * 1000) / 1000
             if fits < MIN_TRANSITION_SECONDS:
                 # `check_plan` refuses this with the ways to fix it; a preview built
                 # without checking still says what happened.
@@ -2697,6 +2701,8 @@ def _as_made(pinned: Clip) -> dict:
         "video_fade_out": float(pinned.video_fade_out),
         "color": pinned.color.model_dump() if pinned.color else None,
         "layout": pinned.layout.model_dump() if pinned.layout else None,
+        "fit": pinned.fit.model_dump() if pinned.fit else None,
+        "motion": pinned.motion,
     }
 
 def _with_cards(plan: EditPlan, pieces: List[Piece], project: Optional[Project]) -> List[Piece]:
@@ -2705,10 +2711,12 @@ def _with_cards(plan: EditPlan, pieces: List[Piece], project: Optional[Project])
     A card is a window of its own, so everything laid out by where windows
     fall — markers, B-roll, music — makes room for it. A part the plan gives
     a card opens on it, and the part's transition comes in on the card. A
-    card that was on the cut already and not made by the plan, or made by it
-    and changed by hand since, comes back as it was: the plan's in front of
-    its part, one made by hand in front of the shot whose frame it shows, or
-    failing that wherever it was nearest.
+    card that was on the cut already and made by hand, or made by a plan and
+    changed by hand since, comes back as it was: the plan's in front of its
+    part, one made by hand next to the shot whose frame it shows — in front
+    of it, or after it when it shows the shot's end — or failing that
+    wherever it was nearest. Another plan's cards nobody touched go with
+    that plan.
 
     Args:
         plan: The plan being compiled.
@@ -2723,7 +2731,9 @@ def _with_cards(plan: EditPlan, pieces: List[Piece], project: Optional[Project])
                   if track_id == VIDEO_TRACK_ID and clip.card is not None), key=lambda clip: clip.timeline_in)
     held = {clip.card.beat_id: clip for clip in old
             if clip.from_plan_id == plan.id and clip.pinned and clip.card.beat_id in beats}
-    by_hand = [clip for clip in old if clip not in held.values() and (clip.from_plan_id != plan.id or clip.pinned)]
+    # Made by hand, or a plan's card somebody changed: kept. Another plan's untouched cards are
+    # that plan's work, rebuilt by nobody now, and go with it.
+    by_hand = [clip for clip in old if clip not in held.values() and (clip.from_plan_id is None or clip.pinned)]
 
     def from_clip(clip: Clip, beat_id: str) -> Piece:
         length = float(clip.timeline_duration)
@@ -2747,7 +2757,7 @@ def _with_cards(plan: EditPlan, pieces: List[Piece], project: Optional[Project])
                     beat_id=piece.beat_id,
                     card=TitleCard(
                         title=wanted.title, subtitle=wanted.subtitle,
-                        background=wanted.background or ("picture" if photo else "blur"),
+                        background=card_background(wanted.background, photo),
                         at=0 if photo else piece.start, beat_id=piece.beat_id,
                         **({"colour": wanted.colour} if wanted.colour else {}),
                     ),
@@ -2770,6 +2780,9 @@ def _with_cards(plan: EditPlan, pieces: List[Piece], project: Optional[Project])
             was = float(clip.timeline_in)
             shows = min(range(len(out)), key=lambda index: abs(starts[index] - was)) if out else 0
         beat_id = out[shows].beat_id if shows < len(out) else ""
+        # A card showing the end of its shot came after it — the closing card of a part — and goes back there.
+        if shows < len(out) and out[shows].card is None and abs(at - out[shows].end) < abs(at - out[shows].start):
+            shows += 1
         out.insert(shows, from_clip(clip, beat_id))
     return out
 
@@ -2833,30 +2846,41 @@ def _text_operations(
         texts.append({"action": "add_text", "track_id": track_id, "clip_id": clip_id, "text_id": name,
                       "start": round(start, 3), "end": round(end, 3), **fields})
 
+    # Kept first, so the plan's own words give way to a changed or taken-off copy of themselves.
+    # Each once: a split clip's halves both carry the words of the whole, and a new clip
+    # spanning both halves would otherwise get them twice.
+    old = [clip for track_id, clip in _compiled_clips(project) if track_id in (VIDEO_TRACK_ID, BROLL_TRACK_ID)]
+    kept, carried = set(), set()
+    for clip in old:
+        for text in clip.texts:
+            key = (clip.asset_id, text.id, text.start, text.end)
+            if text.by_plan or key in carried:
+                continue
+            carried.add(key)
+            kept.add(text.id)
+            fields = {"text": text.text, "second": text.second, "style": text.style, "x": text.x, "y": text.y,
+                      "hidden": text.hidden}
+            for track_id, clip_id, asset_id, start, end, _ in made:
+                low, high = max(start, float(text.start)), min(end, float(text.end))
+                if asset_id == clip.asset_id and high > low:
+                    put(track_id, clip_id, text.id, low, high, fields)
+
     for selection in plan.selections:
         if not selection.texts:
             continue
         own = {selection.clip_id} | {child.id for child in children.get(selection.clip_id, [])}
         windows = [entry for entry in made if entry[0] == VIDEO_TRACK_ID and entry[5] & own]
         for number, text in enumerate(selection.texts, start=1):
+            text_id = f"plan-{selection.clip_id}-{number}"
+            if text_id in kept:
+                continue
             fields = {"text": text.text, "second": text.second, "style": text.style, "x": text.x, "y": text.y,
                       "by_plan": True}
             for track_id, clip_id, _, start, end, _ in windows:
                 low = max(start, text.start if text.start is not None else start)
                 high = min(end, text.end if text.end is not None else end)
                 if high > low:
-                    put(track_id, clip_id, f"plan-{selection.clip_id}-{number}", low, high, fields)
-
-    old = [clip for track_id, clip in _compiled_clips(project) if track_id in (VIDEO_TRACK_ID, BROLL_TRACK_ID)]
-    for clip in old:
-        for text in clip.texts:
-            if text.by_plan:
-                continue
-            fields = {"text": text.text, "second": text.second, "style": text.style, "x": text.x, "y": text.y}
-            for track_id, clip_id, asset_id, start, end, _ in made:
-                low, high = max(start, float(text.start)), min(end, float(text.end))
-                if asset_id == clip.asset_id and high > low:
-                    put(track_id, clip_id, text.id, low, high, fields)
+                    put(track_id, clip_id, text_id, low, high, fields)
     return texts
 
 def compile_operations(
@@ -2901,6 +2925,10 @@ def compile_operations(
         for track_id, clip in _compiled_clips(project) if clip.pinned and clip.card is None
     }
     pieces = _with_cards(plan, pieces, project)
+    if any(piece.card is not None for piece in pieces):
+        # The beat was found for the cut without its cards; with them in, everything after a
+        # card is that much later against the music, so the cuts are put on the beat again.
+        pieces, _ = _on_the_beat(plan, pieces, assets, cuts)
 
     operations: List[dict] = [
         # Everything the compiler owns comes down first, so the cut is rebuilt rather than

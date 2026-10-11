@@ -97,3 +97,43 @@ def test_a_card_nobody_touched_follows_the_plan() -> None:
     apply_amendment(plan, SetBeatTitleOp(beat_id="open", title_card=None))
     again = compiled(plan, by_id, children, assets, project)
     assert not any(clip.card for clip in again.base_video_track.clips)
+
+
+def plan_with_words(by_id, clips):
+    plan = two_parts(by_id, clips)
+    target = plan.selections[1].clip_id
+    apply_amendment(plan, SetSelectionTextsOp(clip_id=target, texts=[PlanText(text="王小明", second="店長")]))
+    return plan
+
+
+def test_words_of_the_plan_taken_off_by_hand_stay_off() -> None:
+    by_id, children, assets, clips = footage()
+    plan = plan_with_words(by_id, clips)
+    project = compiled(plan, by_id, children, assets)
+    [carrier] = [clip for clip in project.base_video_track.clips if clip.texts]
+    by_hand(project, assets, {"action": "remove_text", "track_id": "main", "clip_id": carrier.id,
+                              "text_id": carrier.texts[0].id})
+    again = compiled(plan, by_id, children, assets, project)
+    assert not any(clip.shown_texts for clip in again.base_video_track.clips)
+
+
+def test_words_of_the_plan_changed_by_hand_are_not_doubled() -> None:
+    by_id, children, assets, clips = footage()
+    plan = plan_with_words(by_id, clips)
+    project = compiled(plan, by_id, children, assets)
+    [carrier] = [clip for clip in project.base_video_track.clips if clip.texts]
+    by_hand(project, assets, {"action": "set_text", "track_id": "main", "clip_id": carrier.id,
+                              "text_id": carrier.texts[0].id, "text": "王大明"})
+    again = compiled(plan, by_id, children, assets, project)
+    words = [text.text for clip in again.base_video_track.clips for text in clip.shown_texts]
+    assert words == ["王大明"]
+
+
+def test_a_card_of_another_plan_is_not_carried() -> None:
+    by_id, children, assets, clips = footage()
+    project = compiled(two_parts(by_id, clips, title_card=PlanTitleCard(title="別的")), by_id, children, assets)
+    for clip in project.base_video_track.clips:
+        if clip.card:
+            clip.from_plan_id = "another"
+    again = compiled(two_parts(by_id, clips), by_id, children, assets, project)
+    assert not any(clip.card for clip in again.base_video_track.clips)

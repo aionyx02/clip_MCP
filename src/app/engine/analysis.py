@@ -9,7 +9,7 @@ import statistics
 import subprocess
 import time
 from dataclasses import dataclass, field
-from typing import Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Callable, Dict, List, Optional, Sequence, Tuple, TypeVar
 
 from app.engine import faces, machine, models, resources, stills
 from app.engine.diarize import (
@@ -944,6 +944,36 @@ def transcription_of(model: Optional[str]) -> Optional[str]:
         return "balanced"
     return "fast" if model == FAST_WHISPER_MODEL != whisper_model_name() else "accurate"
 
+T = TypeVar("T")
+
+def on_whisper_device(run: Callable[[str], T]) -> T:
+    """Run something on the speech model's device, falling back to the processor if the GPU cannot.
+
+    A CUDA install that is there but broken — a missing cuBLAS or cuDNN —
+    fails only once the model starts, so the retry is on the error rather
+    than decided up front.
+
+    Args:
+        run: Takes the device, `"cuda"` or `"cpu"`, and does the work on it.
+
+    Returns:
+        What `run` returns.
+
+    Raises:
+        RuntimeError: Whatever `run` raises that is not the GPU failing.
+    """
+    device = machine.whisper_device()
+    try:
+        return run(device)
+    except RuntimeError as exc:
+        if device != "cuda" or not any(name in str(exc).lower() for name in ("cuda", "cublas", "cudnn")):
+            raise
+        return run("cpu")
+
+def heard_with(model: Optional[str]) -> str:
+    """The speech model to listen with for a transcript made with `model`: a balanced one's accurate half."""
+    return (model or whisper_model_name()).split(BALANCED_JOIN)[-1]
+
 def _run_whisper(
     device: str,
     path: str,
@@ -1071,13 +1101,7 @@ def listen_again(
     def moved(seconds: float) -> float:
         return round(seconds + start, 3)
 
-    device = machine.whisper_device()
-    try:
-        raw = hear(device)
-    except RuntimeError as exc:
-        if device != "cuda" or not any(name in str(exc).lower() for name in ("cuda", "cublas", "cudnn")):
-            raise
-        raw = hear("cpu")
+    raw = on_whisper_device(hear)
     segments = [
         TranscriptSegment(
             start=moved(segment.start), end=moved(segment.end), text=segment.text.strip(),
@@ -1138,15 +1162,8 @@ def transcribe_speech(
     Raises:
         OperationCancelled: If cancellation was requested.
     """
-    device = machine.whisper_device()
-    try:
-        raw = _run_whisper(device, path, duration, language, prompt, on_progress, is_cancelled, on_measured,
-                           model_name)
-    except RuntimeError as exc:
-        if device != "cuda" or not any(name in str(exc).lower() for name in ("cuda", "cublas", "cudnn")):
-            raise
-        raw = _run_whisper("cpu", path, duration, language, prompt, on_progress, is_cancelled, on_measured,
-                           model_name)
+    raw = on_whisper_device(lambda device: _run_whisper(
+        device, path, duration, language, prompt, on_progress, is_cancelled, on_measured, model_name))
 
     words = [word for segment in raw.segments for word in segment.words]
     snap_words_to_silences(words, silences)
@@ -1232,7 +1249,6 @@ def refine_unsure_lines(
     stretches = _unsure_stretches(transcript.segments, duration)
     words = [word for segment in transcript.segments for word in segment.words]
     os.makedirs(work_dir, exist_ok=True)
-    device = machine.whisper_device()
     for index, (start, end) in enumerate(stretches):
         if is_cancelled():
             raise OperationCancelled()
@@ -1246,14 +1262,9 @@ def refine_unsure_lines(
         if cut.returncode != 0:
             raise RuntimeError(f"could not read the sound at {start:.2f}s: {cut.stderr.strip()[-300:]}")
         try:
-            heard = _run_whisper(device, piece, end - start, transcript.language, prompt, lambda fraction: None,
-                                 is_cancelled, None, model_name)
-        except RuntimeError as exc:
-            if device != "cuda" or not any(name in str(exc).lower() for name in ("cuda", "cublas", "cudnn")):
-                raise
-            device = "cpu"
-            heard = _run_whisper(device, piece, end - start, transcript.language, prompt, lambda fraction: None,
-                                 is_cancelled, None, model_name)
+            heard = on_whisper_device(lambda device: _run_whisper(
+                device, piece, end - start, transcript.language, prompt, lambda fraction: None, is_cancelled,
+                None, model_name))
         finally:
             if os.path.exists(piece):
                 os.remove(piece)
@@ -1301,19 +1312,12 @@ def second_listen(
         import opencc
 
         convert = opencc.OpenCC(f"{CHINESE_VARIANT_CONFIGS[transcript.chinese_variant]}.json").convert
-    device = machine.whisper_device()
-    try:
-        return relisten.listen_again(
-            path, transcript.language, Listener(transcript.model or whisper_model_name(), device, models.whisper_dir()),
-            on_progress, is_cancelled, convert, ffmpeg_bin,
-        )
-    except RuntimeError as exc:
-        if device != "cuda" or not any(name in str(exc).lower() for name in ("cuda", "cublas", "cudnn")):
-            raise
-        return relisten.listen_again(
-            path, transcript.language, Listener(transcript.model or whisper_model_name(), "cpu", models.whisper_dir()),
-            on_progress, is_cancelled, convert, ffmpeg_bin,
-        )
+    # A balanced transcript names both its models; the second listen hears with the accurate one.
+    model = heard_with(transcript.model)
+    return on_whisper_device(lambda device: relisten.listen_again(
+        path, transcript.language, Listener(model, device, models.whisper_dir()),
+        on_progress, is_cancelled, convert, ffmpeg_bin,
+    ))
 
 def discard_scratch(work_dir: str) -> None:
     """Throw away everything the pass wrote for its own use.

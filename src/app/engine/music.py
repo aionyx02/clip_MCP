@@ -130,12 +130,14 @@ def energy_at(energy: Sequence[float], second: float) -> Optional[float]:
 # tracker finds beats, not which of them begins a bar, so this assumes common time.
 # Provisional (roadmap §13).
 BAR_BEATS = 4
-# The shortest loop: shorter, and the repeat is heard as a stuck record. Provisional.
+# The shortest loop: shorter, and the repeat is heard as a stuck record. Provisional
+# (roadmap §13).
 LOOP_SHORTEST_BARS = 8
-# Energy averaged this long either side of a loop's two ends to compare them. Provisional.
+# Energy averaged this long either side of a loop's two ends to compare them.
+# Provisional (roadmap §13).
 LOOP_COMPARE_SECONDS = 2
 # Neither end of a loop may sit where the song is quieter than this on its own scale — an
-# intro, a breakdown, a fade-out — since a jump there is heard. Provisional.
+# intro, a breakdown, a fade-out — since a jump there is heard. Provisional (roadmap §13).
 LOOP_FLOOR = 0.35
 
 

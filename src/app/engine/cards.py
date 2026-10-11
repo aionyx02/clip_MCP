@@ -24,9 +24,9 @@ TITLE_WIDTH = 0.8
 # Provisional (roadmap §13): how long the words take to fade in, and out again.
 TEXT_FADE_SECONDS = 0.3
 # How far the blur reaches, as a share of the picture's short side: far enough that the
-# shot behind is colour and shape, not something to read.
+# shot behind is colour and shape, not something to read. Provisional (roadmap §13).
 BLUR_SHARE = 1 / 25
-# How much darker the frame behind is made, so white words read on it.
+# How much darker the frame behind is made, so white words read on it. Provisional (roadmap §13).
 BLUR_DIM = -0.25
 PICTURE_DIM = -0.15
 
@@ -43,7 +43,8 @@ def backdrop_filter(card: TitleCard, width: int, height: int) -> str:
         The filters, without a leading comma.
     """
     if card.background == "colour":
-        return f"drawbox=x=0:y=0:w=iw:h=ih:color=0x{card.colour[1:]}@1:t=fill"
+        colour = f"0x{card.colour[1:]}" if card.colour.startswith("#") else card.colour
+        return f"drawbox=x=0:y=0:w=iw:h=ih:color={colour}@1:t=fill"
     if card.background == "picture":
         return f"eq=brightness={PICTURE_DIM}"
     # boxblur's radius cannot pass half the picture's short side.

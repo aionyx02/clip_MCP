@@ -31,7 +31,7 @@ VOICE_DETECTOR = "silero-vad"
 # long a gap or a sound has to be before it counts. Measured against the edges the first
 # edit got wrong: at 0.5 with no padding it put the onset of 「終」 at 2.05s where the
 # sound rises at 2.0s, and the end of 「囉」 at 9.82s where it falls away by 9.8s.
-# Provisional.
+# Provisional (roadmap §13).
 VOICE_THRESHOLD = 0.5
 VOICE_MIN_SPEECH_MS = 100
 VOICE_MIN_SILENCE_MS = 100

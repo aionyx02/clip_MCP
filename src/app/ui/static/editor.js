@@ -1194,8 +1194,9 @@
   // The words on a clip: a row each, the chosen one opened up to change.
   function textsGroup(clip) {
     if (clip.card) return "";
-    const open = (clip.texts || []).find((text) => text.id === E.selectedText);
-    const rows = (clip.texts || []).map((text) =>
+    const shown = (clip.texts || []).filter((text) => !text.hidden);
+    const open = shown.find((text) => text.id === E.selectedText);
+    const rows = shown.map((text) =>
       `<button class="btn small ${text.id === E.selectedText ? "primary" : ""}" data-text-pick="${esc(text.id)}">${esc(T.texts.styles[text.style])}・${esc(text.text)}</button>`).join("");
     const style = (value) => `<button class="${open?.style === value ? "on" : ""}" data-text-style="${value}">${esc(T.texts.styles[value])}</button>`;
     return `<div class="group edit-action"><div class="label">${esc(T.texts.title)}</div>
@@ -1241,7 +1242,7 @@
         $("[data-text-words]", E.root)?.select();
       }
     };
-    const open = (clip.texts || []).find((text) => text.id === E.selectedText);
+    const open = (clip.texts || []).find((text) => text.id === E.selectedText && !text.hidden);
     if (!open) return;
     const commit = (input, field) => {
       input.onchange = () => {

@@ -112,7 +112,7 @@ def _layers(project: Project) -> List[Tuple[Clip, TextLayer, Tuple[float, float]
     found = []
     for track in project.video_tracks:
         for clip in track.clips:
-            for text in clip.texts:
+            for text in clip.shown_texts:
                 when = shown(clip, text)
                 if when is not None:
                     found.append((clip, text, when))
