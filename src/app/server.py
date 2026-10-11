@@ -51,8 +51,8 @@ from app.models.job import Job, JobKind, JobStatus
 from app.engine import cards, texts, loudness, machine, meaning, resources, speed, stills
 from app.engine.analysis import listen_again as listen_again_in_file
 from app.engine.analysis import (
-    current_recipe, doubtful_spots, marked_text, marked_words, second_listen, sound_note, transcription_of,
-    unsure_words, whisper_model_for, whisper_model_name,
+    BALANCED_JOIN, current_recipe, doubtful_spots, marked_text, marked_words, second_listen, sound_note,
+    transcription_of, unsure_words, whisper_model_for, whisper_model_name,
 )
 from app.engine.diarize import speaker_model_name
 from app.engine.rhythm import rhythm_model_name
@@ -765,7 +765,7 @@ def list_assets(
         A dictionary with `assets`, one short record per file — `id`, `name`,
         `duration` in seconds (null for a photo, which lasts as long as its
         clip; `photo` is true for one), `has_video`, `has_audio`, `analyzed`,
-        `transcription` (`fast`, `accurate`, or null when speech was not
+        `transcription` (`fast`, `balanced`, `accurate`, or null when speech was not
         transcribed), `stale`, `library`, `folder_id` and, where the file has
         them, its `notes` — how it may be used — in name order; `total`, how
         many match; `offset`; and `folders`, every folder of that library (the
@@ -1386,15 +1386,15 @@ def _is_stale(analysis: MediaAnalysis) -> bool:
         it just answers a slightly different question from a fresh one, which
         matters most when two assets are being compared with each other.
     """
-    # A fast transcript is one the user chose, not one made with a model since replaced.
+    # A fast or balanced transcript is one the user chose, not one made with a model since replaced.
     speech_model = analysis.recipe.speech_model
-    current = speech_model if transcription_of(speech_model) == "fast" else whisper_model_name()
+    current = speech_model if transcription_of(speech_model) in ("fast", "balanced") else whisper_model_name()
     return analysis.recipe.differs_from(current_recipe(
         current, speaker_model=speaker_model_name(), rhythm_model=rhythm_model_name(), clap_model=clap.MODEL_ID,
     ))
 
 def _transcription(analysis: Optional[MediaAnalysis]) -> Optional[str]:
-    """Say how an asset's speech was transcribed: `fast`, `accurate`, or None when it was not."""
+    """Say how an asset's speech was transcribed: `fast`, `balanced`, `accurate`, or None when it was not."""
     return transcription_of(None if analysis is None or analysis.transcript is None else analysis.transcript.model)
 
 def _transcribed(asset: Asset, transcribe: bool) -> bool:
@@ -1409,7 +1409,7 @@ def _start_analysis(asset: Asset, transcribe: bool, transcription: str, language
     Args:
         asset: The file.
         transcribe: Whether speech is transcribed; never for a song.
-        transcription: `accurate` or `fast`.
+        transcription: `accurate`, `balanced` or `fast`.
         language: Spoken language code, or None to detect it.
         prompt: Text that guides transcription.
         chinese_variant: Script and regional variant for a Chinese transcript.
@@ -1425,7 +1425,8 @@ def _start_analysis(asset: Asset, transcribe: bool, transcription: str, language
     with_speech = _transcribed(asset, transcribe)
     job.memory_estimate = resources.analysis_memory_bytes(
         with_speech,
-        whisper_model_for(transcription),
+        # The larger model is what has to fit; a balanced transcription loads one after the other.
+        whisper_model_for(transcription).split(BALANCED_JOIN)[-1],
         duration=float(asset.duration),
         diarize=with_speech and diarize,
         detect_faces=asset.has_video,
@@ -1440,26 +1441,31 @@ def _start_analysis(asset: Asset, transcribe: bool, transcription: str, language
         "speakers": speakers,
     })
 
+# How good each kind of transcription is, so a file is never analyzed into a worse one.
+TRANSCRIPTION_RANK = {"fast": 0, "balanced": 1, "accurate": 2}
+
 def _plan_analyses(
     assets: Sequence[Asset], transcribe: bool, transcription: str, again: bool,
 ) -> Tuple[List[Tuple[Asset, str]], List[str], List[str]]:
     """Decide which files an analysis starts, and with which transcription.
 
-    A file whose transcript is accurate is never made fast: asked for fast,
-    it is skipped while current, and analyzed accurately again when it is
-    out of date or `again` is given. A fast transcript asked for accurate is
-    redone without `again`.
+    A transcript is never made worse: asked for less than it has, a file is
+    skipped while current, and analyzed again as well as it was when it is
+    out of date or `again` is given. A transcript asked to be better —
+    fast to balanced or accurate, balanced to accurate — is redone without
+    `again`; fast to balanced keeps the fast transcript and hears only its
+    unsure lines again.
 
     Args:
         assets: The files asked for.
         transcribe: Whether speech is transcribed.
-        transcription: `accurate` or `fast`, as asked.
+        transcription: `accurate`, `balanced` or `fast`, as asked.
         again: Redo files whose analysis is current.
 
     Returns:
         `(to_start, skipped, upgrading)`: each file to start with the
-        transcription it gets, the files left alone, and the files whose fast
-        transcript is being replaced.
+        transcription it gets, the files left alone, and the files whose
+        transcript is being made better.
     """
     to_start: List[Tuple[Asset, str]] = []
     skipped: List[str] = []
@@ -1467,7 +1473,8 @@ def _plan_analyses(
     for asset in assets:
         existing = repo.get_analysis(asset.id)
         had = _transcription(existing)
-        upgrade = _transcribed(asset, transcribe) and transcription == "accurate" and had == "fast"
+        upgrade = (_transcribed(asset, transcribe) and had is not None
+                   and TRANSCRIPTION_RANK[transcription] > TRANSCRIPTION_RANK[had])
         # Heard as a song, never transcribed; footage now, so it is listened to again for what is said.
         heard_as_song = (existing is not None and existing.transcript is None and existing.rhythm is not None
                          and _transcribed(asset, transcribe))
@@ -1476,13 +1483,14 @@ def _plan_analyses(
             continue
         if upgrade:
             upgrading.append(asset.id)
-        to_start.append((asset, "accurate" if had == "accurate" else transcription))
+        better = had if had is not None and TRANSCRIPTION_RANK[had] > TRANSCRIPTION_RANK[transcription] else None
+        to_start.append((asset, better or transcription))
     return to_start, skipped, upgrading
 
 def _estimate(to_start: Sequence[Tuple[Asset, str]], transcribe: bool, diarize: bool,
               upgrading: Sequence[str]) -> Optional[dict]:
     """How long the files about to be analyzed take here, or None when nothing in them is transcribed."""
-    footage: Dict[str, float] = {"accurate": 0.0, "fast": 0.0}
+    footage: Dict[str, float] = {"accurate": 0.0, "balanced": 0.0, "fast": 0.0}
     for asset, transcription in to_start:
         if _transcribed(asset, transcribe):
             footage[transcription] += float(asset.duration)
@@ -1492,8 +1500,14 @@ def _estimate(to_start: Sequence[Tuple[Asset, str]], transcribe: bool, diarize: 
     found = {"tier": here.tier, "footage_minutes": round(sum(footage.values()) / 60, 1),
              **speed.estimate(repo, here, footage, diarize)}
     if upgrading:
-        found["note"] = ("files being upgraded to an accurate transcript are analyzed whole again, so reading"
-                         " their picture and sound adds a little on top")
+        chosen = {transcription for asset, transcription in to_start if asset.id in upgrading}
+        found["note"] = (
+            "files whose transcript is being made better keep their picture and sound measurements; "
+            + ("made accurate, the whole transcript is heard again" if "accurate" in chosen else "")
+            + ("; " if chosen == {"accurate", "balanced"} else "")
+            + ("a fast one made balanced has only its unsure lines heard again, so it takes less than this says"
+               if "balanced" in chosen else "")
+        )
     return found
 
 @mcp.tool()
@@ -1506,7 +1520,7 @@ def analyze_asset(
     diarize: bool = True,
     speakers: Annotated[Optional[int], Field(ge=1, le=20)] = None,
     again: bool = False,
-    transcription: Literal["accurate", "fast"] = "accurate",
+    transcription: Literal["accurate", "balanced", "fast"] = "accurate",
     dry_run: bool = False,
 ) -> dict:
     """Start analyzing what assets contain, in the background.
@@ -1564,19 +1578,19 @@ def analyze_asset(
             run did not have. Only what would come out different is redone:
             the transcript, the voices when `speakers` is given; the scan and
             the faces are kept.
-        transcription: "accurate", the default, or "fast": about twice as
-            quick on a computer without an NVIDIA card, but with noticeably
-            more misheard words and looser word timings, so cuts land less
-            exactly. It is the user's trade to make: on a low-tier computer,
-            or a mid-tier one with more than about an hour of footage, call
-            with `dry_run` first and ask them with both times; use it unasked
-            only when they said they want it quick. A file with a fast
-            transcript asked for "accurate" is transcribed again without
-            `again` — the whole analysis is redone — and an accurate
-            transcript is never replaced with a fast one.
+        transcription: "accurate", the default; "fast": about twice as
+            quick without an NVIDIA card, with more misheard words and looser
+            word timings; or "balanced": fast, then only the lines it was
+            unsure of heard again by the accurate model — most of the quality
+            for a little more than fast. The user's trade to make: on a
+            low-tier computer, or a mid-tier one with more than about an hour
+            of footage, call with `dry_run` first and ask them with the
+            times. A transcript asked to be better is redone without `again`
+            (fast to balanced hears only the unsure lines again); one is
+            never made worse.
         dry_run: Start nothing; say what would start and how long it would
-            take, as `estimates` with one estimate for "accurate" and one for
-            "fast", so the user can choose before waiting on either.
+            take, as `estimates` for "accurate", "balanced" and "fast", so
+            the user can choose before waiting on any.
 
     Returns:
         A dictionary with `jobs`, one `asset_id`, `job_id`, `status` and
@@ -1609,7 +1623,7 @@ def analyze_asset(
 
     if dry_run:
         choices = {}
-        for choice in ("accurate", "fast"):
+        for choice in ("accurate", "balanced", "fast"):
             to_start, skipped, upgrading = _plan_analyses(assets, transcribe, choice, again)
             choices[choice] = _estimate(to_start, transcribe, diarize, upgrading)
         to_start, skipped, upgrading = _plan_analyses(assets, transcribe, transcription, again)
@@ -1847,7 +1861,7 @@ def get_analysis(
         A dictionary with the asset's `notes` where it has them — how it may
         be used, which every cut from it has to respect — its `duration`, `analyzed_at`,
         `transcription` (`fast` — expect misheard words, check them before
-        trusting a cut to a word — `accurate`, or null), `doubtful_spots`
+        trusting a cut to a word — `balanced`, `accurate`, or null), `doubtful_spots`
         (how many stretches in the whole file the speech model was unsure
         of; null for a transcript made before that was kept), and the
         overlapping `scenes`, `black_frames`, `frozen_frames`, `silences`,
