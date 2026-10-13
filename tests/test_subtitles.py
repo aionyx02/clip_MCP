@@ -443,21 +443,30 @@ def test_a_caption_can_be_retimed_and_deleted(spoken: str) -> None:
     edit(project, [{"action": "edit_subtitle", "cue_id": "c2", "delete": True}])
     assert [cue["cue_id"] for cue in get_subtitles(project)["cues"]] == ["c1", "c3"]
 
-def test_a_correction_is_remembered_for_every_project_by_default_and_says_so(spoken: str) -> None:
+def test_a_correction_said_to_be_for_every_project_is_remembered_and_named_where_it_turns_up(spoken: str) -> None:
     first = build_project([video_track(), insert("a", spoken, 0, 10)])
-    edit(first, [{"action": "set_subtitles", "cues": caption(first)["cues"]}])
-    result = edit(first, [{"action": "edit_subtitle", "cue_id": "c3", "text": "大家都看得到的修正"}])
+    caption(first)
+    result = edit(first, [{"action": "edit_subtitle", "cue_id": "c3", "text": "大家都看得到的修正",
+                           "for_all_projects": True}])
     assert "every project" in result["captions_kept"]
     second = build_project([video_track(), insert("a", spoken, 0, 10)])
-    assert "大家都看得到的修正" in [cue["text"] for cue in caption(second)["cues"]]
+    made = caption(second)
+    assert "大家都看得到的修正" in [cue["text"] for cue in made["cues"]]
+    # Where it came from, so a line worded for that cut can be caught in this one.
+    assert any(line.endswith("大家都看得到的修正 — 「測試」") for line in made["from_other_projects"])
+
+def test_storing_every_caption_at_once_keeps_them_to_this_project(spoken: str) -> None:
+    first = build_project([video_track(), insert("a", spoken, 0, 10)])
+    rewritten = [{**cue, "text": "第三、四版"} if index == 0 else cue for index, cue in enumerate(caption(first)["cues"])]
+    edit(first, [{"action": "set_subtitles", "cues": rewritten}])
+    assert "第三、四版" not in [cue.text for cue in repo.reviewed_captions(spoken)]
 
 def test_a_caption_written_for_one_cut_stays_in_that_project(spoken: str) -> None:
     # 「第三版」 rewritten as 「第三、四版」 for one cut's order is not what was said in the file,
     # and every later project captioning that footage used to be handed it.
     first = build_project([video_track(), insert("a", spoken, 0, 10)])
     edit(first, [{"action": "set_subtitles", "cues": caption(first)["cues"]}])
-    result = edit(first, [{"action": "edit_subtitle", "cue_id": "c2", "text": "只屬於這一支的說法",
-                           "this_project_only": True}])
+    result = edit(first, [{"action": "edit_subtitle", "cue_id": "c2", "text": "只屬於這一支的說法"}])
     assert any("this project only" in line for line in result["captions"])
     assert "只屬於這一支的說法" not in [cue.text for cue in repo.reviewed_captions(spoken)]
     # Captioned again here, it is kept; captioned elsewhere, the footage's own words come back.
@@ -795,7 +804,7 @@ def test_a_correction_made_in_one_project_is_used_in_the_next(spoken: str) -> No
     first = build_project([video_track(), insert("a", spoken, 0.0, 9.0)])
     caption(first)
     result = apply_edits(first, get_project(first)["version"], [
-        EditSubtitleOp(cue_id=repo.get_project(first).subtitles[1].id, text="第二局"),
+        EditSubtitleOp(cue_id=repo.get_project(first).subtitles[1].id, text="第二局", for_all_projects=True),
     ])
     # Read back as it now stands, and remembered against the file.
     assert len(result["captions"]) == 1 and result["captions"][0].endswith("第二局")
@@ -820,7 +829,7 @@ def test_one_caption_is_added_without_sending_the_rest(spoken: str) -> None:
         AddSubtitleOp(asset_id=spoken, source_start=Decimal("6.2"), source_end=Decimal("6.8"), text="（停頓）"),
     ])
     assert len(repo.get_project(project).subtitles) == 4
-    assert result["captions"][0].endswith("（停頓）")
+    assert result["captions"][0].endswith("（停頓） (this project only)")
 
 def test_a_one_for_one_correction_keeps_the_word_timings() -> None:
     words = [CueWord(text="掐", start=Decimal("1.0"), end=Decimal("1.5")),
@@ -848,8 +857,8 @@ def test_each_caption_says_where_it_came_from(spoken: str) -> None:
     # The line the speech model was unsure of is the one to proofread first.
     assert made["to_check"][0] == "c1" and sorted(made["to_check"]) == ["c1", "c2", "c3"]
 
-    edit(project, [{"action": "edit_subtitle", "cue_id": "c2", "text": "第二句改好了"}])
-    edit(project, [{"action": "edit_subtitle", "cue_id": "c3", "text": "只給這支", "this_project_only": True}])
+    edit(project, [{"action": "edit_subtitle", "cue_id": "c2", "text": "第二句改好了", "for_all_projects": True}])
+    edit(project, [{"action": "edit_subtitle", "cue_id": "c3", "text": "只給這支"}])
     cues = {cue["cue_id"]: cue for cue in get_subtitles(project)["cues"]}
     assert cues["c1"]["from"] == "transcript" and cues["c1"]["unsure"] == ["怎麼"]
     assert cues["c1"]["marked"] == "整個用起來⟦怎麼⟧那麼順" and cues["c1"]["text"] == "整個用起來怎麼那麼順"

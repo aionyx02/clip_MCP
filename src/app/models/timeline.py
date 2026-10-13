@@ -85,6 +85,10 @@ class SubtitleCue(BaseModel):
         description="Word timings inside this caption, in source seconds, for captions that light up word by "
                     "word. Empty is normal: a caption written by hand has none, and one lights up whole instead",
     )
+    remembered_from: Optional[str] = Field(
+        default=None,
+        description="For a caption remembered against its file: the project it was written in",
+    )
     local: bool = Field(
         default=False,
         description="Written for this project only — a title, or words put to fit this cut's order — so it is "
@@ -1079,11 +1083,11 @@ class EditSubtitleOp(BaseModel):
         description="New end as a time in the finished cut (seconds). Both times have to fall inside one clip of "
                     "the caption's file. Give this or `source_end`, not both",
     )
-    this_project_only: bool = Field(
+    for_all_projects: bool = Field(
         default=False,
-        description="Keep this caption in this project only. Leave it off for a correction of what was said — a "
-                    "misheard word or name — so every project captioning this footage gets it; turn it on for "
-                    "words written for this cut: a title, a part's name, a line reworded to fit this order",
+        description="Also remember this caption against its file, so every project captioning this footage starts "
+                    "from it. Only for a correction of what was said — a misheard word or a name. Left off, it stays "
+                    "in this project: anything worded for this cut, such as 「第三、四版」, would be wrong in the next",
     )
 
     @model_validator(mode="after")
@@ -1143,7 +1147,7 @@ class AddSubtitleOp(BaseModel):
         description="Where it ends as a time in the finished cut (seconds). Both times have to fall inside one clip of "
                     "the caption's file. Give this or `source_end`, not both",
     )
-    this_project_only: bool = Field(default=False, description="As on `edit_subtitle`")
+    for_all_projects: bool = Field(default=False, description="As on `edit_subtitle`")
 
     @model_validator(mode="after")
     def validate_where(self):
@@ -1266,6 +1270,11 @@ class SetSubtitlesOp(BaseModel):
 
     action: Literal["set_subtitles"] = "set_subtitles"
     cues: List[SubtitleCue] = Field(default_factory=list, description="The complete new set of captions; an empty list removes them")
+    for_all_projects: bool = Field(
+        default=False,
+        description="Remember these captions against their files for every project, as each one's `local` says. "
+                    "Left off, every one is kept to this project",
+    )
 
 class SetCaptionStyleOp(BaseModel):
     """Edit operation that changes how the captions are drawn.
@@ -1995,7 +2004,8 @@ def apply_operation(project: Project, op: EditOperation, assets: Mapping[str, As
         return
 
     if isinstance(op, SetSubtitlesOp):
-        project.subtitles = number_cues(sorted(op.cues, key=cue_order))
+        cues = op.cues if op.for_all_projects else [cue.model_copy(update={"local": True}) for cue in op.cues]
+        project.subtitles = number_cues(sorted(cues, key=cue_order))
         return
 
     if isinstance(op, AddSubtitleOp):
@@ -2010,7 +2020,7 @@ def apply_operation(project: Project, op: EditOperation, assets: Mapping[str, As
             asset_id, source_start, source_end = op.asset_id, op.source_start, op.source_end
         added = SubtitleCue(
             id=f"c{number}", asset_id=asset_id, source_start=source_start, source_end=source_end,
-            text=op.text, secondary=op.secondary, speaker=op.speaker, local=op.this_project_only,
+            text=op.text, secondary=op.secondary, speaker=op.speaker, local=not op.for_all_projects,
         )
         project.subtitles = sorted([*project.subtitles, added], key=cue_order)
         return
@@ -2035,10 +2045,9 @@ def apply_operation(project: Project, op: EditOperation, assets: Mapping[str, As
              ("source_start", source_start), ("source_end", source_end))
             if value is not None
         }
-        # Once kept to this project, a caption stays kept to it: edited again without saying,
-        # it would otherwise leak into every other project the next time it was saved.
-        if op.this_project_only:
-            named["local"] = True
+        # Kept to this project unless it is said to be for all of them: words put to one cut,
+        # remembered against the footage, turn up in every cut made from it after.
+        named["local"] = not op.for_all_projects
         # Correcting the words leaves the word timings describing words that are no longer
         # there, and a caption lighting up against the wrong syllables is worse than one
         # lighting up whole — unless the correction only swaps characters one for one, the

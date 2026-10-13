@@ -3267,8 +3267,8 @@ def apply_edits(project_id: str, expected_version: int, operations: list[EditOpe
             `set_subtitles`, `edit_subtitle`, or `add_subtitle`. Captions stored
             or corrected here are also remembered against the file they belong
             to, and the next `generate_subtitles` over that file, in any
-            project, starts from them — unless `this_project_only` keeps one
-            to this project. Caption times can be given in the cut's own
+            project, starts from them — but only those given
+            `for_all_projects`; the rest stay in this project. Caption times can be given in the cut's own
             seconds with `timeline_start` and `timeline_end`.
 
     Returns:
@@ -3294,7 +3294,7 @@ def apply_edits(project_id: str, expected_version: int, operations: list[EditOpe
     if touched:
         shared = [cue for cue in touched if not cue.local]
         if shared:
-            repo.remember_captions(shared)
+            repo.remember_captions([cue.model_copy(update={"remembered_from": saved.name}) for cue in shared])
         result["captions"] = [_caption_line(saved, cue) for cue in touched]
         if not shared:
             result["captions_kept"] = "in this project only"
@@ -4577,7 +4577,10 @@ def generate_subtitles(
     Returns:
         A dictionary with the project's `new_version`; `captions`, each as
         one line — its ID, where it lands in the cut, and what it says;
-        `reused`, how many came from captions already reviewed; `sources`,
+        `reused`, how many came from captions already reviewed, and
+        `from_other_projects`, each of those as a line with the project it was
+        written in — read them back, since words put to another cut are wrong
+        in this one; `sources`,
         how many came from each of `reviewed`, `this_project` and
         `transcript`; `to_check`, the IDs of the ones straight from the
         transcript, those with the most words the speech model was unsure of
@@ -4665,7 +4668,7 @@ def generate_subtitles(
     ]
     reused = [known.model_copy(update={"id": ""}) for known_list in reviewed.values() for known in known_list]
     reused = [cue for cue in reused if place_cues(project, [cue]) and not taken(cue, local)]
-    saved = _apply(project_id, expected_version, [SetSubtitlesOp(cues=[*kept, *reused, *local])])
+    saved = _apply(project_id, expected_version, [SetSubtitlesOp(cues=[*kept, *reused, *local], for_all_projects=True)])
     # Counted where the captions land, not where the words were said: two lines from
     # different files overlap only once the cut puts them on screen together.
     placed = place_cues(saved, saved.subtitles)
@@ -4687,6 +4690,10 @@ def generate_subtitles(
             for cue in placed
         ],
         "reused": len(reused),
+        "from_other_projects": [
+            f"{cue.id} {cue.text} — 「{cue.remembered_from or 'an earlier project'}」"
+            for cue in saved.subtitles if heard[cue.id]["from"] == "reviewed"
+        ],
         "sources": {source: sum(1 for cue in saved.subtitles if heard[cue.id]["from"] == source)
                     for source in ("reviewed", "this_project", "transcript")},
         "to_check": [cue.id for cue in to_check],
