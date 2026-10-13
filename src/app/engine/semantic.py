@@ -48,21 +48,21 @@ ONSET_REACH_SECONDS = 0.6
 # a cut, or run this far past one, to have been cut into. The ends are given more room
 # because the detector holds on after a voice stops: against the level measured every
 # tenth of a second on the first edit, its ends ran 0.08s to 0.26s late, and its starts
-# were within a window. Provisional.
+# were within a window. Provisional (roadmap §13).
 VOICED_MARGIN_SECONDS = 0.05
 VOICED_TAIL_MARGIN_SECONDS = 0.15
 # A heard word counts as the detector's to place once this much of it is voiced. The
 # speech model stretches a word back across the pause in front of it — 「然後」 was heard
 # from 18.02s where the voice resumes at 18.24s — so a word the detector hears is where
 # the detector says; one it missed altogether, a soft 「我們」, is where the model says.
-# Provisional.
+# Provisional (roadmap §13).
 VOICED_SHARE = 0.25
 # A word heard on the second listen counts only when the speech model was at least this
 # sure of it. Transcribing near-silence on its own it hears 「字幕」 and 「放入冰箱」 at
-# well under this; the words it was right about were well over it. Provisional.
+# well under this; the words it was right about were well over it. Provisional (roadmap §13).
 HEARD_PROBABILITY = 0.5
 # Two heard words this close together are one phrase, so a cut between them takes the
-# first off the second. Provisional.
+# first off the second. Provisional (roadmap §13).
 PHRASE_GAP_SECONDS = 0.3
 MOSTLY = 0.5
 NEARLY_ALL = 0.9

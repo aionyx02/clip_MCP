@@ -243,7 +243,8 @@ def check_delivery(
         shown += [(clip, []) for clip in track.clips if clip.layout is None]
     for clip, hidden_by in sorted(shown, key=lambda item: item[0].timeline_in):
         analysis = analyses.get(clip.asset_id)
-        if analysis is None:
+        # A title card's source range is only its length, not a stretch of its file that plays.
+        if analysis is None or clip.card is not None:
             continue
         for span in sorted([*analysis.black_frames, *analysis.frozen_frames], key=lambda item: item.start):
             landed = _on_timeline(clip, span.start, span.end)
@@ -519,7 +520,9 @@ def _out_of_time(project: Project, recorded: Mapping[str, datetime]) -> List[Fin
         One finding per stray run of clips.
     """
     base = project.base_video_track
-    clips = sorted(base.clips if base else [], key=lambda clip: clip.timeline_in)
+    # A title card was shot at no moment: it borrows a frame, and stands between the shots either side.
+    clips = sorted((clip for clip in (base.clips if base else []) if clip.card is None),
+                   key=lambda clip: clip.timeline_in)
     parts = {float(marker.timeline_in) for marker in project.markers}
     shots = [
         Shot(
@@ -547,7 +550,8 @@ def _repeats(clips: Sequence[Clip]) -> List[Finding]:
         replay — which is why it is a finding and not a refusal.
     """
     found: List[Finding] = []
-    ordered = sorted(clips, key=lambda item: item.timeline_in)
+    # A title card's source range is only its length, so it shows nothing of its file twice.
+    ordered = sorted((clip for clip in clips if clip.card is None), key=lambda item: item.timeline_in)
     for index, first in enumerate(ordered):
         for second in ordered[index + 1:]:
             if first.asset_id != second.asset_id:
