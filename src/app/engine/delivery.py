@@ -18,7 +18,7 @@ from datetime import datetime, timedelta
 from typing import List, Mapping, Optional, Sequence, Tuple
 
 from app.engine.builder import DUCK_DEPTH_DB, Talking
-from app.engine.continuity import Shot, strays
+from app.engine.continuity import Shot, stray_runs
 from app.engine.plan import LENGTH_TOLERANCE
 from app.engine.semantic import clean_cuts, share_covered, was_audible, was_made_up
 from app.engine.subtitles import caption_overflow, captioned_clips
@@ -74,10 +74,14 @@ class Finding:
     Attributes:
         check: Which check found it: one of `CHECKS`.
         message: What it is and where, for whoever decides.
+        spans: Where in the cut it is, as `(start, end)` in seconds, a
+            moment being a span that starts where it ends; empty for what
+            is about the whole cut.
     """
 
     check: str
     message: str
+    spans: Tuple[Tuple[float, float], ...] = ()
 
 def clock(seconds: float) -> str:
     """Write a time the way a video description does.
@@ -255,7 +259,7 @@ def check_delivery(
                     findings.append(Finding("bad_picture", (
                         f"black or frozen picture from {clock(start)} to {clock(end)} "
                         f"({end - start:.1f}s, clip {clip.id})"
-                    )))
+                    ), ((start, end),)))
 
     # Everything heard: the sequence and the audio tracks, less anything turned all the way down.
     for clip in captioned_clips(project):
@@ -487,7 +491,7 @@ def _speech_cuts(clips: Sequence[Clip], analyses: Mapping[str, MediaAnalysis]) -
                         f"clip {clip.id} {side} {abs(at - edge):.2f}s {where}, at {clock(landed)} ({at:.2f}s of the "
                         f"file), so the {part} of it is cut off — the transcript may have no word there, but the "
                         f"sound was measured. {move} at {edge:.2f}s of the file to keep all of it"
-                    )))
+                    ), ((landed, landed),)))
                 continue
             known = clean_cuts(analysis)
             really = known.sound_before(at) if opens else known.sound_after(at)
@@ -506,7 +510,7 @@ def _speech_cuts(clips: Sequence[Clip], analyses: Mapping[str, MediaAnalysis]) -
                 f"({at:.2f}s of the file)"
                 + (f", and takes 「{lost}」 off, heard on a second listen" if lost else "")
                 + advice
-            )))
+            ), ((landed, landed),)))
     return found
 
 def _out_of_time(project: Project, recorded: Mapping[str, datetime]) -> List[Finding]:
@@ -535,8 +539,9 @@ def _out_of_time(project: Project, recorded: Mapping[str, datetime]) -> List[Fin
         for clip in clips
     ]
     return [
-        Finding("continuity", f"{stray}; it may be meant — a flash-forward — or dropped in by mistake")
-        for stray in strays(shots)
+        Finding("continuity", f"{stray}; it may be meant — a flash-forward — or dropped in by mistake",
+                ((float(clips[first].timeline_in),) * 2, (float(clips[last].timeline_out),) * 2))
+        for stray, (first, last) in stray_runs(shots)
     ]
 
 def _repeats(clips: Sequence[Clip]) -> List[Finding]:
@@ -563,7 +568,7 @@ def _repeats(clips: Sequence[Clip]) -> List[Finding]:
                 found.append(Finding("repeated", (
                     f"clips {first.id} (at {clock(float(first.timeline_in))}) and {second.id} "
                     f"(at {clock(float(second.timeline_in))}) show the same {float(overlap):.1f}s of the same file"
-                )))
+                ), tuple((float(at),) * 2 for clip in (first, second) for at in (clip.timeline_in, clip.timeline_out))))
     return found
 
 def cover_candidates(

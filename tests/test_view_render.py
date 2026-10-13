@@ -41,13 +41,31 @@ def rendered(tmp_path_factory: pytest.TempPathFactory, media: Path) -> dict:
     return {"project": project, "job_id": finished(job)}
 
 
-def test_a_render_is_looked_at_around_every_transition(rendered: dict) -> None:
-    seen = server.view_render(rendered["job_id"], at="transitions")
+def test_a_render_lists_its_joins_without_frames(rendered: dict) -> None:
+    seen = server.inspect_join(rendered["job_id"])
     listing = seen.content[0].text
-    # The cut is at 4s and the dissolve ends on it: before, inside and after.
-    assert "before the dissolve" in listing and "middle of the dissolve" in listing and "after the dissolve" in listing
-    assert "3.50s" in listing and "4.15s" in listing
+    assert "#1 " in listing and "(4.00s) dissolve: clip a: wide.mp4 0.00–4.00s → clip b: wide.mp4 5.00–9.00s" in listing
+    assert len(seen.content) == 1
+
+
+def test_a_join_is_looked_at_frame_by_frame_with_its_words_and_sound(rendered: dict) -> None:
+    seen = server.inspect_join(rendered["job_id"], joins=[1])
+    text = seen.content[0].text
+    assert "a row of 7 up to the cut, then 7 from it" in text
+    # 「第一句」 ends at 2.5s, before the stretch; 「第二句」 starts a second into clip b.
+    assert "words: ‖ [clip b] +1.00 第二句" in text
+    levels = text.split("levels: ")[1].splitlines()[0]
+    assert levels.startswith("dB every 0.1s from -1.50s") and " ‖ " in levels
+    assert Path(text.split("sound: ")[1].splitlines()[0]).exists()
     assert seen.content[1].type == "image"
+
+
+def test_a_join_is_found_by_time_and_a_number_not_in_the_list_is_refused(rendered: dict) -> None:
+    assert server.inspect_join(rendered["job_id"], at=[3.2]).content[0].text.startswith("#1 ")
+    with pytest.raises(ValueError, match="has 1 joins; there is no #2"):
+        server.inspect_join(rendered["job_id"], joins=[2])
+    with pytest.raises(ValueError, match="more than the 36 a sheet holds"):
+        server.inspect_join(rendered["job_id"], joins=[1], seconds=3, fps=8)
 
 
 def test_a_render_is_looked_at_on_every_caption(rendered: dict) -> None:
@@ -60,6 +78,13 @@ def test_a_render_says_when_the_project_has_moved_on_since(rendered: dict) -> No
     edit(rendered["project"], [{"action": "rename_project", "name": "改過名字"}])
     listing = server.view_render(rendered["job_id"], times=[1.0]).content[0].text
     assert "edited since this render" in listing
+
+
+def test_a_render_lists_the_joins_it_was_made_with_after_the_cut_has_changed(rendered: dict) -> None:
+    edit(rendered["project"], [{"action": "trim_clip", "track_id": "main", "clip_id": "a",
+                                "new_source_range": {"start": 0, "end": 3}, "ripple": True}])
+    listing = server.inspect_join(rendered["job_id"]).content[0].text
+    assert "these are the joins of the version rendered" in listing and "(4.00s) dissolve" in listing
 
 
 def test_a_render_that_has_not_finished_is_not_looked_at() -> None:

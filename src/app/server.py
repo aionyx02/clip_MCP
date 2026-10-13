@@ -81,10 +81,13 @@ from app.engine.comments import anchor_at, where_now
 from app.engine.compare import compare
 from app.engine.compare import parts_of as cut_parts
 from app.engine.merge import WHOLE_PICKS, merge, merge_plans
-from app.engine.delivery import CHECKS, chapter_metadata, chapters, check_delivery, clock, cover_candidates
+from app.engine.delivery import (
+    CHECKS, Finding, chapter_metadata, chapters, check_delivery, clock, cover_candidates,
+)
+from app.engine.joins import HeardWord, Join, joins_in, words_heard
 from app.engine.frames import format_timestamp, still, storyboard_sheet
 from app.engine.interchange import write_edl, write_fcpxml, write_otio, write_srt
-from app.engine.listen import chart, describe, levels, levels_every, parts_of
+from app.engine.listen import WINDOW_SECONDS, chart, cut_sound, describe, levels, levels_every, parts_of
 from app.engine.subtitles import (
     DEFAULT_MAX_CHARACTERS,
     DEFAULT_MAX_SECONDS,
@@ -136,7 +139,7 @@ history = repo.keep_history(os.path.join(WORKSPACE_DIR, "history"))
 CORE_TOOLS = (
     "list_assets", "analyze_asset", "get_job", "build_semantic_timeline", "query_clips", "view_frames",
     "save_plan", "amend_plan", "create_project", "compile_plan", "preview_project", "render_project",
-    "view_render", "listen_again", "check_render", "apply_edits", "generate_subtitles",
+    "view_render", "inspect_join", "listen_again", "check_render", "apply_edits", "generate_subtitles",
 )
 
 mcp = FastMCP(
@@ -2817,14 +2820,10 @@ def view_frames(
         Image(data=storyboard_sheet(shots), format="jpeg"),
     ])
 
-# Provisional (roadmap §13): how far either side of a transition `view_render` looks —
-# clear of the mix, near enough to be the same shot.
-AROUND_TRANSITION_SECONDS = 0.15
-
 @mcp.tool()
 def view_render(
     job_id: str,
-    at: Literal["even", "transitions", "captions"] = "even",
+    at: Literal["even", "captions"] = "even",
     times: Optional[List[Annotated[float, Field(ge=0)]]] = None,
     start: Annotated[float, Field(ge=0)] = 0,
     end: Optional[float] = None,
@@ -2836,17 +2835,16 @@ def view_render(
     that came out, so it is how to check what only rendering makes — captions
     burned in where they belong and readable, transitions that really happen,
     the framing of another shape. Render a preview, look here, fix what is
-    wrong, and only then render the final cut.
+    wrong, and only then render the final cut. How one shot hands over to the
+    next — every cut, transition and picture laid over — is `inspect_join`.
 
     The frames are returned to you as a tool result, which means they leave
     this machine if you are not running on it.
 
     Args:
         job_id: The render, preview or full, from `render_project`.
-        at: `even` spreads `count` frames over the stretch; `transitions`
-            takes one just before, one in the middle and one just after each
-            transition; `captions` one from the middle of each caption on
-            screen.
+        at: `even` spreads `count` frames over the stretch; `captions` takes
+            one from the middle of each caption on screen.
         times: Exact seconds of the render to look at instead.
         start: Only look from here, in seconds of the render.
         end: Only look up to here; omit for the end.
@@ -2869,20 +2867,6 @@ def view_render(
     wanted: List[tuple] = []
     if times:
         wanted = [(seconds, "") for seconds in times]
-    elif at == "transitions":
-        base = project.base_video_track if project else None
-        for clip in (base.clips if base else []):
-            if clip.transition_in is None:
-                continue
-            cut, seconds = float(clip.timeline_in), float(clip.transition_in.seconds)
-            if cut < start or (last is not None and cut > last):
-                continue
-            kind = clip.transition_in.kind
-            wanted += [(max(0.0, cut - seconds - AROUND_TRANSITION_SECONDS), f"before the {kind}"),
-                       (cut - seconds / 2, f"middle of the {kind}"),
-                       (cut + AROUND_TRANSITION_SECONDS, f"after the {kind}")]
-        if not wanted:
-            said.append("there is no transition in this stretch of the cut")
     elif at == "captions":
         if not job.captioned:
             said.append("this render has no captions burned in; render with burn_subtitles to look at them")
@@ -2910,6 +2894,184 @@ def view_render(
     return ToolResult(content=[
         "\n".join([*said, "Frames of the render, in reading order:", *listing]),
         Image(data=storyboard_sheet(shots), format="jpeg"),
+    ])
+
+# How much of a join `inspect_join` looks at unless asked for more: a second and a half
+# either side, four frames a second. Enough for a movement to carry through or not, and
+# one join is a sheet of fourteen frames.
+JOIN_SECONDS = 1.5
+JOIN_FPS = 4.0
+# How the two frames either side of a cut are framed, so the cut can be found in the sheet.
+CUT_BORDER = (230, 60, 60)
+
+def _project_as_rendered(job: Job) -> Tuple[Optional[Project], bool]:
+    """The project a render was made from, as it was when it was rendered.
+
+    Args:
+        job: The render.
+
+    Returns:
+        `(project, exact)`: the project at the version rendered and True; or,
+        when that version is no longer in its history, the project as it is
+        now and False. `(None, False)` when the project is gone.
+    """
+    project = _rendered_from(job)
+    if project is None or not _changed_since(job):
+        return project, project is not None
+    for version in history.versions_of("projects/", f"{project.id}.json", 50):
+        data = _project_json_at(project.id, version.commit)
+        if data is not None and data.get("version") == job.project_version:
+            return Project.model_validate(data), True
+    return project, False
+
+def _found_at(join: Join, findings: Sequence[Finding]) -> List[Finding]:
+    """The findings about the stretch of the cut that looking at a join shows."""
+    opened, closed = join.at - JOIN_SECONDS, join.at + JOIN_SECONDS
+    return [finding for finding in findings
+            if any(start <= closed and end >= opened for start, end in finding.spans)]
+
+def _join_line(number: int, join: Join, found: Sequence[Finding]) -> str:
+    """Say where a join is, what kind, between what, and what was found there."""
+    line = (f"#{number} {format_timestamp(join.at)} ({join.at:.2f}s) {join.kind}: {join.before} → {join.after}"
+            + (f"; part 「{join.part}」 begins" if join.part else "")
+            + (f"; the sound changes over at {join.sound_at:.2f}s" if join.sound_at is not None else ""))
+    return "\n".join([line, *(f"    found: {finding.check}: {finding.message}" for finding in found)])
+
+def _words_across(join: Join, heard: Sequence[HeardWord]) -> str:
+    """Write the words heard around a join, in order, with ‖ where the picture cuts."""
+    words: List[str] = []
+    side, marked = None, False
+    for word in heard:
+        if not marked and word.start >= join.at:
+            words.append("‖")
+            marked = True
+        if side != word.clip_id:
+            words.append(f"[clip {word.clip_id}]")
+            side = word.clip_id
+        words.append(f"{word.start - join.at:+.2f} {word.text}" + ("✂" if word.cut else ""))
+    if not heard:
+        return "none transcribed"
+    return " ".join(words + ([] if marked else ["‖"]))
+
+def _levels_across(path: str, join: Join, opened: float, closed: float, keep_as: str) -> str:
+    """Measure a render's sound around a join, keeping the stretch to play."""
+    try:
+        cut_sound(path, opened, closed, keep_as)
+    except RuntimeError:
+        return "the render has no sound here"
+    measured = levels_every(keep_as, WINDOW_SECONDS)
+    split = round((join.at - opened) / WINDOW_SECONDS)
+    return (f"dB every {WINDOW_SECONDS:g}s from {opened - join.at:+.2f}s: "
+            + " ".join(f"{level:g}" for level in measured[:split]) + " ‖ "
+            + " ".join(f"{level:g}" for level in measured[split:]) + f"\n  sound: {keep_as}")
+
+@mcp.tool()
+def inspect_join(
+    job_id: str,
+    joins: Optional[List[Annotated[int, Field(ge=1)]]] = None,
+    at: Optional[List[Annotated[float, Field(ge=0)]]] = None,
+    seconds: Annotated[float, Field(gt=0, le=3)] = JOIN_SECONDS,
+    fps: Annotated[float, Field(gt=0, le=8)] = JOIN_FPS,
+) -> ToolResult:
+    """Look at how a finished render hands over from one shot to the next.
+
+    A storyboard shows each shot; whether a movement carries through a cut,
+    or a sentence ends before the picture moves on, is in the second either
+    side. Every join counts: plain cuts, transitions, B-roll coming in and
+    going off, the start of a part.
+
+    With neither `joins` nor `at`, it lists the render's joins and no frames:
+    number, time, kind, what is either side, and what `check_render` found
+    there. Then look at the ones that matter, by number or by time.
+
+    The frames are returned to you as a tool result, which means they leave
+    this machine if you are not running on it.
+
+    Args:
+        job_id: The render, preview or full, from `render_project`.
+        joins: Numbers from the list; they belong to this render only.
+        at: Seconds of the render; each looks at the join nearest it.
+        seconds: How far either side of each join to look.
+        fps: Frames a second to take.
+
+    Returns:
+        The list; or for each join its frames, a row before the cut and a row
+        from it with the two either side framed red; the transcribed words
+        laid onto the render's time, ✂ on any a cut takes into; the render's
+        sound level every 0.1s with ‖ at the cut; and a WAV of the stretch to
+        play or hear again with `listen_again`. It says when the project has
+        changed since the render, and which joins did not fit on the sheet.
+
+    Raises:
+        ValueError: If the job is not a finished render, a number is not in
+            the list, or one join is more frames than a sheet holds.
+    """
+    job, path = _finished_render(job_id)
+    project, exact = _project_as_rendered(job)
+    if project is None:
+        raise ValueError(f"the project render {job_id} was made from is gone, so its joins are not known")
+    said: List[str] = []
+    if not exact:
+        said.append("the project has been edited since this render and the version rendered is no longer kept, "
+                    "so these are the joins of the cut as it is now; render again to be sure")
+    elif _changed_since(job):
+        said.append("the project has been edited since this render; these are the joins of the version rendered")
+    listed = joins_in(project, {asset_id: os.path.basename(asset.path)
+                                for asset_id, asset in _referenced_assets(project).items()})
+    if not listed:
+        return ToolResult(content=["\n".join([*said, f"render {job_id} has no joins: it is one shot"])])
+    findings = [finding for finding in _findings(project, job.captioned) if finding.spans]
+    if not joins and not at:
+        return ToolResult(content=["\n".join([
+            *said, f"Joins of render {job_id}; look at any with `joins` or `at`:",
+            *(_join_line(number, join, _found_at(join, findings)) for number, join in enumerate(listed, start=1)),
+        ])])
+
+    wanted: List[int] = []
+    for number in joins or []:
+        if number > len(listed):
+            raise ValueError(f"render {job_id} has {len(listed)} joins; there is no #{number}")
+        wanted.append(number)
+    for seconds_in in at or []:
+        wanted.append(1 + min(range(len(listed)), key=lambda index: abs(listed[index].at - seconds_in)))
+    wanted = list(dict.fromkeys(wanted))
+    steps = round(seconds * fps)
+    per_join = 2 * (steps + 1)
+    if per_join > MAX_STORYBOARD_TILES:
+        raise ValueError(f"{seconds:g}s at {fps:g} frames a second is {per_join} frames a join, more than the "
+                         f"{MAX_STORYBOARD_TILES} a sheet holds; look less far, or more thinly")
+    fits = MAX_STORYBOARD_TILES // per_join
+    if len(wanted) > fits:
+        said.append(f"{', '.join(f'#{number}' for number in wanted[fits:])} did not fit on the sheet; "
+                    "look at them in another call")
+        wanted = wanted[:fits]
+
+    length = float(project.duration)
+    frame = project.fps_den / project.fps_num
+    analyses = _analyses(project)
+    shots: list = []
+    borders: list = []
+    text: List[str] = []
+    for number in wanted:
+        join = listed[number - 1]
+        before = [join.at - step / fps for step in range(steps, 0, -1)] + [join.at - frame]
+        after = [join.at] + [join.at + step / fps for step in range(1, steps + 1)]
+        for times, edge in ((before, len(before) - 1), (after, 0)):
+            for index, moment in enumerate(times):
+                shots.append((path, round(min(max(0.0, moment), length - 0.05), 3),
+                              f"#{number} {moment - join.at:+.2f}s"))
+                borders.append(CUT_BORDER if index == edge else None)
+        opened, closed = max(0.0, join.at - seconds), min(length, join.at + seconds)
+        keep_as = os.path.join(WORKSPACE_DIR, "temp", "joins", f"render-{job_id[:8]}-{join.at:.2f}.wav")
+        text += [
+            _join_line(number, join, _found_at(join, findings)),
+            f"  frames: a row of {steps + 1} up to the cut, then {steps + 1} from it",
+            "  words: " + _words_across(join, words_heard(project, analyses, opened, closed)),
+            "  levels: " + _levels_across(path, join, opened, closed, keep_as),
+        ]
+    return ToolResult(content=[
+        "\n".join([*said, *text]),
+        Image(data=storyboard_sheet(shots, columns=steps + 1, borders=borders), format="jpeg"),
     ])
 
 @mcp.tool()
