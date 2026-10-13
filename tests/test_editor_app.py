@@ -213,10 +213,10 @@ def test_an_export_goes_ahead_only_over_what_the_user_was_shown(client: TestClie
     def fake_render(*args):
         asked.append(args)
         return {"job_id": "missing-job"}
-    monkeypatch.setattr(server, "render_project", fake_render)
+    monkeypatch.setattr(server, "_start_render", fake_render)
     answer = client.post(f"/api/projects/{project}/export", json={"frame": "", "captions": False, "allow": ["mid_speech"]})
     assert answer.status_code == 200
-    project_id, preview, _, captions, frame, _, allow = asked[0]
+    project_id, preview, _, captions, frame, _, allow, _ = asked[0]
     assert (preview, captions, frame, allow) == (False, False, None, ["mid_speech"])
     assert client.get(f"/api/projects/{project}/export").json()["job_id"] == "missing-job"
 

@@ -223,8 +223,11 @@ was not there to agree to them.
    storyboard cannot show whether it gets out of the way of the talking.
 8. Call `check_render` and tell the user what it finds; a full render is
    refused until they have heard. See the platform file.
-9. Call `render_project` with `is_preview: true` unless the user asked for
-   the final file, and with `burn_subtitles: true` if captions were stored.
+9. Call `render_project` — it renders a preview unless told otherwise —
+   with `burn_subtitles: true` if captions were stored. Even when the user
+   asked for the final file, the preview comes first: a final render is
+   refused until a preview of the cut as it is now, in the same shape, has
+   finished.
    Do not even out clip volumes by hand: the render normalizes the mix. Call
    `get_job` with `wait_seconds: 50` until the status is `completed`, `failed`,
    or `cancelled`. Look at what came out with `view_render` — captions and
@@ -234,8 +237,8 @@ was not there to agree to them.
    B-roll comes in or goes off, and any moment the user points at. Whether a
    movement or a sentence carries across a cut is in those frames and words,
    not in what the plan says the clips are about.
-10. Render with `is_preview: false` once the user is happy, or at once if they
-    asked for the final file.
+10. Render with `is_preview: false` once the user is happy, or as soon as the
+    preview checks out if they asked for the final file.
 
 For later edits, call `get_project` first so your operations match the current
 clips and version.

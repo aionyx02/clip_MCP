@@ -31,7 +31,7 @@ from app.models.timeline import (
 from app.server import (
     check_render, export_cover, export_timeline, get_chapters, import_asset, render_project, repo,
 )
-from helpers import build_project, edit, insert, video_track
+from helpers import build_project, edit, finished, insert, video_track
 
 def clip(clip_id: str, asset_id: str, start: float, end: float, at: float, **fields) -> Clip:
     """Build a clip.
@@ -192,11 +192,29 @@ def test_render_is_refused_until_the_user_says_to_go_ahead(media: Path) -> None:
     repo.save_analysis(MediaAnalysis(asset_id=asset, duration=8.0, black_frames=[Span(start=0.0, end=8.0)]))
     project = build_project([video_track(), insert("a", asset, 0, 4)], width=640, height=360)
     assert check_render(project)["findings"][0]["check"] == "bad_picture"
-    with pytest.raises(ValueError, match="allow="):
-        render_project(project)
     # A preview is how you look, so it is never refused; it says what it found.
-    assert render_project(project, is_preview=True)["findings"][0]["check"] == "bad_picture"
-    assert render_project(project, allow=["bad_picture"])["findings"][0]["check"] == "bad_picture"
+    preview = render_project(project)
+    assert preview["findings"][0]["check"] == "bad_picture"
+    finished(preview)
+    with pytest.raises(ValueError, match="allow="):
+        render_project(project, is_preview=False)
+    assert render_project(project, is_preview=False, allow=["bad_picture"])["findings"][0]["check"] == "bad_picture"
+
+def test_a_final_render_waits_for_a_preview_of_the_cut_as_it_is_now(media: Path) -> None:
+    asset = import_asset(str(media / "wide.mp4"))["id"]
+    project = build_project([video_track(), insert("a", asset, 0, 2)], width=640, height=360)
+    anything = ["bad_picture", "clipping", "music", "mid_speech", "repeated", "continuity", "unplanned",
+                "captions", "length"]
+    with pytest.raises(ValueError, match="no preview of the cut as it is now has finished"):
+        render_project(project, is_preview=False, allow=anything)
+    finished(render_project(project))
+    with pytest.raises(ValueError, match="no preview of the cut as it is now, portrait, has finished"):
+        render_project(project, is_preview=False, frame="portrait", allow=anything)
+    edit(project, [{"action": "rename_project", "name": "改過"}])
+    with pytest.raises(ValueError, match="no preview"):
+        render_project(project, is_preview=False, allow=anything)
+    finished(render_project(project))
+    assert finished(render_project(project, is_preview=False, allow=anything))["status"] == "completed"
 
 def test_the_chapters_are_carried_inside_the_rendered_file(media: Path, tmp_path: Path) -> None:
     from app.engine.builder import FFmpegRenderer

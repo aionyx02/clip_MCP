@@ -26,7 +26,7 @@ from mcp.types import TextContent
 from pydantic import BaseModel, Field, TypeAdapter
 from app.models.media import Asset, Measured, MediaAnalysis, Source, Span, SpeakerTurn, Transcript
 from app.models.plan import (
-    EditPlan, PlanAmendment, TrimKind, apply_amendment, describe_amendment, short_clip_ids, whole_clip_id,
+    EditPlan, PlanAmendment, Trim, TrimKind, apply_amendment, describe_amendment, short_clip_ids, whole_clip_id,
     with_whole_clip_ids,
 )
 from app.models.semantic import (
@@ -3523,9 +3523,10 @@ def copy_plan(plan_id: str, timeline_id: Optional[str] = None, version: Optional
 
     After the footage is transcribed again, sentences start and end a little
     elsewhere, so a clip with no exact match takes the one from the same file
-    and level that covers most of it. Those are listed in `matched_nearby`
-    with both stretches: read them back, since a sentence that was split or
-    joined may now say a little more or less.
+    and level that covers most of it, and its trim is moved to take the same
+    seconds of the file as before. Those are listed in `matched_nearby` with
+    both stretches and any trim moved: read them back, since a sentence that
+    was split or joined may now say a little more or less.
 
     Args:
         plan_id: The plan to copy.
@@ -3540,7 +3541,8 @@ def copy_plan(plan_id: str, timeline_id: Optional[str] = None, version: Optional
     Raises:
         ValueError: If the plan or the timeline does not exist, or a clip the
             copy uses has no match in the other timeline — named, so it can be
-            taken out of the plan first. A rejected clip with no match is
+            taken out of the plan first — or its trim's seconds are no longer
+            in the clip matched to it. A rejected clip with no match is
             simply not carried over, since there is nothing to reject.
     """
     plan = repo.get_plan(plan_id) if version is None else repo.get_plan_version(plan_id, version)
@@ -3568,13 +3570,21 @@ def copy_plan(plan_id: str, timeline_id: Optional[str] = None, version: Optional
                 "or it is a section that timeline does not have. Take them out of the plan, or copy it onto a "
                 "timeline that has them"
             )
+        moved, outside = {}, []
         for item in copy.selections:
-            shift = shifts.get(item.clip_id, 0.0)
-            if shift and item.trim.kind == TrimKind.RANGE:
-                # A range is counted from the clip's own start, which moved.
-                item.trim.from_seconds = max(0.0, round((item.trim.from_seconds or 0.0) + shift, 3))
-                if item.trim.to_seconds is not None:
-                    item.trim.to_seconds = max(0.001, round(item.trim.to_seconds + shift, 3))
+            if item.clip_id in shifts:
+                said_trim = _trim_moved(item.trim, *shifts[item.clip_id])
+                if said_trim == "outside":
+                    outside.append(item.clip_id)
+                elif said_trim:
+                    moved[item.clip_id] = said_trim
+        if outside:
+            raise ValueError(
+                f"{', '.join(outside)}: after the footage was transcribed again, the sentence each is matched to "
+                "no longer holds the seconds its trim takes. Set its trim to `full` on this plan, copy it, and "
+                "trim it again on the copy"
+            )
+        for item in copy.selections:
             item.clip_id = mapping[item.clip_id]
             item.trim.keep_clip_ids = [mapping[kept] for kept in item.trim.keep_clip_ids]
         for shot in copy.broll:
@@ -3585,12 +3595,13 @@ def copy_plan(plan_id: str, timeline_id: Optional[str] = None, version: Optional
         ]
         copy.timeline_id = target
     else:
-        nearby = []
+        nearby, moved = [], {}
     said = f"copied from {plan.id} v{plan.version}" + (f" onto {target}" if target != plan.timeline_id else "")
     saved = save_plan(copy, f"{said}: {note}" if note else said)
     used = {item.clip_id for item in plan.selections} | {clip for shot in plan.broll for clip in
                                                          (shot.clip_id, shot.over_clip_id)}
-    nearby = [match for match in nearby if match["clip_id"] in used]
+    nearby = [{**match, **({"trim": moved[match["clip_id"]]} if match["clip_id"] in moved else {})}
+              for match in nearby if match["clip_id"] in used]
     if nearby:
         saved["matched_nearby"] = nearby
     return saved
@@ -3608,7 +3619,8 @@ def _matched_clips(here: List[SemanticClip], there: List[SemanticClip]) -> tuple
 
     Returns:
         The new ID for each old one (None when nothing matches), the matches
-        that are not exact, and how far each of those clips' start moved.
+        that are not exact, and for each of those how far its start and its
+        end moved back, and how long the clip standing in for it is.
     """
     def place(clip: SemanticClip) -> tuple:
         """Say which moment of which file a clip is, whatever timeline it sits in."""
@@ -3631,7 +3643,8 @@ def _matched_clips(here: List[SemanticClip], there: List[SemanticClip]) -> tuple
             best = max(alike.get((clip.asset_id, clip.level), []), key=covered, default=None)
             if best is not None and covered(best) >= NEARBY_SHARE * max(end - start, 0.001):
                 found = best
-                shifts[clip.id] = round(start - best.source_range.start, 3)
+                shifts[clip.id] = (round(start - best.source_range.start, 3), round(end - best.source_range.end, 3),
+                                   round(best.source_range.end - best.source_range.start, 3))
                 nearby.append({
                     "clip_id": clip.id, "now": best.id,
                     "was": [round(start, 2), round(end, 2)],
@@ -3640,6 +3653,47 @@ def _matched_clips(here: List[SemanticClip], there: List[SemanticClip]) -> tuple
                 })
         mapping[clip.id] = found.id if found else None
     return mapping, nearby, shifts
+
+def _trim_moved(trim: Trim, start_moved: float, end_moved: float, length: float) -> str:
+    """Keep a trim on the same seconds of its file when its clip now starts or ends elsewhere.
+
+    A trim is counted from its clip's own start, or for `tail` its end, so a
+    sentence that a second transcription moved would otherwise carry it onto
+    other words. Moving it back is arithmetic, so it is done; it is said.
+
+    Args:
+        trim: The trim, changed in place.
+        start_moved: How far back the clip's start moved, in seconds.
+        end_moved: How far back its end moved.
+        length: How long the clip is now.
+
+    Returns:
+        What changed, for whoever reads the copy back; empty when nothing
+        did; `outside` when the same seconds are no longer in the clip, and
+        then nothing is changed.
+    """
+    if trim.kind == TrimKind.HEAD and start_moved:
+        now = round(trim.seconds + start_moved, 3)
+        if not 0 < now <= length:
+            return "outside"
+        said, trim.seconds = f"head {trim.seconds:g}s → {now:g}s", now
+        return said
+    if trim.kind == TrimKind.TAIL and end_moved:
+        now = round(trim.seconds - end_moved, 3)
+        if not 0 < now <= length:
+            return "outside"
+        said, trim.seconds = f"tail {trim.seconds:g}s → {now:g}s", now
+        return said
+    if trim.kind == TrimKind.RANGE and start_moved:
+        opened = round((trim.from_seconds or 0.0) + start_moved, 3)
+        closed = round(trim.to_seconds + start_moved, 3) if trim.to_seconds is not None else None
+        if opened < 0 or opened >= (closed if closed is not None else length) or (closed or 0) > length:
+            return "outside"
+        said = (f"range {trim.from_seconds or 0:g}–{trim.to_seconds if trim.to_seconds is not None else 'end'}s → "
+                f"{opened:g}–{closed if closed is not None else 'end'}s")
+        trim.from_seconds, trim.to_seconds = opened, closed
+        return said
+    return ""
 
 @mcp.tool()
 def amend_plan(plan_id: str, expected_version: int, amendments: list[PlanAmendment], note: str = "") -> dict:
@@ -4887,7 +4941,7 @@ def _framing(project: Project, assets: Mapping[str, Asset], follow_faces: bool =
 @mcp.tool()
 def render_project(
     project_id: str,
-    is_preview: bool = False,
+    is_preview: bool = True,
     loudness_target: Annotated[Optional[float], Field(ge=-40, le=-5)] = DEFAULT_LOUDNESS_TARGET,
     burn_subtitles: bool = False,
     frame: Optional[Literal["landscape", "portrait", "square"]] = None,
@@ -4900,7 +4954,9 @@ def render_project(
     """Start rendering a project to an MP4 file in the background.
 
     Before a final render, read skill://clip-editing/platform-conventions.md;
-    after any render, look at it with `view_render`.
+    after any render, look at it with `view_render` and `inspect_join`. A
+    final render is refused until a preview of the cut as it is now, in the
+    same shape, has finished: that preview is what was looked at.
 
     Before anything is rendered the cut is checked the way `check_render`
     checks it, and a full render is refused while it finds anything: black
@@ -4917,8 +4973,8 @@ def render_project(
 
     Args:
         project_id: ID of the project to render.
-        is_preview: If true, render a fast preview, 480 pixels on its short
-            side, instead of the full-quality output. A preview renders each
+        is_preview: True, the default, renders a fast preview, 480 pixels on
+            its short side; false renders the full-quality output. A preview renders each
             clip's picture once and keeps it: after a change, only the clips
             the change touched are rendered again, so a second preview of a
             long cut takes a fraction of the first.
@@ -4964,10 +5020,34 @@ def render_project(
 
     Raises:
         ValueError: If the project does not exist, contains no clips, uses an
-            unsupported feature, or the check found something not allowed.
+            unsupported feature, has no finished preview of this version in
+            this shape for a final render, or the check found something not
+            allowed.
     """
+    if not is_preview and not _previewed(project_id, frame):
+        raise ValueError(
+            "no preview of the cut as it is now" + (f", {frame}," if frame else "") + " has finished: render one "
+            "with is_preview: true, look at it with view_render and inspect_join, then render the final cut"
+        )
     return _start_render(
         project_id, is_preview, loudness_target, burn_subtitles, frame, follow_faces, allow, PREVIEW_SHORT_SIDE,
+    )
+
+def _previewed(project_id: str, frame: Optional[str]) -> bool:
+    """Whether a preview of a project as it is now, in one shape, has finished.
+
+    Args:
+        project_id: The project.
+        frame: The shape, or None for the project's own.
+
+    Returns:
+        True when there is one; False too when the project does not exist,
+        which rendering says in its own words.
+    """
+    project = repo.get_project(project_id)
+    return project is not None and any(
+        job.preview and job.project_version == project.version and job.frame == frame
+        for job in repo.renders_of(project_id)
     )
 
 def _start_render(
@@ -5013,7 +5093,7 @@ def _start_render(
         _make_room()
     housekeeping.sweep_renders(WORKSPACE_DIR, _delivered)
     job = Job(kind=JobKind.RENDER, project_id=project_id, project_version=project.version, captioned=burn_subtitles,
-              preview=is_preview)
+              preview=is_preview, frame=frame)
     delivered: Optional[str] = None
     if is_preview:
         job.work_dir = os.path.join(housekeeping.preview_dir(WORKSPACE_DIR, project_id), job.job_id)

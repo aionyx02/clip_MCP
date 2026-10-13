@@ -2,6 +2,7 @@
 
 import re
 import subprocess
+import time
 from pathlib import Path
 from typing import List, Optional, Sequence
 
@@ -10,7 +11,9 @@ from pydantic import TypeAdapter
 from app.engine import loudness as levelling
 from app.engine.builder import DEFAULT_LOUDNESS_TARGET, FFmpegRenderer
 from app.models.timeline import Clip, EditOperation
-from app.server import _referenced_assets, apply_edits, create_project, generate_subtitles, get_project, repo
+from app.server import (
+    _referenced_assets, apply_edits, create_project, generate_subtitles, get_job, get_project, repo,
+)
 
 _OPERATIONS = TypeAdapter(List[EditOperation])
 
@@ -28,6 +31,23 @@ def build_project(operations: List[dict], **settings) -> str:
     project_id = create_project(**{"name": "測試", **settings})["id"]
     apply_edits(project_id, 1, _OPERATIONS.validate_python(operations))
     return project_id
+
+def finished(job: dict) -> dict:
+    """Wait for a render to end.
+
+    Args:
+        job: What `render_project` returned.
+
+    Returns:
+        The job as `get_job` reports it at the end.
+    """
+    deadline = time.monotonic() + 180
+    while time.monotonic() < deadline:
+        state = get_job([job["job_id"]])["jobs"][0]
+        if state["status"] in {"completed", "failed", "cancelled"}:
+            return state
+        time.sleep(0.3)
+    raise AssertionError(f"render {job['job_id']} did not finish")
 
 def video_track(track_id: str = "main") -> dict:
     """Build an `add_track` operation for a video track.

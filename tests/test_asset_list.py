@@ -19,7 +19,7 @@ def stored(name: str, folder: str, tmp_path: Path, seconds: float = 12.5) -> str
 
 @pytest.fixture
 def shelf(tmp_path: Path) -> dict:
-    folder = server.repo.create_folder(f"f-{uuid.uuid4().hex[:8]}", "assets", f"抽杯架-{uuid.uuid4().hex[:4]}")
+    folder = server.repo.create_folder(f"f-{uuid.uuid4().hex[:8]}", "assets", f"抽杯架-{uuid.uuid4().hex[:12]}")
     inside = [stored(f"杯架{index}.mp4", "a", tmp_path) for index in range(3)]
     server.repo.file_items("assets", inside, folder["id"])
     name = f"台南-{uuid.uuid4().hex[:6]}"

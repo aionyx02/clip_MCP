@@ -55,6 +55,9 @@ class Job(BaseModel):
         default=None, description="The project's version when it was rendered, to tell whether it has changed since",
     )
     captioned: bool = Field(default=False, description="Whether the render burns the captions in (render jobs)")
+    frame: Optional[str] = Field(
+        default=None, description="The shape it was rendered in, when not the project's own (render jobs)",
+    )
     preview: bool = Field(default=False, description="Whether the render is a preview rather than the finished video")
     work_dir: Optional[str] = Field(default=None, description="Directory holding the job's specification and logs")
     error_message: Optional[str] = None
