@@ -127,3 +127,31 @@ def test_analyzing_again_measures_only_what_would_come_out_different(media: Path
     with pytest.raises(pytest.fail.Exception, match="measured the file again"):
         analyze_media(shot, str(tmp_path), False, None, None, None, lambda *_: None, lambda: False, "ffmpeg",
                       earlier=stale)
+
+
+def test_analyzing_music_says_how_much_of_each_file_is_somebody_talking(media: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.models.job import Job, JobKind
+
+    song = server.import_asset(str(media / "song.mp3"))["id"]
+    server.repo.save_asset(server.repo.get_assets([song])[song].model_copy(update={"library": library.MUSIC}))
+    monkeypatch.setattr(server, "_start_analysis", lambda asset, *args, **kwargs: Job(kind=JobKind.ANALYZE,
+                                                                                       asset_id=asset.id))
+    monkeypatch.setattr(server, "speech_share", lambda *_: 0.8)
+    heard = server.analyze_asset([song], again=True)["music"]
+    # A narration filed with the songs is beat-tracked, not transcribed: said, so the user can be asked.
+    assert heard == [{"asset_id": song, "name": "song.mp3", "speech_share": 0.8, "sounds_like_speech": True}]
+    monkeypatch.setattr(server, "speech_share", lambda *_: 0.1)
+    assert "sounds_like_speech" not in server.analyze_asset([song], again=True)["music"][0]
+
+
+def test_a_file_never_sorted_is_sorted_before_it_is_analyzed(media: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.models.job import Job, JobKind
+
+    song = server.import_asset(str(media / "song.mp3"))["id"]
+    unsorted = server.repo.get_assets([song])[song].model_copy(update={"library": None})
+    server.repo.save_asset(unsorted)
+    monkeypatch.setattr(server, "_start_analysis", lambda asset, *args, **kwargs: Job(kind=JobKind.ANALYZE,
+                                                                                       asset_id=asset.id))
+    monkeypatch.setattr(server, "classify", lambda asset: library.FOOTAGE)
+    server.analyze_asset([song], again=True)
+    assert server.repo.get_assets([song])[song].library == library.FOOTAGE

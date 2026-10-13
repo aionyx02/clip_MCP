@@ -71,7 +71,7 @@ from app.engine.ffmpeg import graph_from_file, hidden_window_flags
 from app.engine.probe import picture_size, probe_file, recorded_at, speech_loudness, timecode_start
 from app.engine.reframe import Framing, frame_project, placement_at
 from app.engine import playback
-from app.engine.library import FOLDER_KINDS, FOOTAGE, LIBRARIES, MUSIC, classify, library_of
+from app.engine.library import FOLDER_KINDS, FOOTAGE, LIBRARIES, MUSIC, SPEECH_SHARE, classify, library_of, speech_share
 from app.engine import clap
 from app.engine import fetch
 from app.engine import music as music_energy
@@ -1616,6 +1616,12 @@ def analyze_asset(
         with an accurate one. With `dry_run`, `would_start` lists the files
         in place of `jobs`.
 
+        Files in the music library are beat-tracked and never transcribed.
+        `music` lists the ones started, each with how much of what was
+        listened to is speech; one that is mostly speech, or named like a
+        narration, may have been filed there by mistake — ask the user, and
+        move it with `set_asset_library` before analyzing it again.
+
         When anything started is transcribed, `estimate` says how long that
         takes here for all of it together: `footage_minutes`,
         `transcription_minutes` and `speakers_minutes` as `[low, high]` (high
@@ -1633,6 +1639,13 @@ def analyze_asset(
     for asset in assets:
         if asset.duration is None:
             raise ValueError(f"asset {asset.id} has no known duration and cannot be analyzed")
+        if asset.library is None:
+            # Sorted when it was added, or when the server started; listened to now if neither managed.
+            try:
+                asset.library = classify(asset)
+            except (OSError, RuntimeError, ValueError):
+                continue
+            repo.save_asset(asset)
 
     if dry_run:
         choices = {}
@@ -1649,10 +1662,36 @@ def analyze_asset(
         job = _start_analysis(asset, transcribe, chosen, language, prompt, chinese_variant, diarize, speakers)
         started.append({"asset_id": asset.id, "job_id": job.job_id, "status": job.status.value, "stage": job.stage})
     result: dict = {"jobs": started, "skipped": skipped, "upgrading": upgrading}
+    music = _music_heard(asset for asset, _ in to_start)
+    if music:
+        result["music"] = music
     found = _estimate(to_start, transcribe, diarize, upgrading)
     if found is not None:
         result["estimate"] = found
     return result
+
+def _music_heard(assets: Iterable[Asset]) -> List[dict]:
+    """Say, for each file in the music library, how much of it is somebody talking.
+
+    Args:
+        assets: The files about to be analyzed.
+
+    Returns:
+        One entry per music file: its `asset_id`, `name`, `speech_share`
+        (null when its sound could not be read), and `sounds_like_speech`
+        when that share is what would have filed it as footage.
+    """
+    heard = []
+    for asset in assets:
+        if not asset.has_audio or library_of(asset) != MUSIC:
+            continue
+        share = speech_share(asset.path, float(asset.duration or 0))
+        entry = {"asset_id": asset.id, "name": os.path.basename(asset.path),
+                 "speech_share": None if share is None else round(share, 2)}
+        if share is not None and share >= SPEECH_SHARE:
+            entry["sounds_like_speech"] = True
+        heard.append(entry)
+    return heard
 
 # Provisional (roadmap §13): the longest stretch heard again at once, short enough to come back
 # inside the time most AI clients allow a tool call.
