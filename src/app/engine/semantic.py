@@ -494,8 +494,7 @@ def _scores(
     """Measure a stretch against everything the analysis detected.
 
     These are measurements, not judgements: each one is a share of the stretch
-    that some detector marked, so `query_clips` can filter on them and a
-    benchmark can count them.
+    that some detector marked, so `query_clips` can filter on them.
 
     Args:
         start: Start of the stretch in seconds.
@@ -651,8 +650,7 @@ def build_timeline(
     The timeline's ID comes from the fingerprint of its input, so the same
     footage analyzed the same way always produces the same timeline and the
     same clip IDs — on this machine and on any other. That is what lets a plan
-    refer to a clip by ID and mean the same moment tomorrow, and what lets a
-    benchmark hold the timeline fixed while something else is being measured.
+    refer to a clip by ID and mean the same moment tomorrow.
 
     Args:
         assets: Assets to cover, keyed by asset ID.
@@ -776,10 +774,7 @@ class CleanCuts:
         """Say whether a cut here would land inside a word.
 
         The same rounding tolerance the rest of this module allows on a snapped
-        boundary applies, so that this and the benchmark's `words_cut` — which
-        asks the identical question of a finished cut — cannot answer it
-        differently and leave the compiler chasing a fault the scorer does not
-        see.
+        boundary applies.
 
         Args:
             seconds: The time to check.
@@ -848,9 +843,7 @@ class CleanCuts:
         is the first frame the viewer sees, so black starting exactly there is
         seen. A closing point is the first frame they do not, so black
         starting exactly there is not, while black ending exactly there was on
-        screen until the last moment. The benchmark's `bad_frame_cuts` asks
-        this same question of a finished cut and has to get the same answer,
-        or the compiler would be chasing a fault the scorer cannot see.
+        screen until the last moment.
 
         Args:
             seconds: The time to check.
