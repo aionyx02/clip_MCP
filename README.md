@@ -28,7 +28,6 @@ editor (ui/) ──HTTP──────┤
 | `models/` | Pydantic 領域模型（素材、語意片段、計畫、時間軸、工作） |
 | `storage/` | SQLite 持久化、版本歷史、儲存空間管理 |
 | `ui/` | 編輯器：與 AI 共用同一組工具與驗證規則 |
-| `benchmark/` | 剪輯結果的確定性評分 |
 
 詳見 [docs/architecture.md](docs/architecture.md)。
 
@@ -123,9 +122,6 @@ uv run pytest
 ```
 
 測試以 FFmpeg 即時產生素材並使用暫存工作區；部分測試實際 render 後量測（響度、ducking、轉場、同步、字幕位置、跟臉裁切、節拍）。
-
-`src/app/benchmark/` 對編譯結果做確定性評分（切字剪點、壞幀剪點、長度誤差、必留覆蓋率、必剔洩漏率、剪點餘裕）。
-語料庫（`corpus/`）尚在建立，目前尚無基準分數；進度見 [docs/roadmap.md](docs/roadmap.md)。
 
 ## 授權
 
