@@ -90,30 +90,26 @@ def test_a_stretch_where_nobody_was_heard_again_keeps_no_words() -> None:
         TranscriptSegment(start=1.0, end=6.0, text="前面中間後面", words=[
             TranscriptWord(start=1.0, end=2.0, text="前面"), TranscriptWord(start=3.0, end=4.0, text="中間"),
             TranscriptWord(start=5.0, end=6.0, text="後面")]),
-    ]), heard_again=[{"start": 2.5, "end": 4.5, "sentences": []}])
+    ]), heard_again=[{"start": 2.5, "end": 4.5, "words": []}])
     (segment,) = analysis.with_words_heard_again(made).transcript.segments
     assert [word.text for word in segment.words] == ["前面", "後面"]
 
-def test_a_word_across_the_edge_of_a_kept_stretch_keeps_the_part_outside_it() -> None:
-    made = MediaAnalysis(asset_id="x", duration=10.0, transcript=Transcript(language="zh", model="t", segments=[
-        TranscriptSegment(start=1.0, end=4.0, text="前面中間", words=[
-            TranscriptWord(start=1.0, end=3.0, text="前面"), TranscriptWord(start=3.2, end=4.0, text="中間")]),
-    ]), heard_again=[{"start": 2.5, "end": 4.5, "sentences": [
-        {"start": 3.0, "end": 3.6, "text": "中間", "words": [{"start": 3.0, "end": 3.6, "text": "中間"}]}]}])
-    (segment,) = analysis.with_words_heard_again(made).transcript.segments
-    # The hearing began at 2.5s and never heard the 1.0–2.5s of 「前面」, so that part still stops a cut.
-    assert [(word.start, word.end, word.text) for word in segment.words] == [(1.0, 2.5, "前面"), (3.0, 3.6, "中間")]
+def test_a_stretch_with_a_word_across_its_edge_is_not_kept(heard: dict, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(analysis, "_run_whisper", hears("怎麼那麼順"))
+    found = server.listen_again(asset_id=heard["asset"], start=3.0, end=4.5, keep=True)
+    # 「怎麼那麼順」 runs 2.0–4.0s: kept, it would be there twice, cut back to 3.0s and as heard.
+    assert found["not_kept"].endswith("hear 2s to 4.5s again with keep")
+    assert server.repo.get_analysis(heard["asset"]).heard_again == []
 
 def test_a_sentence_that_ends_inside_a_kept_stretch_still_ends_there() -> None:
     made = MediaAnalysis(asset_id="x", duration=10.0, transcript=Transcript(language="zh", model="t", segments=[
         TranscriptSegment(start=1.0, end=3.0, text="第一句", words=[TranscriptWord(start=1.0, end=3.0, text="第一句")]),
         TranscriptSegment(start=4.0, end=6.0, text="第二句", words=[TranscriptWord(start=4.0, end=6.0, text="第二句")]),
     ]), second_listen={"model": "t", "words": [{"start": 4.1, "end": 4.9, "text": "第二", "probability": 0.9}]},
-        heard_again=[{"start": 0.5, "end": 6.5, "sentences": [
-            {"start": 1.0, "end": 2.6, "text": "第一句", "words": [{"start": 1.0, "end": 2.6, "text": "第一句"}]},
-            {"start": 4.3, "end": 5.8, "text": "第二句", "words": [{"start": 4.3, "end": 5.8, "text": "第二句"}]}]}])
+        heard_again=[{"start": 0.5, "end": 6.5, "words": [
+            {"start": 1.0, "end": 2.6, "text": "第一句"}, {"start": 4.3, "end": 5.8, "text": "第二句"}]}])
     after = analysis.with_words_heard_again(made)
     # Two sentences, not one: the pause between them is still a place a cut may go.
     assert [(segment.start, segment.end) for segment in after.transcript.segments] == [(1.0, 2.6), (4.3, 5.8)]
-    # And the second listen's own word there gives way, or it would argue with what was kept.
-    assert after.second_listen.words == []
+    # And the second listen's own word there gives way to the hearing, or the two would argue.
+    assert [word.text for word in after.second_listen.words] == ["第一句", "第二句"]

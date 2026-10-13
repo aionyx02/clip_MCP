@@ -467,6 +467,20 @@ def test_a_caption_kept_before_it_had_to_be_said_to_be_for_every_project_is_not_
     second = build_project([video_track(), insert("a", spoken, 0, 10)])
     assert "第三、四版" not in [cue["text"] for cue in caption(second)["cues"]]
 
+def test_a_correction_kept_the_old_way_stays_in_the_project_that_shows_it(spoken: str) -> None:
+    project = build_project([video_track(), insert("a", spoken, 0, 10)])
+    caption(project)
+    stored = repo.get_project(project)
+    corrected = stored.subtitles[0].model_copy(update={"text": "改過的一句"})
+    repo.remember_captions([corrected])
+    # Shown in this project, as an edit used to leave it: shared, and remembered with no project.
+    repo.update_project(stored.model_copy(update={"subtitles": [corrected, *stored.subtitles[1:]],
+                                                  "version": stored.version + 1}), stored.version)
+    # Captioned again, the correction is this project's own rather than the transcript's line again.
+    caption(project)
+    cues = {cue["text"]: cue for cue in get_subtitles(project)["cues"]}
+    assert cues["改過的一句"]["from"] == "this_project"
+
 def test_storing_every_caption_at_once_keeps_them_to_this_project(spoken: str) -> None:
     first = build_project([video_track(), insert("a", spoken, 0, 10)])
     rewritten = [{**cue, "text": "第三、四版"} if index == 0 else cue for index, cue in enumerate(caption(first)["cues"])]

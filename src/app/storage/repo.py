@@ -386,6 +386,7 @@ class Repository:
         by_asset: Dict[str, List[SubtitleCue]] = {}
         for cue in cues:
             by_asset.setdefault(cue.asset_id, []).append(cue)
+        stored: Dict[str, List[SubtitleCue]] = {}
         with self._transaction() as conn:
             for asset_id, fresh in by_asset.items():
                 rows = conn.execute("SELECT data FROM reviewed_captions WHERE asset_id = ?", (asset_id,)).fetchall()
@@ -395,6 +396,7 @@ class Repository:
                     if not any(old.source_start < new.source_end and new.source_start < old.source_end for new in fresh)
                 ]
                 merged = sorted([*kept, *fresh], key=lambda cue: cue.source_start)
+                stored[asset_id] = merged
                 conn.execute(
                     "INSERT INTO reviewed_captions (asset_id, data) VALUES (?, ?) "
                     "ON CONFLICT(asset_id) DO UPDATE SET data = excluded.data",
@@ -404,7 +406,7 @@ class Repository:
             for asset_id, fresh in by_asset.items():
                 self.history.write(
                     self._captions_file(asset_id),
-                    canonical([cue.model_dump() for cue in self.reviewed_captions(asset_id)]),
+                    canonical([cue.model_dump() for cue in stored[asset_id]]),
                     f"記下了 {len(fresh)} 句校對過的字幕",
                 )
 
@@ -422,9 +424,26 @@ class Repository:
         Returns:
             Its reviewed captions in source order; empty when there are none.
         """
+        return [cue for cue in self._stored_captions(asset_id) if cue.remembered_in is not None]
+
+    def unclaimed_captions(self, asset_id: str) -> List[SubtitleCue]:
+        """Read the captions kept for a file before a caption had to be said to be for every project.
+
+        No longer handed to other projects; read only so that a project
+        already showing one keeps it as its own instead of losing a correction.
+
+        Args:
+            asset_id: The file.
+
+        Returns:
+            Those captions in source order; empty when there are none.
+        """
+        return [cue for cue in self._stored_captions(asset_id) if cue.remembered_in is None]
+
+    def _stored_captions(self, asset_id: str) -> List[SubtitleCue]:
+        """Every caption kept against a file, in source order."""
         rows = self._query("SELECT data FROM reviewed_captions WHERE asset_id = ?", (asset_id,))
-        kept = [SubtitleCue.model_validate(item) for item in json.loads(rows[0][0])] if rows else []
-        return [cue for cue in kept if cue.remembered_in is not None]
+        return [SubtitleCue.model_validate(item) for item in json.loads(rows[0][0])] if rows else []
 
     def update_glossary(self, fixes: Mapping[str, str]) -> Dict[str, str]:
         """Add to or take from the words every transcript is corrected with.

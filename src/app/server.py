@@ -1802,21 +1802,30 @@ def listen_again(
         "agrees": stored is not None and _bare_words(plain_heard) == _bare_words(stored),
     }
     if keep:
-        result.update(_keep_hearing(known, HeardAgain(start=start, end=end, sentences=fresh.segments), result))
+        result.update(_keep_hearing(known, HeardAgain(start=start, end=end, words=[word for segment in fresh.segments for word in segment.words]), result["agrees"]))
     return result
 
-def _keep_hearing(known: MediaAnalysis, stretch: HeardAgain, heard: dict) -> dict:
+def _keep_hearing(known: MediaAnalysis, stretch: HeardAgain, agrees: bool) -> dict:
     """Keep a stretch heard again over the transcript's word times, when it can be believed.
 
     Args:
         known: The file's analysis the hearing was taken against.
         stretch: What was heard, and where.
-        heard: What `listen_again` found, with `agrees`.
+        agrees: Whether the hearing says the same words as the transcript there.
 
     Returns:
         `kept` when it was kept, or `not_kept` saying why it was not.
     """
-    if not heard["agrees"]:
+    # A word half in the stretch would be kept twice: its outside part from the transcript,
+    # and the whole of it as heard. The stretch is moved to take it in or leave it out.
+    across = [word for segment in known.transcript.segments for word in segment.words
+              if word.start < stretch.start < word.end or word.start < stretch.end < word.end]
+    if across:
+        opens = min([stretch.start, *(word.start for word in across if word.start < stretch.start < word.end)])
+        closes = max([stretch.end, *(word.end for word in across if word.start < stretch.end < word.end)])
+        return {"not_kept": f"the transcript has {'、'.join(word.text.strip() for word in across)} running across the "
+                            f"edge of the stretch; hear {opens:g}s to {closes:g}s again with keep"}
+    if not agrees:
         return {"not_kept": "the hearing and the transcript say different words here, so neither is believed; "
                             "play audio_path to the user and ask, or hear a stretch that starts and ends in a pause"}
     unsure = unsure_words(stretch.words)
@@ -4716,7 +4725,14 @@ def generate_subtitles(
     })
     # What this project kept to itself comes first, then what was corrected on the footage
     # for every project, then the transcript: each fills only what the ones before left.
-    local = [cue.model_copy(update={"id": ""}) for cue in project.subtitles if cue.local]
+    # A correction stored before captions had to be said to be for every project is no longer
+    # handed on, but one this project already shows is its own: kept, not lost to the transcript.
+    unclaimed = {asset_id: repo.unclaimed_captions(asset_id) for asset_id in {cue.asset_id for cue in project.subtitles}}
+    local = [
+        cue.model_copy(update={"id": "", "local": True}) for cue in project.subtitles
+        if cue.local or (cue.remembered_in is None and any(
+            _overlaps(cue, old) and old.text == cue.text for old in unclaimed[cue.asset_id]))
+    ]
 
     def taken(cue: SubtitleCue, over: Sequence[SubtitleCue]) -> bool:
         return any(cue.asset_id == known.asset_id and _overlaps(cue, known) for known in over)
