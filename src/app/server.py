@@ -1,5 +1,6 @@
 import hashlib
 import json
+import math
 import os
 from datetime import datetime, timezone
 import re
@@ -1823,8 +1824,10 @@ def _keep_hearing(known: MediaAnalysis, stretch: HeardAgain, agrees: bool) -> di
     if across:
         opens = min([stretch.start, *(word.start for word in across if word.start < stretch.start < word.end)])
         closes = max([stretch.end, *(word.end for word in across if word.start < stretch.end < word.end)])
+        # Rounded outward, so the stretch said takes the word in however long the file is.
+        opens, closes = math.floor(opens * 1000) / 1000, math.ceil(closes * 1000) / 1000
         return {"not_kept": f"the transcript has {'、'.join(word.text.strip() for word in across)} running across the "
-                            f"edge of the stretch; hear {opens:g}s to {closes:g}s again with keep"}
+                            f"edge of the stretch; hear {opens:.3f}s to {closes:.3f}s again with keep"}
     if not agrees:
         return {"not_kept": "the hearing and the transcript say different words here, so neither is believed; "
                             "play audio_path to the user and ask, or hear a stretch that starts and ends in a pause"}

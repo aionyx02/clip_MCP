@@ -98,7 +98,7 @@ def test_a_stretch_with_a_word_across_its_edge_is_not_kept(heard: dict, monkeypa
     monkeypatch.setattr(analysis, "_run_whisper", hears("怎麼那麼順"))
     found = server.listen_again(asset_id=heard["asset"], start=3.0, end=4.5, keep=True)
     # 「怎麼那麼順」 runs 2.0–4.0s: kept, it would be there twice, cut back to 3.0s and as heard.
-    assert found["not_kept"].endswith("hear 2s to 4.5s again with keep")
+    assert found["not_kept"].endswith("hear 2.000s to 4.500s again with keep")
     assert server.repo.get_analysis(heard["asset"]).heard_again == []
 
 def test_a_sentence_that_ends_inside_a_kept_stretch_still_ends_there() -> None:
