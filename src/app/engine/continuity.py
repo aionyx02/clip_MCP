@@ -16,7 +16,7 @@ exists to show what comes later.
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import List, Optional, Sequence
+from typing import List, Optional, Sequence, Tuple
 
 # Two shots this close in time belong to the same moment. Provisional.
 NEAR = timedelta(minutes=60)
@@ -65,7 +65,19 @@ def strays(shots: Sequence[Shot]) -> List[str]:
         One message per stray run of shots, saying what its neighbours have
         in common and what it has instead.
     """
-    found: List[str] = []
+    return [message for message, _ in stray_runs(shots)]
+
+def stray_runs(shots: Sequence[Shot]) -> List[Tuple[str, Tuple[int, int]]]:
+    """Name the shots dropped between two that belong together, and say which they are.
+
+    Args:
+        shots: The video's shots in the order they play.
+
+    Returns:
+        One `(message, (first, last))` per stray run, `first` and `last`
+        being the positions in `shots` of the run's first and last shot.
+    """
+    found: List[Tuple[str, Tuple[int, int]]] = []
     index = 1
     while index < len(shots) - 1:
         for run in range(1, MAX_STRAY_RUN + 1):
@@ -78,7 +90,8 @@ def strays(shots: Sequence[Shot]) -> List[str]:
             reason = _by_time(before, middle, after) or _by_topic(before, middle, after)
             if reason:
                 names = ", ".join(shot.label for shot in middle)
-                found.append(f"{names} sits between {before.label} and {after.label}: {reason}")
+                found.append((f"{names} sits between {before.label} and {after.label}: {reason}",
+                              (index, index + run - 1)))
                 index += run
                 break
         index += 1

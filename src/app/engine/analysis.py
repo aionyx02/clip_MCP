@@ -25,6 +25,7 @@ from app.engine.relisten import Listener
 from app.engine.rhythm import measure_rhythm, rhythm_model_name
 from app.engine import clap
 from app.engine.library import MUSIC, library_of
+from app.engine.listen import cut_sound
 from app.engine.music import energy_curve
 from app.models.media import (
     AnalysisRecipe,
@@ -1084,15 +1085,7 @@ def listen_again(
     Raises:
         RuntimeError: If the sound cannot be read or speech recognition fails.
     """
-    os.makedirs(os.path.dirname(keep_as), exist_ok=True)
-    cut = subprocess.run(
-        [ffmpeg_bin, "-y", "-v", "error", "-ss", f"{start:.3f}", "-t", f"{end - start:.3f}", "-i", path,
-         "-vn", "-ac", "1", "-ar", "16000", keep_as],
-        stdin=subprocess.DEVNULL, capture_output=True, text=True, encoding="utf-8", errors="replace",
-        creationflags=hidden_window_flags(),
-    )
-    if cut.returncode != 0:
-        raise RuntimeError(f"could not read that stretch of sound: {cut.stderr.strip()[-300:]}")
+    cut_sound(path, start, end, keep_as, ffmpeg_bin)
 
     def hear(on: str) -> Transcript:
         return _run_whisper(on, keep_as, end - start, language, None, lambda fraction: None, lambda: False,

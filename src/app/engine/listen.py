@@ -13,6 +13,8 @@ needed to put a number on it; what is measured here is how far under it
 actually sits.
 """
 
+import os
+import subprocess
 import wave
 from io import BytesIO
 from dataclasses import dataclass
@@ -21,6 +23,7 @@ from typing import List, Optional, Sequence
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
+from app.engine.ffmpeg import hidden_window_flags
 from app.models.timeline import Project
 
 # Levels are read in windows this long: short enough to see a word, long enough not to
@@ -63,6 +66,29 @@ def levels(path: str) -> np.ndarray:
     windows = samples[: count * size].reshape(count, size)
     rms = np.sqrt(np.mean(windows ** 2, axis=1))
     return np.maximum(FLOOR_DB, 20 * np.log10(np.maximum(rms, 1e-9)))
+
+def cut_sound(path: str, start: float, end: float, keep_as: str, ffmpeg_bin: str = "ffmpeg") -> None:
+    """Write one stretch of a file's sound as a mono 16 kHz WAV, to measure, hear again or play.
+
+    Args:
+        path: The media file.
+        start: Where the stretch starts, in seconds of the file.
+        end: Where it ends.
+        keep_as: Where to write it.
+        ffmpeg_bin: Path to, or name of, the FFmpeg executable.
+
+    Raises:
+        RuntimeError: If the file has no sound there or it cannot be read.
+    """
+    os.makedirs(os.path.dirname(keep_as), exist_ok=True)
+    cut = subprocess.run(
+        [ffmpeg_bin, "-y", "-v", "error", "-ss", f"{start:.3f}", "-t", f"{end - start:.3f}", "-i", path,
+         "-vn", "-ac", "1", "-ar", "16000", keep_as],
+        stdin=subprocess.DEVNULL, capture_output=True, text=True, encoding="utf-8", errors="replace",
+        creationflags=hidden_window_flags(),
+    )
+    if cut.returncode != 0:
+        raise RuntimeError(f"could not read that stretch of sound: {cut.stderr.strip()[-300:]}")
 
 def levels_every(path: str, seconds: float) -> List[float]:
     """Measure a mono WAV's level over longer windows, for reading as numbers.

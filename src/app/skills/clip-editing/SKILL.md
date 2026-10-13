@@ -172,8 +172,8 @@ user corrects what is wrong before a render is wasted.
 
 **When the user says to finish on your own** — 「直接做完再給我看」 — skip the
 read-back, not the checks: render a preview, look at it with `view_render`
-(`at: "captions"`, then `"transitions"`), hear any join in doubt with
-`listen_again` and the preview's `job_id`, fix what you find, then render
+(`at: "captions"`) and at its joins with `inspect_join`, hear any join in
+doubt with `listen_again` and the preview's `job_id`, fix what you find, then render
 the final cut. `allow` is still never yours to fill in: when `check_render`
 finds something you cannot fix, stop and ask. Then report every decision you
 made — what went in, what was left out and why, the music — since the user
@@ -229,6 +229,11 @@ was not there to agree to them.
    `get_job` with `wait_seconds: 50` until the status is `completed`, `failed`,
    or `cancelled`. Look at what came out with `view_render` — captions and
    transitions only exist once rendered — before reporting the path and length.
+   Then list its joins with `inspect_join` and look at every one with
+   something found at it, every one where a part begins, every one where
+   B-roll comes in or goes off, and any moment the user points at. Whether a
+   movement or a sentence carries across a cut is in those frames and words,
+   not in what the plan says the clips are about.
 10. Render with `is_preview: false` once the user is happy, or at once if they
     asked for the final file.
 
