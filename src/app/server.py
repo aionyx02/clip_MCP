@@ -26,7 +26,7 @@ from mcp.types import TextContent
 from pydantic import BaseModel, Field, TypeAdapter
 from app.models.media import Asset, Measured, MediaAnalysis, Source, Span, SpeakerTurn, Transcript
 from app.models.plan import (
-    EditPlan, PlanAmendment, TrimKind, apply_amendment, describe_amendment, short_clip_ids, whole_clip_id,
+    EditPlan, PlanAmendment, Trim, TrimKind, apply_amendment, describe_amendment, short_clip_ids, whole_clip_id,
     with_whole_clip_ids,
 )
 from app.models.semantic import (
@@ -3523,9 +3523,10 @@ def copy_plan(plan_id: str, timeline_id: Optional[str] = None, version: Optional
 
     After the footage is transcribed again, sentences start and end a little
     elsewhere, so a clip with no exact match takes the one from the same file
-    and level that covers most of it. Those are listed in `matched_nearby`
-    with both stretches: read them back, since a sentence that was split or
-    joined may now say a little more or less.
+    and level that covers most of it, and its trim is moved to take the same
+    seconds of the file as before. Those are listed in `matched_nearby` with
+    both stretches and any trim moved: read them back, since a sentence that
+    was split or joined may now say a little more or less.
 
     Args:
         plan_id: The plan to copy.
@@ -3540,7 +3541,8 @@ def copy_plan(plan_id: str, timeline_id: Optional[str] = None, version: Optional
     Raises:
         ValueError: If the plan or the timeline does not exist, or a clip the
             copy uses has no match in the other timeline — named, so it can be
-            taken out of the plan first. A rejected clip with no match is
+            taken out of the plan first — or its trim's seconds are no longer
+            in the clip matched to it. A rejected clip with no match is
             simply not carried over, since there is nothing to reject.
     """
     plan = repo.get_plan(plan_id) if version is None else repo.get_plan_version(plan_id, version)
@@ -3568,13 +3570,21 @@ def copy_plan(plan_id: str, timeline_id: Optional[str] = None, version: Optional
                 "or it is a section that timeline does not have. Take them out of the plan, or copy it onto a "
                 "timeline that has them"
             )
+        moved, outside = {}, []
         for item in copy.selections:
-            shift = shifts.get(item.clip_id, 0.0)
-            if shift and item.trim.kind == TrimKind.RANGE:
-                # A range is counted from the clip's own start, which moved.
-                item.trim.from_seconds = max(0.0, round((item.trim.from_seconds or 0.0) + shift, 3))
-                if item.trim.to_seconds is not None:
-                    item.trim.to_seconds = max(0.001, round(item.trim.to_seconds + shift, 3))
+            if item.clip_id in shifts:
+                said_trim = _trim_moved(item.trim, *shifts[item.clip_id])
+                if said_trim == "outside":
+                    outside.append(item.clip_id)
+                elif said_trim:
+                    moved[item.clip_id] = said_trim
+        if outside:
+            raise ValueError(
+                f"{', '.join(outside)}: after the footage was transcribed again, the sentence each is matched to "
+                "no longer holds the seconds its trim takes. Set its trim to `full` on this plan, copy it, and "
+                "trim it again on the copy"
+            )
+        for item in copy.selections:
             item.clip_id = mapping[item.clip_id]
             item.trim.keep_clip_ids = [mapping[kept] for kept in item.trim.keep_clip_ids]
         for shot in copy.broll:
@@ -3585,12 +3595,13 @@ def copy_plan(plan_id: str, timeline_id: Optional[str] = None, version: Optional
         ]
         copy.timeline_id = target
     else:
-        nearby = []
+        nearby, moved = [], {}
     said = f"copied from {plan.id} v{plan.version}" + (f" onto {target}" if target != plan.timeline_id else "")
     saved = save_plan(copy, f"{said}: {note}" if note else said)
     used = {item.clip_id for item in plan.selections} | {clip for shot in plan.broll for clip in
                                                          (shot.clip_id, shot.over_clip_id)}
-    nearby = [match for match in nearby if match["clip_id"] in used]
+    nearby = [{**match, **({"trim": moved[match["clip_id"]]} if match["clip_id"] in moved else {})}
+              for match in nearby if match["clip_id"] in used]
     if nearby:
         saved["matched_nearby"] = nearby
     return saved
@@ -3608,7 +3619,8 @@ def _matched_clips(here: List[SemanticClip], there: List[SemanticClip]) -> tuple
 
     Returns:
         The new ID for each old one (None when nothing matches), the matches
-        that are not exact, and how far each of those clips' start moved.
+        that are not exact, and for each of those how far its start and its
+        end moved back, and how long the clip standing in for it is.
     """
     def place(clip: SemanticClip) -> tuple:
         """Say which moment of which file a clip is, whatever timeline it sits in."""
@@ -3631,7 +3643,8 @@ def _matched_clips(here: List[SemanticClip], there: List[SemanticClip]) -> tuple
             best = max(alike.get((clip.asset_id, clip.level), []), key=covered, default=None)
             if best is not None and covered(best) >= NEARBY_SHARE * max(end - start, 0.001):
                 found = best
-                shifts[clip.id] = round(start - best.source_range.start, 3)
+                shifts[clip.id] = (round(start - best.source_range.start, 3), round(end - best.source_range.end, 3),
+                                   round(best.source_range.end - best.source_range.start, 3))
                 nearby.append({
                     "clip_id": clip.id, "now": best.id,
                     "was": [round(start, 2), round(end, 2)],
@@ -3640,6 +3653,47 @@ def _matched_clips(here: List[SemanticClip], there: List[SemanticClip]) -> tuple
                 })
         mapping[clip.id] = found.id if found else None
     return mapping, nearby, shifts
+
+def _trim_moved(trim: Trim, start_moved: float, end_moved: float, length: float) -> str:
+    """Keep a trim on the same seconds of its file when its clip now starts or ends elsewhere.
+
+    A trim is counted from its clip's own start, or for `tail` its end, so a
+    sentence that a second transcription moved would otherwise carry it onto
+    other words. Moving it back is arithmetic, so it is done; it is said.
+
+    Args:
+        trim: The trim, changed in place.
+        start_moved: How far back the clip's start moved, in seconds.
+        end_moved: How far back its end moved.
+        length: How long the clip is now.
+
+    Returns:
+        What changed, for whoever reads the copy back; empty when nothing
+        did; `outside` when the same seconds are no longer in the clip, and
+        then nothing is changed.
+    """
+    if trim.kind == TrimKind.HEAD and start_moved:
+        now = round(trim.seconds + start_moved, 3)
+        if not 0 < now <= length:
+            return "outside"
+        said, trim.seconds = f"head {trim.seconds:g}s → {now:g}s", now
+        return said
+    if trim.kind == TrimKind.TAIL and end_moved:
+        now = round(trim.seconds - end_moved, 3)
+        if not 0 < now <= length:
+            return "outside"
+        said, trim.seconds = f"tail {trim.seconds:g}s → {now:g}s", now
+        return said
+    if trim.kind == TrimKind.RANGE and start_moved:
+        opened = round((trim.from_seconds or 0.0) + start_moved, 3)
+        closed = round(trim.to_seconds + start_moved, 3) if trim.to_seconds is not None else None
+        if opened < 0 or opened >= (closed if closed is not None else length) or (closed or 0) > length:
+            return "outside"
+        said = (f"range {trim.from_seconds or 0:g}–{trim.to_seconds if trim.to_seconds is not None else 'end'}s → "
+                f"{opened:g}–{closed if closed is not None else 'end'}s")
+        trim.from_seconds, trim.to_seconds = opened, closed
+        return said
+    return ""
 
 @mcp.tool()
 def amend_plan(plan_id: str, expected_version: int, amendments: list[PlanAmendment], note: str = "") -> dict:

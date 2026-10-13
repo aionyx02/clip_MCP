@@ -2351,6 +2351,41 @@ def test_a_plan_follows_its_sentences_after_the_footage_is_transcribed_again(pla
     # The rejected sentence did not move, so it is carried exactly and not listed.
     assert len(plan.rejected) == 1
 
+def heard_again(planned: dict, third: tuple = (8.2, 10.4)) -> str:
+    """Transcribe the planned footage again so every sentence edge moves, and build a timeline over it."""
+    from app.server import build_semantic_timeline
+
+    asset_id = planned["clips"][0]["asset_id"]
+    server_repo.save_analysis(analysis(asset_id=asset_id, duration=20.0, segments=[
+        (0.8, 3.1, "第一句話"), (3.5, 5.0, "第二句話"), (*third, "第三句話。"), (12.0, 14.0, "第四句話"),
+    ], silences=[(0.0, 0.8), (3.1, 3.5), (5.0, third[0]), (third[1], 12.0), (14.0, 20.0)]))
+    return build_semantic_timeline([asset_id], rebuild=True)["timeline_id"]
+
+def test_a_trim_takes_the_same_seconds_of_the_file_after_its_sentence_moved(planned: dict) -> None:
+    from app.server import copy_plan
+
+    first, third = planned["clips"][0]["clip_id"], planned["clips"][2]["clip_id"]
+    amend_plan(planned["plan_id"], 1, amendments(
+        {"action": "set_trim", "clip_id": first, "trim": {"kind": "head", "seconds": 1.5}},
+        {"action": "set_trim", "clip_id": third, "trim": {"kind": "tail", "seconds": 1.0}},
+    ))
+    copied = copy_plan(planned["plan_id"], timeline_id=heard_again(planned))
+    plan = EditPlan.model_validate(get_plan(copied["plan_id"])["plan"])
+    # 1.0–2.5s of the file, now that the sentence starts at 0.8; and 9.0–10.0s, now that it ends at 10.4.
+    assert [item.trim.seconds for item in plan.selections] == [1.7, 1.4]
+    assert [match["trim"] for match in copied["matched_nearby"]] == ["head 1.5s → 1.7s", "tail 1s → 1.4s"]
+
+def test_a_trim_whose_seconds_are_no_longer_in_its_sentence_is_handed_back(planned: dict) -> None:
+    from app.server import copy_plan
+
+    third = planned["clips"][2]["clip_id"]
+    amend_plan(planned["plan_id"], 1, amendments(
+        {"action": "set_trim", "clip_id": third, "trim": {"kind": "head", "seconds": 0.4}},
+    ))
+    # 8.0–8.4s of the file, and the sentence now starts at 8.6.
+    with pytest.raises(ValueError, match="no longer holds the seconds its trim takes"):
+        copy_plan(planned["plan_id"], timeline_id=heard_again(planned, third=(8.6, 10.4)))
+
 def test_a_start_the_transcript_placed_late_is_moved_back_onto_the_sound() -> None:
     # 「抽杯」: the sound rises out of silence at 6.35, the transcript's first word is at 6.74.
     made = analysis(duration=12.0, segments=[(6.74, 9.0, "抽杯")], silences=[(0.0, 6.35), (9.0, 12.0)])
