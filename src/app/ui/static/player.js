@@ -367,7 +367,41 @@
         if (incoming) this.drawTransition(track, incoming, time);
       }
       this.drawCards(time);
+      this.drawTexts(time);
       this.drawCaptions(time);
+    }
+
+    // Words over the footage, row by row where the render puts them; a name bar on its box.
+    drawTexts(time) {
+      const style = this.described.texts;
+      if (!style?.events.length) return;
+      const { ctx } = this;
+      const font = this.described.captions.font;
+      for (const event of style.events) {
+        if (time < event.start || time >= event.end) continue;
+        const shown = clamp(Math.min((time - event.start) / style.fade, (event.end - time) / style.fade), 0, 1);
+        ctx.save();
+        ctx.globalAlpha = shown;
+        ctx.textBaseline = "middle";
+        for (const row of event.rows) {
+          ctx.font = `${row.bold ? "bold " : ""}${row.size}px "${font}", ${FONTS}`;
+          ctx.textAlign = row.align;
+          if (row.box) {
+            const width = ctx.measureText(row.text).width;
+            const left = row.align === "left" ? row.x : row.x - width / 2;
+            ctx.fillStyle = `rgba(0,0,0,${style.box_opacity})`;
+            ctx.fillRect(left - row.box, row.y - row.size * 0.62 - row.box, width + row.box * 2, row.size * 1.24 + row.box * 2);
+          } else if (row.outline) {
+            ctx.lineJoin = "round";
+            ctx.lineWidth = row.outline * 2;
+            ctx.strokeStyle = "#000";
+            ctx.strokeText(row.text, row.x, row.y);
+          }
+          ctx.fillStyle = "#fff";
+          ctx.fillText(row.text, row.x, row.y);
+        }
+        ctx.restore();
+      }
     }
 
     // A title card's words, where the render puts them, fading in and out as they do there.

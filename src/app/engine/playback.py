@@ -23,7 +23,7 @@ from app.engine.builder import (
     DUCK_ATTACK_SECONDS, DUCK_DEPTH_DB, DUCK_HOLD_SECONDS, DUCK_RELEASE_SECONDS, Talking, _cleanup_filters,
     overlay_box,
 )
-from app.engine import cards, stills
+from app.engine import cards, stills, texts
 from app.engine.reframe import Framing
 from app.engine.subtitles import drawn_captions, place_cues
 from app.models.media import Asset
@@ -293,6 +293,7 @@ def describe(
         # Title cards: their words, placed as the render places them, and how their backgrounds look.
         "cards": {"events": cards.drawn(project), "blur_share": cards.BLUR_SHARE, "blur_dim": cards.BLUR_DIM,
                   "picture_dim": cards.PICTURE_DIM},
+        "texts": texts.drawn(project, project.caption_style),
         "gain_db": prepared.gain_db,
         "loudness_target": LOUDNESS_TARGET,
         "approximate": {
