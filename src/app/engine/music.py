@@ -6,6 +6,7 @@ its quiet passages to its fullest, since what matters is where in the song the
 energy is, not how loudly it was mastered.
 """
 
+import functools
 from typing import Dict, List, Optional, Sequence, Tuple
 
 import numpy as np
@@ -123,3 +124,69 @@ def energy_at(energy: Sequence[float], second: float) -> Optional[float]:
     """The energy at one second of the song, or None past its end."""
     index = int(second)
     return energy[index] if 0 <= index < len(energy) else None
+
+
+# A loop is whole bars of this many beats, counted from the first beat found: the beat
+# tracker finds beats, not which of them begins a bar, so this assumes common time.
+# Provisional (roadmap §13).
+BAR_BEATS = 4
+# The shortest loop: shorter, and the repeat is heard as a stuck record. Provisional
+# (roadmap §13).
+LOOP_SHORTEST_BARS = 8
+# Energy averaged this long either side of a loop's two ends to compare them.
+# Provisional (roadmap §13).
+LOOP_COMPARE_SECONDS = 2
+# Neither end of a loop may sit where the song is quieter than this on its own scale — an
+# intro, a breakdown, a fade-out — since a jump there is heard. Provisional (roadmap §13).
+LOOP_FLOOR = 0.35
+
+
+def _mean(energy: Sequence[float], start: float, end: float) -> Optional[float]:
+    window = energy[max(0, int(start)):max(0, int(end))]
+    return sum(window) / len(window) if window else None
+
+
+@functools.lru_cache(maxsize=256)
+def loop_span(beats: Tuple[float, ...], energy: Tuple[float, ...], duration: Optional[float]) -> Optional[Tuple[float, float]]:
+    """Find where a song can loop without the jump being heard.
+
+    Both ends on bar lines of the same beat grid, so the loop is whole bars
+    and keeps time; neither in a quiet intro, breakdown or fade-out; and the
+    music either side of the jump as alike in energy as the song allows, so
+    what comes after the loop's end sounds like what came after its start.
+    Of the loops that match about equally well, the longest, so the repeat
+    comes round as seldom as it can.
+
+    Args:
+        beats: The song's beats, in seconds.
+        energy: Its energy each second, from `energy_curve`.
+        duration: How long it is.
+
+    Returns:
+        `(start, end)` in song seconds: play to `end`, then carry on from
+        `start`. None when the song is too short, has too few beats, or has
+        no stretch loud enough to loop in.
+    """
+    if not beats or not energy or duration is None:
+        return None
+    bars = list(beats[::BAR_BEATS])
+    width = LOOP_COMPARE_SECONDS
+    best: Optional[Tuple[float, float, float]] = None
+    for first, start in enumerate(bars):
+        before_start, after_start = _mean(energy, start - width, start), _mean(energy, start, start + width)
+        if after_start is None or after_start < LOOP_FLOOR:
+            continue
+        for end in bars[first + LOOP_SHORTEST_BARS:]:
+            if end > duration - width:
+                break
+            before_end, after_end = _mean(energy, end - width, end), _mean(energy, end, end + width)
+            if before_end is None or after_end is None or before_end < LOOP_FLOOR:
+                continue
+            # After the jump the song carries on from `start` where it would have from `end`;
+            # and what led up to `end` is what will have led up to `start`.
+            mismatch = abs(after_start - after_end) + abs((before_start or after_start) - before_end)
+            # Rounded, so loops that match about equally well are told apart by their length.
+            key = (round(mismatch, 1), -(end - start))
+            if best is None or key < (round(best[0], 1), -(best[2] - best[1])):
+                best = (mismatch, start, end)
+    return None if best is None else (round(best[1], 3), round(best[2], 3))

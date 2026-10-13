@@ -38,6 +38,7 @@ from app.models.timeline import (
     Clip,
     EditOperation,
     EditSubtitleOp,
+    FitTrackOp,
     Project,
     SetSubtitlesOp,
     SubtitleCue,
@@ -704,14 +705,22 @@ def import_asset(filepath: str) -> dict:
 
     Returns:
         The asset serialized as a dictionary: its `id`, absolute `path`,
-        `duration` in seconds (or null if unknown), and `has_video` /
-        `has_audio` flags.
+        `duration` in seconds (or null if unknown, and for a photo, which
+        lasts as long as its clip; `still` is true for one), and
+        `has_video` / `has_audio` flags.
 
     Raises:
         FileNotFoundError: If the file does not exist.
         RuntimeError: If ffprobe cannot read the file.
     """
-    return _plain(register_asset(filepath).model_dump())
+    return _plain(_asset_record(register_asset(filepath)))
+
+def _asset_record(asset: Asset) -> dict:
+    """An asset as a tool hands it back: a photo with no length, since it has none of its own."""
+    record = asset.model_dump()
+    if asset.still:
+        record["duration"] = None
+    return record
 
 def _plain(value):
     """Turn the Decimals a model keeps its seconds in into plain numbers, all the way down.
@@ -1371,8 +1380,9 @@ def import_folder(folderpath: str, recursive: bool = False) -> dict:
         except (OSError, RuntimeError, ValueError) as error:
             skipped.append({"path": path, "reason": str(error)})
 
-    total = sum((asset.duration for asset in assets if asset.duration is not None), Decimal(0))
-    return _plain({"assets": [asset.model_dump() for asset in assets], "total_duration": total, "skipped": skipped})
+    # Photos have no length of their own: counted, an album would read as days of footage.
+    total = sum((asset.duration for asset in assets if asset.duration is not None and not asset.still), Decimal(0))
+    return _plain({"assets": [_asset_record(asset) for asset in assets], "total_duration": total, "skipped": skipped})
 
 def _is_stale(analysis: MediaAnalysis) -> bool:
     """Say whether an analysis was taken in a way the server no longer uses.
@@ -3191,6 +3201,15 @@ def _apply(
         )
 
     # Assets are looked up first so operations that need source lengths, such as fit_track, can use them.
+    # Where each song on a track being fitted can loop on the beat: the timeline cannot read analyses.
+    for op in operations:
+        if isinstance(op, FitTrackOp):
+            track = next((item for item in project.tracks if item.id == op.track_id), None)
+            for asset_id in {clip.asset_id for clip in (track.clips if track else [])}:
+                analysis = repo.get_analysis(asset_id)
+                span = clean_cuts(analysis).loop if analysis is not None else None
+                if span is not None:
+                    op.loops[asset_id] = (Decimal(str(span[0])), Decimal(str(span[1])))
     # A photo a title card is to stand on is not in the cut until the card puts it there.
     known = repo.get_assets({clip.asset_id for track in project.tracks for clip in track.clips}
                             | {op.photo_asset_id for op in operations if getattr(op, "photo_asset_id", None)})
@@ -3236,10 +3255,11 @@ def _plan_context(plan: EditPlan) -> tuple:
     # sound they come from: reading those is interpretation, and the compiler has to stay
     # a pure function of what it is given.
     cuts = {}
-    for asset_id in footage | songs:
+    budget = [BACKFILL_SECONDS]
+    for asset_id in sorted(footage | songs):
         analysis = repo.get_analysis(asset_id)
         if analysis is not None:
-            cuts[asset_id] = clean_cuts(_listened_to(analysis) if asset_id in footage else analysis)
+            cuts[asset_id] = clean_cuts(_listened_to(analysis, budget) if asset_id in footage else analysis)
     return timeline, {clip.id: clip for clip in clips}, children, _dated(repo.get_assets(footage | songs)), cuts
 
 def _require_plan(plan_id: Optional[str]) -> EditPlan:
@@ -4166,7 +4186,7 @@ def preview_project(
                 placement_at(framed, clip, seconds, fps),
             ))
             # Drawn over the render, not over this tile: said instead.
-            over = [text.text for text in clip.texts if text.start <= seconds < text.end]
+            over = [text.text for text in clip.shown_texts if text.start <= seconds < text.end]
             listing.append(
                 f"#{number}: clip {clip.id} | edit {format_timestamp(at)} | "
                 f"source {seconds:.3f}s ({format_timestamp(seconds)})"
@@ -4976,35 +4996,49 @@ def _analyses(project: Project, listened: bool = False) -> Dict[str, MediaAnalys
         The analyses that exist, keyed by asset ID.
     """
     found: Dict[str, MediaAnalysis] = {}
-    for asset_id in {clip.asset_id for track in project.tracks for clip in track.clips}:
+    budget = [BACKFILL_SECONDS]
+    for asset_id in sorted({clip.asset_id for track in project.tracks for clip in track.clips}):
         analysis = repo.get_analysis(asset_id)
         if analysis is not None:
-            found[asset_id] = _listened_to(analysis) if listened else analysis
+            found[asset_id] = _listened_to(analysis, budget) if listened else analysis
     return found
 
-def _listened_to(analysis: MediaAnalysis) -> MediaAnalysis:
+# Provisional (roadmap §13): how much footage one tool call may give its second listen while
+# the caller waits — a compile or a check is a tool call, not a background job, and on a
+# processor a minute of footage takes most of a minute to hear again.
+BACKFILL_SECONDS = 600.0
+
+def _listened_to(analysis: MediaAnalysis, budget: List[float]) -> MediaAnalysis:
     """Give a transcribed file its second listen, if it was analyzed before there was one.
 
     Once per file, and kept: it takes a few seconds for a short clip and
-    about the length of a long recording divided by twenty on a GPU. Where
-    the file has gone or the listen fails, the analysis is handed back
-    without it, and the cuts are judged by the transcript alone as they were
-    before — a check that cannot run is no reason to stop an edit.
+    about the length of a long recording divided by twenty on a GPU. Only
+    as much footage as is left of `budget`, so a call is never held up for
+    long: a file that does not fit is judged by its transcript alone this
+    time and heard on a later call, and one longer than the whole budget
+    gets its second listen when it is analyzed again. Where the file has
+    gone or the listen fails, the analysis is handed back without it too —
+    a check that cannot run is no reason to stop an edit.
 
     Args:
         analysis: The file's analysis.
+        budget: Seconds of footage this call may still hear again, as a
+            one-item list each file's listen is taken off.
 
     Returns:
         The analysis, with its second listen when it could be taken.
     """
     if analysis.transcript is None or analysis.second_listen is not None:
         return analysis
+    if analysis.duration > budget[0]:
+        return analysis
     asset = repo.get_assets([analysis.asset_id]).get(analysis.asset_id)
     if asset is None or not os.path.exists(asset.path):
         return analysis
+    budget[0] -= analysis.duration
     try:
         listened = second_listen(asset.path, analysis.transcript, lambda fraction: None, lambda: False)
-    except (RuntimeError, OSError):
+    except (RuntimeError, OSError, ValueError):
         return analysis
     # Read again before writing, so an analysis taken again meanwhile is not overwritten
     # with the one this started from.

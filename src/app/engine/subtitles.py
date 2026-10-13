@@ -443,7 +443,7 @@ def _room(prefix: str, geometry: CaptionGeometry) -> float:
     """
     return max(4.0, geometry.max_units - sum(_display_width(character) for character in prefix))
 
-def _text_width(text: str) -> float:
+def text_width(text: str) -> float:
     """Measure a run of text the way a line is measured.
 
     Args:
@@ -585,7 +585,7 @@ def _word_lines(
     Returns:
         Each line as `(first, past_last)` word indices, in order.
     """
-    widths = [_text_width(escape_ass_inline(word.text)) for word in words]
+    widths = [text_width(escape_ass_inline(word.text)) for word in words]
     offsets = [0]
     for word in words:
         offsets.append(offsets[-1] + len(word.text))
@@ -644,7 +644,7 @@ def one_line_each(cue: PlacedCue, geometry: CaptionGeometry, style: CaptionStyle
     room = _room(_speaker_prefix(cue, style), geometry)
     words = [word for word in cue.words if escape_ass_inline(word.text).strip()]
     if words:
-        widths = [_text_width(escape_ass_inline(word.text)) for word in words]
+        widths = [text_width(escape_ass_inline(word.text)) for word in words]
         if sum(widths) <= room:
             return [cue]
         lines = _word_lines(words, lambda first, past: sum(widths[first:past]) <= room)
@@ -661,21 +661,21 @@ def one_line_each(cue: PlacedCue, geometry: CaptionGeometry, style: CaptionStyle
         ]
     # Several lines in the stored text are one thing said, so they are read as one run.
     text = " ".join(part for part in escape_ass_text(cue.text).split("\\N") if part)
-    if _text_width(text) <= room:
+    if text_width(text) <= room:
         return [cue]
     # As few lines as fit, filled evenly; with no timings there are no pauses to prefer,
     # and `wrap_caption` already knows where the spaces are.
     fewest = len(wrap_caption(text, room))
-    limit = _text_width(text) / fewest
+    limit = text_width(text) / fewest
     while limit < room and len(wrap_caption(text, limit)) > fewest:
         limit += 0.5
     wrapped = wrap_caption(text, min(limit, room))
-    total = sum(_text_width(line) for line in wrapped) or 1.0
+    total = sum(text_width(line) for line in wrapped) or 1.0
     pieces: List[PlacedCue] = []
     done = 0.0
     for line in wrapped:
         start = _at_share(cue, done / total)
-        done += _text_width(line)
+        done += text_width(line)
         end = _at_share(cue, done / total)
         if end > start:
             pieces.append(cue.model_copy(update={"start": start, "end": end, "text": line}))
@@ -917,7 +917,7 @@ def _pieces(
         return (
             len(joined) <= max_characters
             and words[past - 1].end - words[first].start <= max_seconds
-            and (max_units is None or _text_width(joined) <= max_units)
+            and (max_units is None or text_width(joined) <= max_units)
         )
 
     chunks = [words[first:past] for first, past in _word_lines(words, fits)]
