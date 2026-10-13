@@ -9,9 +9,9 @@ import statistics
 import subprocess
 import time
 from dataclasses import dataclass, field
-from typing import Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Callable, Dict, List, Optional, Sequence, Tuple, TypeVar
 
-from app.engine import faces, machine, models, resources
+from app.engine import faces, machine, models, resources, stills
 from app.engine.diarize import (
     MIN_PAUSE_SECONDS as SPEAKER_MIN_PAUSE_SECONDS,
     MIN_SPEECH_SECONDS as SPEAKER_MIN_SPEECH_SECONDS,
@@ -20,6 +20,8 @@ from app.engine.diarize import (
     speaker_model_name,
 )
 from app.engine.ffmpeg import OperationCancelled, escape_filter_path, hidden_window_flags, run_ffmpeg
+from app.engine import relisten
+from app.engine.relisten import Listener
 from app.engine.rhythm import measure_rhythm, rhythm_model_name
 from app.engine import clap
 from app.engine.library import MUSIC, library_of
@@ -31,6 +33,7 @@ from app.models.media import (
     MediaAnalysis,
     MusicSense,
     Rhythm,
+    SecondListen,
     ShotMeasurement,
     SILENCE_DB,
     SoundMeasurement,
@@ -83,6 +86,15 @@ DEFAULT_WHISPER_MODEL = "large-v3-turbo"
 # more misheard words and looser word timings. Chosen by the AI after asking
 # the user on a slow computer, never by the server on its own.
 FAST_WHISPER_MODEL = "small"
+# A balanced transcription is written as both models joined by this: the fast one heard
+# everything, the accurate one heard again the lines the fast one was unsure of.
+BALANCED_JOIN = "+"
+# Sound taken either side of an unsure line before the accurate model hears it again, so a
+# word the fast model placed a little late is still inside what it hears. Never past the
+# lines either side. Provisional (roadmap §13).
+REFINE_PAD_SECONDS = 0.3
+# The longest stretch heard again at once: the speech model's own window, less some room.
+REFINE_LONGEST_SECONDS = 28.0
 # Provisional (roadmap §13): below this probability the speech model was guessing at a
 # word, and the AI is pointed at it to check.
 LOW_CONFIDENCE = 0.5
@@ -631,6 +643,61 @@ def scan_media(
         sound=_sound_measurements(_frame_records(os.path.join(work_dir, SOUND_FILE_NAME)), duration),
     )
 
+def scan_photo(
+    asset: Asset,
+    work_dir: str,
+    on_progress: Callable[[float], None],
+    is_cancelled: Callable[[], bool],
+    ffmpeg_bin: str = "ffmpeg",
+) -> Tuple[List[ShotMeasurement], List[FaceMeasurement]]:
+    """Measure a photo: how it was taken, and who is in it.
+
+    A photo has no cuts, no sound and no frames that differ, so of
+    everything the scan measures in a video only the picture itself and the
+    faces are left. One pass measures the picture the way a video's shots
+    are measured and writes it where the face detector reads its stills;
+    what both find holds for as long as anybody shows the photo.
+
+    Args:
+        asset: The photo.
+        work_dir: Directory the detector's still is written to.
+        on_progress: Called with the completed fraction.
+        is_cancelled: Polled to stop early.
+        ffmpeg_bin: Path to, or name of, the FFmpeg executable.
+
+    Returns:
+        `(shots, faces)`: one record of each at most, from the start of the
+        photo to the longest it can be shown. Exposure, contrast and blur
+        are measured; motion and shake are not, since nothing in a photo
+        moves.
+
+    Raises:
+        OperationCancelled: If cancellation was requested.
+        RuntimeError: If FFmpeg cannot read the picture.
+    """
+    os.makedirs(faces.frames_dir(work_dir), exist_ok=True)
+    picture = escape_filter_path(os.path.join(work_dir, PICTURE_FILE_NAME))
+    result = subprocess.run(
+        [ffmpeg_bin, "-hide_banner", "-loglevel", "error", "-nostdin", "-y", "-i", asset.path,
+         "-filter_complex",
+         f"[0:V:0]split=2[picture][still];"
+         f"[picture]scale={PICTURE_WIDTH}:-2:out_range=full,signalstats,blurdetect,"
+         f"metadata=mode=print:file='{picture}',nullsink;"
+         f"[still]scale={faces.FRAME_WIDTH}:-2[face]",
+         "-map", "[face]", "-frames:v", "1", "-q:v", str(STILL_QUALITY),
+         os.path.join(faces.frames_dir(work_dir), faces.FRAME_PATTERN % 1)],
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        creationflags=hidden_window_flags(),
+    )
+    if result.returncode != 0:
+        raise RuntimeError(f"could not read the photo: {result.stderr.decode('utf-8', errors='replace').strip()[-300:]}")
+    shown = {"end": float(stills.STILL_LONGEST)}
+    shots = _shot_measurements([Span(start=0.0, end=1.0)], _frame_records(os.path.join(work_dir, PICTURE_FILE_NAME)), [])
+    found = faces.detect_faces(work_dir, 1.0, on_progress, is_cancelled)
+    return ([shot.model_copy(update=shown) for shot in shots],
+            [measurement.model_copy(update=shown) for measurement in found])
+
 def _nearest(values: List[float], target: float) -> Optional[float]:
     """Find the value closest to a target in a sorted list.
 
@@ -844,12 +911,18 @@ def whisper_model_for(transcription: str) -> str:
     """The speech model a transcription of this kind runs.
 
     Args:
-        transcription: `accurate`, the configured model, or `fast`.
+        transcription: `accurate`, the configured model; `fast`; or
+            `balanced`, the fast model and then the configured one over the
+            lines the fast one was unsure of.
 
     Returns:
-        The model name.
+        The model name; for `balanced`, both, joined by `BALANCED_JOIN`.
     """
-    return FAST_WHISPER_MODEL if transcription == "fast" else whisper_model_name()
+    if transcription == "fast":
+        return FAST_WHISPER_MODEL
+    if transcription == "balanced":
+        return f"{FAST_WHISPER_MODEL}{BALANCED_JOIN}{whisper_model_name()}"
+    return whisper_model_name()
 
 def transcription_of(model: Optional[str]) -> Optional[str]:
     """Say which kind of transcription a transcript made with `model` is.
@@ -863,11 +936,43 @@ def transcription_of(model: Optional[str]) -> Optional[str]:
         model: The model a transcript was made with, or None for no transcript.
 
     Returns:
-        `fast`, `accurate`, or None when there is no transcript.
+        `fast`, `balanced`, `accurate`, or None when there is no transcript.
     """
     if model is None:
         return None
+    if BALANCED_JOIN in model:
+        return "balanced"
     return "fast" if model == FAST_WHISPER_MODEL != whisper_model_name() else "accurate"
+
+T = TypeVar("T")
+
+def on_whisper_device(run: Callable[[str], T]) -> T:
+    """Run something on the speech model's device, falling back to the processor if the GPU cannot.
+
+    A CUDA install that is there but broken — a missing cuBLAS or cuDNN —
+    fails only once the model starts, so the retry is on the error rather
+    than decided up front.
+
+    Args:
+        run: Takes the device, `"cuda"` or `"cpu"`, and does the work on it.
+
+    Returns:
+        What `run` returns.
+
+    Raises:
+        RuntimeError: Whatever `run` raises that is not the GPU failing.
+    """
+    device = machine.whisper_device()
+    try:
+        return run(device)
+    except RuntimeError as exc:
+        if device != "cuda" or not any(name in str(exc).lower() for name in ("cuda", "cublas", "cudnn")):
+            raise
+        return run("cpu")
+
+def heard_with(model: Optional[str]) -> str:
+    """The speech model to listen with for a transcript made with `model`: a balanced one's accurate half."""
+    return (model or whisper_model_name()).split(BALANCED_JOIN)[-1]
 
 def _run_whisper(
     device: str,
@@ -996,13 +1101,7 @@ def listen_again(
     def moved(seconds: float) -> float:
         return round(seconds + start, 3)
 
-    device = machine.whisper_device()
-    try:
-        raw = hear(device)
-    except RuntimeError as exc:
-        if device != "cuda" or not any(name in str(exc).lower() for name in ("cuda", "cublas", "cudnn")):
-            raise
-        raw = hear("cpu")
+    raw = on_whisper_device(hear)
     segments = [
         TranscriptSegment(
             start=moved(segment.start), end=moved(segment.end), text=segment.text.strip(),
@@ -1063,15 +1162,8 @@ def transcribe_speech(
     Raises:
         OperationCancelled: If cancellation was requested.
     """
-    device = machine.whisper_device()
-    try:
-        raw = _run_whisper(device, path, duration, language, prompt, on_progress, is_cancelled, on_measured,
-                           model_name)
-    except RuntimeError as exc:
-        if device != "cuda" or not any(name in str(exc).lower() for name in ("cuda", "cublas", "cudnn")):
-            raise
-        raw = _run_whisper("cpu", path, duration, language, prompt, on_progress, is_cancelled, on_measured,
-                           model_name)
+    raw = on_whisper_device(lambda device: _run_whisper(
+        device, path, duration, language, prompt, on_progress, is_cancelled, on_measured, model_name))
 
     words = [word for segment in raw.segments for word in segment.words]
     snap_words_to_silences(words, silences)
@@ -1081,6 +1173,153 @@ def transcribe_speech(
     else:
         chinese_variant = None
     return Transcript(language=raw.language, model=raw.model, chinese_variant=chinese_variant, segments=segments)
+
+def _unsure_stretches(segments: Sequence[TranscriptSegment], duration: float) -> List[Tuple[float, float]]:
+    """Find the stretches of a transcript worth hearing again: its lines with a word it was unsure of.
+
+    Lines next to each other are heard together, up to the model's window,
+    so a phrase split across two lines is heard as one.
+
+    Args:
+        segments: The transcript's lines, in order.
+        duration: How long the file is.
+
+    Returns:
+        `(start, end)` of each stretch, padded by `REFINE_PAD_SECONDS` but
+        never into a line that is not heard again.
+    """
+    unsure = [any(_doubtful(word) for word in segment.words) for segment in segments]
+    groups: List[List[int]] = []
+    for index, doubtful in enumerate(unsure):
+        if not doubtful:
+            continue
+        if (groups and groups[-1][-1] == index - 1
+                and segments[index].end - segments[groups[-1][0]].start <= REFINE_LONGEST_SECONDS):
+            groups[-1].append(index)
+        else:
+            groups.append([index])
+    stretches = []
+    for group in groups:
+        first, last = group[0], group[-1]
+        before = segments[first - 1].end if first > 0 else 0.0
+        after = segments[last + 1].start if last + 1 < len(segments) else duration
+        stretches.append((round(max(segments[first].start - REFINE_PAD_SECONDS, before, 0.0), 3),
+                          round(min(segments[last].end + REFINE_PAD_SECONDS, after, duration), 3)))
+    return stretches
+
+def refine_unsure_lines(
+    path: str,
+    transcript: Transcript,
+    duration: float,
+    prompt: Optional[str],
+    silences: List[Span],
+    model_name: str,
+    on_progress: Callable[[float], None],
+    is_cancelled: Callable[[], bool],
+    work_dir: str,
+    ffmpeg_bin: str = "ffmpeg",
+) -> Transcript:
+    """Hear again, with a better model, only the lines a transcript was unsure of.
+
+    Most of a fast transcript is right, and the lines it got wrong are mostly
+    the ones it says it was unsure of. So instead of transcribing everything
+    a second time, those lines alone go to the accurate model, and its words
+    take their place; the rest stays as it was.
+
+    Args:
+        path: The media file.
+        transcript: The transcript, made with the fast model.
+        duration: How long the file is.
+        prompt: Text that guides transcription, as the first pass had.
+        silences: The file's measured silences, which word edges snap to.
+        model_name: The accurate model.
+        on_progress: Called with the completed fraction.
+        is_cancelled: Polled between stretches.
+        work_dir: Where each stretch's sound is written while it is heard.
+        ffmpeg_bin: Path to, or name of, the FFmpeg executable.
+
+    Returns:
+        The transcript with those lines heard again, its `model` naming both
+        models joined by `BALANCED_JOIN`.
+
+    Raises:
+        OperationCancelled: If cancellation was requested.
+        RuntimeError: If the sound cannot be read or speech recognition fails.
+    """
+    stretches = _unsure_stretches(transcript.segments, duration)
+    words = [word for segment in transcript.segments for word in segment.words]
+    os.makedirs(work_dir, exist_ok=True)
+    for index, (start, end) in enumerate(stretches):
+        if is_cancelled():
+            raise OperationCancelled()
+        piece = os.path.join(work_dir, f"refine_{index:04d}.wav")
+        cut = subprocess.run(
+            [ffmpeg_bin, "-y", "-v", "error", "-ss", f"{start:.3f}", "-t", f"{end - start:.3f}", "-i", path,
+             "-vn", "-ac", "1", "-ar", "16000", piece],
+            stdin=subprocess.DEVNULL, capture_output=True, text=True, encoding="utf-8", errors="replace",
+            creationflags=hidden_window_flags(),
+        )
+        if cut.returncode != 0:
+            raise RuntimeError(f"could not read the sound at {start:.2f}s: {cut.stderr.strip()[-300:]}")
+        try:
+            heard = on_whisper_device(lambda device: _run_whisper(
+                device, piece, end - start, transcript.language, prompt, lambda fraction: None, is_cancelled,
+                None, model_name))
+        finally:
+            if os.path.exists(piece):
+                os.remove(piece)
+        better = [word.model_copy(update={"start": round(word.start + start, 3), "end": round(word.end + start, 3)})
+                  for segment in heard.segments for word in segment.words]
+        # The stretch's words are the accurate model's now; a word belongs to the stretch its middle is in.
+        # Where it heard nothing the fast model's stay, so a line is never lost to being heard again.
+        if better:
+            words = [word for word in words if not start <= (word.start + word.end) / 2 < end] + better
+        on_progress((index + 1) / len(stretches))
+    words.sort(key=lambda word: word.start)
+    snap_words_to_silences(words, silences)
+    segments = split_sentences(words)
+    if transcript.chinese_variant is not None:
+        convert_chinese_variant(segments, transcript.chinese_variant)
+    base = transcript.model.split(BALANCED_JOIN)[0]
+    return transcript.model_copy(update={"segments": segments, "model": f"{base}{BALANCED_JOIN}{model_name}"})
+
+def second_listen(
+    path: str,
+    transcript: Transcript,
+    on_progress: Callable[[float], None],
+    is_cancelled: Callable[[], bool],
+    ffmpeg_bin: str = "ffmpeg",
+) -> SecondListen:
+    """Listen to a transcribed file's talking again, without its transcript.
+
+    With the same speech model the transcript was made with, on the same
+    device, falling back to the CPU the same way. What it hears is written
+    the way the transcript is, so the two can be compared word for word.
+
+    Args:
+        path: Media file.
+        transcript: The file's transcript, for its language and script.
+        on_progress: Called with the completed fraction.
+        is_cancelled: Polled to stop early.
+        ffmpeg_bin: Path to, or name of, the FFmpeg executable.
+
+    Returns:
+        What `relisten.listen_again` hears.
+
+    Raises:
+        OperationCancelled: If cancellation was requested.
+    """
+    convert: Callable[[str], str] = lambda text: text
+    if transcript.chinese_variant in CHINESE_VARIANT_CONFIGS:
+        import opencc
+
+        convert = opencc.OpenCC(f"{CHINESE_VARIANT_CONFIGS[transcript.chinese_variant]}.json").convert
+    # A balanced transcript names both its models; the second listen hears with the accurate one.
+    model = heard_with(transcript.model)
+    return on_whisper_device(lambda device: relisten.listen_again(
+        path, transcript.language, Listener(model, device, models.whisper_dir()),
+        on_progress, is_cancelled, convert, ffmpeg_bin,
+    ))
 
 def discard_scratch(work_dir: str) -> None:
     """Throw away everything the pass wrote for its own use.
@@ -1107,6 +1346,7 @@ def discard_scratch(work_dir: str) -> None:
 
 def _shares(
     with_faces: bool, with_speech: bool, with_speakers: bool, with_rhythm: bool = False, with_scan: bool = True,
+    with_refine: bool = False,
 ) -> Dict[str, Tuple[float, float]]:
     """Divide one progress bar among the stages this analysis will actually run.
 
@@ -1121,6 +1361,8 @@ def _shares(
         with_rhythm: Whether the beat will be looked for.
         with_scan: Whether the picture and sound will be measured, rather
             than kept from an earlier analysis.
+        with_refine: Whether the unsure lines will be heard again by the
+            accurate model.
 
     Returns:
         `(start, span)` of the bar for each stage that will run, keyed by
@@ -1131,6 +1373,10 @@ def _shares(
         weights.append(("faces", 2.0))
     if with_speech:
         weights.append(("speech", 20.0))
+    if with_refine:
+        weights.append(("refine", 6.0))
+    if with_speech or with_refine:
+        weights.append(("relisten", 4.0))
     if with_speakers:
         weights.append(("speakers", 4.0))
     if with_rhythm:
@@ -1232,6 +1478,23 @@ def analyze_media(
         RuntimeError: If FFmpeg fails, a model cannot be downloaded, or speech
             recognition fails.
     """
+    if asset.still:
+        _fetch_models([models.FACE_DETECTION], on_progress)
+        try:
+            shots, on_screen = scan_photo(asset, work_dir, lambda fraction: on_progress(fraction, "looking for faces"),
+                                          is_cancelled, ffmpeg_bin)
+        finally:
+            discard_scratch(work_dir)
+        # A photo lasts as long as it is shown; the timeline built from it offers it at the length
+        # it is shown for when nothing says otherwise.
+        return MediaAnalysis(
+            asset_id=asset.id,
+            duration=stills.STILL_SECONDS,
+            scenes=[Span(start=0.0, end=stills.STILL_SECONDS)],
+            shots=shots,
+            faces=on_screen,
+            recipe=current_recipe(None, ffmpeg_bin, None, None, None),
+        )
     duration = float(asset.duration or 0)
     # Music is listened to for its beat and never transcribed; everything else the other way
     # round: a beat tracker run over somebody talking finds one in their syllables.
@@ -1246,8 +1509,14 @@ def analyze_media(
     keep_speakers = keep_scan and with_speakers and speakers is None and before.speaker_model == now.speaker_model
     keep_music = keep_scan and with_rhythm and earlier.rhythm is not None and earlier.music is not None and (
         before.rhythm_model, before.clap_model) == (now.rhythm_model, now.clap_model)
-    shares = _shares(with_faces and not keep_scan, with_speech, with_speakers and not keep_speakers,
-                     with_rhythm and not keep_music, not keep_scan)
+    first_model, _, refine_model = (speech_model or whisper_model_name()).partition(BALANCED_JOIN)
+    refining_earlier = (
+        with_speech and bool(refine_model) and earlier is not None and earlier.transcript is not None
+        and earlier.transcript.model == first_model and prompt is None
+    )
+    shares = _shares(with_faces and not keep_scan, with_speech and not refining_earlier,
+                     with_speakers and not keep_speakers, with_rhythm and not keep_music, not keep_scan,
+                     with_refine=with_speech and bool(refine_model))
 
     needed: List[models.Model] = []
     if with_faces and not keep_scan:
@@ -1296,7 +1565,10 @@ def analyze_media(
     transcript = None
     turns: List[SpeakerTurn] = []
     voices: List[Voice] = []
-    if with_speech:
+    if refining_earlier:
+        # A fast transcript asked to be balanced keeps what it heard, and only its unsure lines are heard again.
+        transcript = earlier.transcript
+    elif with_speech:
         on_progress(shares["speech"][0], "loading the speech recognition model")
         transcript = transcribe_speech(
             asset.path,
@@ -1308,7 +1580,19 @@ def analyze_media(
             report("speech", "transcribing speech"),
             is_cancelled,
             on_measured,
-            speech_model,
+            first_model,
+        )
+    if transcript is not None and refine_model:
+        transcript = refine_unsure_lines(
+            asset.path, transcript, duration, prompt, scan.silences, refine_model,
+            report("refine", "hearing the unsure lines again with the accurate model"), is_cancelled,
+            os.path.join(work_dir, "refine"), ffmpeg_bin,
+        )
+    listened: Optional[SecondListen] = None
+    if transcript is not None:
+        listened = second_listen(
+            asset.path, transcript, report("relisten", "listening to the talking again without the transcript"),
+            is_cancelled, ffmpeg_bin,
         )
     if keep_speakers:
         turns, voices = list(earlier.speakers), list(earlier.voices)
@@ -1344,6 +1628,7 @@ def analyze_media(
         rhythm=rhythm,
         transcript=transcript,
         music=sense,
+        second_listen=listened,
         recipe=current_recipe(
             transcript.model if transcript is not None else None,
             ffmpeg_bin,

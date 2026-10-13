@@ -38,6 +38,7 @@ from app.models.timeline import (
     Clip,
     EditOperation,
     EditSubtitleOp,
+    FitTrackOp,
     Project,
     SetSubtitlesOp,
     SubtitleCue,
@@ -48,11 +49,11 @@ from app.models.timeline import (
 )
 from app.models.comment import Comment, Reply
 from app.models.job import Job, JobKind, JobStatus
-from app.engine import loudness, machine, meaning, resources, speed
+from app.engine import cards, texts, loudness, machine, meaning, resources, speed, stills
 from app.engine.analysis import listen_again as listen_again_in_file
 from app.engine.analysis import (
-    current_recipe, doubtful_spots, marked_text, marked_words, sound_note, transcription_of, unsure_words,
-    whisper_model_for, whisper_model_name,
+    BALANCED_JOIN, current_recipe, doubtful_spots, marked_text, marked_words, second_listen, sound_note,
+    transcription_of, unsure_words, whisper_model_for, whisper_model_name,
 )
 from app.engine.diarize import speaker_model_name
 from app.engine.rhythm import rhythm_model_name
@@ -68,7 +69,7 @@ from app.engine.semantic import (
 )
 from app.engine.ffmpeg import graph_from_file, hidden_window_flags
 from app.engine.probe import picture_size, probe_file, recorded_at, speech_loudness, timecode_start
-from app.engine.reframe import Framing, centre_at, frame_project
+from app.engine.reframe import Framing, frame_project, placement_at
 from app.engine import playback
 from app.engine.library import FOLDER_KINDS, FOOTAGE, LIBRARIES, MUSIC, classify, library_of
 from app.engine import clap
@@ -123,7 +124,7 @@ SUMMARY_SCORES = content_scores()
 MEDIA_EXTENSIONS = frozenset({
     ".mp4", ".mov", ".m4v", ".mkv", ".avi", ".webm", ".mpg", ".mpeg", ".mts", ".m2ts", ".wmv", ".flv", ".3gp",
     ".mp3", ".m4a", ".wav", ".aac", ".flac", ".ogg", ".opus", ".wma", ".aiff",
-})
+}) | stills.IMAGE_EXTENSIONS
 
 # Opened before the server is described: what it says about this computer's speed comes from runs kept here.
 repo = Repository(os.path.join(WORKSPACE_DIR, "clip_mcp.db"))
@@ -155,7 +156,9 @@ mcp = FastMCP(
         "user has heard what the check found, how one cut is delivered in "
         "several shapes and handed to other editing programs, "
         "and the current limits: no overlapping picture on a "
-        "track, no still images, and no graphics beyond captions. "
+        "track, and no graphics beyond words: captions, title cards and text "
+        "over the footage. Photos go in like videos and are shown for as long "
+        "as their clip runs. "
         "Transitions end on the cut rather than straddling it, so adding one "
         "never changes how long the video runs. The person using this server is "
         "editing their own video, not writing code: reply in plain language "
@@ -547,9 +550,14 @@ def register_asset(filepath: str, library: Optional[str] = None) -> Asset:
     existing = repo.find_asset_by_path(path)
     streams = info.get("streams", [])
     duration = info.get("format", {}).get("duration")
+    photo = stills.is_image(path)
+    if photo:
+        # A photo is as long as it is shown.
+        duration = stills.STILL_LONGEST
     asset = Asset(
         id=existing.id if existing else str(uuid.uuid4()),
         path=path,
+        still=photo,
         duration=Decimal(duration) if duration is not None else None,
         has_video=any(
             stream.get("codec_type") == "video" and not stream.get("disposition", {}).get("attached_pic")
@@ -697,14 +705,22 @@ def import_asset(filepath: str) -> dict:
 
     Returns:
         The asset serialized as a dictionary: its `id`, absolute `path`,
-        `duration` in seconds (or null if unknown), and `has_video` /
-        `has_audio` flags.
+        `duration` in seconds (or null if unknown, and for a photo, which
+        lasts as long as its clip; `still` is true for one), and
+        `has_video` / `has_audio` flags.
 
     Raises:
         FileNotFoundError: If the file does not exist.
         RuntimeError: If ffprobe cannot read the file.
     """
-    return _plain(register_asset(filepath).model_dump())
+    return _plain(_asset_record(register_asset(filepath)))
+
+def _asset_record(asset: Asset) -> dict:
+    """An asset as a tool hands it back: a photo with no length, since it has none of its own."""
+    record = asset.model_dump()
+    if asset.still:
+        record["duration"] = None
+    return record
 
 def _plain(value):
     """Turn the Decimals a model keeps its seconds in into plain numbers, all the way down.
@@ -756,8 +772,9 @@ def list_assets(
 
     Returns:
         A dictionary with `assets`, one short record per file — `id`, `name`,
-        `duration` in seconds, `has_video`, `has_audio`, `analyzed`,
-        `transcription` (`fast`, `accurate`, or null when speech was not
+        `duration` in seconds (null for a photo, which lasts as long as its
+        clip; `photo` is true for one), `has_video`, `has_audio`, `analyzed`,
+        `transcription` (`fast`, `balanced`, `accurate`, or null when speech was not
         transcribed), `stale`, `library`, `folder_id` and, where the file has
         them, its `notes` — how it may be used — in name order; `total`, how
         many match; `offset`; and `folders`, every folder of that library (the
@@ -784,9 +801,11 @@ def list_assets(
         assets.append({
             "id": asset.id,
             "name": os.path.basename(asset.path),
-            "duration": None if asset.duration is None else float(asset.duration),
+            # A photo has no length of its own: it lasts as long as a clip of it is made to.
+            "duration": None if asset.duration is None or asset.still else float(asset.duration),
             "has_video": asset.has_video,
             "has_audio": asset.has_audio,
+            **({"photo": True} if asset.still else {}),
             "analyzed": analysis is not None,
             "transcription": _transcription(analysis),
             "stale": analysis is not None and _is_stale(analysis),
@@ -1361,8 +1380,9 @@ def import_folder(folderpath: str, recursive: bool = False) -> dict:
         except (OSError, RuntimeError, ValueError) as error:
             skipped.append({"path": path, "reason": str(error)})
 
-    total = sum((asset.duration for asset in assets if asset.duration is not None), Decimal(0))
-    return _plain({"assets": [asset.model_dump() for asset in assets], "total_duration": total, "skipped": skipped})
+    # Photos have no length of their own: counted, an album would read as days of footage.
+    total = sum((asset.duration for asset in assets if asset.duration is not None and not asset.still), Decimal(0))
+    return _plain({"assets": [_asset_record(asset) for asset in assets], "total_duration": total, "skipped": skipped})
 
 def _is_stale(analysis: MediaAnalysis) -> bool:
     """Say whether an analysis was taken in a way the server no longer uses.
@@ -1376,15 +1396,15 @@ def _is_stale(analysis: MediaAnalysis) -> bool:
         it just answers a slightly different question from a fresh one, which
         matters most when two assets are being compared with each other.
     """
-    # A fast transcript is one the user chose, not one made with a model since replaced.
+    # A fast or balanced transcript is one the user chose, not one made with a model since replaced.
     speech_model = analysis.recipe.speech_model
-    current = speech_model if transcription_of(speech_model) == "fast" else whisper_model_name()
+    current = speech_model if transcription_of(speech_model) in ("fast", "balanced") else whisper_model_name()
     return analysis.recipe.differs_from(current_recipe(
         current, speaker_model=speaker_model_name(), rhythm_model=rhythm_model_name(), clap_model=clap.MODEL_ID,
     ))
 
 def _transcription(analysis: Optional[MediaAnalysis]) -> Optional[str]:
-    """Say how an asset's speech was transcribed: `fast`, `accurate`, or None when it was not."""
+    """Say how an asset's speech was transcribed: `fast`, `balanced`, `accurate`, or None when it was not."""
     return transcription_of(None if analysis is None or analysis.transcript is None else analysis.transcript.model)
 
 def _transcribed(asset: Asset, transcribe: bool) -> bool:
@@ -1399,7 +1419,7 @@ def _start_analysis(asset: Asset, transcribe: bool, transcription: str, language
     Args:
         asset: The file.
         transcribe: Whether speech is transcribed; never for a song.
-        transcription: `accurate` or `fast`.
+        transcription: `accurate`, `balanced` or `fast`.
         language: Spoken language code, or None to detect it.
         prompt: Text that guides transcription.
         chinese_variant: Script and regional variant for a Chinese transcript.
@@ -1415,7 +1435,8 @@ def _start_analysis(asset: Asset, transcribe: bool, transcription: str, language
     with_speech = _transcribed(asset, transcribe)
     job.memory_estimate = resources.analysis_memory_bytes(
         with_speech,
-        whisper_model_for(transcription),
+        # The larger model is what has to fit; a balanced transcription loads one after the other.
+        whisper_model_for(transcription).split(BALANCED_JOIN)[-1],
         duration=float(asset.duration),
         diarize=with_speech and diarize,
         detect_faces=asset.has_video,
@@ -1430,26 +1451,31 @@ def _start_analysis(asset: Asset, transcribe: bool, transcription: str, language
         "speakers": speakers,
     })
 
+# How good each kind of transcription is, so a file is never analyzed into a worse one.
+TRANSCRIPTION_RANK = {"fast": 0, "balanced": 1, "accurate": 2}
+
 def _plan_analyses(
     assets: Sequence[Asset], transcribe: bool, transcription: str, again: bool,
 ) -> Tuple[List[Tuple[Asset, str]], List[str], List[str]]:
     """Decide which files an analysis starts, and with which transcription.
 
-    A file whose transcript is accurate is never made fast: asked for fast,
-    it is skipped while current, and analyzed accurately again when it is
-    out of date or `again` is given. A fast transcript asked for accurate is
-    redone without `again`.
+    A transcript is never made worse: asked for less than it has, a file is
+    skipped while current, and analyzed again as well as it was when it is
+    out of date or `again` is given. A transcript asked to be better —
+    fast to balanced or accurate, balanced to accurate — is redone without
+    `again`; fast to balanced keeps the fast transcript and hears only its
+    unsure lines again.
 
     Args:
         assets: The files asked for.
         transcribe: Whether speech is transcribed.
-        transcription: `accurate` or `fast`, as asked.
+        transcription: `accurate`, `balanced` or `fast`, as asked.
         again: Redo files whose analysis is current.
 
     Returns:
         `(to_start, skipped, upgrading)`: each file to start with the
-        transcription it gets, the files left alone, and the files whose fast
-        transcript is being replaced.
+        transcription it gets, the files left alone, and the files whose
+        transcript is being made better.
     """
     to_start: List[Tuple[Asset, str]] = []
     skipped: List[str] = []
@@ -1457,7 +1483,8 @@ def _plan_analyses(
     for asset in assets:
         existing = repo.get_analysis(asset.id)
         had = _transcription(existing)
-        upgrade = _transcribed(asset, transcribe) and transcription == "accurate" and had == "fast"
+        upgrade = (_transcribed(asset, transcribe) and had is not None
+                   and TRANSCRIPTION_RANK[transcription] > TRANSCRIPTION_RANK[had])
         # Heard as a song, never transcribed; footage now, so it is listened to again for what is said.
         heard_as_song = (existing is not None and existing.transcript is None and existing.rhythm is not None
                          and _transcribed(asset, transcribe))
@@ -1466,13 +1493,14 @@ def _plan_analyses(
             continue
         if upgrade:
             upgrading.append(asset.id)
-        to_start.append((asset, "accurate" if had == "accurate" else transcription))
+        better = had if had is not None and TRANSCRIPTION_RANK[had] > TRANSCRIPTION_RANK[transcription] else None
+        to_start.append((asset, better or transcription))
     return to_start, skipped, upgrading
 
 def _estimate(to_start: Sequence[Tuple[Asset, str]], transcribe: bool, diarize: bool,
               upgrading: Sequence[str]) -> Optional[dict]:
     """How long the files about to be analyzed take here, or None when nothing in them is transcribed."""
-    footage: Dict[str, float] = {"accurate": 0.0, "fast": 0.0}
+    footage: Dict[str, float] = {"accurate": 0.0, "balanced": 0.0, "fast": 0.0}
     for asset, transcription in to_start:
         if _transcribed(asset, transcribe):
             footage[transcription] += float(asset.duration)
@@ -1482,8 +1510,14 @@ def _estimate(to_start: Sequence[Tuple[Asset, str]], transcribe: bool, diarize: 
     found = {"tier": here.tier, "footage_minutes": round(sum(footage.values()) / 60, 1),
              **speed.estimate(repo, here, footage, diarize)}
     if upgrading:
-        found["note"] = ("files being upgraded to an accurate transcript are analyzed whole again, so reading"
-                         " their picture and sound adds a little on top")
+        chosen = {transcription for asset, transcription in to_start if asset.id in upgrading}
+        found["note"] = (
+            "files whose transcript is being made better keep their picture and sound measurements; "
+            + ("made accurate, the whole transcript is heard again" if "accurate" in chosen else "")
+            + ("; " if chosen == {"accurate", "balanced"} else "")
+            + ("a fast one made balanced has only its unsure lines heard again, so it takes less than this says"
+               if "balanced" in chosen else "")
+        )
     return found
 
 @mcp.tool()
@@ -1496,7 +1530,7 @@ def analyze_asset(
     diarize: bool = True,
     speakers: Annotated[Optional[int], Field(ge=1, le=20)] = None,
     again: bool = False,
-    transcription: Literal["accurate", "fast"] = "accurate",
+    transcription: Literal["accurate", "balanced", "fast"] = "accurate",
     dry_run: bool = False,
 ) -> dict:
     """Start analyzing what assets contain, in the background.
@@ -1554,19 +1588,19 @@ def analyze_asset(
             run did not have. Only what would come out different is redone:
             the transcript, the voices when `speakers` is given; the scan and
             the faces are kept.
-        transcription: "accurate", the default, or "fast": about twice as
-            quick on a computer without an NVIDIA card, but with noticeably
-            more misheard words and looser word timings, so cuts land less
-            exactly. It is the user's trade to make: on a low-tier computer,
-            or a mid-tier one with more than about an hour of footage, call
-            with `dry_run` first and ask them with both times; use it unasked
-            only when they said they want it quick. A file with a fast
-            transcript asked for "accurate" is transcribed again without
-            `again` — the whole analysis is redone — and an accurate
-            transcript is never replaced with a fast one.
+        transcription: "accurate", the default; "fast": about twice as
+            quick without an NVIDIA card, with more misheard words and looser
+            word timings; or "balanced": fast, then only the lines it was
+            unsure of heard again by the accurate model — most of the quality
+            for a little more than fast. The user's trade to make: on a
+            low-tier computer, or a mid-tier one with more than about an hour
+            of footage, call with `dry_run` first and ask them with the
+            times. A transcript asked to be better is redone without `again`
+            (fast to balanced hears only the unsure lines again); one is
+            never made worse.
         dry_run: Start nothing; say what would start and how long it would
-            take, as `estimates` with one estimate for "accurate" and one for
-            "fast", so the user can choose before waiting on either.
+            take, as `estimates` for "accurate", "balanced" and "fast", so
+            the user can choose before waiting on any.
 
     Returns:
         A dictionary with `jobs`, one `asset_id`, `job_id`, `status` and
@@ -1599,7 +1633,7 @@ def analyze_asset(
 
     if dry_run:
         choices = {}
-        for choice in ("accurate", "fast"):
+        for choice in ("accurate", "balanced", "fast"):
             to_start, skipped, upgrading = _plan_analyses(assets, transcribe, choice, again)
             choices[choice] = _estimate(to_start, transcribe, diarize, upgrading)
         to_start, skipped, upgrading = _plan_analyses(assets, transcribe, transcription, again)
@@ -1837,7 +1871,7 @@ def get_analysis(
         A dictionary with the asset's `notes` where it has them — how it may
         be used, which every cut from it has to respect — its `duration`, `analyzed_at`,
         `transcription` (`fast` — expect misheard words, check them before
-        trusting a cut to a word — `accurate`, or null), `doubtful_spots`
+        trusting a cut to a word — `balanced`, `accurate`, or null), `doubtful_spots`
         (how many stretches in the whole file the speech model was unsure
         of; null for a transcript made before that was kept), and the
         overlapping `scenes`, `black_frames`, `frozen_frames`, `silences`,
@@ -3027,6 +3061,8 @@ def apply_edits(project_id: str, expected_version: int, operations: list[EditOpe
             `add_track`, `add_clip`, `insert_clip`, `trim_clip`, `move_clip`,
             `delete_clip`, `split_clip`, `reorder_clip`, `fit_track`,
             `set_clip_audio`, `set_clip_look`, `set_track_audio`,
+            `add_title_card`, `set_title_card`, `add_text`, `set_text`,
+            `remove_text`,
             `set_subtitles`, `edit_subtitle`, or `add_subtitle`. Captions stored
             or corrected here are also remembered against the file they belong
             to, and the next `generate_subtitles` over that file, in any
@@ -3165,7 +3201,18 @@ def _apply(
         )
 
     # Assets are looked up first so operations that need source lengths, such as fit_track, can use them.
-    known = repo.get_assets({clip.asset_id for track in project.tracks for clip in track.clips})
+    # Where each song on a track being fitted can loop on the beat: the timeline cannot read analyses.
+    for op in operations:
+        if isinstance(op, FitTrackOp):
+            track = next((item for item in project.tracks if item.id == op.track_id), None)
+            for asset_id in {clip.asset_id for clip in (track.clips if track else [])}:
+                analysis = repo.get_analysis(asset_id)
+                span = clean_cuts(analysis).loop if analysis is not None else None
+                if span is not None:
+                    op.loops[asset_id] = (Decimal(str(span[0])), Decimal(str(span[1])))
+    # A photo a title card is to stand on is not in the cut until the card puts it there.
+    known = repo.get_assets({clip.asset_id for track in project.tracks for clip in track.clips}
+                            | {op.photo_asset_id for op in operations if getattr(op, "photo_asset_id", None)})
     for op in operations:
         apply_operation(project, op, known)
     if stamp is not None:
@@ -3208,10 +3255,11 @@ def _plan_context(plan: EditPlan) -> tuple:
     # sound they come from: reading those is interpretation, and the compiler has to stay
     # a pure function of what it is given.
     cuts = {}
-    for asset_id in footage | songs:
+    budget = [BACKFILL_SECONDS]
+    for asset_id in sorted(footage | songs):
         analysis = repo.get_analysis(asset_id)
         if analysis is not None:
-            cuts[asset_id] = clean_cuts(analysis)
+            cuts[asset_id] = clean_cuts(_listened_to(analysis, budget) if asset_id in footage else analysis)
     return timeline, {clip.id: clip for clip in clips}, children, _dated(repo.get_assets(footage | songs)), cuts
 
 def _require_plan(plan_id: Optional[str]) -> EditPlan:
@@ -4061,7 +4109,7 @@ def preview_project(
                 "put audio-only assets on an audio track"
             )
 
-    framing = _framing(project, assets) if follow_faces else {}
+    framing = _framing(project, assets, follow_faces)
     fps = Fraction(project.fps_num, project.fps_den)
 
     # Where the picture really goes black, found over the whole sequence rather than over
@@ -4113,6 +4161,16 @@ def preview_project(
         asset = assets[clip.asset_id]
         start, end = float(clip.source_range.start), float(clip.source_range.end)
         step = (end - start) / frames
+        if clip.card is not None:
+            # One tile: the card's background. Its words are in the listing, not on the tile.
+            number = len(shots) + 1
+            at = float(clip.timeline_in)
+            shots.append((asset.path, float(clip.card.at), f"#{number}  {format_timestamp(at)}  title card",
+                          placement_at(framing.get(clip.id), clip, float(clip.card.at), fps), clip.card))
+            words = clip.card.title + (f" / {clip.card.subtitle}" if clip.card.subtitle else "")
+            listing.append(f"#{number}: clip {clip.id} | edit {format_timestamp(at)} | title card 「{words}」 "
+                           f"for {end - start:g}s on {clip.card.background} (words not drawn on the tile)")
+            continue
         for offset in range(frames):
             # Sample the middle of each interval, and stay clear of the very last frame, which may not decode.
             seconds = start + step * (offset + 0.5)
@@ -4125,11 +4183,14 @@ def preview_project(
             framed = framing.get(clip.id)
             shots.append((
                 asset.path, seconds, f"#{number}  {format_timestamp(at)}  {label}",
-                centre_at(framed, clip, seconds, fps) if framed else None,
+                placement_at(framed, clip, seconds, fps),
             ))
+            # Drawn over the render, not over this tile: said instead.
+            over = [text.text for text in clip.shown_texts if text.start <= seconds < text.end]
             listing.append(
                 f"#{number}: clip {clip.id} | edit {format_timestamp(at)} | "
                 f"source {seconds:.3f}s ({format_timestamp(seconds)})"
+                + (f" | text on screen: {' / '.join(f'「{words}」' for words in over)}" if over else "")
             )
 
     # Sampling can stop short of the last clip, so say what runs on past the final tile.
@@ -4642,22 +4703,24 @@ def _reshaped(project: Project, frame: Optional[str]) -> Project:
         width, height = short, even(short * down / across)
     return project.model_copy(update={"width": width, "height": height})
 
-def _framing(project: Project, assets: Mapping[str, Asset]) -> Dict[str, Framing]:
-    """Work out where each clip's crop sits, following the faces in it.
+def _framing(project: Project, assets: Mapping[str, Asset], follow_faces: bool = True) -> Dict[str, Framing]:
+    """Work out how each clip sits in the frame: where its crop goes, or whether it is shown whole.
 
     Args:
         project: The project, at the size it is being rendered at.
         assets: Its files.
+        follow_faces: Whether a crop may follow the face in a shot.
 
     Returns:
-        A framing per clip that has a face to follow, keyed by clip ID.
+        A framing per clip that is not simply cropped from the middle, keyed
+        by clip ID.
     """
     faces = {}
     for asset_id in assets:
         analysis = repo.get_analysis(asset_id)
         if analysis is not None and analysis.faces:
             faces[asset_id] = analysis.faces
-    return frame_project(project, _sized(assets), faces) if faces else {}
+    return frame_project(project, _sized(assets), faces, follow_faces)
 
 @mcp.tool()
 def render_project(
@@ -4801,6 +4864,7 @@ def _start_render(
     render_path = os.path.join(job.work_dir, _output_name(project, kind))
 
     subtitle_path = None
+    placed: list = []
     if burn_subtitles:
         if not project.subtitles:
             raise ValueError(
@@ -4813,10 +4877,15 @@ def _start_render(
                 f"project {project_id} has captions, but none of the footage they transcribe is in the cut; "
                 "run generate_subtitles again against the sequence as it stands"
             )
+    # Title cards' words and the words over the footage go through the same file as the
+    # captions, burned or not.
+    titles = cards.ass_events(project, project.caption_style) + texts.ass_events(project, project.caption_style)
+    if placed or titles:
         os.makedirs(job.work_dir, exist_ok=True)
         subtitle_path = os.path.join(job.work_dir, "subtitles.ass")
         with open(subtitle_path, "w", encoding="utf-8") as handle:
-            handle.write(build_ass(placed, project.width, project.height, project.caption_style))
+            handle.write(build_ass(placed, project.width, project.height, project.caption_style, titles,
+                                   texts.ass_styles(project, project.caption_style)))
 
     chapters_path = None
     listed, _ = chapters(project)
@@ -4827,7 +4896,7 @@ def _start_render(
             handle.write(chapter_metadata(listed))
 
     assets = _referenced_assets(project)
-    framing = _framing(project, assets) if follow_faces else None
+    framing = _framing(project, assets, follow_faces)
     voices = _voices(project)
     talking = _talking(project, voices)
     pieces: list = []
@@ -4915,21 +4984,70 @@ def _voices(project: Project) -> Dict[str, float]:
 
     return voice_keys(project, _analyses(project), loudness)
 
-def _analyses(project: Project) -> Dict[str, MediaAnalysis]:
+def _analyses(project: Project, listened: bool = False) -> Dict[str, MediaAnalysis]:
     """Read the analysis of every file a project plays.
 
     Args:
         project: The project.
+        listened: Whether each transcribed file has to have had its second
+            listen, which is taken now for one analyzed before there was one.
 
     Returns:
         The analyses that exist, keyed by asset ID.
     """
     found: Dict[str, MediaAnalysis] = {}
-    for asset_id in {clip.asset_id for track in project.tracks for clip in track.clips}:
+    budget = [BACKFILL_SECONDS]
+    for asset_id in sorted({clip.asset_id for track in project.tracks for clip in track.clips}):
         analysis = repo.get_analysis(asset_id)
         if analysis is not None:
-            found[asset_id] = analysis
+            found[asset_id] = _listened_to(analysis, budget) if listened else analysis
     return found
+
+# Provisional (roadmap §13): how much footage one tool call may give its second listen while
+# the caller waits — a compile or a check is a tool call, not a background job, and on a
+# processor a minute of footage takes most of a minute to hear again.
+BACKFILL_SECONDS = 600.0
+
+def _listened_to(analysis: MediaAnalysis, budget: List[float]) -> MediaAnalysis:
+    """Give a transcribed file its second listen, if it was analyzed before there was one.
+
+    Once per file, and kept: it takes a few seconds for a short clip and
+    about the length of a long recording divided by twenty on a GPU. Only
+    as much footage as is left of `budget`, so a call is never held up for
+    long: a file that does not fit is judged by its transcript alone this
+    time and heard on a later call, and one longer than the whole budget
+    gets its second listen when it is analyzed again. Where the file has
+    gone or the listen fails, the analysis is handed back without it too —
+    a check that cannot run is no reason to stop an edit.
+
+    Args:
+        analysis: The file's analysis.
+        budget: Seconds of footage this call may still hear again, as a
+            one-item list each file's listen is taken off.
+
+    Returns:
+        The analysis, with its second listen when it could be taken.
+    """
+    if analysis.transcript is None or analysis.second_listen is not None:
+        return analysis
+    if analysis.duration > budget[0]:
+        return analysis
+    asset = repo.get_assets([analysis.asset_id]).get(analysis.asset_id)
+    if asset is None or not os.path.exists(asset.path):
+        return analysis
+    budget[0] -= analysis.duration
+    try:
+        listened = second_listen(asset.path, analysis.transcript, lambda fraction: None, lambda: False)
+    except (RuntimeError, OSError, ValueError):
+        return analysis
+    # Read again before writing, so an analysis taken again meanwhile is not overwritten
+    # with the one this started from.
+    current = repo.get_analysis(analysis.asset_id)
+    if current is None or current.analyzed_at != analysis.analyzed_at:
+        return analysis.model_copy(update={"second_listen": listened})
+    current.second_listen = listened
+    repo.save_analysis(current)
+    return current
 
 def _plan_target(project: Project) -> Optional[float]:
     """Find how long the plan a project was compiled from asked it to run.
@@ -4961,7 +5079,7 @@ def _findings(project: Project, burn_subtitles: bool) -> list:
     placed = place_cues(project, project.subtitles) if burn_subtitles and project.subtitles else None
     dated = _dated(_referenced_assets(project))
     return check_delivery(
-        project, _analyses(project), _plan_target(project), placed, project.caption_style,
+        project, _analyses(project, listened=True), _plan_target(project), placed, project.caption_style,
         _talking(project, _voices(project)), {asset_id: asset.recorded_at for asset_id, asset in dated.items()},
     )
 
@@ -5077,14 +5195,14 @@ def propose_covers(
     if not offered:
         raise ValueError(f"project {project_id} has no picture to take a cover from")
     assets = _referenced_assets(project)
-    framing = _framing(project, assets) if follow_faces else {}
+    framing = _framing(project, assets, follow_faces)
     fps = Fraction(project.fps_num, project.fps_den)
     shots, listing = [], []
     for number, (clip, seconds) in enumerate(offered, start=1):
         at = float(clip.timeline_in) + (seconds - float(clip.source_range.start)) / clip.speed
         framed = framing.get(clip.id)
         shots.append((assets[clip.asset_id].path, seconds, f"#{number}  {format_timestamp(at)}",
-                      centre_at(framed, clip, seconds, fps) if framed else None))
+                      placement_at(framed, clip, seconds, fps)))
         listing.append(f"#{number}: edit {at:.3f}s ({format_timestamp(at)}) | clip {clip.id}")
     header = f"{len(offered)} cover candidate(s) for project {project_id}, {project.width}x{project.height}:"
     return ToolResult(content=[
@@ -5133,10 +5251,12 @@ def export_cover(
     clip = on_screen[-1]
     assets = _referenced_assets(project)
     source = float(clip.source_range.start) + (seconds - float(clip.timeline_in)) * clip.speed
-    framed = (_framing(project, assets) if follow_faces else {}).get(clip.id)
+    if clip.card is not None:
+        raise ValueError(f"{seconds:g}s of project {project_id} is a title card; take the cover from a shot")
+    framed = _framing(project, assets, follow_faces).get(clip.id)
     fps = Fraction(project.fps_num, project.fps_den)
     picture = still(assets[clip.asset_id].path, source, project.width, project.height,
-                    centre_at(framed, clip, source, fps) if framed else None)
+                    placement_at(framed, clip, source, fps))
     folder = str(output_dir())
     os.makedirs(folder, exist_ok=True)
     path = housekeeping.unique_path(folder, _delivery_name(project, "cover" + (f"-{frame}" if frame else ""), ".jpg"))
@@ -5213,8 +5333,18 @@ def export_timeline(
         if project.base_video_track is None or not project.base_video_track.clips:
             raise ValueError(f"project {project_id} has nothing on its sequence to export")
         writer = {"edl": write_edl, "otio": write_otio, "fcpxml": write_fcpxml}[format]
-        assets = _referenced_assets(project)
-        text, behind = writer(project, assets, _timecodes(assets))
+        # A title card is a frame and words this server draws; another program would read it as
+        # footage of the file behind it. It goes across as the gap it fills, and is said to.
+        titled = cards.cards_of(project)
+        shown = project.model_copy(deep=True)
+        if titled:
+            base = shown.base_video_track
+            base.clips = [clip for clip in base.clips if clip.card is None]
+        assets = _referenced_assets(shown)
+        text, behind = writer(shown, assets, _timecodes(assets))
+        if titled:
+            behind.append("title cards (they come across as gaps; add them as titles there): "
+                          + ", ".join(clip.card.title for clip in titled[:6]) + (" …" if len(titled) > 6 else ""))
         # Decided at render time from the recordings, so the writers, which never see an
         # analysis, cannot say it. Only which tracks, not how loud: nothing is measured.
         if voice_keys(project, _analyses(project), lambda clip: None):

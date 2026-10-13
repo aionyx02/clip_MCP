@@ -32,6 +32,7 @@ jobs:
       - uses: astral-sh/setup-uv@v6
         with:
           version: ${{ env.UV_VERSION }}
+          python-version: "3.14"
       - name: FFmpeg for the tests (the same build users get)
         shell: pwsh
         run: |
@@ -52,6 +53,7 @@ jobs:
       - uses: astral-sh/setup-uv@v6
         with:
           version: ${{ env.UV_VERSION }}
+          python-version: "3.14"
       - name: The tag is the version
         id: version
         shell: pwsh
