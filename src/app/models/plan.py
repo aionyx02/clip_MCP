@@ -16,7 +16,7 @@ import re
 import uuid
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Annotated, Any, Dict, List, Literal, Optional, Union
+from typing import Annotated, Any, Dict, List, Literal, Optional, Tuple, Union
 
 from pydantic import BaseModel, Field, model_validator
 
@@ -324,6 +324,36 @@ class BeatTransition(BaseModel):
     )
     direction: Literal["left", "right", "up", "down"] = Field(default="left", description="For `wipe`")
 
+class Fact(BaseModel):
+    """Something the viewer has to come to know for the video to make sense.
+
+    「展示修復結果」 means nothing to somebody who was never shown what was
+    broken. A reason written for a piece can say anything; a fact named here
+    has to be shown or said by some piece, at seconds of its file, before the
+    pieces that rely on it.
+    """
+
+    id: str = Field(..., min_length=1, max_length=40, pattern=r"^\S+$",
+                    description="A short name the selections refer to it by, such as damage")
+    says: str = Field(..., min_length=1, description="The fact in a sentence, as the viewer comes to know it")
+
+class Established(BaseModel):
+    """A fact one piece shows or says, and where in its file it does."""
+
+    fact: str = Field(..., description="The fact's `id`")
+    evidence: Tuple[float, float] = Field(
+        ..., description="`[start, end]` in seconds of the clip's file where it is shown or said. Look at or listen "
+                         "to that stretch before writing it; it has to be in what the piece plays once trimmed",
+    )
+
+    @model_validator(mode="after")
+    def runs_forward(self) -> "Established":
+        """Refuse evidence that ends before it starts."""
+        start, end = self.evidence
+        if not 0 <= start < end:
+            raise ValueError(f"the evidence for {self.fact} has to be [start, end] with start before end")
+        return self
+
 class Selection(BaseModel):
     """One piece of footage, placed in a beat, with the reason it is there."""
 
@@ -367,6 +397,21 @@ class Selection(BaseModel):
         description="This shot is here for what it shows, not only for what is said over it, so B-roll may not "
                     "cover it. Set it on the shots where the speaker is doing something that has to be seen — "
                     "pointing at a thing, holding a thing up. Nothing measures that, so it is said here or not at all",
+    )
+    establishes: List[Established] = Field(
+        default_factory=list,
+        description="The plan's facts this piece shows or says, each with where in the file. A shot only there for "
+                    "the mood establishes nothing",
+    )
+    requires: List[str] = Field(
+        default_factory=list,
+        description="Facts the viewer has to know already for this piece to make sense; an earlier piece has to "
+                    "establish each one. A piece in the hook may rely on what comes later",
+    )
+    ahead: List[str] = Field(
+        default_factory=list,
+        description="Facts this piece relies on that are established later on purpose — the result shown before "
+                    "the problem. A later piece has to establish each one",
     )
 
 class Rejection(BaseModel):
@@ -523,6 +568,11 @@ class EditPlan(BaseModel):
     )
     target: PlanTarget = Field(default_factory=PlanTarget)
     beats: List[Beat] = Field(default_factory=list, description="The parts of the video, in order")
+    facts: List[Fact] = Field(
+        default_factory=list,
+        description="What the viewer has to come to know for the video to make sense. A plan of more than one part "
+                    "lists them, and some selection establishes each",
+    )
     selections: List[Selection] = Field(default_factory=list, description="The footage, in the order it is used")
     rejected: List[Rejection] = Field(default_factory=list)
     broll: List[BrollShot] = Field(
@@ -652,11 +702,26 @@ class SetSelectionTextsOp(BaseModel):
     clip_id: str = Field(..., description="Semantic clip the selection uses")
     texts: List[PlanText] = Field(default_factory=list, description="Its words; empty takes them all away")
 
+class SetFactsOp(BaseModel):
+    """Amendment that replaces the facts the viewer has to come to know."""
+
+    action: Literal["set_facts"] = "set_facts"
+    facts: List[Fact] = Field(default_factory=list, description="All of them; the old list is replaced")
+
+class SetKnowledgeOp(BaseModel):
+    """Amendment that says what one piece establishes and relies on; omitted fields stay unchanged."""
+
+    action: Literal["set_knowledge"] = "set_knowledge"
+    clip_id: str = Field(..., description="Semantic clip the selection uses")
+    establishes: Optional[List[Established]] = Field(default=None, description="The facts it shows or says, and where")
+    requires: Optional[List[str]] = Field(default=None, description="The facts it relies on being known already")
+    ahead: Optional[List[str]] = Field(default=None, description="The facts it relies on that come later on purpose")
+
 PlanAmendment = Annotated[
     Union[
         SetTrimOp, SetRationaleOp, AddSelectionOp, DropSelectionOp, AddBrollOp, DropBrollOp,
         SetPacingOp, SetMusicLevelOp, SetTargetOp, DropBeatOp, SetPlaybackOp, SetBeatJoinOp,
-        SetBeatTitleOp, SetSelectionTextsOp,
+        SetBeatTitleOp, SetSelectionTextsOp, SetFactsOp, SetKnowledgeOp,
     ],
     Field(discriminator="action"),
 ]
@@ -700,6 +765,10 @@ def describe_amendment(op: "PlanAmendment") -> str:
     if isinstance(op, SetSelectionTextsOp):
         shown = "、".join(f"「{text.text}」" for text in op.texts)
         return f"words over {op.clip_id}: {shown}" if shown else f"no words over {op.clip_id}"
+    if isinstance(op, SetFactsOp):
+        return "facts: " + (", ".join(fact.id for fact in op.facts) or "none")
+    if isinstance(op, SetKnowledgeOp):
+        return f"said what {op.clip_id} establishes and relies on"
     return f"dropped the part {op.beat_id}" + (f" ({op.reason})" if op.reason else "")
 
 def _selection_index(plan: EditPlan, clip_id: str) -> int:
@@ -816,6 +885,20 @@ def apply_amendment(plan: EditPlan, op: PlanAmendment) -> None:
             plan.music.cues = [cue for cue in plan.music.cues if cue.beat_id != op.beat_id]
             if not plan.music.cues:
                 plan.music = None
+        return
+
+    if isinstance(op, SetFactsOp):
+        plan.facts = list(op.facts)
+        return
+
+    if isinstance(op, SetKnowledgeOp):
+        selection = plan.selections[_selection_index(plan, op.clip_id)]
+        if op.establishes is not None:
+            selection.establishes = list(op.establishes)
+        if op.requires is not None:
+            selection.requires = list(op.requires)
+        if op.ahead is not None:
+            selection.ahead = list(op.ahead)
         return
 
     if isinstance(op, SetRationaleOp):

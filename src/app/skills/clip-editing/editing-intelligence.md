@@ -153,6 +153,19 @@ it; only when the jump is the point — a flash-forward, a callback — keep it
 and say so in its `jump_reason`. A hook and the first piece of a beat may
 jump freely, since that is how a part begins.
 
+A reason can be written for anything; what the viewer knows cannot. Before
+choosing footage for a plan of more than one part, list in `facts` what the
+viewer has to come to know for it to make sense — 「水管接頭裂了」 before
+「修好了」 — one short `id` and a sentence each. Then give each piece that
+shows or says one an `establishes` entry with its `evidence`: the seconds of
+the file where it happens, found by looking at or listening to that stretch,
+not from the clip's summary. A piece that only makes sense once something is
+known `requires` it. `validate_plan` refuses a fact relied on before it is
+established, a fact nothing establishes, and evidence the trim cuts off. The
+hook may rely on what comes later; anywhere else, a result shown before its
+cause on purpose lists the cause in `ahead`, and it has to come. A shot there
+only for the mood establishes nothing, and that is fine.
+
 ## Covering picture (B-roll)
 
 A second pass, after the rough cut is right. `propose_broll` says where the

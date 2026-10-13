@@ -48,7 +48,7 @@ from app.models.media import (
 from app.models.plan import (
     BeatRole,
     AddBrollOp, Beat, BeatTransition, BrollShot, DropBrollOp, DropSelectionOp, EditPlan, MusicCue, MusicPlan, PlanAmendment,
-    Pacing, PlanTarget, Rejection, Selection, Structure, Trim, TrimKind, apply_amendment,
+    Established, Fact, Pacing, PlanTarget, Rejection, Selection, Structure, Trim, TrimKind, apply_amendment,
 )
 from app.models.semantic import SectionChoice, SemanticClip, SemanticTimeline
 from app.models.timeline import Clip, Marker, Project, Track
@@ -132,6 +132,22 @@ def plan_for(selections: List[Selection], **fields) -> EditPlan:
         selections=selections,
         **fields,
     )
+
+def with_a_fact(plan: EditPlan, start: float, end: float) -> EditPlan:
+    """Give a plan of several parts the one fact it needs, established by its first piece.
+
+    Args:
+        plan: The plan.
+        start: Where in the first piece's file the fact is said.
+        end: Where that stops.
+
+    Returns:
+        The plan, with the fact and its evidence.
+    """
+    first = plan.selections[0].model_copy(update={"establishes": [Established(fact="topic", evidence=(start, end))]})
+    return plan.model_copy(update={
+        "facts": [Fact(id="topic", says="這支在講什麼")], "selections": [first, *plan.selections[1:]],
+    })
 
 def plan_duration(plan: EditPlan, by_id: dict, children: dict, assets: dict, cuts=None) -> float:
     """Measure how long a plan compiles to.
@@ -1703,6 +1719,8 @@ def parts() -> tuple:
         selections=[Selection(clip_id=talk[0].id, beat_id="b1"), Selection(clip_id=talk[2].id, beat_id="b2"),
                     Selection(clip_id=talk[3].id, beat_id="b3")],
     )
+    opened, closed = talk[0].source_range.start, talk[0].source_range.end
+    plan = with_a_fact(plan, opened + (closed - opened) * 0.4, opened + (closed - opened) * 0.6)
     other = sourced("other", seconds=60.0).model_copy(update={"has_video": False})
     return plan, by_id, {**assets, SONG: song_of(every(0.5), 60.0)[0], "other": other}
 
@@ -1819,14 +1837,14 @@ def test_the_music_changes_where_the_part_of_the_video_does(planned: dict, tmp_p
     ))
     stored = EditPlan.model_validate(get_plan(planned["plan_id"])["plan"])
     first, last = planned["clips"][0]["clip_id"], planned["clips"][2]["clip_id"]
-    saved = save_plan(stored.model_copy(update={
+    saved = save_plan(with_a_fact(stored.model_copy(update={
         "beats": [Beat(id="b1", name="開場", role=BeatRole.TURN), Beat(id="b2", name="結尾", role=BeatRole.PAYOFF)],
         "selections": [Selection(clip_id=first, beat_id="b1"), Selection(clip_id=last, beat_id="b2")],
         "music": MusicPlan(duck_under_speech=False, cues=[
             MusicCue(asset_id=low, volume=1.0, fade_in=0, fade_out=0, cut_on_beat=True),
             MusicCue(beat_id="b2", asset_id=high, volume=1.0, fade_in=0, fade_out=0),
         ]),
-    }))
+    }), 1.5, 2.5))
     assert saved["problems"] == [], saved["problems"]
     moved = next(note for note in saved["notes"] if note["kind"] == "cuts_moved_onto_the_beat")
     assert "moved onto the beat" in moved["message"] and not moved["look"]
@@ -1987,14 +2005,14 @@ def test_both_songs_are_heard_where_they_cross_fade(planned: dict, tmp_path: Pat
     low, high = tone(tmp_path, "low.mp3", 700), tone(tmp_path, "high.mp3", 1500)
     stored = EditPlan.model_validate(get_plan(planned["plan_id"])["plan"])
     first, last = planned["clips"][0]["clip_id"], planned["clips"][2]["clip_id"]
-    saved = save_plan(stored.model_copy(update={
+    saved = save_plan(with_a_fact(stored.model_copy(update={
         "beats": [Beat(id="b1", name="開場", role=BeatRole.TURN), Beat(id="b2", name="結尾", role=BeatRole.PAYOFF)],
         "selections": [Selection(clip_id=first, beat_id="b1"), Selection(clip_id=last, beat_id="b2")],
         "music": MusicPlan(duck_under_speech=False, crossfade_seconds=1.0, cues=[
             MusicCue(asset_id=low, volume=1.0, fade_in=0, fade_out=0),
             MusicCue(beat_id="b2", asset_id=high, start=5.0, volume=1.0, fade_in=0, fade_out=0),
         ]),
-    }))
+    }), 1.5, 2.5))
     assert saved["problems"] == [], saved["problems"]
     project = create_project(name="測試", width=640, height=360)["id"]
     compile_plan(project_id=project, expected_version=1, plan_id=saved["plan_id"])
@@ -2226,6 +2244,8 @@ def joined_plan(transition: Optional[BeatTransition], lead: Optional[float], ope
                       trim=Trim(kind=TrimKind.RANGE, from_seconds=opening, to_seconds=opening + 3.0)),
         ],
     )
+    opened, closed = talk.source_range.start, talk.source_range.end
+    plan = with_a_fact(plan, opened + (closed - opened) * 0.4, opened + (closed - opened) * 0.6)
     return plan, by_id, children, assets
 
 def test_a_beat_comes_in_on_its_transition_and_its_sound_early() -> None:
@@ -2309,6 +2329,9 @@ def test_how_a_beat_comes_in_and_how_a_piece_plays_reach_the_timeline(planned: d
         {"action": "set_beat_join", "beat_id": "b2", "transition_in": {"kind": "dissolve", "seconds": 0.4},
          "sound_lead": 0.3},
         {"action": "set_playback", "clip_id": second, "speed": 1.5, "volume": 0.5},
+        {"action": "set_facts", "facts": [{"id": "topic", "says": "這支在講什麼"}]},
+        {"action": "set_knowledge", "clip_id": planned["clips"][0]["clip_id"],
+         "establishes": [{"fact": "topic", "evidence": [1.5, 2.5]}]},
     ))
     assert result["problems"] == []
     project = compiled_project(planned)
@@ -2423,3 +2446,89 @@ def test_a_piece_from_another_time_between_two_that_belong_together_is_handed_ba
     plan.selections[1].jump_reason = "先讓人看到下午要去哪"
     problems, _ = check_plan(plan, timeline, by_id, children, assets)
     assert not any(problem.startswith("continuity:") for problem in problems)
+
+def knowing(plan: EditPlan, by_id: dict, *said: dict) -> EditPlan:
+    """Say, piece by piece in playing order, what each establishes and relies on.
+
+    Args:
+        plan: A plan of `parts`.
+        by_id: Its clips, for where each piece's fact is said.
+        *said: Per piece, `establishes` as a list of fact IDs, and `requires` and `ahead`.
+
+    Returns:
+        The plan, with a fact for every ID named.
+    """
+    named = sorted({fact for item in said for key in ("establishes", "requires", "ahead") for fact in item.get(key, [])})
+    selections = []
+    for selection, item in zip(plan.selections, said):
+        clip = by_id[selection.clip_id]
+        middle = (clip.source_range.start + clip.source_range.end) / 2
+        selections.append(selection.model_copy(update={
+            "establishes": [Established(fact=fact, evidence=(middle - 0.1, middle + 0.1))
+                            for fact in item.get("establishes", [])],
+            "requires": item.get("requires", []), "ahead": item.get("ahead", []),
+        }))
+    return plan.model_copy(update={"facts": [Fact(id=fact, says=fact) for fact in named], "selections": selections})
+
+def test_a_plan_of_several_parts_says_what_the_viewer_has_to_know() -> None:
+    plan, by_id, assets = parts()
+    problems, _ = checked(plan.model_copy(update={"facts": []}), by_id, assets)
+    assert any(problem.startswith("facts: a plan of more than one part") for problem in problems)
+    # One part is a trim, and asks for nothing.
+    one = plan_for([plan.selections[0].model_copy(update={"establishes": []})])
+    assert not any("facts" in problem for problem in checked(one, by_id, assets)[0])
+
+@pytest.mark.parametrize("said, expected", [
+    # The result before the damage it repairs, with nothing to say it is on purpose.
+    (({}, {"requires": ["damage"]}, {"establishes": ["damage"]}), "relies on damage, which nothing before it"),
+    # On purpose, but the damage is never shown.
+    (({}, {"ahead": ["damage"]}, {}), "nothing after it establishes it"),
+    (({"establishes": ["damage"]}, {"ahead": ["damage"]}, {}), "has already established it"),
+    # The hook may show what comes later, but it has to come.
+    (({"requires": ["damage"]}, {}, {}), "relies on damage coming later"),
+    (({"establishes": ["damage"]}, {"requires": ["cost"]}, {"establishes": ["cost"]}), "relies on cost"),
+], ids=["out of order", "ahead never told", "ahead already told", "hook never told", "second fact"])
+def test_a_fact_relied_on_before_it_is_established_is_handed_back(said: tuple, expected: str) -> None:
+    plan, by_id, assets = parts()
+    problems, _ = checked(knowing(plan, by_id, *said), by_id, assets)
+    assert any(expected in problem for problem in problems), problems
+
+@pytest.mark.parametrize("said", [
+    ({"establishes": ["damage"]}, {"requires": ["damage"]}, {}),
+    ({}, {"ahead": ["damage"]}, {"establishes": ["damage"]}),
+    # The hook shows the result; the damage comes after it.
+    ({"requires": ["damage"]}, {"establishes": ["damage"]}, {}),
+], ids=["in order", "ahead on purpose", "hook"])
+def test_a_fact_established_where_it_is_needed_passes(said: tuple) -> None:
+    plan, by_id, assets = parts()
+    problems, _ = checked(knowing(plan, by_id, *said), by_id, assets)
+    assert problems == []
+
+def test_a_fact_nobody_establishes_or_nobody_listed_is_handed_back() -> None:
+    plan, by_id, assets = parts()
+    plan = knowing(plan, by_id, {"establishes": ["damage"]}, {}, {})
+    unlisted = plan.model_copy(update={"facts": [*plan.facts, Fact(id="cost", says="修了多少錢")]})
+    assert "facts: nothing establishes cost; say which piece shows or says it, or take it out" in checked(
+        unlisted, by_id, assets)[0]
+    stranger = plan.model_copy(update={"selections": [
+        plan.selections[0], plan.selections[1].model_copy(update={"requires": ["weather"]}), plan.selections[2],
+    ]})
+    assert any("names the fact weather, which is not in the plan's `facts`" in problem
+               for problem in checked(stranger, by_id, assets)[0])
+
+def test_evidence_outside_the_clip_or_trimmed_off_is_handed_back() -> None:
+    plan, by_id, assets = parts()
+    plan = knowing(plan, by_id, {"establishes": ["damage"]}, {}, {})
+    first = plan.selections[0]
+    clip = by_id[first.clip_id]
+    opened, closed = clip.source_range.start, clip.source_range.end
+    outside = first.model_copy(update={"establishes": [Established(fact="damage", evidence=(closed + 1, closed + 2))]})
+    problems, _ = checked(plan.model_copy(update={"selections": [outside, *plan.selections[1:]]}), by_id, assets)
+    assert any("is not in the clip" in problem for problem in problems), problems
+    # Said near the end of the clip, and only its first second is played.
+    late = first.model_copy(update={
+        "establishes": [Established(fact="damage", evidence=(closed - 0.3, closed - 0.1))],
+        "trim": Trim(kind=TrimKind.HEAD, seconds=1.0),
+    })
+    problems, _ = checked(plan.model_copy(update={"selections": [late, *plan.selections[1:]]}), by_id, assets)
+    assert any("is not all played" in problem for problem in problems), problems
