@@ -825,6 +825,7 @@
           <button class="icon-btn edit-action" data-delete title="${esc(T.editor.delete)}（Delete）">${icon("trash", 16)}</button>
           <span class="sep"></span>
           <button class="icon-btn edit-action" data-make-captions title="${esc(T.captions.make)}">${svg("captions")}</button>
+          <button class="icon-btn edit-action" data-add-card title="${esc(T.card.add)}">${svg("title")}</button>
           <button class="icon-btn edit-action" data-add-music title="${esc(T.music.add)}">${icon("music", 16)}</button>
           <span class="tl-status" data-tl-status hidden></span>
           <div class="grow"></div>
@@ -860,6 +861,7 @@
     captions: '<rect x="3" y="5" width="18" height="14" rx="3"/><path d="M7 15h4M13 15h4M7 11h10"/>',
     speaker: '<path d="M4 9h4l5-4v14l-5-4H4z"/><path d="M16 9a4 4 0 0 1 0 6"/>',
     comment: '<path d="M4 5h16v11H9l-5 4z"/>',
+    title: '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M8 9h8M12 9v7"/>',
   };
   const svg = (name, size = 16) => `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">${EXTRA[name]}</svg>`;
 
@@ -942,12 +944,18 @@
     const element = document.createElement("div");
     const selected = E.selected?.track === lane.track.id && E.selected?.clip === clip.id;
     const isVideo = lane.kind === "base" || lane.kind === "overlay";
-    element.className = `clip ${isVideo ? "video" : "audio"} ${lane.kind === "music" ? "music" : ""} ${selected ? "sel" : ""} ${clip.pinned ? "pinned" : ""} ${asset ? "" : "missing"}`;
+    element.className = `clip ${isVideo ? "video" : "audio"} ${lane.kind === "music" ? "music" : ""} ${clip.card ? "card" : ""} ${selected ? "sel" : ""} ${clip.pinned ? "pinned" : ""} ${asset ? "" : "missing"}`;
     element.style.left = `${start * E.pps}px`;
     element.style.width = `${Math.max(2, length * E.pps)}px`;
     element.dataset.track = lane.track.id;
     element.dataset.clip = clip.id;
     const width = length * E.pps;
+    if (clip.card) {
+      // A title card is its words, not the frame it borrows.
+      element.insertAdjacentHTML("beforeend", `<span class="label">${esc(clip.card.title)}</span>
+        <span class="handle l" data-handle="l"></span><span class="handle r" data-handle="r"></span>`);
+      return element;
+    }
     if (isVideo && asset?.has_video && width > 24) element.append(filmstrip(clip, asset, width, lane.height - 10));
     if (asset?.has_audio && width > 24) drawWave(element, clip, asset, width, lane.height - 10, isVideo);
     element.insertAdjacentHTML("beforeend", `<span class="label">${esc(asset ? asset.name : T.editor.missingFile)} · ${length.toFixed(1)}s</span>
@@ -1096,7 +1104,7 @@
     const clip = E.selected && findClip(E.selected.track, E.selected.clip);
     const track = clip && E.project.tracks.find((entry) => entry.id === E.selected.track);
     const context = E.selectedCaption ? ["captions"] : !clip ? [] : track.track_type === "audio" ? ["sound"]
-      : (E.project.assets[clip.asset_id]?.has_audio === false ? ["picture"] : ["picture", "sound"]);
+      : (clip.card || E.project.assets[clip.asset_id]?.has_audio === false ? ["picture"] : ["picture", "sound"]);
     const available = [...context, "comments"];
     if (!available.includes(E.tab)) E.tab = context[0] || null;
     const waiting = (E.comments || []).filter((comment) => comment.status === "open").length;
@@ -1117,6 +1125,7 @@
         <div class="keys">${T.editor.shortcuts.map(([key, what]) => `<kbd>${esc(key)}</kbd><span>${esc(what)}</span>`).join("")}</div></div>`;
       return;
     }
+    if (clip.card) return drawCardInspector(panel, clip);
     const asset = E.project.assets[clip.asset_id];
     const nudges = (side) => [-1, -0.1, 0.1, 1].map((delta) =>
       `<button data-nudge="${side}" data-by="${delta}">${delta > 0 ? "+" : ""}${delta}</button>`).join("");
@@ -1133,6 +1142,7 @@
       <div class="group"><div class="label">${esc(T.editor.length)}<b>${clipLength(clip).toFixed(2)} ${esc(T.editor.seconds)}</b></div></div>
       ${fitGroup(clip, asset)}
       ${motionGroup(clip, asset)}
+      ${textsGroup(clip)}
       <div class="group stack-buttons edit-action">
         <button class="btn" data-split>${svg("split")}${esc(T.editor.split)}</button>
         <button class="btn danger" data-delete>${icon("trash", 16)}${esc(T.editor.delete)}</button>
@@ -1145,6 +1155,7 @@
     $("[data-split]", panel).onclick = split;
     $("[data-delete]", panel).onclick = remove;
     wireFit(panel, clip);
+    wireTexts(panel, clip);
     panel.querySelectorAll("[data-motion]").forEach((button) => {
       button.onclick = () => {
         if (button.dataset.motion === (clip.motion || "push")) return;
@@ -1176,6 +1187,111 @@
       ${mode === "fill" ? `<div class="label">${esc(T.fit.zoom)}<b data-zoom-value>${zoom}%</b></div>
         <input type="range" min="100" max="400" step="5" value="${zoom}" data-fit-zoom>` : ""}
       ${clip.fit?.center_x != null || clip.fit?.center_y != null ? `<button class="btn small" data-fit-free>${esc(T.fit.free)}</button>` : ""}</div>`;
+  }
+
+  // ------------------------------------------------------------------ words over the footage
+
+  // The words on a clip: a row each, the chosen one opened up to change.
+  function textsGroup(clip) {
+    if (clip.card) return "";
+    const shown = (clip.texts || []).filter((text) => !text.hidden);
+    const open = shown.find((text) => text.id === E.selectedText);
+    const rows = shown.map((text) =>
+      `<button class="btn small ${text.id === E.selectedText ? "primary" : ""}" data-text-pick="${esc(text.id)}">${esc(T.texts.styles[text.style])}・${esc(text.text)}</button>`).join("");
+    const style = (value) => `<button class="${open?.style === value ? "on" : ""}" data-text-style="${value}">${esc(T.texts.styles[value])}</button>`;
+    return `<div class="group edit-action"><div class="label">${esc(T.texts.title)}</div>
+      <div class="stack-buttons">${rows || `<p class="hint" style="margin:0">${esc(T.texts.none)}</p>`}</div>
+      ${open ? `<input class="card-text" data-text-words maxlength="60" value="${esc(open.text)}">
+        <input class="card-text" data-text-second maxlength="60" placeholder="${esc(T.texts.second)}" value="${esc(open.second || "")}">
+        <div class="seg fit-seg">${["name", "place", "headline", "free"].map(style).join("")}</div>
+        <p class="hint">${esc(T.texts.hints[open.style])}</p>
+        <div class="label">${esc(T.texts.when)}</div>
+        <div class="nudges"><button data-text-from>${esc(T.texts.fromHere)}</button><button data-text-to>${esc(T.texts.toHere)}</button></div>
+        <button class="btn small danger" data-text-remove>${icon("trash", 14)}${esc(T.texts.remove)}</button>` : ""}
+      <button class="btn small" data-text-add>${icon("plus", 14)}${esc(T.texts.add)}</button></div>`;
+  }
+
+  function textEdit(clip, action, fields) {
+    return edit([{ action, track_id: E.selected.track, clip_id: clip.id, ...fields }]);
+  }
+
+  function wireTexts(panel, clip) {
+    panel.querySelectorAll("[data-text-pick]").forEach((button) => {
+      button.onclick = () => {
+        E.selectedText = E.selectedText === button.dataset.textPick ? null : button.dataset.textPick;
+        const text = clip.texts.find((item) => item.id === E.selectedText);
+        // Onto the words, so what is being changed is what the viewer shows.
+        if (text) {
+          const start = num(clip.timeline_in) + (Math.max(num(text.start), num(clip.source_range.start)) - num(clip.source_range.start)) / (clip.speed || 1);
+          if (E.time < start || E.time >= clipEnd(clip)) seek(start + 0.25);
+        }
+        drawInspector();
+      };
+    });
+    const add = $("[data-text-add]", panel);
+    if (add) add.onclick = async () => {
+      const id = `text-${Math.random().toString(36).slice(2, 7)}`;
+      const from = Math.max(num(clip.timeline_in), Math.min(E.time, clipEnd(clip) - 0.5));
+      const to = Math.min(clipEnd(clip), from + 3);
+      if (await textEdit(clip, "add_text", { text_id: id, text: T.texts.defaultText,
+        timeline_start: Number(from.toFixed(3)), timeline_end: Number(to.toFixed(3)) })) {
+        E.selectedText = id;
+        seek(from + 0.25);
+        drawAll();
+        toast(T.texts.added);
+        $("[data-text-words]", E.root)?.select();
+      }
+    };
+    const open = (clip.texts || []).find((text) => text.id === E.selectedText && !text.hidden);
+    if (!open) return;
+    const commit = (input, field) => {
+      input.onchange = () => {
+        const value = input.value.trim();
+        if (field === "text" && !value) { input.value = open.text; return; }
+        if (value !== (open[field] || "")) textEdit(clip, "set_text", { text_id: open.id, [field]: value });
+      };
+      input.onkeydown = (event) => { if (event.key === "Enter") input.blur(); event.stopPropagation(); };
+    };
+    commit($("[data-text-words]", panel), "text");
+    commit($("[data-text-second]", panel), "second");
+    panel.querySelectorAll("[data-text-style]").forEach((button) => {
+      button.onclick = () => { if (button.dataset.textStyle !== open.style) textEdit(clip, "set_text", { text_id: open.id, style: button.dataset.textStyle }); };
+    });
+    $("[data-text-from]", panel).onclick = () => textEdit(clip, "set_text", { text_id: open.id, timeline_start: Number(E.time.toFixed(3)) });
+    $("[data-text-to]", panel).onclick = () => textEdit(clip, "set_text", { text_id: open.id, timeline_end: Number(E.time.toFixed(3)) });
+    $("[data-text-remove]", panel).onclick = async () => {
+      if (await textEdit(clip, "remove_text", { text_id: open.id })) { E.selectedText = null; drawInspector(); }
+    };
+  }
+
+  // Dragging the chosen words on the picture moves them by as much as the pointer moved, in the style they have.
+  function startTextDrag(event) {
+    const clip = E.selected && findClip(E.selected.track, E.selected.clip);
+    const text = clip?.texts?.find((item) => item.id === E.selectedText);
+    if (!text || E.viewing || !clock().paused) return false;
+    const event_ = E.described?.texts?.events.find((item) => item.text_id === text.id && item.clip_id === clip.id
+      && E.time >= item.start && E.time < item.end);
+    if (!event_) return false;
+    if (!E.textHinted) { E.textHinted = true; toast(T.texts.dragHint); }
+    const stage = $("[data-stage]", E.root).getBoundingClientRect();
+    // Where the words are drawn now, which may be short of where they were put if that was out of bounds.
+    const from = event_.at;
+    let moved = null;
+    const move = (moveEvent) => {
+      moved = { x: clamp(from.x + (moveEvent.clientX - event.clientX) / stage.width, 0, 1),
+                y: clamp(from.y + (moveEvent.clientY - event.clientY) / stage.height, 0, 1) };
+      $("[data-stage]", E.root).style.cursor = "grabbing";
+    };
+    const up = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      $("[data-stage]", E.root).style.cursor = "";
+      if (moved) textEdit(clip, "set_text", { text_id: text.id,
+        x: Math.round(moved.x * 1000) / 1000, y: Math.round(moved.y * 1000) / 1000 });
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+    return true;
   }
 
   // A photo moves while it is on screen; null is the slow push the render gives it.
@@ -1737,6 +1853,84 @@
     edit([{ action: "split_clip", track_id: found.track.id, clip_id: found.clip.id, new_clip_id: `${found.clip.id}-${suffix}`, at: E.time.toFixed(3) }]);
   }
 
+  // ------------------------------------------------------------------ title cards
+
+  // A card goes in front of the shot under the playhead, or at the end when there is none.
+  async function addCard() {
+    if (lockedWhilePlaying()) return;
+    const base = E.project.tracks.find((track) => track.track_type === "video");
+    const shots = (base?.clips || []).filter((clip) => !clip.card);
+    if (!base || !shots.length) { toast(T.card.needShot, "error"); return; }
+    const under = base.clips.find((clip) => E.time >= num(clip.timeline_in) && E.time < clipEnd(clip));
+    const id = `card-${Math.random().toString(36).slice(2, 7)}`;
+    const done = await edit([{ action: "add_title_card", track_id: base.id, clip_id: id, title: T.card.defaultTitle,
+      ...(under ? { before_clip_id: under.id } : {}) }]);
+    if (!done) return;
+    E.selected = { track: base.id, clip: id };
+    E.tab = "picture";
+    // Onto the card, past its words' fade, so it is what the viewer shows.
+    const made = findClip(base.id, id);
+    if (made) seek(num(made.timeline_in) + 0.5);
+    drawAll();
+    toast(T.card.added);
+    $("[data-card-title]", E.root)?.select();
+  }
+
+  function cardEdit(clip, fields) {
+    return edit([{ action: "set_title_card", track_id: E.selected.track, clip_id: clip.id, ...fields }]);
+  }
+
+  function drawCardInspector(panel, clip) {
+    const card = clip.card;
+    const length = clipLength(clip);
+    const choice = (value) => `<button class="${card.background === value ? "on" : ""}" data-card-bg="${value}">${esc(T.card.backgrounds[value])}</button>`;
+    panel.innerHTML = `<h2>${esc(T.card.name)}</h2>
+      <div class="group edit-action"><div class="label">${esc(T.card.title)}</div>
+        <input class="card-text" data-card-title maxlength="60" value="${esc(card.title)}">
+        <div class="label">${esc(T.card.subtitle)}</div>
+        <input class="card-text" data-card-subtitle maxlength="80" value="${esc(card.subtitle || "")}"></div>
+      <div class="group edit-action"><div class="label">${esc(T.card.length)}<b>${length.toFixed(1)} ${esc(T.editor.seconds)}</b></div>
+        <div class="nudges">${[-1, -0.5, 0.5, 1].map((delta) => `<button data-card-len="${delta}">${delta > 0 ? "+" : ""}${delta}</button>`).join("")}</div></div>
+      <div class="group edit-action"><div class="label">${esc(T.card.background)}</div>
+        <div class="seg fit-seg">${choice("blur")}${choice("picture")}${choice("colour")}</div>
+        ${card.background === "colour" ? `<input type="color" value="${esc(card.colour)}" data-card-colour>` : ""}
+        <p class="hint">${esc(T.card.hints[card.background])}</p>
+        <select data-card-photo><option value="">${esc(T.card.photo)}</option></select></div>
+      <div class="group stack-buttons edit-action">
+        <button class="btn danger" data-delete>${icon("trash", 16)}${esc(T.editor.delete)}</button></div>`;
+    const commit = (input, field) => {
+      input.onchange = () => {
+        const value = input.value.trim();
+        if (field === "title" && !value) { input.value = card.title; return; }
+        if (value !== (card[field] || "")) cardEdit(clip, { [field]: value });
+      };
+      input.onkeydown = (event) => { if (event.key === "Enter") input.blur(); event.stopPropagation(); };
+    };
+    commit($("[data-card-title]", panel), "title");
+    commit($("[data-card-subtitle]", panel), "subtitle");
+    panel.querySelectorAll("[data-card-len]").forEach((button) => {
+      button.onclick = () => {
+        const seconds = Math.round(Math.min(10, Math.max(0.5, length + Number(button.dataset.cardLen))) * 10) / 10;
+        if (Math.abs(seconds - length) > 0.01) cardEdit(clip, { seconds });
+      };
+    });
+    panel.querySelectorAll("[data-card-bg]").forEach((button) => {
+      button.onclick = () => { if (button.dataset.cardBg !== card.background) cardEdit(clip, { background: button.dataset.cardBg }); };
+    });
+    const colour = $("[data-card-colour]", panel);
+    if (colour) colour.onchange = () => cardEdit(clip, { colour: colour.value });
+    $("[data-delete]", panel).onclick = remove;
+    const photos = $("[data-card-photo]", panel);
+    photos.onchange = () => { if (photos.value) cardEdit(clip, { photo_asset_id: photos.value }); };
+    // The library's photos, fetched when the card is looked at rather than with every project.
+    api("/api/assets?library=footage").then(({ assets }) => {
+      const stills = assets.filter((asset) => asset.still && !asset.missing);
+      photos.insertAdjacentHTML("beforeend", stills.length
+        ? stills.map((asset) => `<option value="${esc(asset.id)}">${esc(asset.name)}</option>`).join("")
+        : `<option disabled>${esc(T.card.noPhoto)}</option>`);
+    }).catch(() => {});
+  }
+
   async function remove() {
     if (!E.selected || lockedWhilePlaying()) return;
     const { track, clip } = E.selected;
@@ -1864,6 +2058,7 @@
     } else {
       const trackId = clipElement.dataset.track, clipId = clipElement.dataset.clip;
       const clip = findClip(trackId, clipId);
+      if (E.selected?.clip !== clipId) E.selectedText = null;
       E.selected = { track: trackId, clip: clipId };
       if (E.tab === "comments") E.tab = null;
       E.selectedCaption = null;
@@ -2092,7 +2287,7 @@
 
     $("[data-play]", page).onclick = togglePlay;
     $("[data-stage]", page).addEventListener("pointerdown", (event) => {
-      if (event.button === 0 && E.view === "edit" && startCropDrag(event)) event.preventDefault();
+      if (event.button === 0 && E.view === "edit" && (startTextDrag(event) || startCropDrag(event))) event.preventDefault();
     });
     $("[data-comment-btn]", page).onclick = () => writeComment(E.time);
     $("[data-replay]", page).onclick = replay;
@@ -2107,6 +2302,7 @@
     $("[data-delete]", page).onclick = remove;
     $("[data-make-captions]", page).onclick = makeCaptions;
     $("[data-add-music]", page).onclick = addMusic;
+    $("[data-add-card]", page).onclick = addCard;
     $("[data-export]", page).onclick = exportDialog;
     $("[data-exact]", page).onclick = askExact;
     $("[data-live]", page).onclick = showLive;

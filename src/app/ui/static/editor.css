@@ -168,6 +168,9 @@ body.editing .page { padding: 0; overflow: hidden; }
   background: var(--clip-v); box-shadow: inset 0 0 0 1px var(--clip-v-edge);
 }
 .clip.audio { background: var(--clip-a); box-shadow: none; }
+.clip.card { background: linear-gradient(135deg, #3a3550, #23202f); }
+.clip.card .label { top: 50%; transform: translateY(-50%); font-size: 12px; font-weight: 600; }
+.group input.card-text { width: 100%; }
 .clip.audio.music { background: var(--clip-music); }
 .clip.sel { box-shadow: inset 0 0 0 2px var(--sel); z-index: 2; }
 .clip.pinned::after {

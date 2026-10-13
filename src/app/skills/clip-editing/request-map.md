@@ -24,7 +24,7 @@ feedback are mapped in their own files.
 | 「音樂從第 10 秒才進來」 / start the music at 0:10 | `move_clip` the first music clip with `new_timeline_in: 10`, then `fit_track` again |
 | 「用歌的 1:05 開始」 / start from the chorus at 1:05 | Music clip `source_range.start: 65` |
 | 「音樂小聲一點／大聲一點」 / music quieter or louder | `set_clip_audio` on every music clip, `volume` × 0.6 or × 1.5 (in a plan: `set_music_level`) |
-| 「音樂淡出」「音樂比影片長／短」 / fade the music, fit it | `fit_track` with `fade_out: 2` |
+| 「音樂淡出」「音樂比影片長／短」 / fade the music, fit it | `fit_track` with `fade_out: 2`; a song too short loops by itself on a loop point on its beat, skipping its intro and ending |
 | 「拿掉背景音樂」 / remove the music | `delete_clip` every clip on the audio track |
 | 「人聲出現時音樂小聲一點」 / duck the music under the talking | `set_track_audio` on the music track with `duck_under_speech: true` |
 | 「找一首輕快的歌」「配首溫暖的鋼琴」 / find a song | `find_music` with it in English and the part's length as `min_seconds`; read the top few back with how each sounds |
@@ -49,6 +49,11 @@ feedback are mapped in their own files.
 | 「這段整個畫面都要看到」「直式裡橫的畫面被切掉了」 / show a shot whole | `set_clip_look` with `fit: {"mode": "whole"}` |
 | 「這段往左一點」「拉近一點」 / move or zoom the crop | `set_clip_look` with `fit: {"mode": "fill", "center_x": 0.3}` or `"zoom": 1.5` |
 | 「放這張照片」 / put a photo in | `insert_clip` with `source_range` `{start: 0, end: 4}`; longer when asked |
+| 「開頭加個標題」「每段前面加標題卡」 / add a title card | `add_title_card` with `title` (and `subtitle`), `before_clip_id` the shot it leads into; 2.5 s unless `seconds` says |
+| 「標題卡改成黑底／用這張照片當底」「標題留久一點」 / change a card | `set_title_card` with `background: "colour"` and `colour`, `photo_asset_id`, `seconds`, `title` or `subtitle` (`""` removes it) |
+| 「這裡打上他的名字」「標一下這是哪裡」 / a name or a place | `add_text` on the clip with `style: "name"` (`second`: their role) or `"place"`, `timeline_start`/`timeline_end` where it should show |
+| 「這句話用大字打出來」 / a headline | `add_text` with `style: "headline"` over that stretch |
+| 「字移到右上」「名字晚一點出來」「字拿掉」 / change words | `set_text` with `x`, `y` (it keeps its style; a new `style` alone puts it back where that style goes); or `timeline_start`; `remove_text` |
 | 「照片不要動」「照片慢慢拉遠／往左移」 / how a photo moves | `set_clip_look` with `motion`: `none`, `pull`, `pan_left`, `pan_right`, or `push` (the default) |
 | 「右上角放一個小視窗」 / an inset in the top right | `add_track` a second video track, then `add_clip` with `timeline_in` and a `layout` box |
 | 「小視窗拿掉」 / drop the inset | `delete_clip` it, or `set_clip_look` with `clear_layout: true` to cover the frame |

@@ -9,7 +9,7 @@ from decimal import Decimal
 from fractions import Fraction
 from statistics import median
 from typing import Callable, Dict, List, Mapping, Optional, Sequence, Tuple
-from app.engine import loudness, resources, stills
+from app.engine import cards, loudness, resources, stills
 from app.engine.ffmpeg import escape_filter_path
 from app.engine.reframe import Framing, crop_filter
 from app.models.media import Asset, MediaAnalysis
@@ -334,6 +334,9 @@ def _input_args(clip: Clip, asset: Asset, frames: int, fps: Fraction) -> List[st
     """
     if asset.still:
         return ["-i", asset.path]
+    if clip.card is not None:
+        # A card holds one frame of its file: read a sliver from there, not the rest of the file.
+        return ["-ss", _format_seconds(Fraction(clip.card.at)), "-t", "0.2", "-i", asset.path]
     return [
         "-ss", _format_seconds(Fraction(clip.video_source_start)),
         "-t", _format_seconds(Fraction(frames + 1) * Fraction(str(clip.speed)) / fps),
@@ -568,6 +571,15 @@ def _picture_chain(
         The filters, without input or output labels.
     """
     rate = f"{fps.numerator}/{fps.denominator}"
+    if clip.card is not None:
+        # One frame, placed, made into the card's background, then held for the card's length.
+        return (
+            f"trim=end_frame=1,{_placed(clip, 2 * width, 2 * height, framing)},"
+            f"{cards.backdrop_filter(clip.card, 2 * width, 2 * height)},"
+            f"{stills.zoompan('none', frames, width, height, rate)},setsar=1,format=yuv420p,"
+            f"trim=end_frame={frames},setpts=PTS-STARTPTS"
+            f"{_clip_video_filter(clip, frames, fps)}"
+        )
     if still:
         return (
             f"{_placed(clip, 2 * width, 2 * height, framing)},"
@@ -1096,7 +1108,7 @@ class FFmpegRenderer:
                         (project.width, project.height), framed.get(segment.clip.id), cache_dir,
                     )
                     filters.append(f"{picture}[v{index}]")
-                if asset.has_audio:
+                if asset.has_audio and segment.clip.card is None:
                     clip = segment.clip
                     lead, lag = _seconds_to_samples(clip.audio_lead), _seconds_to_samples(clip.audio_lag)
                     # The picture's input starts early by any run-up a transition needs, and
@@ -1236,11 +1248,13 @@ class FFmpegRenderer:
                         f"{joined}{over}overlay=x={box_x}:y={box_y}:eof_action=pass:repeatlast=0{composited}"
                     )
                     joined = composited
-                if cached and asset.has_audio:
+                # A title card is silent, whatever the file behind it says.
+                heard = asset.has_audio and clip.card is None
+                if cached and heard:
                     input_index = len(inputs)
                     inputs.append(_input_args(clip, asset, frames, fps))
 
-                if asset.has_audio:
+                if heard:
                     filters.append(_clip_audio_filter(f"[{input_index}:a]", clip, samples, audio_label))
                 else:
                     filters.append(_silence_filter(samples, audio_label))
