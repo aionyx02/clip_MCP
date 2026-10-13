@@ -13,21 +13,23 @@ from typing import List, Optional
 from PIL import Image, ImageEnhance, ImageFilter
 
 from app.engine.subtitles import CAPTION_LINE_HEIGHT, DEFAULT_FONT, escape_ass_text, format_ass_time, wrap_caption
+from app.engine.texts import LINE_WIDTH
 from app.models.timeline import CaptionStyle, Clip, Project, TitleCard
 
 # Provisional (roadmap §13): how big a card's title is, as a share of the frame's short side.
 TITLE_SHARE = 0.1
-# How big the line under the title is, against the title.
+# How big the line under the title is, against the title. Provisional (roadmap §13).
 SUBTITLE_SCALE = 0.5
-# How much of the frame's width a line of the title may take before it wraps.
-TITLE_WIDTH = 0.8
+# How much of the frame's width a line of the title may take before it wraps: the same as words over the footage.
+TITLE_WIDTH = LINE_WIDTH
 # Provisional (roadmap §13): how long the words take to fade in, and out again.
 TEXT_FADE_SECONDS = 0.3
 # How far the blur reaches, as a share of the picture's short side: far enough that the
-# shot behind is colour and shape, not something to read.
+# shot behind is colour and shape, not something to read. Provisional (roadmap §13).
 BLUR_SHARE = 1 / 25
-# How much darker the frame behind is made, so white words read on it.
+# How much darker the frame behind is made, so white words read on it. Provisional (roadmap §13).
 BLUR_DIM = -0.25
+# The same for a photo shown as it is, less, since it is meant to be seen. Provisional (roadmap §13).
 PICTURE_DIM = -0.15
 
 
@@ -43,7 +45,8 @@ def backdrop_filter(card: TitleCard, width: int, height: int) -> str:
         The filters, without a leading comma.
     """
     if card.background == "colour":
-        return f"drawbox=x=0:y=0:w=iw:h=ih:color=0x{card.colour[1:]}@1:t=fill"
+        colour = f"0x{card.colour[1:]}" if card.colour.startswith("#") else card.colour
+        return f"drawbox=x=0:y=0:w=iw:h=ih:color={colour}@1:t=fill"
     if card.background == "picture":
         return f"eq=brightness={PICTURE_DIM}"
     # boxblur's radius cannot pass half the picture's short side.

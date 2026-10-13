@@ -470,6 +470,12 @@ TITLE_CARD_SECONDS = Decimal("2.5")
 TITLE_CARD_SHORTEST = Decimal("0.5")
 TITLE_CARD_LONGEST = Decimal(10)
 
+CardBackground = Literal["blur", "picture", "colour"]
+
+def card_background(asked: Optional[str], photo: Optional[str]) -> str:
+    """The background a new title card gets: the one asked for, else its photo as it is, else the shot blurred."""
+    return asked or ("picture" if photo else "blur")
+
 class TitleCard(BaseModel):
     """A title on a picture of its own, taking up time in the cut.
 
@@ -480,7 +486,7 @@ class TitleCard(BaseModel):
 
     title: str = Field(..., min_length=1, max_length=60, description="The main line, large and centred")
     subtitle: Optional[str] = Field(default=None, max_length=80, description="A smaller line under it, if any")
-    background: Literal["blur", "picture", "colour"] = Field(
+    background: CardBackground = Field(
         default="blur",
         description="`blur`: the frame behind it blurred and darkened; `picture`: that frame as it is, darkened a "
                     "little so the words read; `colour`: a plain colour",
@@ -514,11 +520,21 @@ class TextLayer(BaseModel):
     )
     start: Decimal = Field(..., ge=0, description="First second of the clip's file it is shown over")
     end: Decimal = Field(..., gt=0, description="Second of the clip's file it stops at")
-    x: Optional[float] = Field(default=None, ge=0, le=1, description="For `free`: its centre across the frame, 0 to 1")
-    y: Optional[float] = Field(default=None, ge=0, le=1, description="For `free`: its centre down the frame, 0 to 1")
+    x: Optional[float] = Field(
+        default=None, ge=0, le=1,
+        description="Where it was moved to across the frame, 0 to 1: the centre, or the left edge of a name or a "
+                    "place; null where its style puts it",
+    )
+    y: Optional[float] = Field(default=None, ge=0, le=1,
+                               description="Where it was moved to down the frame, 0 to 1: its centre; null likewise")
     by_plan: bool = Field(
         default=False,
         description="Put there by the plan and rebuilt with it; false once anybody changes it, and then kept",
+    )
+    hidden: bool = Field(
+        default=False,
+        description="Words the plan put there that were taken off by hand: kept out of sight, so the next "
+                    "compile does not put them back",
     )
 
 class Clip(BaseModel):
@@ -609,6 +625,11 @@ class Clip(BaseModel):
         default_factory=list,
         description="Words over this clip's footage, each pinned to seconds of its file",
     )
+
+    @property
+    def shown_texts(self) -> List[TextLayer]:
+        """The words that are on screen: all but the plan's ones taken off by hand."""
+        return [text for text in self.texts if not text.hidden]
 
     @property
     def run_up(self) -> Decimal:
@@ -906,6 +927,8 @@ class _NewClipSpec(BaseModel):
     video_fade_out: SkipJsonSchema[Decimal] = Field(default=Decimal(0), ge=0)
     color: SkipJsonSchema[Optional[ColorAdjust]] = None
     layout: SkipJsonSchema[Optional[ClipLayout]] = None
+    fit: SkipJsonSchema[Optional[ClipFit]] = None
+    motion: SkipJsonSchema[Optional[Motion]] = None
     # A title card the compiler puts in, or one made by hand that it puts back.
     card: SkipJsonSchema[Optional[TitleCard]] = None
 
@@ -1301,7 +1324,7 @@ class AddTitleCardOp(BaseModel):
     title: str = Field(..., min_length=1, max_length=60)
     subtitle: Optional[str] = Field(default=None, max_length=80)
     seconds: Decimal = Field(default=TITLE_CARD_SECONDS, ge=TITLE_CARD_SHORTEST, le=TITLE_CARD_LONGEST)
-    background: Optional[Literal["blur", "picture", "colour"]] = Field(
+    background: Optional[CardBackground] = Field(
         default=None,
         description="Null: `picture` with a photo, else `blur` of the shot next to it",
     )
@@ -1320,7 +1343,7 @@ class SetTitleCardOp(BaseModel):
         default=None, ge=TITLE_CARD_SHORTEST, le=TITLE_CARD_LONGEST,
         description="Its new length; later clips move to keep up",
     )
-    background: Optional[Literal["blur", "picture", "colour"]] = None
+    background: Optional[CardBackground] = None
     colour: Optional[str] = Field(default=None, pattern=COLOUR)
     photo_asset_id: Optional[str] = Field(default=None, description="A photo from the library to put behind it")
 
@@ -1348,9 +1371,15 @@ class AddTextOp(_TextTimes):
     text: str = Field(..., min_length=1, max_length=60)
     second: Optional[str] = Field(default=None, max_length=60, description="A smaller second line, if any")
     style: TextStyle = "name"
-    x: Optional[float] = Field(default=None, ge=0, le=1, description="For `free`: centre across, 0 to 1")
-    y: Optional[float] = Field(default=None, ge=0, le=1, description="For `free`: centre down, 0 to 1")
+    x: Optional[float] = Field(
+        default=None, ge=0, le=1,
+        description="Put it here across instead of where its style goes, 0 to 1: the centre, or the left edge of a "
+                    "name or a place; it is kept inside the frame's margins",
+    )
+    y: Optional[float] = Field(default=None, ge=0, le=1,
+                               description="Put its middle here down the frame instead, 0 to 1; kept off the captions")
     by_plan: SkipJsonSchema[bool] = False
+    hidden: SkipJsonSchema[bool] = False
 
 class SetTextOp(_TextTimes):
     """Edit operation that changes a text layer: its words, its style, where or when it shows."""
@@ -1361,9 +1390,11 @@ class SetTextOp(_TextTimes):
     text_id: str
     text: Optional[str] = Field(default=None, min_length=1, max_length=60)
     second: Optional[str] = Field(default=None, max_length=60, description="An empty string takes it away")
-    style: Optional[TextStyle] = None
-    x: Optional[float] = Field(default=None, ge=0, le=1)
-    y: Optional[float] = Field(default=None, ge=0, le=1)
+    style: Optional[TextStyle] = Field(
+        default=None, description="Changing it puts the words where the new style goes, unless x and y are given too",
+    )
+    x: Optional[float] = Field(default=None, ge=0, le=1, description="Move it: see the text's own `x`")
+    y: Optional[float] = Field(default=None, ge=0, le=1, description="Move it: see the text's own `y`")
 
 class RemoveTextOp(BaseModel):
     """Edit operation that takes a text layer off a clip."""
@@ -1678,6 +1709,8 @@ def _new_clip(track: Track, spec: _NewClipSpec, timeline_in: Decimal) -> Clip:
         video_fade_out=spec.video_fade_out,
         color=spec.color,
         layout=spec.layout,
+        fit=spec.fit,
+        motion=spec.motion,
         card=spec.card,
     )
 
@@ -1687,10 +1720,11 @@ def _find_text(clip: Clip, text_id: str) -> TextLayer:
     Raises:
         ValueError: If the clip has no text with that ID.
     """
-    for text in clip.texts:
+    # Words taken off by hand are gone as far as anybody editing is concerned.
+    for text in clip.shown_texts:
         if text.id == text_id:
             return text
-    known = ", ".join(text.id for text in clip.texts) or "none"
+    known = ", ".join(text.id for text in clip.shown_texts) or "none"
     raise ValueError(f"clip {clip.id} has no text {text_id}; its texts: {known}")
 
 def _text_times(clip: Clip, op: _TextTimes, start: Decimal, end: Decimal) -> Tuple[Decimal, Decimal]:
@@ -2057,7 +2091,7 @@ def apply_operation(project: Project, op: EditOperation, assets: Mapping[str, As
         else:
             position = _find_clip(track, op.before_clip_id).timeline_in
         asset_id, at = _card_backdrop(track, op.before_clip_id, op.photo_asset_id, assets)
-        background = op.background or ("picture" if op.photo_asset_id else "blur")
+        background = card_background(op.background, op.photo_asset_id)
         clip = _new_clip(track, _NewClipSpec(
             track_id=track.id, clip_id=op.clip_id, asset_id=asset_id,
             source_range=TimeRange(start=Decimal(0), end=op.seconds),
@@ -2098,7 +2132,7 @@ def apply_operation(project: Project, op: EditOperation, assets: Mapping[str, As
             raise ValueError(f"clip {clip.id} already has a text {op.text_id}")
         start, end = _text_times(clip, op, clip.source_range.start, clip.source_range.end)
         clip.texts.append(TextLayer(id=op.text_id, text=op.text, second=op.second or None, style=op.style,
-                                    start=start, end=end, x=op.x, y=op.y, by_plan=op.by_plan))
+                                    start=start, end=end, x=op.x, y=op.y, by_plan=op.by_plan, hidden=op.hidden))
     elif isinstance(op, SetTextOp):
         clip = _find_clip(track, op.clip_id)
         layer = _find_text(clip, op.text_id)
@@ -2110,6 +2144,9 @@ def apply_operation(project: Project, op: EditOperation, assets: Mapping[str, As
         if op.second is not None:
             changed.second = op.second or None
         if op.style is not None:
+            if op.style != layer.style and op.style != "free" and op.x is None and op.y is None:
+                # A new style puts the words where that style goes, not where the old ones were moved.
+                changed.x = changed.y = None
             changed.style = op.style
         if op.x is not None:
             changed.x = op.x
@@ -2119,7 +2156,12 @@ def apply_operation(project: Project, op: EditOperation, assets: Mapping[str, As
     elif isinstance(op, RemoveTextOp):
         clip = _find_clip(track, op.clip_id)
         layer = _find_text(clip, op.text_id)
-        clip.texts = [text for text in clip.texts if text.id != layer.id]
+        if layer.by_plan:
+            # The plan would put it back on the next compile: kept, out of sight, as taken off by hand.
+            clip.texts = [text.model_copy(update={"hidden": True, "by_plan": False}) if text.id == layer.id else text
+                          for text in clip.texts]
+        else:
+            clip.texts = [text for text in clip.texts if text.id != layer.id]
     elif isinstance(op, TrimClipOp):
         clip = _find_clip(track, op.clip_id)
         old_out = clip.timeline_out
@@ -2324,7 +2366,8 @@ def validate_project(project: Project, assets: Mapping[str, Asset]) -> None:
                         f"clip {clip.id}: a {transition.seconds}s {transition.kind} is longer than clip "
                         f"{previous.id}, which runs {previous.timeline_duration}s and is what it would run over"
                     )
-                if clip.video_source_start < 0 and clip.card is None:
+                # A title card and a photo hold one picture, which is there before the cut as much as after it.
+                if clip.video_source_start < 0 and clip.card is None and not asset.still:
                     raise ValueError(
                         f"clip {clip.id}: a {transition.seconds}s {transition.kind} reaches back to "
                         f"{clip.video_source_start}s of asset {asset.id}, before the file starts"

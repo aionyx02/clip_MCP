@@ -13,23 +13,23 @@ from decimal import Decimal
 from typing import List, Optional, Tuple
 
 from app.engine.subtitles import (
-    CAPTION_LINE_HEIGHT, DEFAULT_FONT, caption_geometry, escape_ass_text, format_ass_time, wrap_caption,
+    CAPTION_LINE_HEIGHT, DEFAULT_FONT, caption_geometry, escape_ass_text, format_ass_time, text_width, wrap_caption,
 )
 from app.models.timeline import CaptionStyle, Clip, Project, TextLayer
 
 # Provisional (roadmap §13): each kind's size, as a share of the frame's short side.
 SIZES = {"name": 0.05, "place": 0.042, "headline": 0.085, "free": 0.06}
-# The second line, against the first.
+# The second line, against the first. Provisional (roadmap §13).
 SECOND_SCALE = 0.7
 # Provisional (roadmap §13): how much of the top a phone's app covers on a vertical video,
 # and how much a player's title bar might on a landscape one.
 TOP_SAFE_PORTRAIT = 0.12
 TOP_SAFE_LANDSCAPE = 0.06
-# How much of the frame's width a line may take before it wraps.
+# Provisional (roadmap §13): how much of the frame's width a line may take before it wraps.
 LINE_WIDTH = 0.8
-# How long the words take to come and go.
+# Provisional (roadmap §13): how long the words take to come and go.
 FADE_SECONDS = 0.2
-# The name bar's box: how far it reaches past the words, against their size, and how see-through it is.
+# Provisional (roadmap §13): the name bar's box — how far it reaches past the words, against their size, and how see-through it is.
 BOX_PAD = 0.3
 BOX_OPACITY = 0.62
 
@@ -85,20 +85,30 @@ def placed(text: TextLayer, width: int, height: int, style: CaptionStyle) -> Lis
     top_safe = height * (TOP_SAFE_PORTRAIT if height > width else TOP_SAFE_LANDSCAPE)
     box = round(size * BOX_PAD) if text.style == "name" else 0
     outline = max(1, round(size / 14)) if text.style in ("headline", "free") else 0
+    # Where two lines of captions sit from: words under a caption would be covered by it, and the
+    # captions are what the viewer is reading.
+    captions_top = height - geometry.margin_v - 2 * geometry.font_size * CAPTION_LINE_HEIGHT
     if text.style == "name":
-        # Above where two lines of captions sit, with a little air: a name bar under a caption
-        # would be covered by it, and the captions are what the viewer is reading.
-        captions_top = height - geometry.margin_v - 2 * geometry.font_size * CAPTION_LINE_HEIGHT
+        # Above the captions, with a little air.
         top, x, align = captions_top - size * 0.6 - total - box, geometry.margin_h + box, "left"
     elif text.style == "place":
         top, x, align = top_safe, geometry.margin_h, "left"
     elif text.style == "headline":
         top, x, align = height / 2 - total / 2, width / 2, "center"
     else:
-        across = width * (text.x if text.x is not None else 0.5)
-        down = height * (text.y if text.y is not None else 0.5)
-        top = min(max(down - total / 2, 0), height - total)
-        x, align = across, "center"
+        top, x, align = height / 2 - total / 2, width / 2, "center"
+    # Moved by hand: there instead, in its own size and box, all of it inside the captions' side
+    # margins, below the platform's bar at the top and above the captions.
+    if text.x is not None:
+        widest = max(text_width(line) * row_size for line, row_size, _ in lines) + 2 * box
+        low, high = geometry.margin_h + box, width - geometry.margin_h - widest + box
+        if align == "center":
+            low, high = geometry.margin_h + widest / 2, width - geometry.margin_h - widest / 2
+        x = min(max(width * text.x, low), high) if low <= high else (width / 2 if align == "center" else low)
+    if text.y is not None:
+        top = height * text.y - total / 2
+    if text.x is not None or text.y is not None:
+        top = max(min(top, captions_top - total - box), top_safe + box)
     rows = []
     for (line, row_size, bold), step in zip(lines, steps):
         rows.append({"text": line, "size": row_size, "x": round(x), "y": round(top + step / 2), "align": align,
@@ -112,7 +122,7 @@ def _layers(project: Project) -> List[Tuple[Clip, TextLayer, Tuple[float, float]
     found = []
     for track in project.video_tracks:
         for clip in track.clips:
-            for text in clip.texts:
+            for text in clip.shown_texts:
                 when = shown(clip, text)
                 if when is not None:
                     found.append((clip, text, when))
@@ -163,13 +173,17 @@ def drawn(project: Project, style: Optional[CaptionStyle] = None) -> dict:
     """Describe a cut's text layers for the editor's player to paint, as `placed` places them.
 
     Returns:
-        `events`, each with `start`, `end`, the clip and text IDs, and its
-        `rows`; and the `fade` and the box's `opacity`.
+        `events`, each with `start`, `end`, the clip and text IDs, its
+        `rows`, and `at`, where it is drawn as the `x` and `y` that would put
+        it there, which a drag in the editor starts from; and the `fade` and
+        the box's `opacity`.
     """
     style = style or CaptionStyle()
-    return {
-        "fade": FADE_SECONDS, "box_opacity": BOX_OPACITY,
-        "events": [{"start": start, "end": end, "clip_id": clip.id, "text_id": text.id,
-                    "rows": placed(text, project.width, project.height, style)}
-                   for clip, text, (start, end) in _layers(project)],
-    }
+    events = []
+    for clip, text, (start, end) in _layers(project):
+        rows = placed(text, project.width, project.height, style)
+        top = rows[0]["y"] - rows[0]["size"] * CAPTION_LINE_HEIGHT / 2
+        bottom = rows[-1]["y"] + rows[-1]["size"] * CAPTION_LINE_HEIGHT / 2
+        at = {"x": round(rows[0]["x"] / project.width, 4), "y": round((top + bottom) / 2 / project.height, 4)}
+        events.append({"start": start, "end": end, "clip_id": clip.id, "text_id": text.id, "rows": rows, "at": at})
+    return {"fade": FADE_SECONDS, "box_opacity": BOX_OPACITY, "events": events}

@@ -81,7 +81,7 @@ def _source(clip: Clip, fps: Fraction, timecodes: Mapping[str, float]) -> Tuple[
     return (_frames(offset + float(clip.source_range.start), fps),
             _frames(offset + float(clip.source_range.end), fps))
 
-def left_behind(project: Project, carried: Sequence[str] = ()) -> List[str]:
+def left_behind(project: Project, carried: Sequence[str] = (), assets: Optional[Mapping[str, Asset]] = None) -> List[str]:
     """List what a cut uses that an exported timeline cannot carry.
 
     Args:
@@ -89,6 +89,7 @@ def left_behind(project: Project, carried: Sequence[str] = ()) -> List[str]:
         carried: What this format does carry, of `speed`, `transitions`,
             `wipes` (transitions other than a dissolve, as the kind they are)
             and `volume`.
+        assets: The files, to tell which clips are photos.
 
     Returns:
         One line per kind of thing, naming the clips that use it. Empty when
@@ -119,8 +120,14 @@ def left_behind(project: Project, carried: Sequence[str] = ()) -> List[str]:
                 uses.setdefault("voice repair", []).append(clip.id)
             if clip.layout is not None:
                 uses.setdefault("where an inset sits (it comes across full frame)", []).append(clip.id)
-            if clip.texts:
+            if clip.shown_texts:
                 uses.setdefault("words over the footage (add them as titles there)", []).append(clip.id)
+            if clip.fit is not None:
+                uses.setdefault("how a shot of another shape sits — where it is cropped, how far it is zoomed, "
+                                "or shown whole (it comes across cropped from the middle)", []).append(clip.id)
+            photo = (assets or {}).get(clip.asset_id)
+            if photo is not None and photo.still and clip.card is None and clip.motion != "none":
+                uses.setdefault("photos moving while on screen (they come across still)", []).append(clip.id)
     lines = [f"{kind}: {', '.join(clips[:6])}{' …' if len(clips) > 6 else ''}" for kind, clips in uses.items()]
     if project.subtitles:
         lines.append("captions (export them separately as SRT)")
@@ -198,7 +205,7 @@ def write_edl(
         ]
         lines.append("")
     extra = [track.id for track in project.tracks if track is not base and track.clips]
-    behind = left_behind(project, ("speed",))
+    behind = left_behind(project, ("speed",), assets)
     if extra:
         behind.insert(0, f"tracks other than the sequence ({', '.join(extra)}): an EDL holds one picture track")
     return "\n".join(lines).rstrip() + "\n", behind
@@ -356,7 +363,7 @@ def write_otio(
             "enabled": True, "source_range": None, "children": tracks,
         },
     }
-    return json.dumps(timeline, ensure_ascii=False, indent=2) + "\n", left_behind(project, ("speed", "transitions"))
+    return json.dumps(timeline, ensure_ascii=False, indent=2) + "\n", left_behind(project, ("speed", "transitions"), assets)
 
 # --- FCPXML ------------------------------------------------------------------------------
 
@@ -522,7 +529,7 @@ def write_fcpxml(
         f'<sequence format="r1" duration="{total}" tcStart="0s" tcFormat="NDF" audioLayout="stereo" audioRate="48k">'
         f'<spine>{"".join(body)}</spine></sequence></project></event></library>\n</fcpxml>\n'
     )
-    return xml, left_behind(project, ("speed", "volume"))
+    return xml, left_behind(project, ("speed", "volume"), assets)
 
 # --- SRT ---------------------------------------------------------------------------------
 

@@ -31,17 +31,18 @@ VOICE_DETECTOR = "silero-vad"
 # long a gap or a sound has to be before it counts. Measured against the edges the first
 # edit got wrong: at 0.5 with no padding it put the onset of 「終」 at 2.05s where the
 # sound rises at 2.0s, and the end of 「囉」 at 9.82s where it falls away by 9.8s.
-# Provisional.
+# Provisional (roadmap §13).
 VOICE_THRESHOLD = 0.5
 VOICE_MIN_SPEECH_MS = 100
 VOICE_MIN_SILENCE_MS = 100
 # Voiced stretches closer than this are transcribed together, so a phrase with a breath
 # in it is heard as one phrase; a stretch is never longer than the speech model's window.
+# Provisional (roadmap §13), the joining; the longest is the model's own limit.
 JOIN_SECONDS = 0.8
 LONGEST_STRETCH_SECONDS = 28.0
 # Sound taken either side of a voiced stretch before transcribing it. The detector
 # misses soft onsets — it put 「我們」 at 170.5s where it starts at 170.28s — and the
-# speech model does not.
+# speech model does not. Provisional (roadmap §13).
 STRETCH_PAD_SECONDS = 0.4
 
 @dataclass(frozen=True)

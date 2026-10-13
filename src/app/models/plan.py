@@ -20,6 +20,10 @@ from typing import Annotated, Any, Dict, List, Literal, Optional, Union
 
 from pydantic import BaseModel, Field, model_validator
 
+from app.models.timeline import (
+    COLOUR, TITLE_CARD_LONGEST, TITLE_CARD_SECONDS, TITLE_CARD_SHORTEST, CardBackground, TextStyle,
+)
+
 def _utc_now() -> datetime:
     """Return the current time as a timezone-aware UTC datetime."""
     return datetime.now(timezone.utc)
@@ -249,11 +253,12 @@ class PlanTitleCard(BaseModel):
 
     title: str = Field(..., min_length=1, max_length=60)
     subtitle: Optional[str] = Field(default=None, max_length=80)
-    seconds: float = Field(default=2.5, ge=0.5, le=10, description="How long it stays up")
-    background: Optional[Literal["blur", "picture", "colour"]] = Field(
+    seconds: float = Field(default=float(TITLE_CARD_SECONDS), ge=float(TITLE_CARD_SHORTEST),
+                           le=float(TITLE_CARD_LONGEST), description="How long it stays up")
+    background: Optional[CardBackground] = Field(
         default=None, description="Null: `picture` with a photo, else the part's first shot blurred",
     )
-    colour: Optional[str] = Field(default=None, pattern=r"^(#[0-9a-fA-F]{6}|black|white)$")
+    colour: Optional[str] = Field(default=None, pattern=COLOUR)
     photo_asset_id: Optional[str] = Field(default=None, description="A photo from the library to put behind it")
 
 class PlanText(BaseModel):
@@ -261,13 +266,14 @@ class PlanText(BaseModel):
 
     text: str = Field(..., min_length=1, max_length=60)
     second: Optional[str] = Field(default=None, max_length=60, description="A smaller second line")
-    style: Literal["name", "place", "headline", "free"] = "name"
+    style: TextStyle = "name"
     start: Optional[float] = Field(
         default=None, ge=0, description="First second of the file it covers; null from the start of the piece",
     )
     end: Optional[float] = Field(default=None, gt=0, description="Where it stops; null at the end of the piece")
-    x: Optional[float] = Field(default=None, ge=0, le=1, description="For `free`")
-    y: Optional[float] = Field(default=None, ge=0, le=1, description="For `free`")
+    x: Optional[float] = Field(default=None, ge=0, le=1,
+                               description="Across, 0 to 1, instead of where its style goes: as `add_text`'s `x`")
+    y: Optional[float] = Field(default=None, ge=0, le=1, description="Down, 0 to 1, likewise")
 
 class Beat(BaseModel):
     """One part of the finished video, and what it is there to do."""

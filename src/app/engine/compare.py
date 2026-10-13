@@ -152,8 +152,8 @@ def _clip_changes(one: Clip, other: Clip, said: Said, named: Named) -> List[str]
         changes.append(f"{where}速度 {one.speed:g}× → {other.speed:g}×")
     if abs(float(other.volume) - float(one.volume)) > 0.001:
         changes.append(f"{where}音量 {round(float(one.volume) * 100)}% → {round(float(other.volume) * 100)}%")
-    before_words = {text.id: text for text in one.texts}
-    after_words = {text.id: text for text in other.texts}
+    before_words = {text.id: text for text in one.shown_texts}
+    after_words = {text.id: text for text in other.shown_texts}
     for text_id, text in after_words.items():
         if text_id not in before_words:
             changes.append(f"{where}加上文字「{text.text}」")
