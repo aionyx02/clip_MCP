@@ -104,3 +104,57 @@ def test_a_title_card_keeps_its_own_words(media: Path) -> None:
                             name="卡片沒文字")
     with pytest.raises(ValueError, match="title card has its own"):
         edit(project, [words("t")])
+
+
+def test_a_moved_name_keeps_its_box_and_the_safe_area(media: Path) -> None:
+    from app.models.timeline import CaptionStyle, TextLayer
+    style = CaptionStyle()
+    layer = lambda **fields: texts.placed(  # noqa: E731
+        TextLayer(id="t", text="王小明", style="name", start=0, end=4, **fields), 1080, 1920, style)
+    moved = layer(x=0.3, y=0.4)
+    assert moved[0]["box"] and moved[0]["align"] == "left" and moved[0]["x"] == round(1080 * 0.3)
+    assert abs(moved[0]["y"] - 1920 * 0.4) < 60
+    # Dropped on the platform's buttons at the very bottom, it is kept clear of them.
+    assert layer(x=0.99, y=0.99)[0]["y"] < 1920 - 100
+    assert layer(x=0.5, y=0.0)[0]["y"] >= 1920 * texts.TOP_SAFE_PORTRAIT
+
+
+def test_a_new_style_puts_moved_words_where_it_goes(media: Path) -> None:
+    asset = server.import_asset(str(media / "wide.mp4"))["id"]
+    project = build_project([video_track(), insert("a", asset, 0, 4), words()], name="換樣式")
+    edit(project, [{"action": "set_text", "track_id": "main", "clip_id": "a", "text_id": "n", "x": 0.3, "y": 0.2}])
+    [layer] = clips_of(project, "main")[0]["texts"]
+    assert (layer["style"], layer["x"]) == ("name", 0.3)
+    edit(project, [{"action": "set_text", "track_id": "main", "clip_id": "a", "text_id": "n", "style": "headline"}])
+    [layer] = clips_of(project, "main")[0]["texts"]
+    assert (layer["style"], layer["x"], layer["y"]) == ("headline", None, None)
+
+
+def test_moved_words_stay_whole_inside_the_frame() -> None:
+    from app.engine.subtitles import caption_geometry, text_width
+    from app.models.timeline import CaptionStyle, TextLayer
+    style = CaptionStyle()
+    margin = caption_geometry(1080, 1920, style).margin_h
+    for kind in ("name", "place", "headline", "free"):
+        for x in (0.0, 0.99):
+            rows = texts.placed(TextLayer(id="t", text="王小明的店", style=kind, start=0, end=4, x=x, y=0.99),
+                                1080, 1920, style)
+            for row in rows:
+                wide = text_width(row["text"]) * row["size"]
+                left = row["x"] - (wide / 2 if row["align"] == "center" else row["box"])
+                right = row["x"] + (wide / 2 if row["align"] == "center" else wide + row["box"])
+                assert margin - 1 <= left and right <= 1080 - margin + 1, (kind, x, row)
+
+
+def test_where_words_are_drawn_puts_them_there_again() -> None:
+    from app.engine.subtitles import CAPTION_LINE_HEIGHT
+    from app.models.timeline import CaptionStyle, TextLayer
+    style = CaptionStyle()
+    for kind in ("name", "place", "headline"):
+        layer = TextLayer(id="t", text="王小明", second="店長", style=kind, start=0, end=4, y=0.99)
+        rows = texts.placed(layer, 1080, 1920, style)
+        top = rows[0]["y"] - rows[0]["size"] * CAPTION_LINE_HEIGHT / 2
+        bottom = rows[-1]["y"] + rows[-1]["size"] * CAPTION_LINE_HEIGHT / 2
+        again = layer.model_copy(update={"x": rows[0]["x"] / 1080, "y": (top + bottom) / 2 / 1920})
+        assert [(row["x"], row["y"]) for row in texts.placed(again, 1080, 1920, style)] == \
+            [(row["x"], row["y"]) for row in rows], kind
