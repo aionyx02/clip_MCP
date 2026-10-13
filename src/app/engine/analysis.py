@@ -1054,6 +1054,42 @@ def _run_whisper(
         on_measured("transcription", device, model_name, time.monotonic() - began)
     return Transcript(language=info.language, model=model_name, segments=result)
 
+def with_words_heard_again(analysis: MediaAnalysis) -> MediaAnalysis:
+    """Put the word times of every stretch heard again and kept over the transcript's.
+
+    A word whose time the transcript got wrong stops a cut being made beside
+    it; heard again on its own, that stretch says where the words really are.
+    The words the transcript has anywhere in a kept stretch give way to the
+    ones heard there, and a stretch where nobody was heard keeps none.
+
+    Args:
+        analysis: The file's analysis.
+
+    Returns:
+        A copy with those words, or the analysis itself when nothing was kept.
+    """
+    if analysis.transcript is None or not analysis.heard_again:
+        return analysis
+    segments = [segment.model_copy(deep=True) for segment in analysis.transcript.segments]
+    for stretch in sorted(analysis.heard_again, key=lambda item: item.start):
+        inside = lambda word: word.end > stretch.start and word.start < stretch.end
+        touched = [segment for segment in segments if segment.end > stretch.start and segment.start < stretch.end]
+        for segment in touched:
+            segment.words = [word for word in segment.words if not inside(word)]
+        fresh = [word.model_copy() for word in stretch.words]
+        if fresh and touched:
+            touched[0].words = sorted([*touched[0].words, *fresh], key=lambda word: word.start)
+        elif fresh:
+            touched = [TranscriptSegment(start=fresh[0].start, end=fresh[-1].end, text="", words=fresh)]
+            segments.append(touched[0])
+        for segment in touched:
+            if segment.words:
+                segment.start, segment.end = segment.words[0].start, segment.words[-1].end
+                segment.text = "".join(word.text for word in segment.words)
+        segments = [segment for segment in segments if segment.words or not inside(segment)]
+    segments.sort(key=lambda segment: segment.start)
+    return analysis.model_copy(update={"transcript": analysis.transcript.model_copy(update={"segments": segments})})
+
 def listen_again(
     path: str,
     start: float,

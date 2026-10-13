@@ -24,7 +24,7 @@ from fastmcp.tools import ToolResult
 from fastmcp.utilities.types import Image
 from mcp.types import TextContent
 from pydantic import BaseModel, Field, TypeAdapter
-from app.models.media import Asset, Measured, MediaAnalysis, Source, Span, SpeakerTurn, Transcript
+from app.models.media import Asset, HeardAgain, Measured, MediaAnalysis, Source, Span, SpeakerTurn, Transcript
 from app.models.plan import (
     EditPlan, PlanAmendment, Trim, TrimKind, apply_amendment, describe_amendment, short_clip_ids, whole_clip_id,
     with_whole_clip_ids,
@@ -51,6 +51,7 @@ from app.models.comment import Comment, Reply
 from app.models.job import Job, JobKind, JobStatus
 from app.engine import cards, texts, loudness, machine, meaning, resources, speed, stills
 from app.engine.analysis import listen_again as listen_again_in_file
+from app.engine.analysis import with_words_heard_again
 from app.engine.analysis import (
     BALANCED_JOIN, current_recipe, doubtful_spots, marked_text, marked_words, second_listen, sound_note,
     transcription_of, unsure_words, whisper_model_for, whisper_model_name,
@@ -1710,6 +1711,7 @@ def listen_again(
     asset_id: Optional[str] = None,
     language: Optional[str] = None,
     job_id: Optional[str] = None,
+    keep: bool = False,
 ) -> dict:
     """Hear one stretch of a file or of a finished render again, to check a word, a line or the mix.
 
@@ -1718,6 +1720,11 @@ def listen_again(
     transcribes only that stretch of sound, from scratch: no prompt, no text
     before it. Where the two disagree, or the words come back unsure, believe
     neither — give the user `audio_path` to listen to and ask.
+
+    When a cut is refused for landing in a word the transcript placed wrong,
+    hear that stretch with `keep`: its word times are then what cuts in this
+    file are judged and moved by, in place of the transcript's. Only what was
+    heard is kept, never a time you write; the plans stay valid.
 
     Given a render's `job_id` instead of a file, it hears what the viewer
     will: whether a word was cut into at an edit, and, from `levels`, whether
@@ -1730,6 +1737,7 @@ def listen_again(
         asset_id: The file to hear. Give this or `job_id`.
         language: Spoken language code; omit to detect it.
         job_id: A finished render to hear, preview or full.
+        keep: For a file: keep these word times over the transcript's.
 
     Returns:
         A dictionary with `heard`, the new hearing with unsure words in ⟦ ⟧;
@@ -1737,8 +1745,8 @@ def listen_again(
         the sound's level in dBFS every `every_seconds` from `start` — speech
         sits well above a ducked bed, a gap is near -60; `audio_path`, a WAV of
         the stretch for the user to play; for a file, `stored`, what the
-        transcript says there, or null, and `agrees`, whether the two say the
-        same words; for a render, `captions`, the ones on screen in the
+        transcript says there, or null, `agrees`, whether the two say the
+        same words, and `kept` when `keep` was given; for a render, `captions`, the ones on screen in the
         stretch, and `changed_since`, true when the project has been edited
         since it was rendered.
 
@@ -1748,6 +1756,8 @@ def listen_again(
     """
     if (asset_id is None) == (job_id is None):
         raise ValueError("give either asset_id, to hear a file, or job_id, to hear a render")
+    if keep and job_id is not None:
+        raise ValueError("only what a file says is kept; a render is the cut, and is heard to check it")
     if job_id is not None:
         return _listen_to_render(job_id, start, end, language)
     asset = _get_asset(asset_id)
@@ -1769,11 +1779,20 @@ def listen_again(
                 if word.end > start and word.start < end]
         stored = "".join(said).strip() or None
     plain_heard = "".join(segment.text for segment in fresh.segments)
-    return {
+    result = {
         **_heard(fresh, keep_as, start),
         "stored": stored,
         "agrees": stored is not None and _bare_words(plain_heard) == _bare_words(stored),
     }
+    if keep:
+        if known is None or known.transcript is None:
+            raise ValueError(f"asset {asset_id} has no transcript to correct; analyze it first")
+        stretch = HeardAgain(start=start, end=end, words=[word for segment in fresh.segments for word in segment.words])
+        known.heard_again = [*(item for item in known.heard_again if item.end <= start or item.start >= end), stretch]
+        repo.save_analysis(known)
+        result["kept"] = (f"the word times heard from {start:g}s to {end:g}s are now what cuts in this file are "
+                          "judged by; check the cut again")
+    return result
 
 # Provisional (roadmap §13): how long each level `listen_again` reports covers — fine
 # enough to see a fade or a dip under a word, coarse enough that thirty seconds is sixty numbers.
@@ -5297,6 +5316,18 @@ def _analyses(project: Project, listened: bool = False) -> Dict[str, MediaAnalys
 BACKFILL_SECONDS = 600.0
 
 def _listened_to(analysis: MediaAnalysis, budget: List[float]) -> MediaAnalysis:
+    """A file's analysis as cuts are judged by: its second listen taken, its kept hearings put in.
+
+    Args:
+        analysis: The file's analysis.
+        budget: As for `_second_listened`.
+
+    Returns:
+        The analysis, with the word times of every stretch heard again and kept.
+    """
+    return with_words_heard_again(_second_listened(analysis, budget))
+
+def _second_listened(analysis: MediaAnalysis, budget: List[float]) -> MediaAnalysis:
     """Give a transcribed file its second listen, if it was analyzed before there was one.
 
     Once per file, and kept: it takes a few seconds for a short clip and

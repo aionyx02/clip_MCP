@@ -634,7 +634,7 @@ def timeline_input_hash(analyses: Mapping[str, MediaAnalysis]) -> str:
         "derivation_version": DERIVATION_VERSION,
         "analyses": {
             asset_id: hashlib.sha256(
-                analyses[asset_id].model_dump_json(exclude={"analyzed_at"}).encode("utf-8")
+                analyses[asset_id].model_dump_json(exclude={"analyzed_at", "heard_again"}).encode("utf-8")
             ).hexdigest()
             for asset_id in sorted(analyses)
         },

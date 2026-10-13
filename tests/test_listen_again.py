@@ -45,3 +45,29 @@ def test_only_a_short_stretch_is_heard_again(heard: dict) -> None:
         server.listen_again(asset_id=heard["asset"], start=0, end=45)
     with pytest.raises(ValueError, match="after"):
         server.listen_again(asset_id=heard["asset"], start=4, end=3)
+
+def test_a_stretch_heard_again_and_kept_is_what_cuts_are_judged_by(heard: dict) -> None:
+    from app.engine.semantic import timeline_input_hash
+
+    before = server.repo.get_analysis(heard["asset"])
+    found = server.listen_again(asset_id=heard["asset"], start=1.5, end=4.5, keep=True)
+    assert "check the cut again" in found["kept"]
+    after = server.repo.get_analysis(heard["asset"])
+    assert [(item.start, item.end) for item in after.heard_again] == [(1.5, 4.5)]
+    # The plans written against the footage still stand.
+    assert timeline_input_hash({heard["asset"]: after}) == timeline_input_hash({heard["asset"]: before})
+    # The transcript's 2.0–4.0s gives way to the 2.0–3.0s heard again, so a cut at 3.5s is clear of it.
+    words = [(word.start, word.end, word.text) for segment in analysis.with_words_heard_again(after).transcript.segments
+             for word in segment.words]
+    assert words == [(pytest.approx(2.0), pytest.approx(3.0), "沒那麼順")]
+    with pytest.raises(ValueError, match="only what a file says is kept"):
+        server.listen_again(job_id="any", start=0, end=1, keep=True)
+
+def test_a_stretch_where_nobody_was_heard_again_keeps_no_words() -> None:
+    made = MediaAnalysis(asset_id="x", duration=10.0, transcript=Transcript(language="zh", model="t", segments=[
+        TranscriptSegment(start=1.0, end=6.0, text="前面中間後面", words=[
+            TranscriptWord(start=1.0, end=2.0, text="前面"), TranscriptWord(start=3.0, end=4.0, text="中間"),
+            TranscriptWord(start=5.0, end=6.0, text="後面")]),
+    ]), heard_again=[{"start": 2.5, "end": 4.5, "words": []}])
+    (segment,) = analysis.with_words_heard_again(made).transcript.segments
+    assert [word.text for word in segment.words] == ["前面", "後面"]
