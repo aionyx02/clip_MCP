@@ -2187,16 +2187,17 @@ def test_a_piece_turned_down_on_purpose_is_not_joined_to_its_neighbour() -> None
     # They sit half a second apart and would otherwise be one shot, played at one level.
     assert [piece.gain for piece in pieces] == [1.0, 0.0]
 
-def test_the_pacing_speed_multiplies_a_selection_s_own() -> None:
+def test_a_selection_s_own_speed_is_not_multiplied_by_the_pacing_speed() -> None:
     by_id, children, assets, clips = covered()
     walk = next(clip for clip in clips if clip.asset_id == BROLL_ASSET)
-    plan = plan_for([Selection(clip_id=walk.id, beat_id="b1", speed=4.0)], pacing=Pacing(speed=1.5))
-    assert [piece.speed for piece in plan_pieces(plan, by_id, children, assets)] == [6.0]
-    plan.pacing.speed = 2.0
-    plan.selections[0].speed = 8.0
+    talk = speech_of(clips)[0]
+    plan = plan_for([Selection(clip_id=talk.id, beat_id="b1"), Selection(clip_id=walk.id, beat_id="b1", speed=8.0)],
+                    pacing=Pacing(speed=1.5))
+    # The talking takes the pacing; the timelapse keeps the x8 it was given, which x1.5 on top would take past x8.
+    assert [piece.speed for piece in plan_pieces(plan, by_id, children, assets)] == [1.5, 8.0]
     problems, _ = check_plan(plan, SemanticTimeline(id="tl_test", asset_ids=[], input_hash="hash", derivation_version=6),
                              by_id, children, assets)
-    assert any("x16" in problem for problem in problems)
+    assert not any("plays at" in problem for problem in problems)
 
 def joined(transition: Optional[BeatTransition], lead: Optional[float], opening: float) -> tuple:
     """Compile two beats, the second opening on silent picture at `opening` seconds into its file.
