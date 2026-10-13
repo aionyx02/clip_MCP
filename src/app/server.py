@@ -1824,8 +1824,9 @@ def _keep_hearing(known: MediaAnalysis, stretch: HeardAgain, agrees: bool) -> di
     if across:
         opens = min([stretch.start, *(word.start for word in across if word.start < stretch.start < word.end)])
         closes = max([stretch.end, *(word.end for word in across if word.start < stretch.end < word.end)])
-        # Rounded outward, so the stretch said takes the word in however long the file is.
-        opens, closes = math.floor(opens * 1000) / 1000, math.ceil(closes * 1000) / 1000
+        # Rounded outward, so the stretch said takes the word in however long the file is; snapped
+        # first, so a time already in whole milliseconds is not pushed into the next word.
+        opens, closes = math.floor(round(opens * 1000, 6)) / 1000, math.ceil(round(closes * 1000, 6)) / 1000
         return {"not_kept": f"the transcript has {'、'.join(word.text.strip() for word in across)} running across the "
                             f"edge of the stretch; hear {opens:.3f}s to {closes:.3f}s again with keep"}
     if not agrees:
