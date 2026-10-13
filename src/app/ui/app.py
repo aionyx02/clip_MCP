@@ -825,8 +825,9 @@ async def export(request: Request) -> Response:
     frame, captions = _export_settings(body)
     try:
         started = await run_in_threadpool(
-            server.render_project, project_id, False, server.DEFAULT_LOUDNESS_TARGET, captions, frame, True,
-            body.get("allow") or None,
+            # The user exporting by hand has watched the cut here; only the AI is held to a preview first.
+            server._start_render, project_id, False, server.DEFAULT_LOUDNESS_TARGET, captions, frame, True,
+            body.get("allow") or None, server.PREVIEW_SHORT_SIDE,
         )
     except ValueError as error:
         return _error(str(error))

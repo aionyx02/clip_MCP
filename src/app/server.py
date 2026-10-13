@@ -4941,7 +4941,7 @@ def _framing(project: Project, assets: Mapping[str, Asset], follow_faces: bool =
 @mcp.tool()
 def render_project(
     project_id: str,
-    is_preview: bool = False,
+    is_preview: bool = True,
     loudness_target: Annotated[Optional[float], Field(ge=-40, le=-5)] = DEFAULT_LOUDNESS_TARGET,
     burn_subtitles: bool = False,
     frame: Optional[Literal["landscape", "portrait", "square"]] = None,
@@ -4954,7 +4954,9 @@ def render_project(
     """Start rendering a project to an MP4 file in the background.
 
     Before a final render, read skill://clip-editing/platform-conventions.md;
-    after any render, look at it with `view_render`.
+    after any render, look at it with `view_render` and `inspect_join`. A
+    final render is refused until a preview of the cut as it is now, in the
+    same shape, has finished: that preview is what was looked at.
 
     Before anything is rendered the cut is checked the way `check_render`
     checks it, and a full render is refused while it finds anything: black
@@ -4971,8 +4973,8 @@ def render_project(
 
     Args:
         project_id: ID of the project to render.
-        is_preview: If true, render a fast preview, 480 pixels on its short
-            side, instead of the full-quality output. A preview renders each
+        is_preview: True, the default, renders a fast preview, 480 pixels on
+            its short side; false renders the full-quality output. A preview renders each
             clip's picture once and keeps it: after a change, only the clips
             the change touched are rendered again, so a second preview of a
             long cut takes a fraction of the first.
@@ -5018,10 +5020,34 @@ def render_project(
 
     Raises:
         ValueError: If the project does not exist, contains no clips, uses an
-            unsupported feature, or the check found something not allowed.
+            unsupported feature, has no finished preview of this version in
+            this shape for a final render, or the check found something not
+            allowed.
     """
+    if not is_preview and not _previewed(project_id, frame):
+        raise ValueError(
+            "no preview of the cut as it is now" + (f", {frame}," if frame else "") + " has finished: render one "
+            "with is_preview: true, look at it with view_render and inspect_join, then render the final cut"
+        )
     return _start_render(
         project_id, is_preview, loudness_target, burn_subtitles, frame, follow_faces, allow, PREVIEW_SHORT_SIDE,
+    )
+
+def _previewed(project_id: str, frame: Optional[str]) -> bool:
+    """Whether a preview of a project as it is now, in one shape, has finished.
+
+    Args:
+        project_id: The project.
+        frame: The shape, or None for the project's own.
+
+    Returns:
+        True when there is one; False too when the project does not exist,
+        which rendering says in its own words.
+    """
+    project = repo.get_project(project_id)
+    return project is not None and any(
+        job.preview and job.project_version == project.version and job.frame == frame
+        for job in repo.renders_of(project_id)
     )
 
 def _start_render(
@@ -5067,7 +5093,7 @@ def _start_render(
         _make_room()
     housekeeping.sweep_renders(WORKSPACE_DIR, _delivered)
     job = Job(kind=JobKind.RENDER, project_id=project_id, project_version=project.version, captioned=burn_subtitles,
-              preview=is_preview)
+              preview=is_preview, frame=frame)
     delivered: Optional[str] = None
     if is_preview:
         job.work_dir = os.path.join(housekeeping.preview_dir(WORKSPACE_DIR, project_id), job.job_id)

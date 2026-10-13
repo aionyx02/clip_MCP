@@ -9,7 +9,6 @@ from app.server import (
     WORKSPACE_DIR,
     apply_edits,
     create_project,
-    get_job,
     import_asset,
     render_project,
     storage_usage,
@@ -17,25 +16,9 @@ from app.server import (
 )
 from app.storage import housekeeping
 from app.workspace import output_dir
+from helpers import finished
 
 ANYTHING = ["bad_picture", "clipping", "music", "mid_speech", "repeated", "continuity", "unplanned", "captions", "length"]
-
-def finished(job: dict) -> dict:
-    """Wait for a render to end.
-
-    Args:
-        job: What `render_project` returned.
-
-    Returns:
-        The job as `get_job` reports it at the end.
-    """
-    deadline = time.monotonic() + 180
-    while time.monotonic() < deadline:
-        state = get_job([job["job_id"]])["jobs"][0]
-        if state["status"] in {"completed", "failed", "cancelled"}:
-            return state
-        time.sleep(0.3)
-    raise AssertionError(f"render {job['job_id']} did not finish")
 
 def one_clip_project(media: Path, name: str) -> str:
     """A project of one short clip, named.
@@ -109,8 +92,9 @@ def test_a_finished_video_is_saved_with_the_users_videos_and_its_working_files_g
     project = one_clip_project(media, "交付測試")
     # Earlier tests may have transcribed this footage, and a two-second cut ends mid-sentence;
     # what is checked here is where the file goes, not whether the cut is any good.
-    first = finished(render_project(project, allow=ANYTHING))
-    second = finished(render_project(project, allow=ANYTHING))
+    finished(render_project(project))
+    first = finished(render_project(project, is_preview=False, allow=ANYTHING))
+    second = finished(render_project(project, is_preview=False, allow=ANYTHING))
     assert first["status"] == second["status"] == "completed", (first, second)
     assert first["output_path"] == str(output_dir() / "交付測試.mp4")
     assert second["output_path"] == str(output_dir() / "交付測試 (2).mp4")
