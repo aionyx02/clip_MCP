@@ -454,6 +454,18 @@ def test_a_correction_said_to_be_for_every_project_is_remembered_and_named_where
     assert "大家都看得到的修正" in [cue["text"] for cue in made["cues"]]
     # Where it came from, so a line worded for that cut can be caught in this one.
     assert any(line.endswith("大家都看得到的修正 — 「測試」") for line in made["from_other_projects"])
+    # Captioned again where it was written, it is this project's own line, not another's.
+    assert caption(first)["from_other_projects"] == []
+
+def test_a_caption_kept_before_it_had_to_be_said_to_be_for_every_project_is_not_handed_on(spoken: str) -> None:
+    first = build_project([video_track(), insert("a", spoken, 0, 10)])
+    caption(first)
+    written = repo.get_project(first).subtitles[0]
+    # Stored the way every edit used to be: against the footage, with no project saying it was for all of them.
+    repo.remember_captions([written.model_copy(update={"text": "第三、四版"})])
+    assert repo.reviewed_captions(spoken) == []
+    second = build_project([video_track(), insert("a", spoken, 0, 10)])
+    assert "第三、四版" not in [cue["text"] for cue in caption(second)["cues"]]
 
 def test_storing_every_caption_at_once_keeps_them_to_this_project(spoken: str) -> None:
     first = build_project([video_track(), insert("a", spoken, 0, 10)])

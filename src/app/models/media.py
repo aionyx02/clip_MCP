@@ -301,7 +301,14 @@ class HeardAgain(BaseModel):
 
     start: float = Field(..., ge=0, description="Where the stretch starts, in seconds of the file")
     end: float = Field(..., gt=0, description="Where it ends")
-    words: List[TranscriptWord] = Field(default_factory=list, description="What was heard there; none is nobody")
+    sentences: List[TranscriptSegment] = Field(
+        default_factory=list, description="What was heard there, as the hearing split it; none is nobody",
+    )
+
+    @property
+    def words(self) -> List[TranscriptWord]:
+        """Every word heard in the stretch, in order."""
+        return [word for sentence in self.sentences for word in sentence.words]
 
 class MediaAnalysis(BaseModel):
     """Machine-readable description of an asset's content, used to plan edits."""

@@ -144,6 +144,18 @@ def test_analyzing_music_says_how_much_of_each_file_is_somebody_talking(media: P
     assert "sounds_like_speech" not in server.analyze_asset([song], again=True)["music"][0]
 
 
+def test_a_dry_run_sorts_nothing_and_says_what_music_sounds_like_speech(media: Path,
+                                                                      monkeypatch: pytest.MonkeyPatch) -> None:
+    song = server.import_asset(str(media / "song.mp3"))["id"]
+    server.repo.save_asset(server.repo.get_assets([song])[song].model_copy(update={"library": None}))
+    monkeypatch.setattr(server, "classify", lambda asset: pytest.fail("a dry run listened to sort the file"))
+    monkeypatch.setattr(server, "speech_share", lambda *_: 0.8)
+    found = server.analyze_asset([song], again=True, dry_run=True)
+    # Asked before anything starts, so a narration filed with the songs is moved before it is beat-tracked.
+    assert found["music"][0]["sounds_like_speech"] is True
+    assert server.repo.get_assets([song])[song].library is None
+
+
 def test_a_file_never_sorted_is_sorted_before_it_is_analyzed(media: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from app.models.job import Job, JobKind
 

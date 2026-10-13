@@ -411,6 +411,11 @@ class Repository:
     def reviewed_captions(self, asset_id: str) -> List[SubtitleCue]:
         """Read the captions kept for a file.
 
+        Only those said to be for every project, which carry the project they
+        were written in. One kept before a caption had to be said to be — when
+        every edit was remembered, words put to one cut among them — is left
+        out, and the footage's transcript fills its place again.
+
         Args:
             asset_id: The file.
 
@@ -418,7 +423,8 @@ class Repository:
             Its reviewed captions in source order; empty when there are none.
         """
         rows = self._query("SELECT data FROM reviewed_captions WHERE asset_id = ?", (asset_id,))
-        return [SubtitleCue.model_validate(item) for item in json.loads(rows[0][0])] if rows else []
+        kept = [SubtitleCue.model_validate(item) for item in json.loads(rows[0][0])] if rows else []
+        return [cue for cue in kept if cue.remembered_in is not None]
 
     def update_glossary(self, fixes: Mapping[str, str]) -> Dict[str, str]:
         """Add to or take from the words every transcript is corrected with.

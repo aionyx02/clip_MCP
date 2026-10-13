@@ -85,9 +85,9 @@ class SubtitleCue(BaseModel):
         description="Word timings inside this caption, in source seconds, for captions that light up word by "
                     "word. Empty is normal: a caption written by hand has none, and one lights up whole instead",
     )
-    remembered_from: Optional[str] = Field(
+    remembered_in: Optional[str] = Field(
         default=None,
-        description="For a caption remembered against its file: the project it was written in",
+        description="For a caption remembered against its file: the ID of the project it was written in",
     )
     local: bool = Field(
         default=False,
