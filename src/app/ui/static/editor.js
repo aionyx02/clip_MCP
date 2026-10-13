@@ -1194,8 +1194,9 @@
   // The words on a clip: a row each, the chosen one opened up to change.
   function textsGroup(clip) {
     if (clip.card) return "";
-    const open = (clip.texts || []).find((text) => text.id === E.selectedText);
-    const rows = (clip.texts || []).map((text) =>
+    const shown = (clip.texts || []).filter((text) => !text.hidden);
+    const open = shown.find((text) => text.id === E.selectedText);
+    const rows = shown.map((text) =>
       `<button class="btn small ${text.id === E.selectedText ? "primary" : ""}" data-text-pick="${esc(text.id)}">${esc(T.texts.styles[text.style])}・${esc(text.text)}</button>`).join("");
     const style = (value) => `<button class="${open?.style === value ? "on" : ""}" data-text-style="${value}">${esc(T.texts.styles[value])}</button>`;
     return `<div class="group edit-action"><div class="label">${esc(T.texts.title)}</div>
@@ -1241,7 +1242,7 @@
         $("[data-text-words]", E.root)?.select();
       }
     };
-    const open = (clip.texts || []).find((text) => text.id === E.selectedText);
+    const open = (clip.texts || []).find((text) => text.id === E.selectedText && !text.hidden);
     if (!open) return;
     const commit = (input, field) => {
       input.onchange = () => {
@@ -1263,7 +1264,7 @@
     };
   }
 
-  // Dragging the chosen words on the picture puts them where they are dropped, as free words.
+  // Dragging the chosen words on the picture moves them by as much as the pointer moved, in the style they have.
   function startTextDrag(event) {
     const clip = E.selected && findClip(E.selected.track, E.selected.clip);
     const text = clip?.texts?.find((item) => item.id === E.selectedText);
@@ -1273,17 +1274,19 @@
     if (!event_) return false;
     if (!E.textHinted) { E.textHinted = true; toast(T.texts.dragHint); }
     const stage = $("[data-stage]", E.root).getBoundingClientRect();
+    // Where the words are drawn now, which may be short of where they were put if that was out of bounds.
+    const from = event_.at;
     let moved = null;
     const move = (moveEvent) => {
-      moved = { x: clamp((moveEvent.clientX - stage.left) / stage.width, 0.02, 0.98),
-                y: clamp((moveEvent.clientY - stage.top) / stage.height, 0.02, 0.98) };
+      moved = { x: clamp(from.x + (moveEvent.clientX - event.clientX) / stage.width, 0, 1),
+                y: clamp(from.y + (moveEvent.clientY - event.clientY) / stage.height, 0, 1) };
       $("[data-stage]", E.root).style.cursor = "grabbing";
     };
     const up = () => {
       window.removeEventListener("pointermove", move);
       window.removeEventListener("pointerup", up);
       $("[data-stage]", E.root).style.cursor = "";
-      if (moved) textEdit(clip, "set_text", { text_id: text.id, style: "free",
+      if (moved) textEdit(clip, "set_text", { text_id: text.id,
         x: Math.round(moved.x * 1000) / 1000, y: Math.round(moved.y * 1000) / 1000 });
     };
     window.addEventListener("pointermove", move);

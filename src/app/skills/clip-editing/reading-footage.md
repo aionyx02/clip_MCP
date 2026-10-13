@@ -120,17 +120,19 @@ for what it started.
 - **High tier:** analyze with the default, accurate transcription; no need to
   ask about speed.
 - **Low tier, or mid tier with more than about an hour of footage:** call
-  `analyze_asset` with `dry_run: true` — it starts nothing and returns both
-  choices' times for these files — and ask once. The fast choice is about
-  twice as quick and mishears noticeably more, and its word timings are
-  looser, so a cut lands less exactly:
-  「這台電腦沒有可用的 NVIDIA 顯示卡，這批 2 小時的影片精準聽打大約要 20 到 80 分鐘；快速聽打大約一半時間，但錯字比較多、剪接點比較不準。要用哪一種？」
-  Pass `transcription: "fast"` only on their answer, or unasked when they
-  already said they want it quick.
+  `analyze_asset` with `dry_run: true` — it starts nothing and returns each
+  choice's time for these files — and ask once. Fast is about twice as quick
+  and mishears noticeably more, with looser word timings, so a cut lands
+  less exactly; balanced is fast and then the lines it was unsure of heard
+  again by the accurate model, most of the accuracy for a little more time:
+  「這台電腦沒有可用的 NVIDIA 顯示卡，這批 2 小時的影片精準聽打大約要 20 到 80 分鐘；快速聽打大約一半時間，但錯字比較多、剪接點比較不準；折衷是先快速聽，再把沒把握的句子用精準模型重聽，時間比快速多一點。要用哪一種？」
+  Pass `transcription: "fast"` or `"balanced"` only on their answer, or
+  unasked when they already said they want it quick.
 - **One person talking on a low-tier computer** (a vlog, a talking head): also
   suggest `diarize: false`, which saves the minutes spent telling voices
   apart when there is only one voice.
-- A file with a fast transcript is upgraded by asking for accurate again —
+- A file with a fast transcript is upgraded by asking for balanced (only
+  its unsure lines are heard again, cheaply) or accurate (all of it) —
   offer that when the user wants a cut exact to the word or captions they
   will not proofread.
 

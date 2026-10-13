@@ -243,7 +243,8 @@ def check_delivery(
         shown += [(clip, []) for clip in track.clips if clip.layout is None]
     for clip, hidden_by in sorted(shown, key=lambda item: item[0].timeline_in):
         analysis = analyses.get(clip.asset_id)
-        if analysis is None:
+        # A title card's source range is only its length, not a stretch of its file that plays.
+        if analysis is None or clip.card is not None:
             continue
         for span in sorted([*analysis.black_frames, *analysis.frozen_frames], key=lambda item: item.start):
             landed = _on_timeline(clip, span.start, span.end)
@@ -397,7 +398,8 @@ def _inside_speech(analysis: MediaAnalysis, at: float, opens: bool) -> bool:
         True inside a word, or between two words of one sentence closer
         together than a pause, or where sound the transcript missed runs
         right up to the cut on the side it keeps out. Never inside a measured
-        silence of `CLEAN_SILENCE_SECONDS` or more.
+        silence of `CLEAN_SILENCE_SECONDS` or more, nor where the second
+        listen hears nobody, whatever the word timings say.
     """
     if any(span.start <= at <= span.end and span.end - span.start >= CLEAN_SILENCE_SECONDS
            for span in analysis.silences):
@@ -405,6 +407,8 @@ def _inside_speech(analysis: MediaAnalysis, at: float, opens: bool) -> bool:
     known = clean_cuts(analysis)
     if (known.sound_before(at) if opens else known.sound_after(at)) is not None:
         return True
+    if known.quiet_on_second_listen(at):
+        return False
     for segment in _said(analysis):
         if not segment.start < at < segment.end:
             continue
@@ -485,14 +489,23 @@ def _speech_cuts(clips: Sequence[Clip], analyses: Mapping[str, MediaAnalysis]) -
                         f"sound was measured. {move} at {edge:.2f}s of the file to keep all of it"
                     )))
                 continue
-            near = [point for point in _clean_points(analysis) if abs(point - at) <= CLEAN_SEARCH_SECONDS]
-            advice = (
-                f"; the nearest pause is at {min(near, key=lambda point: abs(point - at)):.2f}s of the file"
-                if near else ""
-            )
+            known = clean_cuts(analysis)
+            really = known.sound_before(at) if opens else known.sound_after(at)
+            lost = known.heard_cut_off(at, opens)
+            if really is not None:
+                # What the sound says beats the nearest pause in a transcript that got this wrong.
+                advice = f"; the talking really {'starts' if opens else 'stops'} at {really:.2f}s of the file"
+            else:
+                near = [point for point in _clean_points(analysis) if abs(point - at) <= CLEAN_SEARCH_SECONDS]
+                advice = (
+                    f"; the nearest pause is at {min(near, key=lambda point: abs(point - at)):.2f}s of the file"
+                    if near else ""
+                )
             found.append(Finding("mid_speech", (
                 f"clip {clip.id} {side} in the middle of somebody talking, at {clock(landed)} "
-                f"({at:.2f}s of the file){advice}"
+                f"({at:.2f}s of the file)"
+                + (f", and takes 「{lost}」 off, heard on a second listen" if lost else "")
+                + advice
             )))
     return found
 
@@ -507,7 +520,9 @@ def _out_of_time(project: Project, recorded: Mapping[str, datetime]) -> List[Fin
         One finding per stray run of clips.
     """
     base = project.base_video_track
-    clips = sorted(base.clips if base else [], key=lambda clip: clip.timeline_in)
+    # A title card was shot at no moment: it borrows a frame, and stands between the shots either side.
+    clips = sorted((clip for clip in (base.clips if base else []) if clip.card is None),
+                   key=lambda clip: clip.timeline_in)
     parts = {float(marker.timeline_in) for marker in project.markers}
     shots = [
         Shot(
@@ -535,7 +550,8 @@ def _repeats(clips: Sequence[Clip]) -> List[Finding]:
         replay — which is why it is a finding and not a refusal.
     """
     found: List[Finding] = []
-    ordered = sorted(clips, key=lambda item: item.timeline_in)
+    # A title card's source range is only its length, so it shows nothing of its file twice.
+    ordered = sorted((clip for clip in clips if clip.card is None), key=lambda item: item.timeline_in)
     for index, first in enumerate(ordered):
         for second in ordered[index + 1:]:
             if first.asset_id != second.asset_id:

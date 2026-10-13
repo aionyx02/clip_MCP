@@ -109,3 +109,12 @@ def test_a_card_can_stand_on_a_photo(media: Path, tmp_path: Path) -> None:
     corner = extract_frame(str(out), 1.0, max_size=320).getpixel((5, 5))
     # Green, a little darkened so white words read on it.
     assert corner[1] > corner[0] + 60 and corner[1] < 160
+
+
+def test_a_card_on_a_named_colour_is_drawn_in_it() -> None:
+    from app.engine.cards import backdrop_filter
+    from app.models.timeline import TitleCard
+    card = TitleCard(title="x", background="colour", colour="black")
+    assert "color=black@1" in backdrop_filter(card, 1920, 1080)
+    card = TitleCard(title="x", background="colour", colour="#102030")
+    assert "color=0x102030@1" in backdrop_filter(card, 1920, 1080)

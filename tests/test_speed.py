@@ -58,12 +58,12 @@ def test_only_the_latest_runs_are_kept(repo: Repository) -> None:
 def test_with_nothing_measured_the_hardware_table_is_used_and_called_rough(repo: Repository) -> None:
     found = speed.estimate(repo, computer("mid"), {"accurate": 7200}, speakers=True)
     assert found["basis"] == speed.ROUGH
-    assert found["transcription_minutes"] == [20, 80]
+    assert found["transcription_minutes"] == [40, 160]  # the transcription and its second listen
     assert found["speakers_minutes"] == [6, 16]
 
 def test_a_low_tier_has_no_upper_bound_until_measured(repo: Repository) -> None:
     found = speed.estimate(repo, computer("low"), {"accurate": 3600}, speakers=False)
-    assert found["transcription_minutes"] == [30, None]
+    assert found["transcription_minutes"] == [60, None]
     assert found["speakers_minutes"] is None
 
 def test_fast_is_shorter_by_the_table(repo: Repository) -> None:
@@ -73,14 +73,14 @@ def test_fast_is_shorter_by_the_table(repo: Repository) -> None:
 
 def test_a_batch_of_both_kinds_adds_up(repo: Repository) -> None:
     both = speed.estimate(repo, computer("mid"), {"accurate": 3600, "fast": 3600}, False)
-    assert both["transcription_minutes"] == [15, 60]
+    assert both["transcription_minutes"] == [30, 120]
 
 def test_once_measured_the_median_of_recent_runs_is_used_with_room_to_spare(repo: Repository) -> None:
     for seconds in (600, 900, 1200):  # half, three quarters and all of a twenty-minute file
         speed.record(repo, [measured(seconds=seconds)], media_seconds=1200, computer=COMPUTER)
     found = speed.estimate(repo, computer("low"), {"accurate": 3600}, speakers=False)
     assert found["basis"] == speed.MEASURED
-    assert found["transcription_minutes"] == [45, 68]
+    assert found["transcription_minutes"] == [90, 135]
 
 def test_runs_on_another_device_or_model_do_not_count(repo: Repository) -> None:
     speed.record(repo, [measured(device="cuda")], media_seconds=1200, computer=COMPUTER)
@@ -124,7 +124,7 @@ def test_the_instructions_use_this_computers_runs_once_there_are_some(repo: Repo
     assert speed.ROUGH in machine.describe(here, speed.estimate(repo, here, {"accurate": 3600}, False))
     speed.record(repo, [measured(seconds=120)], media_seconds=1200, computer=COMPUTER)
     told = machine.describe(here, speed.estimate(repo, here, {"accurate": 3600}, False))
-    assert speed.MEASURED in told and "6 to 9 minutes" in told
+    assert speed.MEASURED in told and "12 to 18 minutes" in told
 
 def test_a_finished_analysis_leaves_its_speed_behind_and_a_failed_one_does_not(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,

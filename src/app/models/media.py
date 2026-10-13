@@ -75,6 +75,31 @@ class TranscriptSegment(BaseModel):
     text: str
     words: List[TranscriptWord] = Field(default_factory=list)
 
+class HeardWord(BaseModel):
+    """A word the second listen heard, with how sure the recogniser was of it."""
+
+    start: float
+    end: float
+    text: str
+    probability: float
+
+class SecondListen(BaseModel):
+    """What a file sounds like to an ear that never read its transcript.
+
+    The transcript is one long decode: every word is placed with the words
+    around it in mind, and now and then a word is placed late, stretched
+    across a pause, or left out. A cut made on those timings takes a syllable
+    off without anything noticing. This is the check on it: a voice detector
+    that only listens, and the voiced stretches transcribed again one at a
+    time with nothing said before them to lean on.
+    """
+
+    voiced: List[Span] = Field(default_factory=list, description="Where the voice detector hears somebody talking")
+    words: List[HeardWord] = Field(
+        default_factory=list, description="Every word heard transcribing each voiced stretch on its own",
+    )
+    model: str = Field(..., description="Voice detector and speech model it was listened with")
+
 class Transcript(BaseModel):
     """Speech transcribed from a media file."""
 
@@ -296,5 +321,10 @@ class MediaAnalysis(BaseModel):
     )
     transcript: Optional[Transcript] = None
     music: Optional[MusicSense] = Field(default=None, description="For a song: its mood, style and energy")
+    second_listen: Optional[SecondListen] = Field(
+        default=None,
+        description="The talking listened to again without the transcript, to check where it really starts and "
+                    "stops. Null when it has not been listened to, which is not the same as nobody talking",
+    )
     recipe: AnalysisRecipe = Field(default_factory=AnalysisRecipe, description="What produced this analysis")
     analyzed_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))

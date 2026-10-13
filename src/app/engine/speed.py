@@ -31,6 +31,9 @@ HOUR_MINUTES = {"high": (3, 10), "mid": (10, 40), "low": (30, None)}
 # accurate one, for the same table, until a fast one has been measured here. Measured
 # 1.9 to 2.3 on the processor of the same computer.
 FAST_SPEEDUP = 2
+# Provisional (roadmap §13): how much of a fast transcript a balanced one hears again with the
+# accurate model — the share of the talking in lines it was unsure of. Unmeasured.
+BALANCED_SHARE = 0.25
 # Provisional (roadmap §13): minutes an hour of footage takes to tell the voices apart,
 # by tier, before anything has been measured. It runs on the processor everywhere, so the
 # card does not help; measured about 5 minutes an hour on an i7-14700HX.
@@ -116,9 +119,9 @@ def estimate(repo: Repository, here: Machine, footage: Dict[str, float], speaker
     Args:
         repo: Where past runs are kept.
         here: This computer.
-        footage: Seconds of footage by transcription choice, `accurate` and
-            `fast`; a batch can hold both, when some files keep the accurate
-            transcript they already have.
+        footage: Seconds of footage by transcription choice, `accurate`,
+            `fast` and `balanced`; a batch can hold several, when some files
+            keep the better transcript they already have.
         speakers: Whether the voices will be told apart too.
 
     Returns:
@@ -127,7 +130,16 @@ def estimate(repo: Repository, here: Machine, footage: Dict[str, float], speaker
         for; and `basis`, measured only when every figure was.
     """
     low, high, all_measured = 0.0, 0.0, True
+    # A balanced transcription is a fast one over everything and an accurate one over a share of it.
+    # Every one is then listened to a second time over all of it, with the model it ended with:
+    # the talking is most of what is heard either way, so the whole length is the honest figure.
+    passes: List[Tuple[str, float]] = []
     for transcription, seconds in footage.items():
+        if transcription == "balanced":
+            passes += [("fast", seconds), ("accurate", seconds * BALANCED_SHARE), ("accurate", seconds)]
+        else:
+            passes += [(transcription, seconds), (transcription, seconds)]
+    for transcription, seconds in passes:
         if not seconds:
             continue
         table = HOUR_MINUTES[here.tier]
