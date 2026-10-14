@@ -27,7 +27,9 @@ from typing import AbstractSet, Dict, Iterable, List, Mapping, Optional, Sequenc
 from app.engine.continuity import Shot, strays
 from app.engine.music import MIDDLE, energy_at, fullest
 from app.models.media import Asset
-from app.models.plan import STRUCTURES, Beat, BeatRole, EditPlan, MusicCue, Selection, Structure, TrimKind
+from app.models.plan import (
+    STRUCTURES, Beat, BeatRole, EditPlan, MusicCue, Selection, Structure, TrimKind, short_clip_ids,
+)
 from app.engine.semantic import EDGE_TOLERANCE_SECONDS, CleanCuts
 from app.models.semantic import ClipKind, SemanticClip, SemanticTimeline
 from app.models.timeline import MAX_SPEED, MIN_SPEED, Clip, Project, TitleCard, card_background
@@ -2981,13 +2983,14 @@ def _text_operations(
             if text.by_plan or key in carried:
                 continue
             carried.add(key)
-            kept.add(text.id)
+            # Named with the whole clip ID before they were named as the AI is shown them.
+            kept.add(short_clip_ids(text.id))
             fields = {"text": text.text, "second": text.second, "style": text.style, "x": text.x, "y": text.y,
                       "hidden": text.hidden}
             for track_id, clip_id, asset_id, start, end, _ in made:
                 low, high = max(start, float(text.start)), min(end, float(text.end))
                 if asset_id == clip.asset_id and high > low:
-                    put(track_id, clip_id, text.id, low, high, fields)
+                    put(track_id, clip_id, short_clip_ids(text.id), low, high, fields)
 
     for selection in plan.selections:
         if not selection.texts:
@@ -2998,7 +3001,9 @@ def _text_operations(
             # Named by its words, not its place in the list: a copy changed or taken off by hand
             # stands in for exactly these words, and new words the plan is given come in beside it.
             words = hashlib.sha1(f"{text.text}\n{text.second or ''}".encode("utf-8")).hexdigest()[:8]
-            text_id = f"plan-{selection.clip_id}-{words}"
+            # The clip as the AI is shown it: everything said back has the timeline taken off clip
+            # IDs, so a text named with the whole one could never be named back.
+            text_id = f"plan-{short_clip_ids(selection.clip_id)}-{words}"
             if text_id in kept:
                 continue
             fields = {"text": text.text, "second": text.second, "style": text.style, "x": text.x, "y": text.y,
