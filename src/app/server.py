@@ -4,6 +4,7 @@ import math
 import os
 from datetime import datetime, timezone
 import re
+import secrets
 import shutil
 import subprocess
 import threading
@@ -27,8 +28,8 @@ from mcp.types import TextContent
 from pydantic import BaseModel, Field, TypeAdapter
 from app.models.media import Asset, HeardAgain, Measured, MediaAnalysis, Source, Span, SpeakerTurn, Transcript
 from app.models.plan import (
-    EditPlan, PlanAmendment, Trim, TrimKind, apply_amendment, describe_amendment, short_clip_ids, whole_clip_id,
-    with_whole_clip_ids,
+    EditPlan, MusicCue, PlanAmendment, SetMusicCueOp, Trim, TrimKind, apply_amendment, describe_amendment,
+    short_clip_ids, whole_clip_id, with_whole_clip_ids,
 )
 from app.models.semantic import (
     ClipDescription, ClipKind, ClipLevel, SectionChoice, SemanticClip, SemanticTimeline, Tag, TagSource,
@@ -44,14 +45,18 @@ from app.models.timeline import (
     SetCaptionStyleOp,
     SetSubtitlesOp,
     SubtitleCue,
+    TimeRange,
+    Track,
     TrackType,
     retimed_words,
     apply_operation,
     validate_project,
 )
-from app.models.comment import Comment, Reply
+from app.models.comment import Comment, Preference, Question, Reply
+from app.models.offer import TRIAL_VOLUME, OfferedSong, SongOffer
+from app.models.trial import Trial, Verdict
 from app.models.job import Job, JobKind, JobStatus
-from app.engine import cards, texts, loudness, machine, meaning, resources, speed, stills
+from app.engine import cards, texts, looks, loudness, machine, meaning, resources, speed, stills
 from app.engine.analysis import listen_again as listen_again_in_file
 from app.engine.analysis import (
     BALANCED_JOIN, current_recipe, doubtful_spots, marked_text, marked_words, second_listen, sound_note,
@@ -70,7 +75,7 @@ from app.engine.semantic import (
     build_timeline, clean_cuts, content_scores, join_voices, timeline_input_hash, was_made_up,
 )
 from app.engine.ffmpeg import graph_from_file, hidden_window_flags
-from app.engine.probe import picture_size, probe_file, recorded_at, speech_loudness, timecode_start
+from app.engine.probe import picture_size, probe_file, recorded_at, rights_tags, speech_loudness, timecode_start
 from app.engine.reframe import Framing, frame_project, placement_at
 from app.engine import playback
 from app.engine.library import FOLDER_KINDS, FOOTAGE, LIBRARIES, MUSIC, SPEECH_SHARE, classify, library_of, speech_share
@@ -84,10 +89,11 @@ from app.engine.compare import compare
 from app.engine.compare import parts_of as cut_parts
 from app.engine.merge import WHOLE_PICKS, merge, merge_plans
 from app.engine.delivery import (
-    CHECKS, Finding, chapter_metadata, chapters, check_delivery, clock, cover_candidates,
+    CHECKS, Finding, chapter_metadata, chapters, check_delivery, clock, cover_candidates, frames_around, light_steps,
+    look_candidates, marked_parts, on_screen, rights_facts,
 )
-from app.engine.joins import HeardWord, Join, joins_in, words_heard
-from app.engine.frames import format_timestamp, still, storyboard_sheet
+from app.engine.joins import HeardWord, Join, joins_in, pause_across, words_heard
+from app.engine.frames import feed_preview, format_timestamp, still, storyboard_sheet
 from app.engine.interchange import write_edl, write_fcpxml, write_otio, write_srt
 from app.engine.listen import WINDOW_SECONDS, chart, cut_sound, describe, levels, levels_every, parts_of
 from app.engine.subtitles import (
@@ -576,6 +582,7 @@ def register_asset(filepath: str, library: Optional[str] = None) -> Asset:
     asset.recorded_at = recorded_at(info, path)
     if existing is not None:
         asset.notes = existing.notes
+        asset.licence = existing.licence
         asset.library = existing.library
         asset.source = existing.source
     if library in LIBRARIES:
@@ -1039,6 +1046,91 @@ def music_credits(project_id: str) -> dict:
         if asset.source.personal_only:
             personal.append(asset.source.title)
     return {"credits": credits, "personal_only": personal, "unknown": unknown}
+
+@mcp.tool()
+def export_notices(
+    project_id: str,
+    text: Optional[str] = None,
+    licences: Optional[Dict[str, str]] = None,
+    next_to: Optional[str] = None,
+) -> dict:
+    """Write what the user has to take care of before publishing a cut, as a text file.
+
+    Call it after the final render, twice. The first time, without `text`, it
+    says what is in the cut that may need permission or has to be disclosed —
+    the music under it, where each song came from and what each file says
+    about itself, other voices, more than one face on screen — and nothing is
+    written. Write the notices from that, in the user's language, and call
+    again with `text`: for each thing, what the concern is and how to resolve
+    it (the credit line a CC BY song needs, a source to confirm for music
+    whose licence nobody gave, the consent of somebody heard or seen). Add
+    what you see in the frames and hear in the footage that no measurement
+    finds: a brand or a logo, music playing in the room, a screen, somebody's
+    work shown. Say plainly where a question is the user's to answer rather
+    than yours. `music_credits` gives the credit lines alone.
+
+    Args:
+        project_id: ID of the project.
+        text: The notices, as the user should read them. Leave it out to be
+            told what they have to cover.
+        licences: Where each file came from and what it may be used for, as
+            the user told you, keyed by asset ID — such as "Kevin MacLeod,
+            incompetech.com, CC BY 4.0". Kept with the file, so the next
+            video that uses it already knows.
+        next_to: The rendered file the notices go with; they are written
+            beside it. Left out, they go to the videos folder, named after
+            the project.
+
+    Returns:
+        `facts`, what the notices have to cover; and once `text` is given,
+        `output_path`, the file written — the text followed by those facts,
+        so none of them can be left out.
+
+    Raises:
+        ValueError: If the project, or a file named in `licences`, does not exist.
+    """
+    project = repo.get_project(project_id)
+    if not project:
+        raise ValueError(f"project {project_id} not found")
+    assets = _referenced_assets(project)
+    # Every file looked up before any is written, so a refusal changes nothing.
+    named = {asset_id: assets.get(asset_id) or repo.get_assets([asset_id]).get(asset_id) for asset_id in licences or {}}
+    unknown = [asset_id for asset_id, asset in named.items() if asset is None]
+    if unknown:
+        raise ValueError(f"asset {', '.join(unknown)} not found; no licence was kept")
+    for asset_id, licence in (licences or {}).items():
+        asset = named[asset_id].model_copy(update={"licence": licence.strip() or None})
+        repo.save_asset(asset)
+        assets[asset_id] = asset
+    tags: Dict[str, Dict[str, str]] = {}
+    for asset_id, asset in assets.items():
+        try:
+            tags[asset_id] = rights_tags(probe_file(asset.path))
+        except (OSError, RuntimeError, ValueError):
+            tags[asset_id] = {}
+    facts = rights_facts(project, _analyses(project), assets, tags)
+    listed = [
+        " | ".join([fact.kind, fact.subject, ", ".join(f"{clock(start)}–{clock(end)}" for start, end in fact.spans),
+                    *fact.detail])
+        for fact in facts
+    ]
+    if text is None:
+        return {"facts": listed, "written": False, "next": (
+            "Write the notices from these facts and what you saw and heard in the cut, in the user's language, "
+            "and call again with `text`" + ("" if next_to else " and `next_to` the rendered file")
+        )}
+    if next_to:
+        if not os.path.isdir(os.path.dirname(os.path.abspath(next_to))):
+            raise ValueError(f"there is no folder for {next_to}; give the rendered file's path")
+        stem, _ = os.path.splitext(next_to)
+        path = housekeeping.unique_path(os.path.dirname(os.path.abspath(next_to)), f"{os.path.basename(stem)}_notices.txt")
+    else:
+        path = housekeeping.unique_path(str(output_dir()), _delivery_name(project, "notices", ".txt"))
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    # With a byte-order mark and Windows line ends, so Notepad opens it right.
+    with open(path, "w", encoding="utf-8-sig", newline="\r\n") as out:
+        out.write(text.rstrip() + "\n\n---\n" + "\n".join(listed or ["(nothing found)"]) + "\n")
+    return {"facts": listed, "written": True, "output_path": path}
 
 def _folder_kind(library: str) -> str:
     """The kind of folder a library's files are filed in."""
@@ -2225,6 +2317,74 @@ def build_semantic_timeline(asset_ids: List[str], rebuild: bool = False) -> dict
     }
 
 @mcp.tool()
+def list_timelines() -> dict:
+    """List every timeline built, newest first, to find the old ones to clear away.
+
+    A timeline is built for each set of files, so the same footage built with
+    one file more or less is another timeline, numbered afresh. They pile up;
+    a clip's short ID then means a clip in each of them.
+
+    Returns:
+        `timelines`, each with its ID, when it was built, its files, how many
+        clips it has, `plans` built on it now and `past`, older versions of
+        plans that were. One with neither can go with `delete_timelines`.
+    """
+    names = {asset.id: os.path.basename(asset.path) for asset in repo.list_assets()}
+    return {"timelines": [
+        {
+            "timeline_id": timeline.id,
+            "built_at": timeline.built_at.astimezone().strftime("%Y-%m-%d %H:%M"),
+            "files": [names.get(asset_id, asset_id) for asset_id in timeline.asset_ids],
+            "clips": clips,
+            "plans": plans,
+            "past": [f"{plan_id} v{version}" for plan_id, version in past],
+        }
+        for timeline, clips, plans, past in repo.list_semantic_timelines()
+    ]}
+
+@mcp.tool()
+def delete_timelines(timeline_ids: List[str], with_past_versions: bool = False) -> dict:
+    """Delete timelines no plan is built on, with their clips and search vectors.
+
+    The files and their analyses stay: building a timeline over the same files
+    again makes it again. A cut already made keeps its clips; what it loses is
+    only the footage's descriptions `read_cut` reads.
+
+    Args:
+        timeline_ids: The timelines, as `list_timelines` gives them.
+        with_past_versions: Delete one older versions of a plan were built on
+            too; going back to those versions then needs `copy_plan` onto a
+            timeline that is still there. Only once the user has said so.
+
+    Returns:
+        `deleted`, the timelines deleted.
+
+    Raises:
+        ValueError: If a timeline does not exist, a plan is built on it now,
+            or older versions of one were and `with_past_versions` is off.
+            Nothing is deleted then.
+    """
+    known = {timeline.id: (plans, past) for timeline, _, plans, past in repo.list_semantic_timelines()}
+    problems = []
+    for timeline_id in timeline_ids:
+        if timeline_id not in known:
+            problems.append(f"there is no timeline {timeline_id}")
+            continue
+        plans, past = known[timeline_id]
+        if plans:
+            problems.append(f"{timeline_id} has {', '.join(plans)} built on it; copy_plan it onto another timeline first")
+        elif past and not with_past_versions:
+            problems.append(
+                f"{timeline_id} has older versions built on it ({', '.join(f'{plan} v{version}' for plan, version in past)}); "
+                "going back to them would need copy_plan. Delete it anyway with with_past_versions once the user says so"
+            )
+    if problems:
+        raise ValueError("nothing deleted: " + "; ".join(problems))
+    for timeline_id in dict.fromkeys(timeline_ids):
+        repo.delete_semantic_timeline(timeline_id)
+    return {"deleted": list(dict.fromkeys(timeline_ids))}
+
+@mcp.tool()
 def query_clips(
     timeline_id: Optional[str] = None,
     level: ClipLevel = ClipLevel.UTTERANCE,
@@ -2931,7 +3091,7 @@ def view_frames(
 @mcp.tool()
 def view_render(
     job_id: str,
-    at: Literal["even", "captions"] = "even",
+    at: Literal["even", "captions", "spots"] = "even",
     times: Optional[List[Annotated[float, Field(ge=0)]]] = None,
     start: Annotated[float, Field(ge=0)] = 0,
     end: Optional[float] = None,
@@ -2952,7 +3112,9 @@ def view_render(
     Args:
         job_id: The render, preview or full, from `render_project`.
         at: `even` spreads `count` frames over the stretch; `captions` takes
-            one from the middle of each caption on screen.
+            one from the middle of each caption on screen; `spots` takes, for
+            each stretch reading every frame found black, frozen or a flash,
+            the frame before it, its middle and the frame after.
         times: Exact seconds of the render to look at instead.
         start: Only look from here, in seconds of the render.
         end: Only look up to here; omit for the end.
@@ -2975,6 +3137,20 @@ def view_render(
     wanted: List[tuple] = []
     if times:
         wanted = [(seconds, "") for seconds in times]
+    elif at == "spots":
+        if job.spots is None:
+            said.append("this render was not read frame by frame — the check failed or was stopped — so nothing "
+                        "is known about black, frozen or flashing frames in it; render again to have it read")
+        elif not job.spots:
+            said.append("every frame of this render was read and nothing was found black, frozen or a flash")
+        step = 1 / (project.fps_num / project.fps_den) if project is not None else 0.04
+        for spot in job.spots or []:
+            begin, finish = float(spot["start"]), float(spot["end"])
+            if finish <= start or (last is not None and begin >= last):
+                continue
+            name = f"{spot['kind']} {begin:.2f}–{finish:.2f}s"
+            wanted += [(max(0.0, begin - step), f"{name}, the frame before"), ((begin + finish) / 2, f"{name}, middle"),
+                       (finish + step, f"{name}, the frame after")]
     elif at == "captions":
         if not job.captioned:
             said.append("this render has no captions burned in; render with burn_subtitles to look at them")
@@ -3105,7 +3281,9 @@ def inspect_join(
     Returns:
         The list; or for each join its frames, a row before the cut and a row
         from it with the two either side framed red; the transcribed words
-        laid onto the render's time, ✂ on any a cut takes into; the render's
+        laid onto the render's time, ✂ on any a cut takes into; where a line
+        ends and another begins across the cut, the pause between them beside
+        the pauses the speaker makes between sentences; the render's
         sound level every 0.1s with ‖ at the cut; and a WAV of the stretch to
         play or hear again with `listen_again`. It says when the project has
         changed since the render, and which joins did not fit on the sheet.
@@ -3171,10 +3349,16 @@ def inspect_join(
                 borders.append(CUT_BORDER if index == edge else None)
         opened, closed = max(0.0, join.at - seconds), min(length, join.at + seconds)
         keep_as = os.path.join(WORKSPACE_DIR, "temp", "joins", f"render-{job_id[:8]}-{join.at:.2f}.wav")
+        heard = words_heard(project, analyses, opened, closed)
         text += [
             _join_line(number, join, _found_at(join, findings)),
             f"  frames: a row of {steps + 1} up to the cut, then {steps + 1} from it",
-            "  words: " + _words_across(join, words_heard(project, analyses, opened, closed)),
+            "  words: " + _words_across(join, heard),
+        ]
+        pause = pause_across(join.at, heard, analyses)
+        if pause:
+            text.append("  pause: " + pause)
+        text += [
             "  levels: " + _levels_across(path, join, opened, closed, keep_as),
         ]
     return ToolResult(content=[
@@ -3209,7 +3393,8 @@ def create_project(
 
     Returns:
         The new project serialized as a dictionary, including its generated
-        `id` and initial `version`.
+        `id` and initial `version`, and `preferences`: how the user likes
+        their videos, as they said it on earlier ones — cut it that way.
     """
     if not name.strip():
         raise ValueError("a project needs a name: what the video is about, such as 'EP1 台北'")
@@ -3218,7 +3403,14 @@ def create_project(
         width=width, height=height, fps_num=fps_num, fps_den=fps_den,
     )
     repo.add_project(project)
-    return _plain(project.model_dump())
+    return _with_preferences(_plain(project.model_dump()))
+
+def _with_preferences(result: dict) -> dict:
+    """Add how the user likes their videos to what a tool says, when anything is kept."""
+    kept = repo.preferences()
+    if kept:
+        result["preferences"] = [{"id": preference.id, "text": preference.text} for preference in kept]
+    return result
 
 @mcp.tool()
 def list_projects() -> dict:
@@ -3226,12 +3418,13 @@ def list_projects() -> dict:
 
     Returns:
         A dictionary with a `projects` list, each item holding a project's
-        `id`, its `name` if it was given one, and its current `version`.
+        `id`, its `name` if it was given one, and its current `version`; and
+        `preferences`, how the user likes their videos, when any are kept.
     """
-    return {"projects": [
+    return _with_preferences({"projects": [
         {"id": project.id, "name": project.name, "version": project.version}
         for project in repo.list_projects()
-    ]}
+    ]})
 
 @mcp.tool()
 def get_project(project_id: str, include_subtitles: bool = False) -> dict:
@@ -3250,7 +3443,8 @@ def get_project(project_id: str, include_subtitles: bool = False) -> dict:
 
     Returns:
         The project serialized as a dictionary, including `duration`, the
-        length of the edited video in seconds, and `subtitle_count`.
+        length of the edited video in seconds, and `subtitle_count`; and
+        `preferences`, how the user likes their videos, when any are kept.
 
     Raises:
         ValueError: If no project with `project_id` exists.
@@ -3281,7 +3475,7 @@ def get_project(project_id: str, include_subtitles: bool = False) -> dict:
         state["subtitles"] = [cue.model_dump() for cue in project.subtitles]
     else:
         state.pop("subtitles", None)
-    return _plain(state)
+    return _with_preferences(_plain(state))
 
 @mcp.tool()
 def apply_edits(project_id: str, expected_version: int, operations: list[EditOperation], note: str = "") -> dict:
@@ -5083,10 +5277,8 @@ def render_project(
     burn_subtitles: bool = False,
     frame: Optional[Literal["landscape", "portrait", "square"]] = None,
     follow_faces: bool = True,
-    allow: Optional[List[Literal[
-        "bad_picture", "clipping", "music", "mid_speech", "repeated", "continuity", "unplanned", "captions",
-        "length",
-    ]]] = None,
+    # Every kind of finding the check makes, from the check's own list, so a new one can always be allowed.
+    allow: Optional[List[Literal[CHECKS]]] = None,
 ) -> dict:
     """Start rendering a project to an MP4 file in the background.
 
@@ -5454,12 +5646,16 @@ def _plan_target(project: Project) -> Optional[float]:
         The plan's target length, or None when the sequence did not all come
         from one plan or that plan named no length.
     """
+    plan = _compiled_plan(project)
+    return plan.target.seconds if plan is not None else None
+
+def _compiled_plan(project: Project) -> Optional[EditPlan]:
+    """The plan a project's whole sequence was compiled from; None when it did not all come from one."""
     base = project.base_video_track
     compiled_from = {clip.from_plan_id for clip in base.clips} if base else set()
     if len(compiled_from) != 1 or None in compiled_from:
         return None
-    plan = repo.get_plan(next(iter(compiled_from)))
-    return plan.target.seconds if plan is not None else None
+    return repo.get_plan(next(iter(compiled_from)))
 
 def _findings(project: Project, burn_subtitles: bool) -> list:
     """Check a cut before it is rendered.
@@ -5472,11 +5668,45 @@ def _findings(project: Project, burn_subtitles: bool) -> list:
         What `delivery.check_delivery` finds.
     """
     placed = place_cues(project, project.subtitles) if burn_subtitles and project.subtitles else None
-    dated = _dated(_referenced_assets(project))
+    assets = _referenced_assets(project)
+    dated = _dated(assets)
+    analyses = _analyses(project, listened=True)
     return check_delivery(
-        project, _analyses(project, listened=True), _plan_target(project), placed, project.caption_style,
+        project, analyses, _plan_target(project), placed, project.caption_style,
         _talking(project, _voices(project)), {asset_id: asset.recorded_at for asset_id, asset in dated.items()},
+        _looks(look_candidates(project, analyses), assets),
     )
+
+def _looks(clips: Sequence[Clip], assets: Mapping[str, Asset]) -> Dict[str, Tuple[int, ...]]:
+    """Fingerprint clips at `looks.SAMPLES`, reading only the frames not fingerprinted before.
+
+    Args:
+        clips: The clips.
+        assets: Their files, keyed by asset ID.
+
+    Returns:
+        The fingerprints by clip ID, for the clips whose file has a picture to read.
+    """
+    found: Dict[str, Tuple[int, ...]] = {}
+    for asset_id in {clip.asset_id for clip in clips}:
+        asset = assets.get(asset_id)
+        if asset is None or not asset.has_video or not os.path.exists(asset.path):
+            continue
+        kept = repo.looks(asset_id)
+        new: Dict[float, int] = {}
+        for clip in (clip for clip in clips if clip.asset_id == asset_id):
+            start, length = float(clip.source_range.start), float(clip.source_range.end - clip.source_range.start)
+            moments = [round(start + length * share, 1) for share in looks.SAMPLES]
+            try:
+                for at in moments:
+                    if at not in kept and at not in new:
+                        new[at] = looks.look_of(asset.path, at)
+            except RuntimeError:
+                continue
+            found[clip.id] = tuple(kept.get(at, new.get(at)) for at in moments)
+        if new:
+            repo.save_looks(asset_id, new)
+    return found
 
 @mcp.tool()
 def check_render(
@@ -5487,13 +5717,15 @@ def check_render(
     """Check a cut for what would be noticed in the finished file, without rendering it.
 
     The same check `render_project` runs first and refuses a render over. It
-    looks for nine things: `bad_picture`, black or frozen source picture that
+    looks for ten things: `bad_picture`, black or frozen source picture that
     reaches the screen; `clipping`, a recording squared off at the ceiling,
     which no amount of turning down undoes; `music`, music heard too close
     under somebody talking; `mid_speech`, a cut that lands
     inside a word or between two words of one phrase, or takes the start or
     the end off a sound the microphone measured, with where to move it; `repeated`, the same stretch of a file shown twice;
-    `continuity`, a clip put on by hand between two shot at another
+    `look_alike`, two clips from different files that look so alike, with
+    nothing said or written over them, that a viewer could not tell which is
+    which; `continuity`, a clip put on by hand between two shot at another
     moment; `unplanned`, a sequence of three or more clips put together by hand
     rather than compiled from a plan, so nothing says how it opens, turns
     and ends; `captions`, a caption too tall for
@@ -5510,7 +5742,11 @@ def check_render(
 
     Returns:
         A dictionary with `ok` and `findings`, each with its `check` and a
-        `message` saying what and where.
+        `message` saying what and where; and `light`, where the picture jumps
+        in brightness or colour from one shot to the next within a part, with
+        the adjustment that would even it out. `light` never stops a render:
+        a jump may be the point. Offer the adjustment, and check again once
+        it is set.
 
     Raises:
         ValueError: If the project does not exist.
@@ -5519,10 +5755,84 @@ def check_render(
     if not project:
         raise ValueError(f"project {project_id} not found")
     findings = _findings(_reshaped(project, frame), burn_subtitles)
-    return {
+    checked = {
         "ok": not findings,
         "findings": [{"check": finding.check, "message": finding.message} for finding in findings],
     }
+    light = light_steps(project, _analyses(project))
+    if light:
+        checked["light"] = light
+    return checked
+
+@mcp.tool()
+def read_cut(project_id: str) -> dict:
+    """Read a cut back as a script: every shot in the order it plays, as a viewer meets it.
+
+    The checks find what is wrong with a cut mechanically — a black frame, a
+    cut inside a word. Whether the story holds is read, not measured: a line
+    that says why somebody did something, landing after what they did, passes
+    every check. Read this through before a final render and tell the user the
+    story in a few sentences, as it plays, so they can say where it goes wrong.
+
+    Args:
+        project_id: The project.
+
+    Returns:
+        `script`: one line per shot of the sequence — when it plays, the part
+        of the video it is in, the clip and what is on screen (the footage's
+        description, or its file), what is said over it, the captions shown
+        and the words on screen; what plays over it on a track above is under
+        it, indented.
+    """
+    project = repo.get_project(project_id)
+    if not project:
+        raise ValueError(f"project {project_id} not found")
+    base = project.base_video_track
+    if base is None or not base.clips:
+        raise ValueError(f"project {project_id} has nothing on its sequence to read")
+    assets = _referenced_assets(project)
+    parts = marked_parts(project)
+    placed = place_cues(project, project.subtitles) if project.subtitles else []
+
+    def seen(clip: Clip) -> str:
+        if clip.card is not None:
+            return f"card 「{clip.card.title}」" + (f" 「{clip.card.subtitle}」" if clip.card.subtitle else "")
+        described = [repo.get_semantic_clip(clip_id) for clip_id in clip.from_clip_ids]
+        words = "; ".join(found.description for found in described if found is not None and found.description)
+        asset = assets.get(clip.asset_id)
+        name = os.path.basename(asset.path) if asset is not None else clip.asset_id
+        return f"{name} {float(clip.source_range.start):.1f}–{float(clip.source_range.end):.1f}s" + (
+            f": {words}" if words else "")
+
+    def line(clip: Clip) -> str:
+        start, end = float(clip.timeline_in), float(clip.timeline_out)
+        parts = [f"{clock(start)}–{clock(end)}", f"clip {clip.id}", seen(clip)]
+        said = "" if clip.card is not None or clip.volume == 0 else _said_between(
+            clip.asset_id, float(clip.source_range.start), float(clip.source_range.end))
+        if said:
+            parts.append(f"said: 「{said}」")
+        shown = [cue.text for cue in placed if float(cue.start) < end and float(cue.end) > start]
+        if shown:
+            parts.append("captions: " + " / ".join(dict.fromkeys(shown)))
+        if clip.shown_texts:
+            parts.append("on screen: " + " / ".join(text.text for text in clip.shown_texts))
+        return " | ".join(parts)
+
+    script: List[str] = []
+    part = None
+    above = [clip for track in project.video_tracks[1:] for clip in track.clips]
+    for clip in sorted(base.clips, key=lambda clip: clip.timeline_in):
+        now = next((marker.name for opens, _, marker in reversed(parts) if opens <= float(clip.timeline_in)), None)
+        if now != part and now is not None:
+            script.append(f"== {now}")
+            part = now
+        script.append(line(clip))
+        for over in sorted((other for other in above
+                            if other.timeline_in < clip.timeline_out and other.timeline_out > clip.timeline_in
+                            and clip.timeline_in <= other.timeline_in),
+                           key=lambda other: other.timeline_in):
+            script.append("    over it: " + line(over))
+    return {"project_id": project_id, "version": project.version, "script": script}
 
 @mcp.tool()
 def get_chapters(project_id: str) -> dict:
@@ -5561,47 +5871,94 @@ def propose_covers(
     project_id: str,
     frame: Optional[Literal["landscape", "portrait", "square"]] = None,
     follow_faces: bool = True,
+    per_shot: Annotated[int, Field(ge=1, le=4)] = 1,
+    around: Optional[Annotated[float, Field(ge=0)]] = None,
+    part: Optional[str] = None,
 ) -> ToolResult:
-    """Offer frames of the cut as cover or thumbnail candidates, one per shot.
+    """Lay out frames of the cut for you to choose a cover or thumbnail from.
 
-    Which frame makes the cover is a judgement, so this only narrows the
-    field: a frame per shot, never one of black or frozen picture, each the
-    moment its shot's measurements favour — the largest face, or where nobody
-    is seen, the sharpest stretch. Look at the sheet, pick with the user, and
-    save the one they choose with `export_cover`.
+    Choosing is yours, not this tool's: the cover has to show what the video
+    is about, and nothing measured here knows that. So the listing opens with
+    what the plan says the video is for and its parts, and every frame comes
+    with what is being said over it. Pick the frame that shows the video's
+    point — the thing it is about, the result it leads to — and that reads at
+    a glance at the size a feed shows it: one subject, large in the frame,
+    sharp, uncluttered, a face with its eyes open if there is one. Then look
+    closer: call again with `around` set to that moment to see the frames
+    either side of it, and choose the exact one. Offer the user your best one
+    or two with the reason for each, and save the one they choose with
+    `export_cover`.
 
     Args:
         project_id: ID of the project.
         frame: Crop the candidates to another shape, as it would be rendered.
         follow_faces: Crop around the face, as the render does.
+        per_shot: How many moments to offer from each shot: the one its
+            measurements favour and others spread through it.
+        around: A moment of the cut, in seconds, to look at closely instead:
+            every quarter second for two seconds either side of it.
+        part: Only the frames of one part of the cut, by its name or the ID
+            of the beat it came from — the payoff, where the point of the
+            video usually is, or any part a long cut's sheet had no room for.
 
     Returns:
-        A listing — each candidate's number, time in the cut and clip — and
-        the candidates as one labeled image.
+        What the video is for, a listing — each candidate's number, time in
+        the cut, clip and what is said then — and the candidates as one
+        labeled image.
 
     Raises:
-        ValueError: If the project does not exist or has nothing to offer.
+        ValueError: If the project or the part does not exist, or there is
+            nothing to offer.
     """
     project = repo.get_project(project_id)
     if not project:
         raise ValueError(f"project {project_id} not found")
     project = _reshaped(project, frame)
-    offered = cover_candidates(project, _analyses(project))[:MAX_STORYBOARD_TILES]
+    analyses = _analyses(project)
+    if around is None:
+        offered = [
+            (clip, seconds, float(clip.timeline_in) + (seconds - float(clip.source_range.start)) / clip.speed)
+            for clip, seconds in cover_candidates(project, analyses, per_shot)
+        ]
+    else:
+        offered = frames_around(project, analyses, around)
+    if part is not None:
+        parts = marked_parts(project)
+        span = next(((opens, closes) for opens, closes, marker in parts
+                     if part in (marker.name, marker.id, marker.from_beat_id)), None)
+        if span is None:
+            raise ValueError(f"no part called {part!r}; the parts are: "
+                             f"{', '.join(marker.name for _, _, marker in parts) or 'none'}")
+        opens, closes = span
+        offered = [item for item in offered if opens <= item[2] < closes]
     if not offered:
         raise ValueError(f"project {project_id} has no picture to take a cover from")
+    left_out = max(0, len(offered) - MAX_STORYBOARD_TILES)
+    offered = offered[:MAX_STORYBOARD_TILES]
     assets = _referenced_assets(project)
     framing = _framing(project, assets, follow_faces)
     fps = Fraction(project.fps_num, project.fps_den)
+    said = place_cues(project, project.subtitles) if project.subtitles else []
     shots, listing = [], []
-    for number, (clip, seconds) in enumerate(offered, start=1):
-        at = float(clip.timeline_in) + (seconds - float(clip.source_range.start)) / clip.speed
-        framed = framing.get(clip.id)
+    for number, (clip, seconds, at) in enumerate(offered, start=1):
         shots.append((assets[clip.asset_id].path, seconds, f"#{number}  {format_timestamp(at)}",
-                      placement_at(framed, clip, seconds, fps)))
-        listing.append(f"#{number}: edit {at:.3f}s ({format_timestamp(at)}) | clip {clip.id}")
-    header = f"{len(offered)} cover candidate(s) for project {project_id}, {project.width}x{project.height}:"
+                      placement_at(framing.get(clip.id), clip, seconds, fps)))
+        words = next((cue.text for cue in said if float(cue.start) <= at < float(cue.end)), "")
+        listing.append(f"#{number}: edit {at:.3f}s ({format_timestamp(at)}) | clip {clip.id}"
+                       + (f" | 「{words}」" if words else ""))
+    header = [f"{len(offered)} cover candidate(s) for project {project_id}, {project.width}x{project.height}"
+              + (f", around {around:g}s" if around is not None else "") + ":"]
+    plan = _compiled_plan(project)
+    if plan is not None and (plan.goal or plan.beats):
+        parts = " → ".join(beat.name or beat.id for beat in plan.beats)
+        header.insert(0, "What the video is for: " + (plan.goal or "(no goal written)")
+                      + (f"\nIts parts: {parts}" if parts else ""))
+    else:
+        header.insert(0, "No plan says what this video is for; ask the user what it is about before choosing.")
+    if left_out:
+        header.append(f"{left_out} more were left out, from the end of the cut; ask for one `part` at a time.")
     return ToolResult(content=[
-        "\n".join([header, *listing]),
+        "\n".join([*header, *listing]),
         Image(data=storyboard_sheet(shots, aspect=project.width / project.height), format="jpeg"),
     ])
 
@@ -5609,45 +5966,46 @@ def propose_covers(
 def export_cover(
     project_id: str,
     seconds: Annotated[float, Field(ge=0)],
+    reason: Annotated[str, Field(min_length=1)],
     frame: Optional[Literal["landscape", "portrait", "square"]] = None,
     follow_faces: bool = True,
-) -> dict:
+) -> ToolResult:
     """Save one frame of the cut as a full-size JPEG, for a cover or thumbnail.
 
     The frame is the one the viewer sees at that moment — covering picture
     where there is some — at the size the cut is rendered at and cropped the
-    way the render crops it.
+    way the render crops it. It comes back at the size a feed shows it too,
+    and for a vertical cut cropped to the 3:4 middle a profile grid shows:
+    look at both before telling the user it is done, and choose again if the
+    subject is lost at that size or falls outside the middle.
 
     Args:
         project_id: ID of the project.
         seconds: The moment in the cut, as `propose_covers` lists it.
+        reason: Why this frame: what of the video's point it shows, and why
+            it reads at a glance. Written for the user, who decides.
         frame: Save it in another shape.
         follow_faces: Crop around the face, as the render does.
 
     Returns:
-        A dictionary with the `output_path` of the JPEG and its `width` and
-        `height`.
+        The `output_path` of the JPEG, its `width` and `height`, the reason,
+        and the cover at feed size.
 
     Raises:
-        ValueError: If the project does not exist or nothing is on screen then.
+        ValueError: If the project does not exist, nothing is on screen then,
+            or what is on screen is a title card.
     """
     project = repo.get_project(project_id)
     if not project:
         raise ValueError(f"project {project_id} not found")
     project = _reshaped(project, frame)
-    on_screen = [
-        clip for track in project.video_tracks for clip in track.clips
-        if (track is project.base_video_track or clip.layout is None)
-        and float(clip.timeline_in) <= seconds < float(clip.timeline_out)
-    ]
-    if not on_screen:
+    clip = on_screen(project, seconds)
+    if clip is None:
         raise ValueError(f"nothing is on screen at {seconds:g}s of project {project_id}")
-    # The topmost full-frame picture is what the viewer sees.
-    clip = on_screen[-1]
-    assets = _referenced_assets(project)
-    source = float(clip.source_range.start) + (seconds - float(clip.timeline_in)) * clip.speed
     if clip.card is not None:
         raise ValueError(f"{seconds:g}s of project {project_id} is a title card; take the cover from a shot")
+    assets = _referenced_assets(project)
+    source = float(clip.source_range.start) + (seconds - float(clip.timeline_in)) * clip.speed
     framed = _framing(project, assets, follow_faces).get(clip.id)
     fps = Fraction(project.fps_num, project.fps_den)
     picture = still(assets[clip.asset_id].path, source, project.width, project.height,
@@ -5656,7 +6014,16 @@ def export_cover(
     os.makedirs(folder, exist_ok=True)
     path = housekeeping.unique_path(folder, _delivery_name(project, "cover" + (f"-{frame}" if frame else ""), ".jpg"))
     picture.save(path, "JPEG", quality=92)
-    return {"output_path": path, "width": project.width, "height": project.height}
+    saved = {"output_path": path, "width": project.width, "height": project.height, "reason": reason}
+    grid = ", and the 3:4 middle a profile grid crops a vertical video to" if project.height > project.width else ""
+    return ToolResult(
+        content=[
+            f"Saved {path} ({project.width}x{project.height}). Why: {reason}\n"
+            f"Below: the cover at the size a feed shows it{grid}.",
+            Image(data=feed_preview(picture), format="jpeg"),
+        ],
+        structured_content=saved,
+    )
 
 def _timecodes(assets: Mapping[str, Asset]) -> Dict[str, float]:
     """Read the timecode each file starts at, for an editing program to line it up by.
@@ -6712,6 +7079,8 @@ def _comment_said(project: Project, comment: Comment) -> dict:
         if comment.start_anchor else None
     return {
         "id": comment.id, "text": comment.text, "by": comment.by, "status": comment.status,
+        **({"question": True, "answered": comment.answered}
+           if comment.question else {}),
         "at": clock(now["start"]) + (f"–{clock(now['end'])}" if now["end"] is not None else ""),
         "start": now["start"], "end": now["end"], "clip_id": now["clip_id"], "gone": now["gone"],
         "file": os.path.basename(asset.path) if asset else None,
@@ -6727,13 +7096,511 @@ def _comment_said(project: Project, comment: Comment) -> dict:
 def open_comments(project_id: str) -> int:
     """How many things the user said about a project are still waiting.
 
+    A question the AI asked waits on the user until they answer it, so it is
+    not counted before then.
+
     Args:
         project_id: The video.
 
     Returns:
         The number of open comments.
     """
-    return sum(comment.status == "open" for comment in repo.comments(project_id))
+    return sum(comment.waiting for comment in repo.comments(project_id))
+
+# How far either side of the problem a judge sees, for whether the change broke what is
+# around it. Provisional.
+TRIAL_MARGIN_SECONDS = 2.0
+
+def _render_length(path: str) -> Optional[float]:
+    """How long a rendered file runs, or None when it cannot be read."""
+    try:
+        return float(probe_file(path)["format"]["duration"])
+    except (OSError, RuntimeError, KeyError, ValueError):
+        return None
+
+def _trial_dir(trial_id: str) -> str:
+    """Where a trial keeps its own copies of the two renders."""
+    return os.path.join(WORKSPACE_DIR, "trials", trial_id)
+
+@mcp.tool()
+def start_trial(
+    project_id: str,
+    before_job: str,
+    problem: Annotated[str, Field(min_length=1)],
+    hypothesis: Annotated[str, Field(min_length=1)],
+    expected: Annotated[str, Field(min_length=1)],
+    at: Annotated[float, Field(ge=0)],
+    end: Annotated[float, Field(gt=0)],
+    evidence: str = "",
+) -> dict:
+    """Put a change you are about to make to a blind test, before you make it.
+
+    Whoever makes a change reads the result through their own reason for it,
+    and says it worked. So when you change a cut to fix something — your own
+    check found it, or the user's feedback — write the problem down first:
+    where it is, what shows it, what you will change and what should be better.
+    Then change the cut, render a preview and give it with `trial_candidate`;
+    the two are handed over blind as X and Y with `trial_pack`; and only the
+    verdict in `judge_trial` says whether the change is kept.
+
+    Args:
+        project_id: The video.
+        before_job: A finished render of the cut before the change. A copy is
+            kept, since a newer preview replaces it.
+        problem: What is wrong and where, as it was seen or heard.
+        hypothesis: What you will change and why it should help. Never shown
+            to whoever judges.
+        expected: What should be better afterwards. Never shown either.
+        at: Where the problem starts in that render, in seconds.
+        end: Where it ends.
+        evidence: What shows it — a join's words and levels from
+            `inspect_join`, a comment, a finding.
+
+    Returns:
+        The trial's `trial_id`, and what to do next.
+
+    Raises:
+        ValueError: If the render is not a finished one of this project, or
+            the stretch is outside it.
+    """
+    job, path = _finished_render(before_job)
+    if job.project_id != project_id:
+        raise ValueError(f"render {before_job} is not of project {project_id}")
+    length = _render_length(path)
+    if end <= at or (length is not None and end > length + 0.05):
+        raise ValueError(f"the stretch {at:g}–{end:g}s is not in the {length or 0:.1f}s render")
+    trial = Trial(id="t" + uuid.uuid4().hex[:7], project_id=project_id, problem=problem.strip(),
+                  evidence=evidence.strip(), hypothesis=hypothesis.strip(), expected=expected.strip(),
+                  at=at, end=end, before_job=before_job, before_version=job.project_version)
+    os.makedirs(_trial_dir(trial.id), exist_ok=True)
+    shutil.copyfile(path, os.path.join(_trial_dir(trial.id), "before.mp4"))
+    repo.save_trial(trial)
+    return {"trial_id": trial.id, "next": (
+        "make the change, render a preview of it, and give it with `trial_candidate`")}
+
+@mcp.tool()
+def trial_candidate(
+    trial_id: str,
+    after_job: str,
+    candidate_at: Optional[Annotated[float, Field(ge=0)]] = None,
+    candidate_end: Optional[Annotated[float, Field(gt=0)]] = None,
+) -> dict:
+    """Give a trial the render of the cut after the change.
+
+    Args:
+        trial_id: The trial, from `start_trial`.
+        after_job: A finished render of the cut after the change.
+        candidate_at: Where the same stretch starts in it, when the change
+            moved it; the same seconds as before when not given.
+        candidate_end: Where it ends.
+
+    Returns:
+        What to do next: who judges it.
+
+    Raises:
+        ValueError: If the trial does not exist or has been judged, or the
+            render is not a finished one of the same project after the first.
+    """
+    trial = repo.trial(trial_id)
+    if trial is None:
+        raise ValueError(f"there is no trial {trial_id}")
+    if trial.verdict is not None:
+        raise ValueError(f"trial {trial_id} has been judged; start another")
+    job, path = _finished_render(after_job)
+    if (job.project_id != trial.project_id or after_job == trial.before_job
+            or (job.project_version or 0) <= (trial.before_version or 0)):
+        raise ValueError(f"render {after_job} is not a render of project {trial.project_id} made after the change; "
+                         f"the cut before was version {trial.before_version}")
+    shutil.copyfile(path, os.path.join(_trial_dir(trial.id), "after.mp4"))
+    trial.after_job, trial.after_version = after_job, job.project_version
+    trial.candidate_at = trial.at if candidate_at is None else candidate_at
+    trial.candidate_end = trial.end if candidate_end is None else candidate_end
+    trial.candidate_is = secrets.choice(["X", "Y"])
+    repo.save_trial(trial)
+    return {"trial_id": trial.id, "next": (
+        "have it judged by someone who has not seen the change: start a fresh subagent with no part in this "
+        "conversation, give it only `trial_pack` and ask which of X and Y handles the problem better and which, "
+        "if either, breaks what is around it; or show the pack to the user. Then record it with `judge_trial`. "
+        "Judging it yourself is not blind — you know which you made — and the record says so")}
+
+@mcp.tool()
+def trial_pack(trial_id: str) -> ToolResult:
+    """Hand over the two versions of a trial blind, as X and Y, for someone to judge.
+
+    It holds the problem and its evidence, and for each of X and Y the frames
+    of the stretch and a little either side, and its sound to hear — nothing
+    that says which is the change or why it was made. Give it to whoever
+    judges, as it is.
+
+    Args:
+        trial_id: The trial.
+
+    Returns:
+        The problem and evidence, where each sound file is, and the frames of
+        X above Y.
+
+    Raises:
+        ValueError: If the trial does not exist or has no candidate yet.
+    """
+    trial = repo.trial(trial_id)
+    if trial is None:
+        raise ValueError(f"there is no trial {trial_id}")
+    if trial.candidate_is is None:
+        raise ValueError(f"trial {trial_id} has no change to compare yet; `trial_candidate` gives it one")
+    folder = _trial_dir(trial.id)
+    files = {"before": (os.path.join(folder, "before.mp4"), trial.at, trial.end),
+             "after": (os.path.join(folder, "after.mp4"), trial.candidate_at, trial.candidate_end)}
+    labels = {trial.candidate_is: "after", ("Y" if trial.candidate_is == "X" else "X"): "before"}
+    per_side = MAX_STORYBOARD_TILES // 2
+    shots, lines = [], [f"The problem: {trial.problem}"]
+    if trial.evidence:
+        lines.append(f"What shows it: {trial.evidence}")
+    lines.append(f"Below, X above Y: the same stretch in two versions of the cut, with {TRIAL_MARGIN_SECONDS:g}s "
+                 "either side. Say which handles the problem better, or that neither does, and which, if either, "
+                 "makes what is around it worse.")
+    for label in ("X", "Y"):
+        path, start, finish = files[labels[label]]
+        length = _render_length(path) or finish
+        opened, closed = max(0.0, start - TRIAL_MARGIN_SECONDS), min(length, finish + TRIAL_MARGIN_SECONDS)
+        step = (closed - opened) / (per_side - 1)
+        for index in range(per_side):
+            moment = round(min(opened + index * step, length - 0.05), 3)
+            shots.append((path, moment, f"{label} {moment - start:+.1f}s"))
+        heard = os.path.join(folder, f"{label}.wav")
+        try:
+            cut_sound(path, opened, closed, heard)
+            lines.append(f"{label} sound: {heard}")
+        except RuntimeError:
+            lines.append(f"{label} has no sound here")
+    return ToolResult(content=["\n".join(lines), Image(data=storyboard_sheet(shots, columns=per_side // 2),
+                                                         format="jpeg")])
+
+@mcp.tool()
+def judge_trial(
+    trial_id: str,
+    better: Literal["X", "Y", "same"],
+    broke: Literal["neither", "X", "Y", "both"],
+    why: Annotated[str, Field(min_length=1)],
+    judged_by: Literal["subagent", "user", "same_ai"],
+) -> dict:
+    """Write down the verdict on a trial, and only then hear which was the change.
+
+    Args:
+        trial_id: The trial.
+        better: Which handles the problem better, as whoever judged said; `same`
+            when neither does.
+        broke: Which, if either, they said makes what is around the problem
+            worse. Only the change breaking something counts against it.
+        why: What they saw and heard, in their words.
+        judged_by: `subagent` for a fresh one that saw none of the change,
+            `user`, or `same_ai` when you judged it yourself — which is not
+            blind, and the record says so.
+
+    Returns:
+        `change_was`, the change's label; `keep`, `change` only when it made
+        the problem better and broke nothing, otherwise `original` — then put
+        the cut back with `restore_version` to the version before; and the
+        trial as recorded.
+
+    Raises:
+        ValueError: If the trial does not exist, has no change yet, or was
+            judged already.
+    """
+    trial = repo.trial(trial_id)
+    if trial is None:
+        raise ValueError(f"there is no trial {trial_id}")
+    if trial.candidate_is is None:
+        raise ValueError(f"trial {trial_id} has no change to judge yet")
+    if trial.verdict is not None:
+        raise ValueError(f"trial {trial_id} was judged already: {trial.verdict.better}")
+    trial.verdict = Verdict(better=better, broke=broke, why=why.strip(), judged_by=judged_by)
+    repo.save_trial(trial)
+    shutil.rmtree(_trial_dir(trial.id), ignore_errors=True)
+    keep = "change" if better == trial.candidate_is and broke not in (trial.candidate_is, "both") else "original"
+    said = {
+        "change_was": trial.candidate_is, "keep": keep, "blind": judged_by != "same_ai",
+        "trial": _trial_said(trial),
+    }
+    if keep == "original":
+        said["next"] = (f"the change is not kept: put the cut back as it was in version {trial.before_version} with "
+                        "`project_history` and `restore_version`, and tell the user what was tried and why it was not "
+                        "kept")
+    return said
+
+def _trial_said(trial: Trial) -> dict:
+    """A trial as it is read back."""
+    said = {"trial_id": trial.id, "problem": trial.problem, "hypothesis": trial.hypothesis,
+            "expected": trial.expected, "before_version": trial.before_version, "after_version": trial.after_version}
+    if trial.verdict is not None:
+        said["verdict"] = {"better": trial.verdict.better, "change_was": trial.candidate_is,
+                           "broke": trial.verdict.broke, "why": trial.verdict.why,
+                           "judged_by": trial.verdict.judged_by}
+    return said
+
+@mcp.tool()
+def get_trials(project_id: str) -> dict:
+    """Read back the changes to a video that were tried blind, and what came of each.
+
+    Args:
+        project_id: The video.
+
+    Returns:
+        `trials`, oldest first: the problem, what was changed and expected,
+        and the verdict with who gave it.
+    """
+    return {"trials": [_trial_said(trial) for trial in repo.trials(project_id)]}
+
+@mcp.tool()
+def ask_user(project_id: str, questions: Annotated[List[Question], Field(min_length=1, max_length=8)]) -> dict:
+    """Put what you are not sure of about a cut to the user, each on the moment it is about.
+
+    The checks say whether something is wrong; none says whether it is good —
+    whether four seconds of opening hook anybody, whether a 57-second test
+    loses them. Do not settle those by yourself: after a preview, ask about
+    the few you weighed and could not decide, with why. Each shows in the
+    editor as a question on its moment of the cut, and the answer comes back
+    as a reply to it in `get_comments`. When an answer says how the user
+    likes their videos in general, not only this one, `remember_preference`.
+
+    Args:
+        project_id: The video.
+        questions: Each with where it is (`start`, and `end` for a stretch),
+            the `question` in the user's language and `why` it is in doubt.
+
+    Returns:
+        The questions as `get_comments` shows them.
+
+    Raises:
+        ValueError: If the project does not exist.
+    """
+    project = repo.get_project(project_id)
+    if project is None:
+        raise ValueError(f"project {project_id} not found")
+    asked = []
+    length = float(project.duration)
+    for question in questions:
+        if question.start > length or (question.end is not None and not (
+                question.start + SHORTEST_STRETCH_SECONDS <= question.end <= length + 0.001)):
+            raise ValueError(f"「{question.question[:20]}」 is asked at {question.start:g}"
+                             + (f"–{question.end:g}" if question.end is not None else "")
+                             + f"s, which is not a moment or a stretch of the {length:.1f}s cut; nothing was asked")
+    for question in questions:
+        end = question.end
+        comment = Comment(
+            id="c" + uuid.uuid4().hex[:7], project_id=project_id, by=f"AI（{_calling_client.get()}）",
+            text=question.question.strip() + (f"\n（{question.why.strip()}）" if question.why.strip() else ""),
+            commit=_current_commit(project_id), question=True,
+            start=round(question.start, 3), end=round(end, 3) if end is not None else None,
+            start_anchor=anchor_at(project, question.start),
+            end_anchor=anchor_at(project, end) if end is not None else None,
+        )
+        repo.save_comment(comment, f"AI 問：{question.question[:30]}")
+        asked.append(_comment_said(project, comment))
+    return {"asked": asked}
+
+@mcp.tool()
+def remember_preference(text: Annotated[str, Field(min_length=1, max_length=300)],
+                        project_id: Optional[str] = None) -> dict:
+    """Keep how the user likes their videos, for every project after this one.
+
+    Only what the user said, in their words — 「開場不要超過三秒」, 「不要用
+    轉場」 — and only when it is about their videos in general rather than
+    this cut. What is kept comes back with `list_projects`, `create_project`
+    and `get_project`, so the next video starts from it. Read it back to them
+    when you keep it.
+
+    Args:
+        text: The preference, as they said it.
+        project_id: The video it was said about, if one.
+
+    Returns:
+        `kept`, the preference with its `id`; and `preferences`, all of them.
+    """
+    preference = Preference(id="p" + uuid.uuid4().hex[:7], text=text.strip(), project_id=project_id)
+    repo.save_preference(preference)
+    return _with_preferences({"kept": {"id": preference.id, "text": preference.text}})
+
+@mcp.tool()
+def forget_preference(preference_id: str) -> dict:
+    """Stop keeping a preference, when the user says it no longer holds.
+
+    Args:
+        preference_id: Its ID, from `preferences` in `list_projects`.
+
+    Returns:
+        `forgotten`, its ID; and `preferences`, what is still kept.
+
+    Raises:
+        ValueError: If no preference has that ID.
+    """
+    if not repo.delete_preference(preference_id):
+        raise ValueError(f"there is no preference {preference_id}")
+    return _with_preferences({"forgotten": preference_id})
+
+# More songs than this to hear under the same stretch is a library, not a choice. Provisional.
+MOST_OFFERED_SONGS = 4
+
+@mcp.tool()
+def offer_songs(
+    project_id: str,
+    songs: Annotated[List[OfferedSong], Field(min_length=1, max_length=MOST_OFFERED_SONGS)],
+    beat_id: Optional[str] = None,
+    start: Optional[float] = None,
+    end: Optional[float] = None,
+) -> dict:
+    """Put a few songs to the user to hear under the same stretch of the cut, and let them pick.
+
+    You cannot hear whether a song suits the pictures; its tags are a guess at
+    its mood, about half the time right. Narrow the music down to two or three
+    with `find_music`, then offer them here: the editor plays the stretch with
+    each in turn in place of its music — at the level and fades of the plan's
+    cue there, or else as loud as the music there is — and the user picks by
+    ear. Their pick comes back as a comment on the stretch: which song, from
+    which second. When the stretch is a music cue of the plan the cut was
+    compiled from (`beat_id`, or the start of the cut), the pick is already
+    written into that cue, and the comment says so — compile the plan to hear
+    it; otherwise set it with `fit_track`. A new offer replaces the last.
+
+    Args:
+        project_id: The video.
+        songs: The songs, each with the second to hear it from and, in
+            `why`, what it is meant to do there.
+        beat_id: The part of the plan to hear them under: from where it
+            begins to where the next begins.
+        start: Otherwise, where the stretch begins in seconds of the cut; the
+            start when neither is given.
+        end: Where it ends; the end of the cut when not given.
+
+    Returns:
+        `offered`, the songs by name, and what to tell the user.
+
+    Raises:
+        ValueError: If the project, a song or the part does not exist, a song
+            has no sound or is shorter than the second it is heard from, or
+            the stretch is empty.
+    """
+    project = repo.get_project(project_id)
+    if project is None:
+        raise ValueError(f"project {project_id} not found")
+    length = float(project.duration)
+    if beat_id is not None and (start is not None or end is not None):
+        raise ValueError("give the part as `beat_id`, or the stretch as `start` and `end`, not both")
+    if beat_id is not None:
+        parts = marked_parts(project)
+        span = next(((opens, closes) for opens, closes, marker in parts if marker.from_beat_id == beat_id), None)
+        if span is None:
+            raise ValueError(f"the cut has no part {beat_id}; its parts: "
+                             + (", ".join(marker.from_beat_id or marker.name for _, _, marker in parts) or "none"))
+        start, end = span
+    start = 0.0 if start is None else start
+    end = length if end is None else end
+    if not 0 <= start < end <= length + 0.001:
+        raise ValueError(f"the stretch {start:g}–{end:g}s is not inside the {length:.1f}s cut")
+    names = []
+    for song in songs:
+        asset = repo.get_assets([asset_id_for(song.asset_id)]).get(asset_id_for(song.asset_id))
+        if asset is None:
+            raise ValueError(f"there is no song {song.asset_id}")
+        if not asset.has_audio:
+            raise ValueError(f"{os.path.basename(asset.path)} has no sound to hear")
+        if asset.duration is not None and song.start >= float(asset.duration):
+            raise ValueError(f"{os.path.basename(asset.path)} runs {float(asset.duration):.1f}s, "
+                             f"so it cannot be heard from {song.start:g}s")
+        song.asset_id = asset.id
+        names.append(os.path.basename(asset.path))
+    offer = SongOffer(project_id=project_id, start=round(start, 3), end=round(end, 3), songs=songs, beat_id=beat_id)
+    # Heard as the plan's cue there would play it; else as loud as the music the cut has there.
+    found = _offered_cue(project, offer)
+    if found is not None:
+        cue = found[1]
+        offer = offer.model_copy(update={"volume": cue.volume, "fade_in": cue.fade_in, "fade_out": cue.fade_out})
+    else:
+        playing = [clip for track in project.tracks if track.track_type == TrackType.AUDIO
+                   and track.duck_under_speech for clip in track.clips
+                   if float(clip.timeline_in) < end and float(clip.timeline_out) > start]
+        if playing:
+            offer = offer.model_copy(update={"volume": playing[0].volume})
+    repo.save_song_offer(offer, project_id)
+    return {"offered": names, "say": (
+        f"tell the user {len(names)} songs are waiting in the editor to hear under {clock(start)}–{clock(end)}; "
+        "their pick comes back as a comment")}
+
+def song_trial(project: Project, offer: SongOffer, number: int) -> Project:
+    """The cut with one offered song in place of its music over the stretch, for the editor to play.
+
+    Args:
+        project: The cut.
+        offer: The songs offered.
+        number: Which of them, from 1.
+
+    Returns:
+        A copy: every music clip that plays in the stretch taken off, and the
+        song laid over the stretch from its second, faded in and out.
+    """
+    song = offer.songs[number - 1]
+    asset = repo.get_assets([song.asset_id]).get(song.asset_id)
+    trial = project.model_copy(deep=True)
+    music = [track for track in trial.tracks if track.track_type == TrackType.AUDIO and track.duck_under_speech]
+    for track in music:
+        track.clips = [clip for clip in track.clips
+                       if float(clip.timeline_out) <= offer.start or float(clip.timeline_in) >= offer.end]
+    if not music:
+        music = [Track(id="music", track_type=TrackType.AUDIO, duck_under_speech=True)]
+        trial.tracks.append(music[0])
+    heard = offer.end - offer.start
+    if asset is not None and asset.duration is not None:
+        heard = min(heard, float(asset.duration) - song.start)
+    music[0].clips.append(Clip(
+        id="trial", asset_id=song.asset_id, timeline_in=Decimal(str(offer.start)),
+        source_range=TimeRange(start=Decimal(str(song.start)), end=Decimal(str(round(song.start + heard, 3)))),
+        volume=offer.volume, audio_fade_in=Decimal(str(offer.fade_in)), audio_fade_out=Decimal(str(offer.fade_out)),
+    ))
+    music[0].clips.sort(key=lambda clip: clip.timeline_in)
+    return trial
+
+def _offered_cue(project: Project, offer: SongOffer) -> Optional[Tuple[EditPlan, MusicCue]]:
+    """The music cue of the plan the cut was compiled from that the offered stretch is, if it is one."""
+    plan = _compiled_plan(project)
+    if plan is None or plan.music is None or (offer.beat_id is None and offer.start > 0):
+        return None
+    cue = next((cue for cue in plan.music.cues if cue.beat_id == offer.beat_id), None)
+    return (plan, cue) if cue is not None else None
+
+def pick_song(project_id: str, number: int) -> dict:
+    """Take the user's pick of the offered songs to the AI, as a comment on the stretch.
+
+    Where the stretch is a music cue of the plan the cut was compiled from,
+    the pick is written into that cue too, so compiling the plan again plays
+    it; the comment says so.
+
+    The editor's, never the AI's: the pick is the user speaking.
+
+    Args:
+        project_id: The video.
+        number: Which song, from 1.
+
+    Returns:
+        The comment.
+
+    Raises:
+        ValueError: If nothing is offered, or there is no such song.
+    """
+    offer = repo.song_offer(project_id)
+    if offer is None or not 1 <= number <= len(offer.songs):
+        raise ValueError("no such song is offered")
+    song = offer.songs[number - 1]
+    asset = repo.get_assets([song.asset_id]).get(song.asset_id)
+    name = os.path.basename(asset.path) if asset is not None else song.asset_id
+    said = f"配樂選「{name}」，從歌的 {song.start:g} 秒開始（{song.asset_id}）"
+    found = _offered_cue(repo.get_project(project_id), offer)
+    if found is not None:
+        plan, cue = found
+        amended = amend_plan(plan.id, plan.version, [SetMusicCueOp(beat_id=cue.beat_id, asset_id=song.asset_id,
+                                                                     start=song.start)], note=said)
+        said += f"；已寫進計畫 {plan.id} 第 {amended['version']} 版，重新 compile_plan 後生效"
+    made = add_comment(project_id, said, offer.start, offer.end)
+    repo.save_song_offer(None, project_id)
+    return made
 
 def add_comment(project_id: str, text: str, start: float, end: Optional[float] = None) -> dict:
     """Write down what the user said about a moment of the cut, pinned to the footage under it.
@@ -6811,7 +7678,9 @@ def get_comments(project_id: str, include_resolved: bool = False) -> dict:
     stretch) in seconds, `at` as a timecode, the `clip_id` under it, and the
     `file` and `file_seconds`. `gone` means that footage has since been cut
     out. Read it, do what it asks — or ask the user if it can be read two
-    ways — then close it with `resolve_comment`, saying what you did.
+    ways — then close it with `resolve_comment`, saying what you did. One
+    marked `question` is one you asked with `ask_user`: it waits on the user
+    until it is `answered`, in its replies.
 
     Args:
         project_id: The video.
@@ -6887,8 +7756,13 @@ def get_job(
         analysis or the `output_path` of a render, `remaining_seconds` once a
         running job has gone far enough for its pace to say, `ahead` — how
         many queued jobs go before a queued one — for a failed job its
-        `error_message`, and for a finished analysis worth a second look a
-        `note` to pass on; and a summary over all of them: `finished` and
+        `error_message`, for a finished analysis worth a second look a
+        `note` to pass on, and for a finished render whose every frame was
+        found black, frozen or a flash somewhere, `frames`: `found`, what the
+        cut did not ask for — look at them with `view_render` `at: "spots"` —
+        and `meant`, inside a fade, a dip, a card or a photo; or `not_read`
+        when the check could not read it, which says nothing about its frames; and a summary
+        over all of them: `finished` and
         `total` counts, `failed` counting those that failed or were
         cancelled, and `progress`, the average.
 
@@ -6960,6 +7834,12 @@ def _job_states(job_ids: List[str]) -> List[dict]:
             entry["ahead"] = ahead[job.job_id]
         if job.error_message:
             entry["error_message"] = job.error_message
+        if job.kind == JobKind.RENDER and job.status == JobStatus.COMPLETED:
+            if job.spots is None:
+                entry["frames"] = {"not_read": "every frame was not read — the check failed or was stopped — so "
+                                               "black, frozen or flashing frames in it are not known"}
+            elif job.spots:
+                entry["frames"] = _frame_spots(job)
         if job.kind == JobKind.ANALYZE and job.status == JobStatus.COMPLETED and job.asset_id:
             heard = repo.get_analysis(job.asset_id)
             voices = len({turn.speaker for turn in heard.speakers}) if heard else 0
@@ -6971,6 +7851,57 @@ def _job_states(job_ids: List[str]) -> List[dict]:
                 )
         listed.append(entry)
     return listed
+
+def _frame_spots(job: Job) -> dict:
+    """Say where every frame of a render was found black, frozen or a flash, and which of it the cut meant.
+
+    Black inside a fade or a dip through black, and a card or a photo held
+    still, are what the cut asked for; the rest is what nobody asked for — two
+    pieces that do not quite meet, a frame of the wrong shot — and is said
+    first, as `found`.
+
+    Args:
+        job: A finished render.
+
+    Returns:
+        `found` and `meant`, a line each: when, what, and the clips there.
+    """
+    project, _ = _project_as_rendered(job)
+    clips = sorted(project.base_video_track.clips, key=lambda clip: clip.timeline_in) if (
+        project is not None and project.base_video_track is not None) else []
+    assets = _referenced_assets(project) if project is not None else {}
+    slack = 1 / (project.fps_num / project.fps_den) if project is not None else 0.04
+
+    def meant(kind: str, start: float, end: float, here: List[Clip]) -> Optional[str]:
+        for clip in here:
+            begin, finish = float(clip.timeline_in), float(clip.timeline_out)
+            if clip.card is not None:
+                return f"card {clip.id}"
+            asset = assets.get(clip.asset_id)
+            if kind == "frozen" and asset is not None and stills.is_image(asset.path):
+                return f"photo {clip.id}"
+            if kind == "black" and clip.video_fade_in and start >= begin - slack and end <= begin + float(
+                    clip.video_fade_in) + slack:
+                return f"fade in of {clip.id}"
+            if kind == "black" and clip.video_fade_out and end <= finish + slack and start >= finish - float(
+                    clip.video_fade_out) - slack:
+                return f"fade out of {clip.id}"
+            dip = clip.transition_in
+            if (kind in ("black", "flash") and dip is not None and dip.kind == "dip"
+                    and start >= begin - float(dip.seconds) - slack and end <= begin + slack):
+                return f"dip into {clip.id}"
+        return None
+
+    found, kept = [], []
+    for spot in job.spots:
+        start, end = float(spot["start"]), float(spot["end"])
+        here = [clip for clip in clips if float(clip.timeline_in) < max(end, start + slack)
+                and float(clip.timeline_out) > start]
+        where = " → ".join(f"clip {clip.id}" for clip in here) or "past the cut"
+        line = f"{start:.2f}–{end:.2f}s {spot['kind']} ({end - start:.2f}s) in {where}"
+        reason = meant(str(spot["kind"]), start, end, here)
+        (kept if reason else found).append(line + (f": the {reason}" if reason else ""))
+    return {"found": found, "meant": kept}
 
 # Provisional (roadmap §13): more voices than this in one file is far more likely a noisy
 # recording split apart than that many people — 40 for two friends talking over traffic.

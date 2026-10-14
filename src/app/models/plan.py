@@ -671,6 +671,7 @@ class SetMusicCueOp(BaseModel):
     beat_id: Optional[str] = Field(
         default=None, description="The music cue coming in on this beat; left out, the one that starts with the video",
     )
+    asset_id: Optional[str] = Field(default=None, description="Another song for the cue, as the user picked it")
     start: Optional[float] = Field(default=None, ge=0, description="As on a cue: where in the song to come in")
     volume: Optional[float] = Field(default=None, ge=0, le=4, description="As on a cue")
     fade_in: Optional[float] = Field(default=None, ge=0, description="As on a cue")

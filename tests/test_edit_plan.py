@@ -2448,6 +2448,61 @@ def test_a_piece_from_another_time_between_two_that_belong_together_is_handed_ba
     problems, _ = check_plan(plan, timeline, by_id, children, assets)
     assert not any(problem.startswith("continuity:") for problem in problems)
 
+def test_a_part_that_opens_later_and_goes_back_in_time_is_handed_back() -> None:
+    by_id, children, assets, clips = covered()
+    first, second = speech_of(clips)[:2]
+    walk = next(clip for clip in clips if clip.asset_id == BROLL_ASSET)
+    # The afternoon walk opens the part, and the morning's talking follows it.
+    assets = {
+        ASSET_ID: assets[ASSET_ID].model_copy(update={"recorded_at": datetime(2026, 8, 31, 2, 0, tzinfo=timezone.utc)}),
+        BROLL_ASSET: assets[BROLL_ASSET].model_copy(update={"recorded_at": datetime(2026, 8, 31, 8, 0, tzinfo=timezone.utc)}),
+    }
+    selections = [Selection(clip_id=walk.id, beat_id="b1"), Selection(clip_id=first.id, beat_id="b1"),
+                  Selection(clip_id=second.id, beat_id="b1")]
+    timeline = SemanticTimeline(id="tl_test", asset_ids=[], input_hash="hash", derivation_version=6)
+    problems, _ = check_plan(plan_for(selections), timeline, by_id, children, assets)
+    assert [problem for problem in problems if problem.startswith("continuity:")] == [
+        problem for problem in problems if problem.startswith(f"continuity: {first.id} was shot at")]
+    assert any(problem.startswith("continuity:") for problem in problems)
+    # Told backwards on purpose, it stands.
+    problems, _ = check_plan(plan_for(selections, structure=Structure.FLASHBACK), timeline, by_id, children, assets)
+    assert not any(problem.startswith("continuity:") for problem in problems)
+
+def test_files_numbered_by_hand_played_out_of_their_order_are_noted() -> None:
+    from app.engine.plan import file_number
+
+    assert [file_number(name) for name in ("1-開場.mp4", "01_a.mp4", "3.mov", "12 b.mp4", "2、c.mp4", "(4) d.mp4",
+                                           "IMG_0001.mp4", "20260829_1.mp4", "v2.mp4")] == [1, 1, 3, 12, 2, 4,
+                                                                                            None, None, None]
+    by_id, children, assets, clips = covered()
+    first = speech_of(clips)[0]
+    walk = next(clip for clip in clips if clip.asset_id == BROLL_ASSET)
+    assets = {ASSET_ID: assets[ASSET_ID].model_copy(update={"path": "D:/拍攝/1-聊天.mp4"}),
+              BROLL_ASSET: assets[BROLL_ASSET].model_copy(update={"path": "D:/拍攝/2-散步.mp4"})}
+    timeline = SemanticTimeline(id="tl_test", asset_ids=[], input_hash="hash", derivation_version=6)
+
+    def noted(*selections: Selection) -> list:
+        _, notes = check_plan(plan_for(list(selections)), timeline, by_id, children, assets)
+        return [note for note in notes if note.kind == "file_order"]
+
+    found = noted(Selection(clip_id=walk.id, beat_id="b1"), Selection(clip_id=first.id, beat_id="b1"))
+    assert len(found) == 1 and "1-聊天.mp4 after 2-散步.mp4" in found[0] and found[0].clip_ids == (first.id,)
+    assert noted(Selection(clip_id=first.id, beat_id="b1"), Selection(clip_id=walk.id, beat_id="b1")) == []
+    assert noted(Selection(clip_id=walk.id, beat_id="b1"),
+                 Selection(clip_id=first.id, beat_id="b1", jump_reason="回到開頭")) == []
+
+def test_a_chosen_clip_the_camera_shook_in_is_noted_with_how_much() -> None:
+    by_id, children, assets, clips = covered()
+    first = speech_of(clips)[0]
+    walk = next(clip for clip in clips if clip.asset_id == BROLL_ASSET)
+    by_id = {**by_id, walk.id: walk.model_copy(update={"scores": {**walk.scores, "shake": 0.04}}),
+             first.id: first.model_copy(update={"scores": {**first.scores, "shake": 0.002}})}
+    timeline = SemanticTimeline(id="tl_test", asset_ids=[], input_hash="hash", derivation_version=6)
+    _, notes = check_plan(plan_for([Selection(clip_id=first.id, beat_id="b1"), Selection(clip_id=walk.id, beat_id="b1")]),
+                          timeline, by_id, children, assets)
+    [shaky] = [note for note in notes if note.kind == "shaky"]
+    assert f"{walk.id} (0.040)" in shaky and first.id not in shaky and shaky.clip_ids == (walk.id,)
+
 def knowing(plan: EditPlan, by_id: dict, *said: dict) -> EditPlan:
     """Say, piece by piece in playing order, what each establishes and relies on.
 
@@ -2533,3 +2588,25 @@ def test_evidence_outside_the_clip_or_trimmed_off_is_handed_back() -> None:
     })
     problems, _ = checked(plan.model_copy(update={"selections": [late, *plan.selections[1:]]}), by_id, assets)
     assert any("is not all played" in problem for problem in problems), problems
+
+def test_a_song_picked_by_ear_under_the_plan_s_music_is_written_into_its_cue(planned: dict, media: Path) -> None:
+    from app.models.offer import OfferedSong
+    from app.server import offer_songs, pick_song, set_asset_library, song_trial
+
+    song = import_asset(str(media / "song.mp3"))["id"]
+    jingle = import_asset(str(media / "jingle.wav"))["id"]
+    set_asset_library([song, jingle], "music")
+    stored = EditPlan.model_validate(get_plan(planned["plan_id"])["plan"])
+    save_plan(stored.model_copy(update={"music": MusicPlan(cues=[MusicCue(asset_id=jingle, volume=0.3, fade_in=0.4)])}))
+    project = create_project(name="配樂", width=640, height=360)["id"]
+    compile_plan(project_id=project, expected_version=1, plan_id=planned["plan_id"])
+    offer_songs(project, [OfferedSong(asset_id=song, start=2)])
+    # Heard as the plan's cue would play it.
+    offer = server_repo.song_offer(project)
+    assert (offer.volume, offer.fade_in) == (0.3, 0.4)
+    trial = song_trial(server_repo.get_project(project), offer, 1)
+    assert any(clip.asset_id == song and float(clip.audio_fade_in) == 0.4 for track in trial.tracks for clip in track.clips)
+    picked = pick_song(project, 1)
+    assert "已寫進計畫" in picked["text"]
+    cue = get_plan(planned["plan_id"])["plan"]["music"]["cues"][0]
+    assert (cue["asset_id"], cue["start"], cue["volume"]) == (song, 2, 0.3)

@@ -14,7 +14,7 @@ measured separately, by level, and heard again with `listen_again`.
 """
 
 from dataclasses import dataclass
-from typing import List, Mapping, Optional, Tuple
+from typing import List, Mapping, Optional, Sequence, Tuple
 
 from app.engine.delivery import _said
 from app.engine.subtitles import captioned_clips
@@ -55,6 +55,8 @@ class HeardWord:
         text: The word.
         clip_id: The clip it is heard in.
         cut: Whether the clip's sound starts or stops partway through it.
+        asset_id: The file it was said in.
+        said_at: Where it starts in that file, in seconds.
     """
 
     start: float
@@ -62,6 +64,8 @@ class HeardWord:
     text: str
     clip_id: str
     cut: bool
+    asset_id: str = ""
+    said_at: float = 0.0
 
 
 def _shown(clip: Clip, names: Mapping[str, str]) -> str:
@@ -151,6 +155,71 @@ def words_heard(
                     continue
                 heard.append(HeardWord(
                     start=lands[0], end=lands[1], text=word.text.strip(), clip_id=clip.id,
-                    cut=word.start < opened or word.end > closed,
+                    cut=word.start < opened or word.end > closed, asset_id=clip.asset_id, said_at=word.start,
                 ))
     return sorted(heard, key=lambda word: word.start)
+
+# A stop longer than this between two sentences is a break in the talking, not the pause it
+# is spoken with. Provisional.
+LONGEST_PAUSE_SECONDS = 2.0
+# Fewer pauses than this say nothing about how somebody talks. Provisional.
+FEWEST_PAUSES = 5
+
+def usual_pauses(analysis: MediaAnalysis, speaker: Optional[str] = None) -> List[float]:
+    """Measure the pauses between one sentence and the next in a file, as it was recorded.
+
+    Args:
+        analysis: The file's analysis.
+        speaker: Only the pauses between two of this voice's sentences; every
+            pause when None.
+
+    Returns:
+        The pauses in seconds, shortest first, each under `LONGEST_PAUSE_SECONDS`.
+    """
+    def voice(seconds: float) -> Optional[str]:
+        return next((turn.speaker for turn in analysis.speakers if turn.start <= seconds < turn.end), None)
+
+    said = [segment for segment in _said(analysis) if segment.words]
+    found = []
+    for earlier, later in zip(said, said[1:]):
+        gap = later.words[0].start - earlier.words[-1].end
+        if 0 < gap <= LONGEST_PAUSE_SECONDS and (
+                speaker is None or voice(earlier.words[-1].end) == speaker == voice(later.words[0].start)):
+            found.append(gap)
+    return sorted(found)
+
+def pause_across(at: float, heard: Sequence[HeardWord], analyses: Mapping[str, MediaAnalysis]) -> Optional[str]:
+    """Set the pause a cut leaves between two lines beside the pauses the speaker makes.
+
+    Whether a cut sounds tight or rushed cannot be heard here, but it can be
+    measured: the gap the cut leaves, against the gaps the same person leaves
+    between sentences when nobody has cut them.
+
+    Args:
+        at: The join, in seconds of the cut.
+        heard: The words heard around it, as `words_heard` lays them out.
+        analyses: The analyses of the files, keyed by asset ID.
+
+    Returns:
+        One line, or None when the same clip talks on across the join or
+        nothing is said on one side of it.
+    """
+    before = [word for word in heard if word.start < at]
+    after = [word for word in heard if word.start >= at]
+    if not before or not after or before[-1].clip_id == after[0].clip_id:
+        return None
+    last, first = before[-1], after[0]
+    gap = max(0.0, first.start - last.end)
+    line = f"{gap:.2f}s between 「{last.text}」 and 「{first.text}」"
+    analysis = analyses.get(last.asset_id)
+    if analysis is None:
+        return line
+    speaker = next((turn.speaker for turn in analysis.speakers if turn.start <= last.said_at < turn.end), None)
+    pauses = usual_pauses(analysis, speaker)
+    if len(pauses) < FEWEST_PAUSES:
+        return line + "; too few pauses in the file to say how this speaker usually pauses"
+    low, middle, high = (pauses[len(pauses) // 4], pauses[len(pauses) // 2], pauses[(3 * len(pauses)) // 4])
+    where = ("shorter than this speaker's usual pause" if gap < low else
+             "longer than this speaker's usual pause" if gap > high else "within this speaker's usual pause")
+    return (line + f"; {speaker or 'the speaker'} pauses {low:.2f}–{high:.2f}s between sentences "
+            f"(middle {middle:.2f}s, of {len(pauses)}): {where}")

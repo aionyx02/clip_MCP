@@ -2,7 +2,7 @@
 
 from datetime import datetime, timedelta, timezone
 
-from app.engine.continuity import FAR, Shot, strays
+from app.engine.continuity import FAR, Shot, backward_steps, strays
 
 MORNING = datetime(2026, 8, 31, 2, 0, tzinfo=timezone.utc)
 
@@ -32,3 +32,19 @@ def test_a_shot_off_the_topic_its_neighbours_share_is_named() -> None:
 def test_nothing_is_said_about_a_shot_whose_time_is_unknown() -> None:
     assert strays([at(0), Shot("x"), at(1)]) == []
     assert FAR > timedelta(0)
+
+def test_a_part_that_opens_on_the_night_and_goes_back_to_the_day_is_named() -> None:
+    # No stray between two that agree: the night opens the part, and the day follows it.
+    shots = [at(0), at(720, opens_part=True), at(10), at(20)]
+    assert strays(shots) == []
+    by_time, by_light = backward_steps(shots)
+    assert len(by_time) == 1 and by_time[0].startswith("s10 was shot at") and by_light == []
+    # A reason given, or a new part, is a step back meant.
+    assert backward_steps([at(720), at(10, exempt=True)]) == ([], [])
+    assert backward_steps([at(720), at(10, opens_part=True)]) == ([], [])
+    assert backward_steps([at(720), at(600)]) == ([], [])
+
+def test_with_no_times_a_dark_shot_then_a_bright_one_is_only_a_note() -> None:
+    _, by_light = backward_steps([Shot("night", exposure=0.1), Shot("day", exposure=0.6)])
+    assert [pair for _, pair in by_light] == [("night", "day")]
+    assert backward_steps([Shot("day", exposure=0.6), Shot("night", exposure=0.1)]) == ([], [])

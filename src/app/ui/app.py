@@ -31,6 +31,7 @@ from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 
 from app import clients, server
+from app.models.comment import USER
 from app.engine.ffmpeg import hidden_window_flags
 from app.engine import models
 from app.engine import playback as playback_module
@@ -514,6 +515,34 @@ async def comments(request: Request) -> Response:
         return _error(str(error), 400)
     return JSONResponse(made)
 
+async def songs(request: Request) -> Response:
+    """The songs the AI put to the user to hear under a stretch, each with its name, or none."""
+    project_id = request.path_params["project_id"]
+    offer = await run_in_threadpool(server.repo.song_offer, project_id)
+    if offer is None:
+        return JSONResponse({"offer": None})
+    listed = []
+    for number, song in enumerate(offer.songs, start=1):
+        asset = (await run_in_threadpool(server.repo.get_assets, [song.asset_id])).get(song.asset_id)
+        listed.append({"number": number, "name": os.path.basename(asset.path) if asset else song.asset_id,
+                       "start": song.start, "why": song.why})
+    return JSONResponse({"offer": {"start": offer.start, "end": offer.end, "songs": listed}})
+
+async def song(request: Request) -> Response:
+    """The cut with one offered song in place of its music, to play (GET); or that song picked (POST)."""
+    project_id, number = request.path_params["project_id"], int(request.path_params["number"])
+    if request.method == "POST":
+        try:
+            return JSONResponse(await run_in_threadpool(server.pick_song, project_id, number))
+        except ValueError as error:
+            return _error(str(error), 400)
+    project = await run_in_threadpool(server.repo.get_project, project_id)
+    offer = await run_in_threadpool(server.repo.song_offer, project_id)
+    if project is None or offer is None or not 1 <= number <= len(offer.songs):
+        return _error("no such song is offered", 404)
+    trial = await run_in_threadpool(server.song_trial, project, offer, number)
+    return JSONResponse(await run_in_threadpool(server.playback_of, trial))
+
 async def comment(request: Request) -> Response:
     """Add to a comment, close it or open it again; or delete it, which only the user can do, here."""
     project_id, comment_id = request.path_params["project_id"], request.path_params["comment_id"]
@@ -526,7 +555,7 @@ async def comment(request: Request) -> Response:
         status = body.get("status")
         if status not in (None, "open", "resolved"):
             return _error("a comment is open or resolved", 400)
-        changed = await run_in_threadpool(server.change_comment, project_id, comment_id, "你",
+        changed = await run_in_threadpool(server.change_comment, project_id, comment_id, USER,
                                           str(body.get("reply", "")), status)
     except ValueError as error:
         return _error(str(error), 400)
@@ -1085,6 +1114,8 @@ def create_app() -> Starlette:
         Route("/api/projects/{project_id}/versions/compare", compare_versions),
         Route("/api/projects/{project_id}/versions/merge", merge_versions, methods=["POST"]),
         Route("/api/projects/{project_id}/comments/{comment_id}", comment, methods=["POST"]),
+        Route("/api/projects/{project_id}/songs", songs),
+        Route("/api/projects/{project_id}/songs/{number:int}", song, methods=["GET", "POST"]),
         Route("/api/projects/{project_id}/storage", project_storage),
         Route("/api/projects/{project_id}/storage/trim", trim, methods=["POST"]),
         Route("/api/trash", trash, methods=["GET", "POST"]),

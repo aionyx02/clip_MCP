@@ -115,3 +115,10 @@ def test_a_preview_breaks_its_captions_where_the_finished_video_does(rendered: d
     script = (Path(job.work_dir) / "subtitles.ass").read_text(encoding="utf-8")
     assert f"PlayResX: {project.width}" in script and f"PlayResY: {project.height}" in script
     assert min(project.width, project.height) > server.PREVIEW_SHORT_SIDE
+
+
+def test_a_cut_is_read_back_as_a_script(rendered: dict) -> None:
+    script = server.read_cut(rendered["project"])["script"]
+    assert len(script) == 2 and script[0].startswith("0:00–") and "| clip a | wide.mp4 0.0–" in script[0]
+    assert "said: 「第一句」" in script[0] and "captions: 第一句" in script[0]
+    assert "said: 「第二句」" in script[1] and "captions: 第二句" in script[1]

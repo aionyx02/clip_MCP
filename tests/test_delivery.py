@@ -21,6 +21,9 @@ from app.engine.delivery import (
     chapters,
     check_delivery,
     cover_candidates,
+    frames_around,
+    light_steps,
+    look_candidates,
 )
 from app.engine.interchange import left_behind, write_edl, write_fcpxml, write_otio, write_srt
 from app.engine.subtitles import build_ass, caption_overflow
@@ -203,7 +206,7 @@ def test_render_is_refused_until_the_user_says_to_go_ahead(media: Path) -> None:
 def test_a_final_render_waits_for_a_preview_of_the_cut_as_it_is_now(media: Path) -> None:
     asset = import_asset(str(media / "wide.mp4"))["id"]
     project = build_project([video_track(), insert("a", asset, 0, 2)], width=640, height=360)
-    anything = ["bad_picture", "clipping", "music", "mid_speech", "repeated", "continuity", "unplanned",
+    anything = ["bad_picture", "clipping", "music", "mid_speech", "repeated", "look_alike", "continuity", "unplanned",
                 "captions", "length"]
     with pytest.raises(ValueError, match="no preview of the cut as it is now has finished"):
         render_project(project, is_preview=False, allow=anything)
@@ -261,9 +264,44 @@ def test_without_a_face_the_sharpest_stretch_is_offered_and_never_black() -> Non
 def test_a_cover_is_saved_at_the_size_the_cut_is_rendered_at(media: Path) -> None:
     asset = import_asset(str(media / "wide.mp4"))["id"]
     project = build_project([video_track(), insert("a", asset, 0, 6)], width=640, height=360)
-    saved = export_cover(project, 2.0, frame="portrait")
+    saved = export_cover(project, 2.0, "test", frame="portrait").structured_content
     with PILImage.open(saved["output_path"]) as picture:
         assert picture.size == (360, 640) == (saved["width"], saved["height"])
+
+def test_a_cover_comes_back_at_feed_size_and_as_a_profile_grid_crops_it(media: Path) -> None:
+    import base64
+    import io
+
+    asset = import_asset(str(media / "wide.mp4"))["id"]
+    project = build_project([video_track(), insert("a", asset, 0, 6)], width=1080, height=1920)
+    shown = export_cover(project, 2.0, "the product, large and sharp").content[1]
+    with PILImage.open(io.BytesIO(base64.b64decode(shown.data))) as preview:
+        # 360 wide in the feed, and beside it the 3:4 middle at 360 by 480.
+        assert preview.size == (360 + 6 + 360, 640)
+
+def test_more_than_one_moment_of_a_shot_can_be_offered_and_never_black() -> None:
+    analysis = MediaAnalysis(asset_id="x", duration=10.0, black_frames=[Span(start=0.0, end=3.0)])
+    offered = cover_candidates(project_of(clip("a", "x", 0, 10, 0)), {"x": analysis}, per_shot=3)
+    assert len(offered) == 3 and all(seconds >= 3.0 for _, seconds in offered)
+
+def test_a_close_look_shows_what_is_on_screen_either_side_of_one_moment() -> None:
+    project = project_of(clip("a", "x", 0, 4, 0), clip("b", "y", 10, 14, 4))
+    found = frames_around(project, {}, 4.0, reach=0.5, step=0.25)
+    assert [(item.id, source, at) for item, source, at in found] == [
+        ("a", 3.5, 3.5), ("a", 3.75, 3.75), ("b", 10.0, 4.0), ("b", 10.25, 4.25), ("b", 10.5, 4.5),
+    ]
+
+def test_covers_are_offered_one_part_at_a_time_with_what_the_video_is_for(media: Path) -> None:
+    from app.server import propose_covers
+
+    asset = import_asset(str(media / "wide.mp4"))["id"]
+    project = build_project([video_track(), insert("a", asset, 0, 3), insert("b", asset, 4, 8)], width=640, height=360)
+    edit(project, [{"action": "set_markers", "markers": [{"id": "m1", "name": "開場", "timeline_in": 0},
+                                                         {"id": "m2", "name": "結果", "timeline_in": 3}]}])
+    listing = propose_covers(project, part="結果", per_shot=2).content[0].text
+    assert "ask the user what it is about" in listing and "clip b" in listing and "clip a" not in listing
+    with pytest.raises(ValueError, match="no part called '中段'"):
+        propose_covers(project, part="中段")
 
 # --- export ------------------------------------------------------------------------------
 
@@ -607,3 +645,81 @@ def test_how_long_a_caption_has_to_stay_is_the_users_to_change() -> None:
     placed = place_cues(relaxed, [cue("c1", 12.0, 12.36)])
     assert not [f for f in check_delivery(relaxed, {}, captions=placed, style=relaxed.caption_style)
                 if f.check == "captions"]
+
+
+def test_two_files_that_look_alike_apart_in_the_cut_are_found() -> None:
+    project = project_of(clip("a", "x", 0, 4, 0), clip("b", "y", 0, 4, 4), clip("c", "z", 0, 4, 8),
+                         clip("d", "x", 5, 9, 12))
+    same, other = (0x0F0F0F0F0F0F0F0F,) * 3, (0xF0F0F0F0F0F0F0F0,) * 3
+    def alike(looks: dict) -> list:
+        return [finding.message for finding in check_delivery(project, {}, looks=looks)
+                if finding.check == "look_alike"]
+
+    # a and c are different files with b between, and so are b and d; a and b play side by side,
+    # and a and d are one file.
+    found = alike({"a": same, "b": same, "c": same, "d": same})
+    assert len(found) == 2 and found[0].startswith("clips a (at 0:00) and c (at 0:08)")
+    assert found[1].startswith("clips b (at 0:04) and d (at 0:12)")
+    assert alike({}) == [] and alike({"a": same, "c": other}) == []
+
+    # Marked off by a transition into it, the second is told apart; so would a card just before it be.
+    from app.models.timeline import Dissolve
+    project.tracks[0].clips[2].transition_in = Dissolve(kind="dissolve", seconds=Decimal("0.5"))
+    assert [message[:15] for message in alike({"a": same, "b": same, "c": same, "d": same})] == ["clips b (at 0:0"]
+
+def test_only_a_clip_nothing_is_said_or_written_over_is_told_apart_by_its_look() -> None:
+    from app.models.media import Transcript, TranscriptSegment
+    from app.models.timeline import TextLayer
+
+    spoken = MediaAnalysis(asset_id="x", duration=10.0, transcript=Transcript(language="zh", model="test", segments=[
+        TranscriptSegment(start=1.0, end=2.0, text="成功了")]))
+    words = clip("c", "z", 0, 4, 8)
+    words.texts.append(TextLayer(id="t1", text="第二次", start=0, end=4))
+    project = project_of(clip("a", "x", 0, 4, 0), clip("b", "y", 0, 4, 4), words)
+    assert [found.id for found in look_candidates(project, {"x": spoken})] == ["b"]
+
+def test_a_render_is_checked_for_two_files_that_look_alike(media: Path, tmp_path: Path) -> None:
+    from app.engine import looks
+
+    # The same picture at half the size is another file that looks the same.
+    small = tmp_path / "small.mp4"
+    subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(media / "wide.mp4"), "-vf", "scale=320:180",
+                    "-an", "-c:v", "libx264", "-preset", "ultrafast", str(small)], check=True)
+    first, second = import_asset(str(media / "wide.mp4"))["id"], import_asset(str(small))["id"]
+    black = import_asset(str(media / "black.mp4"))["id"]
+    project = build_project([video_track(), insert("a", first, 0, 2), insert("b", black, 0, 2),
+                             insert("c", second, 0, 2)], width=640, height=360)
+    found = [finding for finding in check_render(project)["findings"] if finding["check"] == "look_alike"]
+    assert len(found) == 1 and "clips a" in found[0]["message"] and "and c" in found[0]["message"]
+    # Read once: the frames are kept against their files.
+    assert set(repo.looks(second)) == {round(2 * share, 1) for share in looks.SAMPLES}
+
+
+def test_a_shot_darker_than_the_ones_either_side_is_offered_the_brightness_that_evens_it_out() -> None:
+    from app.models.timeline import ColorAdjust
+
+    def lit(asset_id: str, exposure: float, warmth=None) -> MediaAnalysis:
+        return MediaAnalysis(asset_id=asset_id, duration=10.0, shots=[
+            ShotMeasurement(start=0, end=10, exposure=exposure, contrast=0.5, warmth=warmth)])
+
+    analyses = {"x": lit("x", 0.5), "y": lit("y", 0.2), "z": lit("z", 0.52)}
+    project = project_of(clip("a", "x", 0, 4, 0), clip("b", "y", 0, 4, 4), clip("c", "z", 0, 4, 8))
+    found = light_steps(project, analyses)
+    assert len(found) == 2 and all("set_clip_look on clip b with color brightness +0.31" in line for line in found)
+    # Set, it is measured again and nothing is left.
+    project.tracks[0].clips[1].color = ColorAdjust(brightness=0.31)
+    assert light_steps(project, analyses) == []
+    # A new part, or a dip, is a change made on purpose.
+    project.tracks[0].clips[1].color = None
+    assert light_steps(project_of(clip("a", "x", 0, 4, 0), clip("b", "y", 0, 4, 4), markers=[(0, "一"), (4, "二")]),
+                       analyses) == []
+    # A part beginning inside a shot puts the shots either side of it in different parts.
+    assert light_steps(project_of(clip("a", "x", 0, 4, 0), clip("b", "y", 0, 4, 4), markers=[(0, "一"), (2, "二")]),
+                       analyses) == []
+    # A colour cast is said with the way to set it.
+    warm = {"x": lit("x", 0.5, warmth=0.0), "y": lit("y", 0.5, warmth=0.06)}
+    [step] = light_steps(project_of(clip("a", "x", 0, 4, 0), clip("b", "y", 0, 4, 4)), warm)
+    assert "clip b is warmer by 0.06; a color temperature above 6500 on it cools it" in step
+    warmed = project_of(clip("a", "x", 0, 4, 0), clip("b", "y", 0, 4, 4))
+    warmed.tracks[0].clips[1].color = ColorAdjust(temperature=7500)
+    assert light_steps(warmed, warm) == []
