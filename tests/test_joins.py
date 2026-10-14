@@ -2,6 +2,8 @@
 
 from pathlib import Path
 
+import pytest
+
 from app import server
 from app.engine.delivery import check_delivery
 from app.engine.joins import joins_in, words_heard
@@ -66,3 +68,26 @@ def test_what_check_render_finds_at_a_join_is_put_on_it(media: Path) -> None:
     near, far = joins_in(project, {})
     assert [finding.check for finding in server._found_at(near, findings)] == ["mid_speech"]
     assert server._found_at(far, findings) == []
+
+
+def test_the_pause_a_cut_leaves_is_set_beside_the_pauses_the_speaker_makes() -> None:
+    from app.engine.joins import HeardWord, pause_across, usual_pauses
+    from app.models.media import SpeakerTurn
+
+    # Ten sentences, 0.4s apart; a 5s stop is a break, not a pause, and S2's are not S1's.
+    segments = [TranscriptSegment(start=index * 2.0, end=index * 2.0 + 1.6, text="好",
+                                  words=[TranscriptWord(start=index * 2.0, end=index * 2.0 + 1.6, text="好")])
+                for index in range(10)]
+    segments.append(TranscriptSegment(start=24.6, end=25.0, text="走", words=[TranscriptWord(start=24.6, end=25.0, text="走")]))
+    heard = MediaAnalysis(asset_id="x", duration=30.0, transcript=Transcript(language="zh", model="t", segments=segments),
+                          speakers=[SpeakerTurn(start=0.0, end=20.0, speaker="S1"), SpeakerTurn(start=20.0, end=30.0, speaker="S2")])
+    assert usual_pauses(heard) == pytest.approx([0.4] * 9)
+    assert usual_pauses(heard, "S1") == pytest.approx([0.4] * 9) and usual_pauses(heard, "S2") == []
+
+    words = [HeardWord(start=1.0, end=1.95, text="難受耶", clip_id="a", cut=False, asset_id="x", said_at=4.0),
+             HeardWord(start=2.0, end=2.5, text="各位", clip_id="b", cut=False, asset_id="x", said_at=8.0)]
+    line = pause_across(2.0, words, {"x": heard})
+    assert line.startswith("0.05s between 「難受耶」 and 「各位」; S1 pauses 0.40–0.40s")
+    assert line.endswith("shorter than this speaker's usual pause")
+    # The same clip talking on across a join is not a pause the cut made.
+    assert pause_across(2.0, [words[0], HeardWord(2.0, 2.5, "各位", "a", False, "x", 4.8)], {"x": heard}) is None

@@ -239,8 +239,9 @@ was not there to agree to them.
    B-roll comes in or goes off, and any moment the user points at. Whether a
    movement or a sentence carries across a cut is in those frames and words,
    not in what the plan says the clips are about.
-10. Render with `is_preview: false` once the user is happy, or as soon as the
-    preview checks out if they asked for the final file.
+10. Before `is_preview: false`, tell the user the story as `read_cut` reads it
+    (checks pass a line explaining what already happened), then render it once
+    they are happy, or once the preview checks out if they asked for the file.
 
 For later edits, call `get_project` first so your operations match the current
 clips and version.
@@ -288,9 +289,9 @@ hand:
 The user's songs are in the library's music half. When they want music and
 have not named a song, `find_music` with what they asked for in English and
 the length of the part as `min_seconds`; read the top two or three back with
-how each sounds (「聽起來偏懷舊、原聲吉他」 — the mood is a model's ear) and
-let them choose. When reading a plan back, say the mood of the song in it the
-same way. A compile's `music_loops`, `music_peak_off` and `music_cut_off`
+how each sounds (「聽起來偏懷舊、原聲吉他」 — the mood is a model's ear), and
+`offer_songs` them so the user picks by ear under the part itself. Read a
+plan's song back the same way. A compile's `music_loops`, `music_peak_off` and `music_cut_off`
 notes say where a song sits badly and how to fix it: tell the user, and fix
 it only if they want. When nothing in the library fits, ask for a file, and
 in the same message tell them in plain words what each kind of source means

@@ -7,11 +7,13 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Callable, Dict, Iterable, Iterator, List, Mapping, Optional, Set, Tuple
 
-from app.models.comment import Comment
+from app.models.comment import Comment, Preference
 from app.models.job import Job
 from app.models.media import Asset, MediaAnalysis
+from app.models.offer import SongOffer
 from app.models.plan import EditPlan
 from app.models.semantic import ClipKind, ClipLevel, SemanticClip, SemanticTimeline
+from app.models.trial import Trial
 from app.models.timeline import Project, SubtitleCue
 from app.storage.history import History, canonical, describe_project, file_stem, fingerprint
 
@@ -109,6 +111,25 @@ _MIGRATIONS: List[List[str]] = [
         # going back to an older version must not take back what the user asked for.
         "CREATE TABLE IF NOT EXISTS comments (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, data TEXT NOT NULL)",
         "CREATE INDEX IF NOT EXISTS comments_project ON comments (project_id)",
+    ],
+    [
+        # A frame's fingerprint, kept by file and second: reading a frame is the slow part of
+        # telling apart two shots that look alike, and the frame never changes.
+        "CREATE TABLE IF NOT EXISTS looks (asset_id TEXT NOT NULL, at REAL NOT NULL, look TEXT NOT NULL, "
+        "PRIMARY KEY (asset_id, at))",
+    ],
+    [
+        # The songs put to the user to hear under a stretch of a cut, one set a project at a time.
+        "CREATE TABLE IF NOT EXISTS song_offers (project_id TEXT PRIMARY KEY, data TEXT NOT NULL)",
+    ],
+    [
+        # How the user likes their videos, said once and kept for every project after.
+        "CREATE TABLE IF NOT EXISTS preferences (id TEXT PRIMARY KEY, data TEXT NOT NULL)",
+    ],
+    [
+        # Changes to a cut tried blind before they are kept, and what whoever judged them said.
+        "CREATE TABLE IF NOT EXISTS trials (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, data TEXT NOT NULL)",
+        "CREATE INDEX IF NOT EXISTS trials_project ON trials (project_id)",
     ],
 ]
 # Footage and music are filed apart, each in folders of its own; projects in theirs.
@@ -667,6 +688,51 @@ class Repository:
                  self._query("SELECT data FROM comments WHERE project_id = ?", (project_id,))]
         return sorted(found, key=lambda comment: comment.created_at)
 
+    def trial(self, trial_id: str) -> Optional[Trial]:
+        """Read one trial."""
+        rows = self._query("SELECT data FROM trials WHERE id = ?", (trial_id,))
+        return Trial.model_validate_json(rows[0][0]) if rows else None
+
+    def trials(self, project_id: str) -> List[Trial]:
+        """Read a project's trials, oldest first."""
+        rows = self._query("SELECT data FROM trials WHERE project_id = ?", (project_id,))
+        return sorted((Trial.model_validate_json(row[0]) for row in rows), key=lambda trial: trial.started_at)
+
+    def save_trial(self, trial: Trial) -> None:
+        """Keep a trial as it now stands."""
+        with self._transaction() as conn:
+            conn.execute("INSERT OR REPLACE INTO trials (id, project_id, data) VALUES (?, ?, ?)",
+                         (trial.id, trial.project_id, trial.model_dump_json()))
+
+    def preferences(self) -> List[Preference]:
+        """Read how the user likes their videos, oldest first."""
+        kept = [Preference.model_validate_json(row[0]) for row in self._query("SELECT data FROM preferences")]
+        return sorted(kept, key=lambda preference: preference.said_at)
+
+    def save_preference(self, preference: Preference) -> None:
+        """Keep one."""
+        with self._transaction() as conn:
+            conn.execute("INSERT OR REPLACE INTO preferences (id, data) VALUES (?, ?)",
+                         (preference.id, preference.model_dump_json()))
+
+    def delete_preference(self, preference_id: str) -> bool:
+        """Forget one; False when there was none by that ID."""
+        with self._transaction() as conn:
+            return conn.execute("DELETE FROM preferences WHERE id = ?", (preference_id,)).rowcount > 0
+
+    def song_offer(self, project_id: str) -> Optional[SongOffer]:
+        """Read the songs put to the user for a project, if any are."""
+        rows = self._query("SELECT data FROM song_offers WHERE project_id = ?", (project_id,))
+        return SongOffer.model_validate_json(rows[0][0]) if rows else None
+
+    def save_song_offer(self, offer: Optional[SongOffer], project_id: str) -> None:
+        """Put songs to the user for a project, in place of any before; None takes them away."""
+        with self._transaction() as conn:
+            conn.execute("DELETE FROM song_offers WHERE project_id = ?", (project_id,))
+            if offer is not None:
+                conn.execute("INSERT INTO song_offers (project_id, data) VALUES (?, ?)",
+                             (project_id, offer.model_dump_json()))
+
     def save_comment(self, comment: Comment, said: str) -> None:
         """Keep a comment, new or changed, and the project's comments in the history.
 
@@ -836,6 +902,31 @@ class Repository:
             found.update({row[0]: (row[1], row[2]) for row in rows})
         return found
 
+    def looks(self, asset_id: str) -> Dict[float, int]:
+        """Read the fingerprints kept for a file's frames.
+
+        Args:
+            asset_id: The file.
+
+        Returns:
+            The fingerprint by second of the file.
+        """
+        rows = self._query("SELECT at, look FROM looks WHERE asset_id = ?", (asset_id,))
+        return {row[0]: int(row[1], 16) for row in rows}
+
+    def save_looks(self, asset_id: str, looks: Mapping[float, int]) -> None:
+        """Keep fingerprints of a file's frames.
+
+        Args:
+            asset_id: The file.
+            looks: The fingerprint by second of the file.
+        """
+        with self._transaction() as conn:
+            conn.executemany(
+                "INSERT OR REPLACE INTO looks (asset_id, at, look) VALUES (?, ?, ?)",
+                [(asset_id, at, f"{look:016x}") for at, look in looks.items()],
+            )
+
     def save_clip_vectors(self, rows: Iterable[tuple]) -> None:
         """Store search vectors.
 
@@ -894,6 +985,40 @@ class Repository:
         else:
             rows = self._query("SELECT data FROM semantic_timelines WHERE id = ?", (timeline_id,))
         return SemanticTimeline.model_validate_json(rows[0][0]) if rows else None
+
+    def list_semantic_timelines(self) -> List[Tuple[SemanticTimeline, int, List[str], List[Tuple[str, int]]]]:
+        """List every timeline built, newest first, with what holds on to it.
+
+        Returns:
+            `(timeline, clips, plans, past)` each: how many clips it has, the
+            plans built on it now, and the `(plan, version)` of older versions
+            of other plans that were.
+        """
+        timelines = [SemanticTimeline.model_validate_json(row[0])
+                     for row in self._query("SELECT data FROM semantic_timelines ORDER BY rowid DESC")]
+        counts = dict(self._query("SELECT timeline_id, COUNT(*) FROM semantic_clips GROUP BY timeline_id"))
+        current: Dict[str, List[str]] = {}
+        for plan_id, timeline_id in self._query("SELECT id, timeline_id FROM plans"):
+            current.setdefault(timeline_id, []).append(plan_id)
+        past: Dict[str, List[Tuple[str, int]]] = {}
+        for plan_id, version, timeline_id in self._query(
+            "SELECT plan_id, version, json_extract(data, '$.timeline_id') FROM plan_versions ORDER BY plan_id, version"
+        ):
+            if plan_id not in current.get(timeline_id, []):
+                past.setdefault(timeline_id, []).append((plan_id, version))
+        return [(timeline, counts.get(timeline.id, 0), current.get(timeline.id, []), past.get(timeline.id, []))
+                for timeline in timelines]
+
+    def delete_semantic_timeline(self, timeline_id: str) -> None:
+        """Delete a timeline, its clips and their search vectors.
+
+        Args:
+            timeline_id: The timeline.
+        """
+        with self._transaction() as conn:
+            conn.execute("DELETE FROM clip_vectors WHERE timeline_id = ?", (timeline_id,))
+            conn.execute("DELETE FROM semantic_clips WHERE timeline_id = ?", (timeline_id,))
+            conn.execute("DELETE FROM semantic_timelines WHERE id = ?", (timeline_id,))
 
     def timelines_holding(self, short_id: str) -> List[str]:
         """Say which timelines have a clip by this short ID, such as `u0034`.
@@ -1442,7 +1567,7 @@ class Repository:
                      (asset_id,))
         for statement in ("DELETE FROM assets WHERE id = ?", "DELETE FROM analyses WHERE asset_id = ?",
                           "DELETE FROM reviewed_captions WHERE asset_id = ?",
-                          "DELETE FROM semantic_clips WHERE asset_id = ?"):
+                          "DELETE FROM semantic_clips WHERE asset_id = ?", "DELETE FROM looks WHERE asset_id = ?"):
             conn.execute(statement, (asset_id,))
         conn.execute("DELETE FROM folder_items WHERE kind = 'assets' AND item_id = ?", (asset_id,))
         planned = {row[0] for row in conn.execute("SELECT timeline_id FROM plans")}

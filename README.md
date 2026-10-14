@@ -91,12 +91,12 @@ LM Studio、Cherry Studio（一鍵安裝連結）。修改前備份為 `<檔名>
 |---|---|
 | 素材庫 | `inspect_media` `import_asset` `import_folder` `list_assets` `edit_asset` `organize_library` `move_files` |
 | 分析 | `analyze_asset` `listen_again` `get_analysis` `view_frames` |
-| 語意時間軸 | `build_semantic_timeline` `query_clips` `get_semantic_clip` `propose_sections` `set_sections` `frames_for_clips` `set_clip_tags` |
+| 語意時間軸 | `build_semantic_timeline` `query_clips` `get_semantic_clip` `propose_sections` `set_sections` `frames_for_clips` `set_clip_tags` `list_timelines` `delete_timelines` |
 | 計畫 | `save_plan` `amend_plan` `copy_plan` `get_plan` `validate_plan` `compile_plan` `diff_plan` `preview_plan_diff` `list_plan_versions` `revert_plan` `propose_broll` |
-| 專案 | `create_project` `list_projects` `get_project` `apply_edits` `preview_project` `preview_sound` |
+| 專案 | `create_project` `list_projects` `get_project` `apply_edits` `preview_project` `preview_sound` `offer_songs` `ask_user` `remember_preference` `forget_preference` |
 | 字幕 | `generate_subtitles` `get_subtitles` |
-| 輸出 | `check_render` `render_project` `view_render` `inspect_join` `get_chapters` `propose_covers` `export_cover` `export_timeline` |
-| 版本 | `project_history` `restore_version` `branch_project` `mark_version` |
+| 輸出 | `check_render` `render_project` `view_render` `inspect_join` `read_cut` `get_chapters` `propose_covers` `export_cover` `export_notices` `export_timeline` |
+| 版本 | `project_history` `restore_version` `branch_project` `mark_version` `start_trial` `trial_candidate` `trial_pack` `judge_trial` `get_trials` |
 | 工作與儲存 | `get_job` `cancel_job` `storage_usage` `clean_storage` `tidy_old_outputs` |
 
 ## 工作區

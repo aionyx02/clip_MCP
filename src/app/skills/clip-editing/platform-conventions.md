@@ -66,14 +66,16 @@ without the word-by-word lighting.
 
 `render_project` checks the cut first and refuses a full render while it finds
 anything; `check_render` runs the same check without rendering, so run it
-first. It finds nine kinds of thing: `bad_picture` (black or frozen picture
+first. It finds ten kinds of thing: `bad_picture` (black or frozen picture
 that reaches the screen), `clipping` (a recording squared off at the ceiling —
 turning it down does not undo it), `music` (music too close under somebody
 talking — `set_music_level` down, or let it duck), `mid_speech` (a cut inside a word or a
 phrase; it names the nearest pause — move the cut there, or, when the words
 there sound clear of the cut, hear the stretch with `listen_again` and `keep`
 so its word times replace the transcript's, then check again), `repeated` (the same
-stretch of a file shown twice), `continuity` (a clip put on by hand between
+stretch of a file shown twice), `look_alike` (two different files a viewer could
+not tell apart, such as the timelapse that failed and the one that worked — give
+the second a line, words over it or a card), `continuity` (a clip put on by hand between
 two shot hours away from it — move it, or let it stand if it is a
 flash-forward), `unplanned` (three or more clips put together
 by hand, with no plan saying how its parts hold together — ask which structure,
@@ -114,10 +116,29 @@ least three, and each is at least ten seconds; `problems` says what breaks
 that. Fixing it means merging or renaming parts — a change to the plan, so
 ask.
 
-`propose_covers` offers one frame per shot — never black, each the moment with
-the biggest face or the sharpest picture — as a labeled sheet. Show it, let the
-user choose, and save the one they pick with `export_cover` at its time in the
-cut.
+The cover is chosen for what the video is about, not for what the frames
+measure: an `export_cover` on the sheet's biggest face is often the wrong cover
+for a video about the thing in that person's hands. Say to yourself where the
+video lands — the thing made, the result, the payoff part — and look for that
+with `propose_covers` `part` and `per_shot`, then `around` your picks; offer the
+user your best one or two with why.
+
+A title on the cover is the user's to add in another program; say so if the
+frame needs one to be understood.
+
+## What the user has to take care of
+
+After the final render, write the notices that go with it: `export_notices`
+once without `text` for what is in the cut — the music, where each song came
+from and what each file says about itself, other voices, more than one face on
+screen — then write them in the user's language and call it again with `text`
+and `next_to` the rendered file. For each: what the concern is, and how to
+resolve it — the credit line a CC BY song needs in the description, a source to
+confirm where nobody said the licence, consent from somebody heard or seen. Add
+what you saw and heard that nothing measures: a brand or logo in shot, music
+playing in the room, somebody else's work on screen. When the user tells you
+where music came from, pass it in `licences`; it is kept with the file for the
+next video. Say plainly which questions are theirs to answer.
 
 ## Handing over to an editing program
 
@@ -139,7 +160,8 @@ the file.
 | 「字幕加英文」「中英對照」 / bilingual captions | Put the other language in each caption's `secondary`, with `set_subtitles` or `edit_subtitle` |
 | 「誰在講話要標出來」「兩個人不同顏色」 / show who is speaking | `set_caption_style` with `speaker_mark` and `speaker_names` |
 | 「幫我寫 YouTube 章節」 / YouTube chapters | `get_chapters`, paste its `description`; say what `problems` lists |
-| 「挑一張封面」「縮圖」 / pick a cover or thumbnail | `propose_covers`, let the user choose, then `export_cover` |
+| 「要注意什麼」「版權」 / what to watch out for, copyright | `export_notices` without `text`, write the notices, then again with `text` and `next_to` the render |
+| 「挑一張封面」「縮圖」 / pick a cover or thumbnail | `propose_covers` (then again `around` your picks), choose by what the video is about and what reads at feed size, offer your best one or two with reasons, then `export_cover` with the `reason` |
 | 「我要拿去 Premiere／達文西／Final Cut 修」 / finish it in another editor | `export_timeline` with `fcpxml` (or `otio`, `edl`), plus `srt` for the captions; read out `left_behind` |
 
 ## Where files go, and disk space

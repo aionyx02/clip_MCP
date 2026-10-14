@@ -259,7 +259,7 @@ def clean(workspace: str, keys: Iterable[str], busy: Set[str]) -> int:
 # The shapes a cut can be delivered in, as the file name says them.
 FRAME_WORDS = {"landscape": "橫式", "portrait": "直式", "square": "方形"}
 # What follows the project's name for each kind of thing delivered.
-KIND_WORDS = {"output": "", "cover": " 封面", "timeline": ""}
+KIND_WORDS = {"output": "", "cover": " 封面", "timeline": "", "notices": " 發布注意事項"}
 
 # Said after the shape when a video has its captions burned in. The same cut with and
 # without them used to come out as `EP1.mp4` and `EP1 (2).mp4`, and nothing said which was which.

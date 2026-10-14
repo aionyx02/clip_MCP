@@ -46,6 +46,9 @@
   // What the user said about moments of the cut, open and closed, where each is on the cut now.
   async function loadComments() {
     try {
+      E.songs = (await api(`/api/projects/${encodeURIComponent(E.id)}/songs`)).offer;
+    } catch { /* kept as it was until the next look */ }
+    try {
       const listed = await api(`/api/projects/${encodeURIComponent(E.id)}/comments`);
       const seen = JSON.stringify(listed.comments);
       const changed = seen !== E.commentsSeen;
@@ -674,7 +677,8 @@
       const described = await api(`/api/projects/${encodeURIComponent(E.id)}/playback${at}`);
       if (!E) return;
       E.described = described;
-      E.player.load(described);
+      // A song being heard keeps playing over the cut it was laid on until it is stopped.
+      if (!E.trial) E.player.load(described);
       E.describeTries = 0;
     } catch { /* the next look will try again */ }
     if (!E) return;
@@ -1106,8 +1110,8 @@
     const context = E.selectedCaption ? ["captions"] : !clip ? [] : track.track_type === "audio" ? ["sound"]
       : (clip.card || E.project.assets[clip.asset_id]?.has_audio === false ? ["picture"] : ["picture", "sound"]);
     const available = [...context, "comments"];
-    if (!available.includes(E.tab)) E.tab = context[0] || null;
-    const waiting = (E.comments || []).filter((comment) => comment.status === "open").length;
+    if (!available.includes(E.tab)) E.tab = context[0] || (E.songs ? "comments" : null);
+    const waiting = (E.comments || []).filter((comment) => comment.status === "open").length + (E.songs ? 1 : 0);
     root.innerHTML = `<div class="tabs">${["picture", "sound", "captions", "comments"].map((tab) =>
       `<button type="button" data-tab="${tab}" class="${tab === E.tab ? "on" : ""}" ${available.includes(tab) ? "" : "disabled"}>${esc(T.editor.tabs[tab])}${tab === "comments" && waiting ? `<span class="count">${waiting}</span>` : ""}</button>`).join("")}</div>
       <div class="props" data-props></div>`;
@@ -1485,6 +1489,7 @@
     const replies = comment.replies.map((reply) => `<li class="${reply.by === T.comments.you ? "mine" : "theirs"}"><b>${esc(reply.by)}</b>${esc(reply.text)}</li>`).join("");
     return `<li class="citem ${comment.status}${comment.id === E.focusComment ? " on" : ""}" data-cid="${esc(comment.id)}">
       <div class="chead"><button class="ctime" data-jump ${comment.gone ? "disabled" : ""}>${esc(where)}</button>
+        ${comment.question ? `<span class="badge">${esc(comment.answered ? T.comments.answered : T.comments.asked)}</span>` : ""}
         ${comment.gone ? `<span class="badge warn">${esc(T.comments.gone)}</span>` : ""}
         ${comment.status === "resolved" ? `<span class="badge">${esc(T.comments.resolvedTag)}</span>` : ""}
         ${comment.resolved_in ? `<button class="ctime" data-open-version="${esc(comment.resolved_in)}">${esc(T.comments.seeVersion)}</button>` : ""}</div>
@@ -1505,12 +1510,17 @@
     const comments = E.comments || [];
     const open = comments.filter((comment) => comment.status === "open");
     const closed = comments.filter((comment) => comment.status !== "open");
-    panel.innerHTML = `<div class="group"><button class="btn small" data-new-comment>${svg("comment", 14)}${esc(T.comments.addHere(fmt(E.time)))}</button>
+    panel.innerHTML = `${songsHtml()}<div class="group"><button class="btn small" data-new-comment>${svg("comment", 14)}${esc(T.comments.addHere(fmt(E.time)))}</button>
       <p class="hint">${esc(T.comments.how)}</p></div>
       ${open.length ? `<ol class="clist">${open.map(commentHtml).join("")}</ol>` : `<p class="hint">${esc(comments.length ? T.comments.allDone : T.comments.none)}</p>`}
       ${closed.length ? `<details class="cclosed"${closed.some((comment) => comment.id === E.focusComment) ? " open" : ""}><summary>${esc(T.comments.closed(closed.length))}</summary>
         <ol class="clist">${closed.map(commentHtml).join("")}</ol></details>` : ""}`;
     $("[data-new-comment]", panel).onclick = () => writeComment(E.time);
+    panel.querySelectorAll("[data-song]").forEach((item) => {
+      const number = Number(item.dataset.song);
+      $("[data-hear]", item).onclick = () => (E.trial === number ? stopSong() : hearSong(number));
+      $("[data-pick]", item).onclick = () => pickSong(number);
+    });
     const change = async (id, body) => {
       try {
         await api(`/api/projects/${encodeURIComponent(E.id)}/comments/${encodeURIComponent(id)}`, body);
@@ -1542,6 +1552,60 @@
         if (E.focusComment === id) E.focusComment = null;
       };
     });
+  }
+
+  // ------------------------------------------------------------------ songs offered to hear
+
+  // The songs the AI put to the user for a stretch: each heard in place of the music there,
+  // picked by ear, and the pick sent back as a comment on the stretch.
+  function songsHtml() {
+    const offer = E.songs;
+    if (!offer) return "";
+    return `<div class="group songs"><p class="label">${esc(T.songs.title(fmt(offer.start), fmt(offer.end)))}</p>
+      <p class="hint">${esc(T.songs.how)}</p><ol class="clist">${offer.songs.map((song) => `<li data-song="${song.number}">
+        <p class="ctext"><strong>${esc(song.name)}</strong>${song.start ? ` · ${esc(T.songs.from(fmt(song.start)))}` : ""}</p>
+        ${song.why ? `<p class="hint">${esc(song.why)}</p>` : ""}
+        <div class="cactions"><button class="btn small" data-hear>${esc(E.trial === song.number ? T.songs.stop : T.songs.hear)}</button>
+          <button class="btn small primary" data-pick>${esc(T.songs.pick)}</button></div></li>`).join("")}</ol></div>`;
+  }
+
+  async function hearSong(number) {
+    const offer = E.songs;
+    if (!offer) return;
+    try {
+      const described = await api(`/api/projects/${encodeURIComponent(E.id)}/songs/${number}`);
+      if (!E) return;
+      if (E.mode === "exact") showLive();
+      E.trial = number;
+      E.player.load(described);
+      seek(offer.start);
+      E.player.play();
+      clearInterval(E.trialTimer);
+      // Heard to the end of the stretch and no further: past it is the cut's own music again.
+      E.trialTimer = setInterval(() => { if (!E || E.player.paused || E.player.time >= offer.end) stopSong(); }, 200);
+      drawInspector();
+    } catch (error) { toast(error.message, "error"); }
+  }
+
+  function stopSong() {
+    if (!E) return;
+    clearInterval(E.trialTimer);
+    if (!E.trial) return;
+    E.trial = null;
+    E.player.pause();
+    if (E.described) E.player.load(E.described);
+    drawInspector();
+  }
+
+  async function pickSong(number) {
+    try {
+      await api(`/api/projects/${encodeURIComponent(E.id)}/songs/${number}`, {});
+      stopSong();
+      await loadComments();
+      drawCommentMarks();
+      drawInspector();
+      toast(T.songs.picked);
+    } catch (error) { toast(error.message, "error"); }
   }
 
   // ------------------------------------------------------------------ captions

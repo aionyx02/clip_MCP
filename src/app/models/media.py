@@ -34,6 +34,11 @@ class Asset(BaseModel):
     recorded_at: Optional[datetime] = Field(
         default=None, description="When recording started, from the file's own timestamp or its name; null if unknown",
     )
+    licence: Optional[str] = Field(
+        default=None,
+        description="Where the file came from and what it may be used for, as the user said — such as 'Kevin "
+                    "MacLeod, incompetech.com, CC BY 4.0'; null when nobody has said",
+    )
     notes: str = Field(
         default="",
         description="How this file may be used, in the user's words: 「請消音」, 「0:12 以後手入鏡，不要用」. Shown "
@@ -147,6 +152,14 @@ class ShotMeasurement(Measured):
         default=None,
         description="Mean change in the camera's own movement, in frame widths; near 0 for a tripod or a smooth pan, "
                     "and far higher for handheld. Null when FFmpeg was built without libvidstab",
+    )
+    # Left out of the record when not measured, so an analysis made before it was measured
+    # reads, and fingerprints, exactly as it did: its timelines keep their IDs.
+    warmth: Optional[float] = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        description="Colour cast, red against blue, from about -0.5 to 0.5: above 0 warmer, below cooler. Null in an "
+                    "analysis made before it was measured",
     )
 
 # Digital silence measures as minus infinity decibels, which no arithmetic survives, so

@@ -19,12 +19,13 @@ import bisect
 import hashlib
 import math
 import os
+import re
 from dataclasses import dataclass, replace
 from datetime import timedelta
 from difflib import SequenceMatcher
 from typing import AbstractSet, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
-from app.engine.continuity import Shot, strays
+from app.engine.continuity import Shot, backward_steps, strays
 from app.engine.music import MIDDLE, energy_at, fullest
 from app.models.media import Asset
 from app.models.plan import (
@@ -928,6 +929,26 @@ def _cue_entries(plan: EditPlan, pieces: Sequence[Piece]) -> Dict[int, MusicCue]
         if at is not None:
             entries[at] = cue
     return entries
+
+def cue_stretches(plan: EditPlan, pieces: Sequence[Piece]) -> List[Tuple[MusicCue, float, float]]:
+    """Say where in the cut each music cue holds: from where its beat begins to where the next cue's does.
+
+    Args:
+        plan: The plan.
+        pieces: Its windows, in order.
+
+    Returns:
+        `(cue, at, until)` in seconds of the cut, in the order they come in;
+        the last runs to the end of the cut.
+    """
+    starts: List[float] = []
+    position = 0.0
+    for piece in pieces:
+        starts.append(round(position, 3))
+        position += piece.played
+    entries = sorted(_cue_entries(plan, pieces).items())
+    return [(cue, starts[index], starts[entries[order + 1][0]] if order + 1 < len(entries) else round(position, 3))
+            for order, (index, cue) in enumerate(entries)]
 
 def _song_length(source: Optional[Asset]) -> Optional[float]:
     """Say how long a song runs, to the millisecond the timeline keeps.
@@ -2228,11 +2249,24 @@ def check_plan(
             notes.append(Note(f"the rejected clip {rejection.clip_id} is not in this timeline",
                               "rejected_clip_missing", clip_ids=[rejection.clip_id]))
     problems.extend(_knowledge_problems(plan, clips))
-    for stray in strays(_shots(plan, clips, assets)):
+    notes.extend(_file_order_notes(plan, clips, assets))
+    notes.extend(_shaky_notes(plan, clips))
+    shots = _shots(plan, clips, assets)
+    for stray in strays(shots):
         problems.append(
             f"continuity: {stray}. Move it next to what it belongs with, drop it, or say in its `jump_reason` "
             "why it belongs here — a flash-forward, a callback"
         )
+    if plan.structure != Structure.FLASHBACK:
+        by_time, by_light = backward_steps(shots)
+        for step in by_time:
+            problems.append(
+                f"continuity: {step}. Put the part in the order it happened, or say in the later shot's "
+                "`jump_reason` why it goes back — a memory, a callback"
+            )
+        for step, pair in by_light:
+            notes.append(Note(f"{step}: if that is night going back to day, put them in order or give a "
+                              "`jump_reason`", "dark_to_bright", clip_ids=list(pair), look=True))
     both = sorted({rejection.clip_id for rejection in plan.rejected} & {item.clip_id for item in plan.selections})
     if both:
         problems.append(
@@ -2441,9 +2475,97 @@ def _shots(
             topic=clip.topic or (parent.topic if parent is not None else None),
             opens_part=selection.beat_id not in begun,
             exempt=selection.beat_id in hook or bool(selection.jump_reason),
+            exposure=clip.scores.get("exposure"),
         ))
         begun.add(selection.beat_id)
     return shots
+
+# A clip whose camera was this unsteady — the mean change in its movement, in frame widths —
+# is handheld enough to be felt. Provisional: the steady side of what the search docs offer
+# as a bound, not measured against anyone watching.
+SHAKY = 0.01
+
+def _shaky_notes(plan: EditPlan, clips: Mapping[str, SemanticClip]) -> List[Note]:
+    """Say which chosen clips the camera shook in, with how much, so a steadier one can be looked for.
+
+    Args:
+        plan: The plan.
+        clips: The timeline's clips, keyed by ID.
+
+    Returns:
+        One note naming them all, or none.
+    """
+    shaky = []
+    for selection in plan.selections:
+        clip = clips.get(selection.clip_id)
+        shake = clip.scores.get("shake") if clip is not None else None
+        if shake is not None and shake > SHAKY:
+            shaky.append((selection.clip_id, shake))
+    if not shaky:
+        return []
+    listed = ", ".join(f"{clip_id} ({shake:.3f})" for clip_id, shake in sorted(shaky, key=lambda item: -item[1]))
+    return [Note(f"the camera shakes in {listed}, against {SHAKY:g} for a steady shot; if a shake is not wanted, "
+                 "query_clips with max_scores {\"shake\": " + f"{SHAKY:g}" + "} finds steadier footage of the same",
+                 "shaky", clip_ids=[clip_id for clip_id, _ in shaky], look=True)]
+
+# A number a file's name starts with, before a separator: `1-`, `01_`, `1.`, `1 `, `1、`, `(1)`.
+# Numbered by hand, it is the order somebody meant the files to be cut in.
+FILE_NUMBER = re.compile(r"^\(?(\d{1,4})\s*[-_.、)\s]")
+
+def file_number(path: str) -> Optional[int]:
+    """Read the number a file's name starts with, if it starts with one before a separator."""
+    found = FILE_NUMBER.match(os.path.basename(path))
+    return int(found.group(1)) if found else None
+
+def _file_order_notes(
+    plan: EditPlan,
+    clips: Mapping[str, SemanticClip],
+    assets: Mapping[str, Asset],
+) -> List[Note]:
+    """Say where the plan plays numbered files out of the order their names give.
+
+    Files numbered by hand in one folder are the order somebody meant them to
+    be cut in; files in different folders were numbered apart. Only where a
+    file first comes in counts, and the hook and a selection that says why it
+    is out of place are left out: both are meant to be. A note, not a refusal:
+    the numbers may be the order they were shot rather than the order wanted.
+
+    Args:
+        plan: The plan.
+        clips: The timeline's clips, keyed by ID.
+        assets: The files, keyed by asset ID.
+
+    Returns:
+        One note per folder played out of its order.
+    """
+    hook = {beat.id for beat in plan.beats if beat.role == BeatRole.HOOK}
+    seen: set = set()
+    highest: Dict[str, Tuple[int, str]] = {}
+    behind: Dict[str, List[str]] = {}
+    labels: Dict[str, List[str]] = {}
+    for selection in _ordered_selections(plan):
+        clip = clips.get(selection.clip_id)
+        asset = assets.get(clip.asset_id) if clip is not None else None
+        if asset is None or asset.id in seen:
+            continue
+        seen.add(asset.id)
+        number = file_number(asset.path)
+        if number is None or selection.beat_id in hook or selection.jump_reason:
+            continue
+        folder, name = os.path.dirname(os.path.abspath(asset.path)), os.path.basename(asset.path)
+        top = highest.get(folder)
+        if top is not None and number < top[0]:
+            behind.setdefault(folder, []).append(f"{name} after {top[1]}")
+            labels.setdefault(folder, []).append(selection.clip_id)
+        else:
+            highest[folder] = (number, name)
+    return [
+        Note(f"the files are numbered in the order they were meant to be cut, and the plan plays "
+             f"{'; '.join(steps[:3])}{f' and {len(steps) - 3} more' if len(steps) > 3 else ''}: put them in "
+             "their order, or say in the selection's `jump_reason` why it comes there",
+             "file_order", clip_ids=labels[folder], look=True)
+        for folder, steps in behind.items()
+    ]
 
 def check_recompile(
     plan: EditPlan,
@@ -2628,19 +2750,10 @@ def music_beds(
     """
     if plan.music is None or not pieces:
         return []
-    starts: List[float] = []
-    position = 0.0
-    for piece in pieces:
-        starts.append(round(position, 3))
-        position += piece.played
-    total = round(position, 3)
-    entries = sorted(_cue_entries(plan, pieces).items())
     crossfade = plan.music.crossfade_seconds
     beds: List[Bed] = []
     lane, sounding = 0, False
-    for order, (index, cue) in enumerate(entries):
-        at = starts[index]
-        until = starts[entries[order + 1][0]] if order + 1 < len(entries) else total
+    for cue, at, until in cue_stretches(plan, pieces):
         if cue.asset_id is None or until <= at:
             sounding = False
             continue
@@ -2736,20 +2849,15 @@ def music_fit_notes(
         return []
     total = compiled_duration(pieces)
     payoff = next((beat.id for beat in plan.beats if beat.role == BeatRole.PAYOFF), None)
-    climax, position, starts = None, 0.0, []
+    climax, position = None, 0.0
     for piece in pieces:
         if piece.beat_id == payoff and climax is None:
             climax = position
-        starts.append(round(position, 3))
         position += piece.played
     # Where each cue holds the cut, and the second of its song it is at when it takes over: a
     # cross-fade lends it a little either side, but this is the stretch it was asked to play under.
-    entries = sorted(_cue_entries(plan, pieces).items())
-    spans: Dict[str, Tuple[float, float, float]] = {}
-    for order, (index, cue) in enumerate(entries):
-        until = starts[entries[order + 1][0]] if order + 1 < len(entries) else round(position, 3)
-        spans[f"cue:{cue.beat_id or '^'}"] = (
-            starts[index], until, song_entry(cue, cuts.get(cue.asset_id) if cuts else None))
+    spans = {f"cue:{cue.beat_id or '^'}": (at, until, song_entry(cue, cuts.get(cue.asset_id) if cuts else None))
+             for cue, at, until in cue_stretches(plan, pieces)}
     by_cue: Dict[str, List[Bed]] = {}
     for bed in beds:
         by_cue.setdefault(bed.key[0], []).append(bed)

@@ -18,6 +18,10 @@ def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+# Who the user is in a comment and its replies: the editor's own word for them.
+USER = "你"
+
+
 class Anchor(BaseModel):
     """The moment of footage under a comment's edge."""
 
@@ -41,7 +45,7 @@ class Comment(BaseModel):
     id: str
     project_id: str
     text: str
-    by: str = "你"
+    by: str = USER
     created_at: datetime = Field(default_factory=_utc_now)
     commit: Optional[str] = Field(default=None, description="The version it was written on")
     start: float = Field(..., ge=0, description="Where on the cut it was written, in seconds")
@@ -49,5 +53,35 @@ class Comment(BaseModel):
     start_anchor: Optional[Anchor] = None
     end_anchor: Optional[Anchor] = None
     status: Literal["open", "resolved"] = "open"
+    question: bool = Field(default=False, description="Whether the AI asked it, for the user to answer")
     replies: List[Reply] = Field(default_factory=list)
     resolved_commit: Optional[str] = Field(default=None, description="The version it was dealt with in")
+
+    @property
+    def answered(self) -> bool:
+        """Whether the user has said something back on it: for a question the AI asked, its answer."""
+        return any(reply.by == USER for reply in self.replies)
+
+    @property
+    def waiting(self) -> bool:
+        """Whether it waits on the AI: open, and not a question still waiting on the user."""
+        return self.status == "open" and (not self.question or self.answered)
+
+
+class Question(BaseModel):
+    """Something the AI is not sure of about a moment of the cut, put to the user."""
+
+    start: float = Field(..., ge=0, description="Where on the cut, in seconds")
+    end: Optional[float] = Field(default=None, description="Where the stretch it is about ends; None for a moment")
+    question: str = Field(..., min_length=1, max_length=300, description="What to ask, in the user's language")
+    why: str = Field(default="", max_length=300,
+                     description="Why it is in doubt — what was weighed — so the user can answer the real question")
+
+
+class Preference(BaseModel):
+    """How the user likes their videos, in their words, kept for every project after."""
+
+    id: str
+    text: str = Field(..., min_length=1, max_length=300)
+    said_at: datetime = Field(default_factory=_utc_now)
+    project_id: Optional[str] = Field(default=None, description="The video it was said about")

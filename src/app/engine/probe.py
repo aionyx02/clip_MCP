@@ -43,6 +43,23 @@ def probe_file(filepath: str, ffprobe_bin: str = "ffprobe") -> Dict[str, Any]:
         raise RuntimeError(f"ffprobe failed: {result.stderr.decode('utf-8', errors='replace').strip()}")
     return json.loads(result.stdout)
 
+# The metadata a file carries about who made it and on what terms, in the order worth
+# reading it. Everything else in a tag block is the encoder talking to itself.
+RIGHTS_TAGS = ("title", "artist", "album_artist", "composer", "album", "copyright", "license", "comment", "date")
+
+def rights_tags(info: Dict[str, Any]) -> Dict[str, str]:
+    """Read what a file says about who made it and on what terms.
+
+    Args:
+        info: What `probe_file` read from it.
+
+    Returns:
+        The `RIGHTS_TAGS` it carries, by lower-case name; a file with none has
+        nothing to say, which is not the same as being free to use.
+    """
+    tags = {str(key).lower(): str(value).strip() for key, value in (info.get("format", {}).get("tags") or {}).items()}
+    return {key: tags[key] for key in RIGHTS_TAGS if tags.get(key)}
+
 def recorded_at(info: Dict[str, Any], filepath: str) -> Optional[datetime]:
     """Work out when a file was recorded.
 

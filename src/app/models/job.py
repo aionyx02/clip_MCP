@@ -1,7 +1,7 @@
 import uuid
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Optional
+from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
@@ -60,6 +60,11 @@ class Job(BaseModel):
     )
     preview: bool = Field(default=False, description="Whether the render is a preview rather than the finished video")
     work_dir: Optional[str] = Field(default=None, description="Directory holding the job's specification and logs")
+    spots: Optional[List[Dict[str, Any]]] = Field(
+        default=None,
+        description="Where every frame of a finished render was read and found black, frozen or a flash: "
+                    "`{kind, start, end}` in seconds of the render; null when it was not read (render jobs)",
+    )
     error_message: Optional[str] = None
     cancel_requested: bool = False
     memory_estimate: int = Field(default=0, ge=0, description="Peak memory the job is expected to need, in bytes")
