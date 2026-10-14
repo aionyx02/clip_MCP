@@ -2225,6 +2225,74 @@ def build_semantic_timeline(asset_ids: List[str], rebuild: bool = False) -> dict
     }
 
 @mcp.tool()
+def list_timelines() -> dict:
+    """List every timeline built, newest first, to find the old ones to clear away.
+
+    A timeline is built for each set of files, so the same footage built with
+    one file more or less is another timeline, numbered afresh. They pile up;
+    a clip's short ID then means a clip in each of them.
+
+    Returns:
+        `timelines`, each with its ID, when it was built, its files, how many
+        clips it has, `plans` built on it now and `past`, older versions of
+        plans that were. One with neither can go with `delete_timelines`.
+    """
+    names = {asset.id: os.path.basename(asset.path) for asset in repo.list_assets()}
+    return {"timelines": [
+        {
+            "timeline_id": timeline.id,
+            "built_at": timeline.built_at.astimezone().strftime("%Y-%m-%d %H:%M"),
+            "files": [names.get(asset_id, asset_id) for asset_id in timeline.asset_ids],
+            "clips": clips,
+            "plans": plans,
+            "past": [f"{plan_id} v{version}" for plan_id, version in past],
+        }
+        for timeline, clips, plans, past in repo.list_semantic_timelines()
+    ]}
+
+@mcp.tool()
+def delete_timelines(timeline_ids: List[str], with_past_versions: bool = False) -> dict:
+    """Delete timelines no plan is built on, with their clips and search vectors.
+
+    The files and their analyses stay: building a timeline over the same files
+    again makes it again. A cut already made keeps its clips; what it loses is
+    only the footage's descriptions `read_cut` reads.
+
+    Args:
+        timeline_ids: The timelines, as `list_timelines` gives them.
+        with_past_versions: Delete one older versions of a plan were built on
+            too; going back to those versions then needs `copy_plan` onto a
+            timeline that is still there. Only once the user has said so.
+
+    Returns:
+        `deleted`, the timelines deleted.
+
+    Raises:
+        ValueError: If a timeline does not exist, a plan is built on it now,
+            or older versions of one were and `with_past_versions` is off.
+            Nothing is deleted then.
+    """
+    known = {timeline.id: (plans, past) for timeline, _, plans, past in repo.list_semantic_timelines()}
+    problems = []
+    for timeline_id in timeline_ids:
+        if timeline_id not in known:
+            problems.append(f"there is no timeline {timeline_id}")
+            continue
+        plans, past = known[timeline_id]
+        if plans:
+            problems.append(f"{timeline_id} has {', '.join(plans)} built on it; copy_plan it onto another timeline first")
+        elif past and not with_past_versions:
+            problems.append(
+                f"{timeline_id} has older versions built on it ({', '.join(f'{plan} v{version}' for plan, version in past)}); "
+                "going back to them would need copy_plan. Delete it anyway with with_past_versions once the user says so"
+            )
+    if problems:
+        raise ValueError("nothing deleted: " + "; ".join(problems))
+    for timeline_id in dict.fromkeys(timeline_ids):
+        repo.delete_semantic_timeline(timeline_id)
+    return {"deleted": list(dict.fromkeys(timeline_ids))}
+
+@mcp.tool()
 def query_clips(
     timeline_id: Optional[str] = None,
     level: ClipLevel = ClipLevel.UTTERANCE,

@@ -926,6 +926,40 @@ class Repository:
             rows = self._query("SELECT data FROM semantic_timelines WHERE id = ?", (timeline_id,))
         return SemanticTimeline.model_validate_json(rows[0][0]) if rows else None
 
+    def list_semantic_timelines(self) -> List[Tuple[SemanticTimeline, int, List[str], List[Tuple[str, int]]]]:
+        """List every timeline built, newest first, with what holds on to it.
+
+        Returns:
+            `(timeline, clips, plans, past)` each: how many clips it has, the
+            plans built on it now, and the `(plan, version)` of older versions
+            of other plans that were.
+        """
+        timelines = [SemanticTimeline.model_validate_json(row[0])
+                     for row in self._query("SELECT data FROM semantic_timelines ORDER BY rowid DESC")]
+        counts = dict(self._query("SELECT timeline_id, COUNT(*) FROM semantic_clips GROUP BY timeline_id"))
+        current: Dict[str, List[str]] = {}
+        for plan_id, timeline_id in self._query("SELECT id, timeline_id FROM plans"):
+            current.setdefault(timeline_id, []).append(plan_id)
+        past: Dict[str, List[Tuple[str, int]]] = {}
+        for plan_id, version, timeline_id in self._query(
+            "SELECT plan_id, version, json_extract(data, '$.timeline_id') FROM plan_versions ORDER BY plan_id, version"
+        ):
+            if plan_id not in current.get(timeline_id, []):
+                past.setdefault(timeline_id, []).append((plan_id, version))
+        return [(timeline, counts.get(timeline.id, 0), current.get(timeline.id, []), past.get(timeline.id, []))
+                for timeline in timelines]
+
+    def delete_semantic_timeline(self, timeline_id: str) -> None:
+        """Delete a timeline, its clips and their search vectors.
+
+        Args:
+            timeline_id: The timeline.
+        """
+        with self._transaction() as conn:
+            conn.execute("DELETE FROM clip_vectors WHERE timeline_id = ?", (timeline_id,))
+            conn.execute("DELETE FROM semantic_clips WHERE timeline_id = ?", (timeline_id,))
+            conn.execute("DELETE FROM semantic_timelines WHERE id = ?", (timeline_id,))
+
     def timelines_holding(self, short_id: str) -> List[str]:
         """Say which timelines have a clip by this short ID, such as `u0034`.
 

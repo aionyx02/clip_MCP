@@ -91,7 +91,7 @@ LM Studio、Cherry Studio（一鍵安裝連結）。修改前備份為 `<檔名>
 |---|---|
 | 素材庫 | `inspect_media` `import_asset` `import_folder` `list_assets` `edit_asset` `organize_library` `move_files` |
 | 分析 | `analyze_asset` `listen_again` `get_analysis` `view_frames` |
-| 語意時間軸 | `build_semantic_timeline` `query_clips` `get_semantic_clip` `propose_sections` `set_sections` `frames_for_clips` `set_clip_tags` |
+| 語意時間軸 | `build_semantic_timeline` `query_clips` `get_semantic_clip` `propose_sections` `set_sections` `frames_for_clips` `set_clip_tags` `list_timelines` `delete_timelines` |
 | 計畫 | `save_plan` `amend_plan` `copy_plan` `get_plan` `validate_plan` `compile_plan` `diff_plan` `preview_plan_diff` `list_plan_versions` `revert_plan` `propose_broll` |
 | 專案 | `create_project` `list_projects` `get_project` `apply_edits` `preview_project` `preview_sound` |
 | 字幕 | `generate_subtitles` `get_subtitles` |
