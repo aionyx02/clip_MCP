@@ -188,7 +188,12 @@ def usual_pauses(analysis: MediaAnalysis, speaker: Optional[str] = None) -> List
             found.append(gap)
     return sorted(found)
 
-def pause_across(at: float, heard: Sequence[HeardWord], analyses: Mapping[str, MediaAnalysis]) -> Optional[str]:
+# A part beginning less than this after the last line of the one before runs straight on. Provisional.
+NO_BREATH_SECONDS = 0.1
+
+def pause_across(
+    at: float, heard: Sequence[HeardWord], analyses: Mapping[str, MediaAnalysis], part: Optional[str] = None,
+) -> Optional[str]:
     """Set the pause a cut leaves between two lines beside the pauses the speaker makes.
 
     Whether a cut sounds tight or rushed cannot be heard here, but it can be
@@ -199,6 +204,7 @@ def pause_across(at: float, heard: Sequence[HeardWord], analyses: Mapping[str, M
         at: The join, in seconds of the cut.
         heard: The words heard around it, as `words_heard` lays them out.
         analyses: The analyses of the files, keyed by asset ID.
+        part: The part of the video the join begins, when it begins one.
 
     Returns:
         One line, or None when the same clip talks on across the join or
@@ -211,6 +217,9 @@ def pause_across(at: float, heard: Sequence[HeardWord], analyses: Mapping[str, M
     last, first = before[-1], after[0]
     gap = max(0.0, first.start - last.end)
     line = f"{gap:.2f}s between 「{last.text}」 and 「{first.text}」"
+    if part is not None and gap < NO_BREATH_SECONDS:
+        line += (f"; 「{part}」 begins here straight on from the last line, with no breath — `pause_before` on "
+                 "its beat opens it on a moment of quiet")
     analysis = analyses.get(last.asset_id)
     if analysis is None:
         return line

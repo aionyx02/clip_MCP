@@ -1298,7 +1298,7 @@ def compile_pieces(
     notes += said
     # Last, because the beat moves cuts, and how much a transition can reach back into
     # depends on exactly where its window starts.
-    pieces, said = _joined_beats(plan, pieces, assets)
+    pieces, said = _joined_beats(plan, pieces, assets, cuts)
     return pieces, notes + said
 
 def _reach(kind: str) -> float:
@@ -1314,8 +1314,13 @@ def _joined_beats(
     plan: EditPlan,
     pieces: Sequence[Piece],
     assets: Mapping[str, Asset],
+    cuts: Optional[Mapping[str, CleanCuts]] = None,
 ) -> Tuple[List[Piece], List[str]]:
-    """Put each beat's transition and sound lead on the window it begins with.
+    """Put each beat's pause, transition and sound lead on the window it begins with.
+
+    The pause first: it opens the window earlier, into the quiet of its shot
+    before the first word, and the transition then runs in from where the
+    window now starts.
 
     Both are fed from before the window's start in its file, and a shot that
     begins at the very start of its file has nothing there. Refusing the plan
@@ -1328,6 +1333,8 @@ def _joined_beats(
         plan: The plan.
         pieces: Its windows, settled.
         assets: The assets they play from, keyed by asset ID.
+        cuts: What is known about each file, keyed by asset ID: where the
+            words are, so a pause never opens a window onto the line before.
 
     Returns:
         `(pieces, notes)`.
@@ -1336,9 +1343,24 @@ def _joined_beats(
     out = list(pieces)
     notes: List[str] = []
     for position, beat in enumerate(plan.beats):
+        at = first.get(beat.id)
+        if position > 0 and beat.pause_before is not None and at:
+            piece = out[at]
+            known = (cuts or {}).get(piece.asset_id)
+            said = [closed for _, closed in (known.words if known is not None else ())
+                    if closed <= piece.start + EDGE_TOLERANCE_SECONDS]
+            quiet = piece.start - max(said, default=0.0)
+            fits = math.floor(min(beat.pause_before * piece.speed, max(0.0, quiet)) * 1000) / 1000
+            if fits < beat.pause_before * piece.speed:
+                notes.append(Note(
+                    f"beat {beat.id}: it opens on {fits / piece.speed:g}s of quiet rather than {beat.pause_before:g}s, "
+                    "all its first shot has before somebody speaks",
+                    "join_shortened", beat_id=beat.id, clip_ids=_first_clips([piece]), seconds=fits, look=True,
+                ))
+            if fits > 0:
+                out[at] = replace(piece, start=round(piece.start - fits, 3))
         if position == 0 or (beat.transition_in is None and beat.sound_lead is None):
             continue
-        at = first.get(beat.id)
         if at is None or at == 0:
             notes.append(Note(
                 f"beat {beat.id} has no shot of its own to begin with — its first one was joined to the shot "

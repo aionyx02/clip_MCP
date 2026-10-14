@@ -3391,7 +3391,7 @@ def inspect_join(
             sides = [_glossed("".join(word.text for word in heard if (word.start >= join.at) == later))
                      for later in (False, True)]
             text.append(f"  reads: 「{sides[0]}」 ‖ 「{sides[1]}」")
-        pause = pause_across(join.at, heard, analyses)
+        pause = pause_across(join.at, heard, analyses, join.part)
         if pause:
             text.append("  pause: " + pause)
         text += [
