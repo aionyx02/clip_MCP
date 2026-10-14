@@ -534,6 +534,10 @@ def _same_line(first: Piece, second: Piece, cuts: Mapping[str, CleanCuts]) -> bo
         return False
     return SequenceMatcher(None, said, again).ratio() >= RETAKE_SIMILARITY
 
+# A window's edge moved further than this to reach the sound is more than a word placed a
+# little late: it is said, with where it was asked for and where it went. Provisional.
+MOVED_FAR_SECONDS = 0.3
+
 def _on_the_sound(
     pieces: Sequence[Piece],
     cuts: Optional[Mapping[str, CleanCuts]],
@@ -561,6 +565,9 @@ def _on_the_sound(
     out: List[Piece] = []
     moved = 0
     shifted: List[Piece] = []
+    # Moves too long to be a slip of the transcript, said one by one so none is made unseen.
+    far: List[str] = []
+    far_in: List[Piece] = []
     for piece in pieces:
         known = cuts.get(piece.asset_id)
         if known is None:
@@ -576,6 +583,12 @@ def _on_the_sound(
         if (start, end) != (piece.start, piece.end):
             moved += (start != piece.start) + (end != piece.end)
             shifted.append(piece)
+            pulled = [(side, asked, made) for side, asked, made in (("starts", piece.start, start), ("ends", piece.end, end))
+                      if abs(made - asked) > MOVED_FAR_SECONDS]
+            if pulled:
+                far_in.append(piece)
+                far += [f"{(piece.from_clip_ids or [piece.asset_id])[0]} {side} at {made:.2f}s of its file, not the {asked:.2f}s asked"
+                        for side, asked, made in pulled]
             out.append(replace(piece, start=start, end=end))
         else:
             out.append(piece)
@@ -585,6 +598,12 @@ def _on_the_sound(
             f"{moved} cut(s) moved out to where the sound really starts or stops: the transcript placed a word "
             "inside the talking, and cutting there would take the start or end of it off",
             "cuts_moved_to_the_sound", clip_ids=_first_clips(shifted),
+        ))
+    if far:
+        notes.append(Note(
+            "moved further than a slip of the transcript: " + "; ".join(far) + ". If the words there were meant "
+            "to go, start or end the window on the edge of the first or last word kept, and it stays",
+            "cuts_moved_far", clip_ids=_first_clips(far_in), look=True,
         ))
     return out, notes
 

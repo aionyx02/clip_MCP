@@ -67,6 +67,10 @@ HEARD_PROBABILITY = 0.5
 # Two heard words this close together are one phrase, so a cut between them takes the
 # first off the second. Provisional (roadmap §13).
 PHRASE_GAP_SECONDS = 0.3
+# A cut this close to where the transcript has one word end and the next begin was put on
+# that edge: the word on the far side is being taken off on purpose — 「各位」 off the front
+# of 「各位我到高鐵了」 — however the sound runs on across it. Provisional.
+WORD_EDGE_SECONDS = 0.05
 MOSTLY = 0.5
 NEARLY_ALL = 0.9
 # How much of the talking in a stretch one voice has to hold before the stretch is called
@@ -1048,7 +1052,7 @@ class CleanCuts:
             cut here would take the start of it off. None otherwise, for a cut
             inside a measured silence, and for a file nobody transcribed.
         """
-        if not self.transcribed or self._in_silence(seconds):
+        if not self.transcribed or self._in_silence(seconds) or self.drops_words(seconds, opens=True):
             return None
         found = [onset for onset in (self._silence_onset(seconds), self._voice_onset(seconds)) if onset is not None]
         return min(found) if found else None
@@ -1067,6 +1071,42 @@ class CleanCuts:
             return None
         found = [fall for fall in (self._silence_fall(seconds), self._voice_fall(seconds)) if fall is not None]
         return max(found) if found else None
+
+    def drops_words(self, seconds: float, opens: bool) -> bool:
+        """Say whether a cut opening a window sits on a word edge, taking whole words off the front of a line.
+
+        The transcript knows the word being cut away — it ends where the first
+        one kept begins — so the cut was put there to take it off, 「各位」
+        off 「各位我到高鐵了」, and the sound running on up to the edge is
+        that word, not one the transcript missed. A cut a missed word runs up
+        to has no transcribed word right against it, and is still moved to
+        the sound. Only the front of a line: a line stopped short of its end
+        between two words that close together is bitten off, and is still
+        found as one.
+
+        Args:
+            seconds: Where the cut is, in source seconds.
+            opens: Whether it opens a window rather than closing one.
+
+        Returns:
+            True when the cut opens a window inside one sentence, a
+            transcribed word starts within `WORD_EDGE_SECONDS` of it, and
+            another ends within it, mostly before it and not run on across a
+            measured silence.
+        """
+        if not opens:
+            return False
+        edge = WORD_EDGE_SECONDS
+
+        def placed(start: float, end: float) -> bool:
+            # A word run on across a measured silence is misplaced: what it says is heard on one side.
+            return not any(min(end, loud) - max(start, quiet) > EDGE_TOLERANCE_SECONDS for quiet, loud in self.pauses)
+
+        kept = any(abs(start - seconds) <= edge for start, _ in self.words)
+        gone = any(abs(end - seconds) <= edge and (start + end) / 2 < seconds and placed(start, end)
+                   for start, end in self.words)
+        within = any(begins < seconds < ends for begins, ends in self.sentences)
+        return kept and gone and within
 
     def room_before(self, onset: float) -> float:
         """Find how far before the start of some talking a window may open.
@@ -1145,7 +1185,8 @@ class CleanCuts:
             The words as heard, or an empty string when it takes none off.
         """
         lost = self._lost_words(seconds, opens)
-        if not lost or self._known_word(*((lost[0][0], seconds) if opens else (seconds, lost[-1][1]))):
+        if (not lost or self.drops_words(seconds, opens)
+                or self._known_word(*((lost[0][0], seconds) if opens else (seconds, lost[-1][1])))):
             return ""
         return "".join(text for _, _, text in lost)
 
