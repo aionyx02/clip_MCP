@@ -86,7 +86,7 @@ from app.engine.merge import WHOLE_PICKS, merge, merge_plans
 from app.engine.delivery import (
     CHECKS, Finding, chapter_metadata, chapters, check_delivery, clock, cover_candidates, look_candidates,
 )
-from app.engine.joins import HeardWord, Join, joins_in, words_heard
+from app.engine.joins import HeardWord, Join, joins_in, pause_across, words_heard
 from app.engine.frames import format_timestamp, still, storyboard_sheet
 from app.engine.interchange import write_edl, write_fcpxml, write_otio, write_srt
 from app.engine.listen import WINDOW_SECONDS, chart, cut_sound, describe, levels, levels_every, parts_of
@@ -3173,7 +3173,9 @@ def inspect_join(
     Returns:
         The list; or for each join its frames, a row before the cut and a row
         from it with the two either side framed red; the transcribed words
-        laid onto the render's time, ✂ on any a cut takes into; the render's
+        laid onto the render's time, ✂ on any a cut takes into; where a line
+        ends and another begins across the cut, the pause between them beside
+        the pauses the speaker makes between sentences; the render's
         sound level every 0.1s with ‖ at the cut; and a WAV of the stretch to
         play or hear again with `listen_again`. It says when the project has
         changed since the render, and which joins did not fit on the sheet.
@@ -3239,10 +3241,16 @@ def inspect_join(
                 borders.append(CUT_BORDER if index == edge else None)
         opened, closed = max(0.0, join.at - seconds), min(length, join.at + seconds)
         keep_as = os.path.join(WORKSPACE_DIR, "temp", "joins", f"render-{job_id[:8]}-{join.at:.2f}.wav")
+        heard = words_heard(project, analyses, opened, closed)
         text += [
             _join_line(number, join, _found_at(join, findings)),
             f"  frames: a row of {steps + 1} up to the cut, then {steps + 1} from it",
-            "  words: " + _words_across(join, words_heard(project, analyses, opened, closed)),
+            "  words: " + _words_across(join, heard),
+        ]
+        pause = pause_across(join.at, heard, analyses)
+        if pause:
+            text.append("  pause: " + pause)
+        text += [
             "  levels: " + _levels_across(path, join, opened, closed, keep_as),
         ]
     return ToolResult(content=[
