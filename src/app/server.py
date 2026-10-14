@@ -44,12 +44,15 @@ from app.models.timeline import (
     SetCaptionStyleOp,
     SetSubtitlesOp,
     SubtitleCue,
+    TimeRange,
+    Track,
     TrackType,
     retimed_words,
     apply_operation,
     validate_project,
 )
 from app.models.comment import Comment, Reply
+from app.models.offer import OfferedSong, SongOffer
 from app.models.job import Job, JobKind, JobStatus
 from app.engine import cards, texts, looks, loudness, machine, meaning, resources, speed, stills
 from app.engine.analysis import listen_again as listen_again_in_file
@@ -6924,6 +6927,141 @@ def open_comments(project_id: str) -> int:
         The number of open comments.
     """
     return sum(comment.status == "open" for comment in repo.comments(project_id))
+
+# More songs than this to hear under the same stretch is a library, not a choice. Provisional.
+MOST_OFFERED_SONGS = 4
+
+@mcp.tool()
+def offer_songs(
+    project_id: str,
+    songs: Annotated[List[OfferedSong], Field(min_length=1, max_length=MOST_OFFERED_SONGS)],
+    beat_id: Optional[str] = None,
+    start: Optional[float] = None,
+    end: Optional[float] = None,
+) -> dict:
+    """Put a few songs to the user to hear under the same stretch of the cut, and let them pick.
+
+    You cannot hear whether a song suits the pictures; its tags are a guess at
+    its mood, about half the time right. Narrow the music down to two or three
+    with `find_music`, then offer them here: the editor plays the stretch with
+    each in turn in place of its music, as loud as the music there is, and the
+    user picks by ear. Their pick comes back as a comment on the stretch —
+    which song, from which second — for you to set with `set_music_cue` or
+    `fit_track`. A new offer replaces the last.
+
+    Args:
+        project_id: The video.
+        songs: The songs, each with the second to hear it from and, in
+            `why`, what it is meant to do there.
+        beat_id: The part of the plan to hear them under: from where it
+            begins to where the next begins.
+        start: Otherwise, where the stretch begins in seconds of the cut; the
+            start when neither is given.
+        end: Where it ends; the end of the cut when not given.
+
+    Returns:
+        `offered`, the songs by name, and what to tell the user.
+
+    Raises:
+        ValueError: If the project, a song or the part does not exist, a song
+            has no sound or is shorter than the second it is heard from, or
+            the stretch is empty.
+    """
+    project = repo.get_project(project_id)
+    if project is None:
+        raise ValueError(f"project {project_id} not found")
+    length = float(project.duration)
+    if beat_id is not None:
+        markers = sorted(project.markers, key=lambda marker: marker.timeline_in)
+        at = next((index for index, marker in enumerate(markers) if marker.from_beat_id == beat_id), None)
+        if at is None:
+            raise ValueError(f"the cut has no part {beat_id}; its parts: "
+                             + (", ".join(marker.from_beat_id or marker.name for marker in markers) or "none"))
+        start = float(markers[at].timeline_in)
+        end = float(markers[at + 1].timeline_in) if at + 1 < len(markers) else length
+    start = 0.0 if start is None else max(0.0, start)
+    end = length if end is None else min(end, length)
+    if end <= start:
+        raise ValueError(f"the stretch {start:g}–{end:g}s of a {length:.1f}s cut is empty")
+    names = []
+    for song in songs:
+        asset = repo.get_assets([asset_id_for(song.asset_id)]).get(asset_id_for(song.asset_id))
+        if asset is None:
+            raise ValueError(f"there is no song {song.asset_id}")
+        if not asset.has_audio:
+            raise ValueError(f"{os.path.basename(asset.path)} has no sound to hear")
+        if asset.duration is not None and song.start >= float(asset.duration):
+            raise ValueError(f"{os.path.basename(asset.path)} runs {float(asset.duration):.1f}s, "
+                             f"so it cannot be heard from {song.start:g}s")
+        song.asset_id = asset.id
+        names.append(os.path.basename(asset.path))
+    playing = [clip for track in project.tracks if track.track_type == TrackType.AUDIO and track.duck_under_speech
+               for clip in track.clips if float(clip.timeline_in) < end and float(clip.timeline_out) > start]
+    repo.save_song_offer(SongOffer(project_id=project_id, start=round(start, 3), end=round(end, 3), songs=songs,
+                                   volume=playing[0].volume if playing else SongOffer.model_fields["volume"].default,
+                                   beat_id=beat_id), project_id)
+    return {"offered": names, "say": (
+        f"tell the user {len(names)} songs are waiting in the editor to hear under {clock(start)}–{clock(end)}; "
+        "their pick comes back as a comment")}
+
+def song_trial(project: Project, offer: SongOffer, number: int) -> Project:
+    """The cut with one offered song in place of its music over the stretch, for the editor to play.
+
+    Args:
+        project: The cut.
+        offer: The songs offered.
+        number: Which of them, from 1.
+
+    Returns:
+        A copy: every music clip that plays in the stretch taken off, and the
+        song laid over the stretch from its second, faded in and out.
+    """
+    song = offer.songs[number - 1]
+    asset = repo.get_assets([song.asset_id]).get(song.asset_id)
+    trial = project.model_copy(deep=True)
+    music = [track for track in trial.tracks if track.track_type == TrackType.AUDIO and track.duck_under_speech]
+    for track in music:
+        track.clips = [clip for clip in track.clips
+                       if float(clip.timeline_out) <= offer.start or float(clip.timeline_in) >= offer.end]
+    if not music:
+        music = [Track(id="music", track_type=TrackType.AUDIO, duck_under_speech=True)]
+        trial.tracks.append(music[0])
+    heard = offer.end - offer.start
+    if asset is not None and asset.duration is not None:
+        heard = min(heard, float(asset.duration) - song.start)
+    music[0].clips.append(Clip(
+        id="trial", asset_id=song.asset_id, timeline_in=Decimal(str(offer.start)),
+        source_range=TimeRange(start=Decimal(str(song.start)), end=Decimal(str(round(song.start + heard, 3)))),
+        volume=offer.volume, audio_fade_in=Decimal("1"), audio_fade_out=Decimal("1.5"),
+    ))
+    music[0].clips.sort(key=lambda clip: clip.timeline_in)
+    return trial
+
+def pick_song(project_id: str, number: int) -> dict:
+    """Take the user's pick of the offered songs to the AI, as a comment on the stretch.
+
+    The editor's, never the AI's: the pick is the user speaking.
+
+    Args:
+        project_id: The video.
+        number: Which song, from 1.
+
+    Returns:
+        The comment.
+
+    Raises:
+        ValueError: If nothing is offered, or there is no such song.
+    """
+    offer = repo.song_offer(project_id)
+    if offer is None or not 1 <= number <= len(offer.songs):
+        raise ValueError("no such song is offered")
+    song = offer.songs[number - 1]
+    asset = repo.get_assets([song.asset_id]).get(song.asset_id)
+    name = os.path.basename(asset.path) if asset is not None else song.asset_id
+    made = add_comment(project_id, f"配樂選「{name}」，從歌的 {song.start:g} 秒開始（{song.asset_id}）",
+                       offer.start, offer.end)
+    repo.save_song_offer(None, project_id)
+    return made
 
 def add_comment(project_id: str, text: str, start: float, end: Optional[float] = None) -> dict:
     """Write down what the user said about a moment of the cut, pinned to the footage under it.

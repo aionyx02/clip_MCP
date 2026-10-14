@@ -9,6 +9,7 @@ import pytest
 from starlette.testclient import TestClient
 
 from app import server
+from app.models.offer import OfferedSong
 from app.ui import app as editor
 from app.ui import dialogs
 
@@ -488,3 +489,31 @@ def test_a_job_can_be_stopped_from_the_editor(client: TestClient, ended_after: l
     assert server.repo.get_job(waiting.job_id).status.value == "cancelled"
     ended = {job["job_id"]: job for job in client.get("/api/jobs/active").json()["ended"]}
     assert ended[waiting.job_id]["status"] == "cancelled"
+
+
+def test_offered_songs_are_heard_in_place_of_the_music_and_the_pick_comes_back_as_a_comment(
+    client: TestClient, media: Path,
+) -> None:
+    made = client.post("/api/projects", json={"name": "配樂", "width": 640, "height": 360}).json()
+    wide = server.import_asset(str(media / "wide.mp4"))["id"]
+    song = server.import_asset(str(media / "song.mp3"))["id"]
+    jingle = server.import_asset(str(media / "jingle.wav"))["id"]
+    server.apply_edits(made["id"], server.repo.get_project(made["id"]).version, server._OPERATIONS.validate_python([
+        {"action": "insert_clip", "track_id": "video", "clip_id": "a", "asset_id": wide,
+         "source_range": {"start": 0, "end": 6}},
+        {"action": "insert_clip", "track_id": "music", "clip_id": "m", "asset_id": jingle,
+         "source_range": {"start": 0, "end": 4}, "timeline_in": 0},
+    ]))
+    assert client.get(f"/api/projects/{made['id']}/songs").json() == {"offer": None}
+    server.offer_songs(made["id"], [OfferedSong(asset_id=song, start=2, why="輕快")], start=1, end=5)
+    offer = client.get(f"/api/projects/{made['id']}/songs").json()["offer"]
+    assert (offer["start"], offer["end"]) == (1, 5) and offer["songs"][0]["name"] == "song.mp3"
+    played = client.get(f"/api/projects/{made['id']}/songs/1").json()
+    music = next(track for track in played["tracks"] if track["id"] == "music")
+    # The jingle under the stretch is taken off, and the song plays there from its second second.
+    assert [(clip["asset_id"], clip["timeline_in"], clip["source_start"]) for clip in music["clips"]] == [(song, 1, 2)]
+    picked = client.post(f"/api/projects/{made['id']}/songs/1", json={}).json()
+    assert "song.mp3" in picked["text"] and "2 秒" in picked["text"]
+    assert client.get(f"/api/projects/{made['id']}/songs").json() == {"offer": None}
+    # The project itself was never changed by hearing it.
+    assert [clip.asset_id for clip in server.repo.get_project(made["id"]).tracks[1].clips] == [jingle]

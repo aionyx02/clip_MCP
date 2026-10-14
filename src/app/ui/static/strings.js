@@ -371,6 +371,15 @@ window.T = {
     swapTitle: "把右邊的版本換到左邊",
     close: "結束比較",
   },
+  songs: {
+    title: (from, to) => `AI 挑了幾首配樂，請聽聽看（${from}–${to}）`,
+    how: "每首都會放在這一段原本配樂的位置播放，聽完選一首，選擇會變成留言傳給 AI。",
+    from: (at) => `從歌的 ${at} 開始`,
+    hear: "試聽",
+    stop: "停止",
+    pick: "選這首",
+    picked: "已經把選擇留言給 AI 了",
+  },
   comments: {
     add: "留言",
     addTitle: "在這裡留言給 AI（C）；按住 Shift 在時間軸上拖曳可以選一段",

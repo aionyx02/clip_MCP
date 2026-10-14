@@ -10,6 +10,7 @@ from typing import Callable, Dict, Iterable, Iterator, List, Mapping, Optional, 
 from app.models.comment import Comment
 from app.models.job import Job
 from app.models.media import Asset, MediaAnalysis
+from app.models.offer import SongOffer
 from app.models.plan import EditPlan
 from app.models.semantic import ClipKind, ClipLevel, SemanticClip, SemanticTimeline
 from app.models.timeline import Project, SubtitleCue
@@ -115,6 +116,10 @@ _MIGRATIONS: List[List[str]] = [
         # telling apart two shots that look alike, and the frame never changes.
         "CREATE TABLE IF NOT EXISTS looks (asset_id TEXT NOT NULL, at REAL NOT NULL, look TEXT NOT NULL, "
         "PRIMARY KEY (asset_id, at))",
+    ],
+    [
+        # The songs put to the user to hear under a stretch of a cut, one set a project at a time.
+        "CREATE TABLE IF NOT EXISTS song_offers (project_id TEXT PRIMARY KEY, data TEXT NOT NULL)",
     ],
 ]
 # Footage and music are filed apart, each in folders of its own; projects in theirs.
@@ -672,6 +677,19 @@ class Repository:
         found = [Comment.model_validate_json(data) for (data,) in
                  self._query("SELECT data FROM comments WHERE project_id = ?", (project_id,))]
         return sorted(found, key=lambda comment: comment.created_at)
+
+    def song_offer(self, project_id: str) -> Optional[SongOffer]:
+        """Read the songs put to the user for a project, if any are."""
+        rows = self._query("SELECT data FROM song_offers WHERE project_id = ?", (project_id,))
+        return SongOffer.model_validate_json(rows[0][0]) if rows else None
+
+    def save_song_offer(self, offer: Optional[SongOffer], project_id: str) -> None:
+        """Put songs to the user for a project, in place of any before; None takes them away."""
+        with self._transaction() as conn:
+            conn.execute("DELETE FROM song_offers WHERE project_id = ?", (project_id,))
+            if offer is not None:
+                conn.execute("INSERT INTO song_offers (project_id, data) VALUES (?, ?)",
+                             (project_id, offer.model_dump_json()))
 
     def save_comment(self, comment: Comment, said: str) -> None:
         """Keep a comment, new or changed, and the project's comments in the history.
