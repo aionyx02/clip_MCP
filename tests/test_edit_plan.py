@@ -2635,3 +2635,12 @@ def test_a_pause_never_opens_a_shot_onto_the_line_before() -> None:
     cuts = {"a": CleanCuts(words=((3.0, 4.6), (5.0, 6.0)), transcribed=True)}
     out, notes = _joined_beats(plan, pieces, {}, cuts)
     assert out[1].start == pytest.approx(4.6) and notes
+
+def test_a_pause_never_opens_a_shot_onto_what_the_cut_already_played_of_its_take() -> None:
+    from app.engine.plan import _joined_beats
+
+    plan = plan_for([]).model_copy(update={"beats": [Beat(id="b1", name="講"), Beat(id="b2", name="走", pause_before=1.0)]})
+    pieces = [Piece(asset_id="a", start=0.0, end=4.7, from_clip_ids=("u1",), beat_id="b1"),
+              Piece(asset_id="a", start=5.0, end=8.0, from_clip_ids=("u2",), beat_id="b2")]
+    out, _ = _joined_beats(plan, pieces, {}, {"a": CleanCuts(transcribed=True)})
+    assert out[1].start == pytest.approx(4.7)

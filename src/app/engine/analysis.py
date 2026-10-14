@@ -27,7 +27,7 @@ from app.engine import clap
 from app.engine.library import MUSIC, library_of
 from app.engine.listen import cut_sound
 from app.engine.music import energy_curve
-from app.engine.subtitles import _segmenter
+from app.engine.subtitles import chinese_words
 from app.models.media import (
     AnalysisRecipe,
     Asset,
@@ -89,7 +89,7 @@ SENTENCE_PAUSE_SECONDS = 0.6
 # Spoken Chinese comes back without punctuation, and a vlogger talking on for half a
 # minute came back as one 43-second sentence, too coarse to pick a line out of or to cut
 # at. A sentence longer than this is split again at its longest pause, down to pauses this
-# short. Both provisional.
+# short. Provisional, both.
 LONG_SENTENCE_SECONDS = 12.0
 INNER_PAUSE_SECONDS = 0.25
 SENTENCE_END_PUNCTUATION = "。！？!?…"
@@ -827,8 +827,7 @@ def convert_chinese_variant(segments: List[TranscriptSegment], variant: str) -> 
 
     Each segment is converted as a whole, so ambiguous characters are resolved
     from context; for example, 头发 becomes 頭髮 rather than 頭發. Into
-    Traditional it goes a word at a time, so a phrase is never read across two
-    words. When the conversion keeps the segment's length, the converted characters are
+    Traditional, a phrase is not read across two words: see `convert` below. When the conversion keeps the segment's length, the converted characters are
     mapped back onto the words one to one. When a vocabulary replacement
     changes the length, each word is converted on its own instead, so timings
     stay attached to the right text.
@@ -857,10 +856,23 @@ def convert_chinese_variant(segments: List[TranscriptSegment], variant: str) -> 
             return converter.convert(text)
         # The recogniser often writes Traditional, or a mix, and OpenCC's phrase table read
         # across words turns 裡面包含 into 裡麵包含 and 了然後 into 瞭然後. So the text is
-        # brought to Simplified first and converted a word at a time, the words found by
-        # the same splitter the captions break lines with.
+        # brought to Simplified first and converted both whole and a word at a time, the words
+        # found by the same splitter the captions break lines with. Where the two differ, the
+        # whole reading stands only when the character closes a phrase with the one before
+        # it — 明了 to 明瞭, which the splitter cuts in two — and not when it opens one with
+        # the one after, which is the phrase read across a word: 了然, 面包.
         simple = simplify(text)
-        return "".join(converter.convert(piece) for piece in _segmenter()(simple if len(simple) == len(text) else text))
+        if len(simple) == len(text):
+            text = simple
+        whole = converter.convert(text)
+        pieces = "".join(converter.convert(piece) for piece in chinese_words()(text))
+        if not len(whole) == len(pieces) == len(text):
+            return pieces
+        return "".join(
+            read if read == split or (index > 0 and converter.convert(text[index - 1:index + 1])[-1:] == read)
+            else split
+            for index, (split, read) in enumerate(zip(pieces, whole))
+        )
 
     for segment in segments:
         joined = "".join(word.text for word in segment.words)

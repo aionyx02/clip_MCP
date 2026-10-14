@@ -2063,9 +2063,13 @@ def _listen_to_render(job_id: str, start: float, end: float, language: Optional[
     if len(edges) == 2:
         fresh = listen_again_in_file(path, start, end, language, keep_as, chinese_variant=variant)
     else:
-        pieces = [listen_again_in_file(path, opened, closed, language, f"{keep_as[:-4]}-{index}.wav",
-                                       chinese_variant=variant)
-                  for index, (opened, closed) in enumerate(zip(edges, edges[1:]))]
+        stem, extension = os.path.splitext(keep_as)
+        pieces = []
+        for index, (opened, closed) in enumerate(zip(edges, edges[1:])):
+            # Each shot's own sound is only what the model is handed; the user plays the whole stretch.
+            piece_as = f"{stem}-{index}{extension}"
+            pieces.append(listen_again_in_file(path, opened, closed, language, piece_as, chinese_variant=variant))
+            os.remove(piece_as)
         cut_sound(path, start, end, keep_as)
         fresh = pieces[0].model_copy(update={"segments": [segment for piece in pieces for segment in piece.segments]})
     shown = [cue for cue in (place_cues(project, project.subtitles) if project and job.captioned else [])
@@ -5099,9 +5103,7 @@ def _corrected(cue: SubtitleCue, glossary: Mapping[str, str]) -> SubtitleCue:
         The caption with every glossary word replaced, and its word timings
         kept where the correction left them fitting.
     """
-    text = cue.text
-    for heard, meant in glossary.items():
-        text = text.replace(heard, meant)
+    text = _glossed(cue.text, glossary)
     if text == cue.text:
         return cue
     return cue.model_copy(update={"text": text, "words": retimed_words(cue.words, text)})
@@ -6860,9 +6862,17 @@ def _said_between(asset_id: str, start: float, end: float) -> str:
         if word.start < end - WORD_INSIDE_SECONDS and word.end > start + WORD_INSIDE_SECONDS
     ).strip())
 
-def _glossed(text: str) -> str:
-    """Text the transcriber wrote, with every word in the workspace glossary corrected as the captions are."""
-    for heard, meant in repo.glossary().items():
+def _glossed(text: str, glossary: Optional[Mapping[str, str]] = None) -> str:
+    """Text the transcriber wrote, with every word in the glossary corrected as the captions are.
+
+    Args:
+        text: The text.
+        glossary: Heard words mapped to meant ones; the workspace's when not given.
+
+    Returns:
+        The text corrected.
+    """
+    for heard, meant in (repo.glossary() if glossary is None else glossary).items():
         text = text.replace(heard, meant)
     return text
 

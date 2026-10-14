@@ -19,6 +19,8 @@ def segment_of(*texts: str) -> TranscriptSegment:
     ("我头发很长", "我頭髮很長"),
     ("一目了然", "一目瞭然"),
     ("麵包很好吃", "麵包很好吃"),
+    ("我瞭解了", "我瞭解了"),
+    ("一切都很明瞭", "一切都很明瞭"),
 ])
 def test_taiwan_traditional_never_reads_a_phrase_across_two_words(heard: str, written: str) -> None:
     [segment] = convert_chinese_variant([segment_of(*heard)], "zh-TW")
@@ -38,6 +40,10 @@ def test_a_subtitle_credit_over_cafe_noise_was_made_up() -> None:
 @pytest.mark.parametrize("line", ["請不吝點贊 訂閱 打賞支援明鏡與點點欄目", "謝謝觀看", "字幕由志願者提供"])
 def test_a_channel_sign_off_was_made_up_whatever_its_confidence(line: str) -> None:
     assert was_made_up(timed(*((char, index * 0.2, index * 0.2 + 0.2, 0.9) for index, char in enumerate(line))))
+
+@pytest.mark.parametrize("line", ["記得點贊訂閱喔", "明鏡高懸", "謝謝大家"])
+def test_a_vlogger_asking_in_their_own_words_was_not_made_up(line: str) -> None:
+    assert not was_made_up(timed(*((char, index * 0.2, index * 0.2 + 0.2, 0.9) for index, char in enumerate(line))))
 
 def test_one_word_looping_was_made_up() -> None:
     assert was_made_up(timed(*(("沒興趣,", index * 0.5, index * 0.5 + 0.5, 0.8) for index in range(40))))

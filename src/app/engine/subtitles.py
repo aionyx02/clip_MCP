@@ -526,7 +526,7 @@ def _phrased(
 _CJK = re.compile(r"[㐀-䶿一-鿿豈-﫿]")
 
 @lru_cache(maxsize=1)
-def _segmenter() -> Callable[[str], List[str]]:
+def chinese_words() -> Callable[[str], List[str]]:
     """Load the Chinese word splitter once, the first time a Chinese caption is broken.
 
     Returns:
@@ -567,7 +567,7 @@ def word_edges(text: str) -> Optional[set[int]]:
     if not _CJK.search(text):
         return None
     edges, offset = {0}, 0
-    for word in _segmenter()(text):
+    for word in chinese_words()(text):
         offset += len(word)
         edges.add(offset)
     return edges

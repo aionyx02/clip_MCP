@@ -1088,7 +1088,7 @@ class Repository:
                 dropped.
             max_scores: Keep only clips whose named scores are at most these
                 values, on the same terms.
-            limit: Largest number of clips to return.
+            limit: Largest number of clips to return; -1 for every one.
 
         Returns:
             The matching clips, ordered by asset and then by time.

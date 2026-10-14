@@ -376,13 +376,14 @@ MADE_UP_FIRST_PROBABILITY = 0.02
 # 「沒興趣,」 forty times over street noise — not someone repeating themselves.
 MADE_UP_REPEATS = 6
 # What the recogniser was trained on most: subtitle credits and a channel's sign-off and
-# plea to subscribe. A sentence that is nothing but one of these, in either script, was
-# not said in a video someone shot themselves.
+# plea to subscribe, in either script, as it writes them rather than as anyone says them.
+# 「謝謝大家」 is left out: people say it at the end of their own videos.
 _MADE_UP_LINES = [
     re.compile(pattern) for pattern in (
         r"^中文字幕|字幕[組组由提供志]",
-        r"明[鏡镜]|[點点]{2}[欄栏]目",
-        r"([點点][贊赞讚]|[訂订][閱阅]|[轉转][發发]|打[賞赏]).*([點点][贊赞讚]|[訂订][閱阅]|[轉转][發发]|打[賞赏])",
+        # Its plea, word for word: 「請不吝點贊 訂閱 轉發 打賞支持明鏡與點點欄目」. A vlogger
+        # asking for a subscription in their own words says neither 不吝 nor 點點欄目.
+        r"不吝[點点][贊赞讚]|[點点]{2}[欄栏]目",
         r"^([謝谢][謝谢]|感[謝谢]|多[謝谢])(觀看|观看|收看|收聽|收听)$",
     )
 ]
@@ -666,7 +667,7 @@ def join_voices(analyses: Mapping[str, MediaAnalysis]) -> Dict[Tuple[str, str], 
     for asset_id in sorted(analyses):
         voices = analyses[asset_id].voices
         reach = LONE_VOICE_DISTANCE if len(voices) == 1 else VOICE_DISTANCE
-        taken: set = set()
+        taken: set[str] = set()
         for voice in sorted(voices, key=lambda item: item.speaker):
             nearest, distance = None, reach
             for index, (label, total, _) in enumerate(known):
@@ -679,9 +680,9 @@ def join_voices(analyses: Mapping[str, MediaAnalysis]) -> Dict[Tuple[str, str], 
             if nearest is None:
                 known.append((f"V{len(known) + 1}", [0.0] * len(voice.embedding), 0.0))
                 nearest = len(known) - 1
+            # Joined only within `reach`, which a vector of another length never is, so the two always match.
             label, total, seconds = known[nearest]
-            if len(total) == len(voice.embedding):
-                total = [held + value * voice.seconds for held, value in zip(total, voice.embedding)]
+            total = [held + value * voice.seconds for held, value in zip(total, voice.embedding)]
             known[nearest] = (label, total, seconds + voice.seconds)
             taken.add(label)
             joined[(asset_id, voice.speaker)] = label
@@ -857,6 +858,11 @@ class CleanCuts:
     listened: bool = False
     duration: Optional[float] = None
 
+    def word_split_at(self, seconds: float) -> Optional[Tuple[float, float]]:
+        """Find the word a cut here would land inside, as `(start, end)`; None when it lands in none."""
+        return next((word for word in self.words
+                     if word[0] + EDGE_TOLERANCE_SECONDS < seconds < word[1] - EDGE_TOLERANCE_SECONDS), None)
+
     def splits_a_word(self, seconds: float) -> bool:
         """Say whether a cut here would land inside a word.
 
@@ -871,10 +877,7 @@ class CleanCuts:
             answers False: nothing is *known* to break, which is not the same
             as nothing breaking.
         """
-        return any(
-            start + EDGE_TOLERANCE_SECONDS < seconds < end - EDGE_TOLERANCE_SECONDS
-            for start, end in self.words
-        )
+        return self.word_split_at(seconds) is not None
 
     def splits_a_sentence(self, seconds: float) -> bool:
         """Say whether a cut here would leave a sentence unfinished.

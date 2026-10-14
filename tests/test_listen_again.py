@@ -135,3 +135,11 @@ def test_a_render_is_heard_a_shot_at_a_time_across_its_cuts(heard: dict, monkeyp
     assert [word["start"] for word in found["words"]] == pytest.approx([1.2, 2.2])
     with wave.open(found["audio_path"]) as sound:
         assert sound.getnframes() / sound.getframerate() == pytest.approx(2.5, abs=0.05)
+
+def test_two_hearings_of_a_made_up_line_do_not_agree(heard: dict, monkeypatch: pytest.MonkeyPatch) -> None:
+    server.repo.save_analysis(server.repo.get_analysis(heard["asset"]).model_copy(update={"transcript": Transcript(
+        language="zh", model="test", segments=[TranscriptSegment(start=2.0, end=3.0, text="謝謝觀看", words=[
+            TranscriptWord(start=2.0, end=3.0, text="謝謝觀看", probability=0.9)])])}))
+    monkeypatch.setattr(analysis, "_run_whisper", hears("謝謝觀看"))
+    found = server.listen_again(asset_id=heard["asset"], start=1.5, end=3.5)
+    assert found["made_up"] is True and found["agrees"] is False

@@ -187,6 +187,10 @@ def _first_clips(pieces: Iterable["Piece"]) -> List[str]:
     """Name windows by the first clip each is made of, as the plan names them."""
     return [piece.from_clip_ids[0] for piece in pieces if piece.from_clip_ids]
 
+def _edge_of(piece: "Piece", side: str, seconds: float) -> str:
+    """Say where one edge of a window is: `u0410 starts at 2.23s of its file`."""
+    return f"{(piece.from_clip_ids or (piece.asset_id,))[0]} {side} at {seconds:.2f}s of its file"
+
 @dataclass(frozen=True)
 class Piece:
     """One window of source footage on the compiled timeline.
@@ -590,8 +594,7 @@ def _on_the_sound(
                       if abs(made - asked) > MOVED_FAR_SECONDS]
             if pulled:
                 far_in.append(piece)
-                far += [f"{(piece.from_clip_ids or [piece.asset_id])[0]} {side} at {made:.2f}s of its file, not the {asked:.2f}s asked"
-                        for side, asked, made in pulled]
+                far += [f"{_edge_of(piece, side, made)}, not the {asked:.2f}s asked" for side, asked, made in pulled]
             out.append(replace(piece, start=start, end=end))
         else:
             out.append(piece)
@@ -1314,7 +1317,7 @@ def _joined_beats(
     plan: EditPlan,
     pieces: Sequence[Piece],
     assets: Mapping[str, Asset],
-    cuts: Optional[Mapping[str, CleanCuts]] = None,
+    cuts: Optional[Mapping[str, CleanCuts]],
 ) -> Tuple[List[Piece], List[str]]:
     """Put each beat's pause, transition and sound lead on the window it begins with.
 
@@ -1347,15 +1350,20 @@ def _joined_beats(
         if position > 0 and beat.pause_before is not None and at:
             piece = out[at]
             known = (cuts or {}).get(piece.asset_id)
+            # Back no further than the last word before it, nor into what the cut already plays of
+            # the same take: opening onto either would hear it twice or start mid-line.
             said = [closed for _, closed in (known.words if known is not None else ())
                     if closed <= piece.start + EDGE_TOLERANCE_SECONDS]
-            quiet = piece.start - max(said, default=0.0)
-            fits = math.floor(min(beat.pause_before * piece.speed, max(0.0, quiet)) * 1000) / 1000
+            played = [other.end for other in out[:at] if other.asset_id == piece.asset_id and other.end <= piece.start]
+            quiet = piece.start - max(said + played, default=0.0)
+            # Rounded first, so a time already in whole milliseconds is not floored a millisecond short.
+            fits = math.floor(round(min(beat.pause_before * piece.speed, max(0.0, quiet)) * 1000, 6)) / 1000
             if fits < beat.pause_before * piece.speed:
                 notes.append(Note(
                     f"beat {beat.id}: it opens on {fits / piece.speed:g}s of quiet rather than {beat.pause_before:g}s, "
-                    "all its first shot has before somebody speaks",
-                    "join_shortened", beat_id=beat.id, clip_ids=_first_clips([piece]), seconds=fits, look=True,
+                    "all its first shot has before somebody speaks or the cut has already played",
+                    "join_shortened", beat_id=beat.id, clip_ids=_first_clips([piece]),
+                    seconds=round(fits / piece.speed, 3), look=True,
                 ))
             if fits > 0:
                 out[at] = replace(piece, start=round(piece.start - fits, 3))
@@ -1870,11 +1878,10 @@ def _cut_notes(
             continue
         # Which end, at which second of the file, inside which word: a window has two edges.
         edges = [(side, edge, word) for side, edge in (("starts", piece.start), ("ends", piece.end))
-                 for word in known.words if word[0] + EDGE_TOLERANCE_SECONDS < edge < word[1] - EDGE_TOLERANCE_SECONDS]
+                 if (word := known.word_split_at(edge)) is not None]
         if edges:
             stuck.append(piece)
-            name = (piece.from_clip_ids or [piece.asset_id])[0]
-            where += [f"{name} {side} at {edge:.2f}s of its file, inside the word at {word[0]:.2f}–{word[1]:.2f}s"
+            where += [f"{_edge_of(piece, side, edge)}, inside the word at {word[0]:.2f}–{word[1]:.2f}s"
                       for side, edge, word in edges]
     if stuck:
         said.append(Note(
