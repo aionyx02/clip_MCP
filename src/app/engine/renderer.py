@@ -5,7 +5,7 @@ import sys
 import threading
 import time
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from app.engine import loudness, machine, resources, speed
 from app.engine.analysis import analyze_media, whisper_model_for
@@ -21,10 +21,6 @@ STALE_AFTER = timedelta(seconds=30)
 WARMUP = timedelta(seconds=60)
 SPEC_FILE_NAME = "job.json"
 FFMPEG_LOG_FILE_NAME = "ffmpeg.log"
-# Provisional (roadmap §13): how much of the bar measuring loudness takes, against the
-# final pass's share. It mixes the whole cut's sound once without drawing any picture, so
-# less than that pass; until it was given a share the bar sat still through it.
-LOUDNESS_SHARE = 0.5
 WORKER_LOG_FILE_NAME = "worker.log"
 
 def _detached_process_options() -> Dict[str, Any]:
@@ -387,7 +383,7 @@ class JobContext:
             if self._stopped.wait(HEARTBEAT_INTERVAL_SECONDS):
                 return
 
-def _run_render(job: Job, spec: Dict[str, Any], context: JobContext) -> None:
+def _run_render(job: Job, spec: Dict[str, Any], context: JobContext, repo: Optional[Repository] = None) -> None:
     """Render a project with the FFmpeg command stored in the job specification.
 
     Args:
@@ -400,6 +396,9 @@ def _run_render(job: Job, spec: Dict[str, Any], context: JobContext) -> None:
             measured first, and the gain it settles on is written into
             `command`.
         context: Progress and cancellation for the job.
+        repo: Where this computer's pace at rendering is kept: the bar is
+            shared out by it, and a finished render adds to it. Left out, the
+            provisional proportions, and nothing is kept.
 
     Raises:
         OperationCancelled: If cancellation was requested.
@@ -407,13 +406,23 @@ def _run_render(job: Job, spec: Dict[str, Any], context: JobContext) -> None:
     """
     log = os.path.join(job.work_dir, FFMPEG_LOG_FILE_NAME)
     pieces = spec.get("pieces", [])
-    # The bar is shared out by seconds of picture: the pieces are rendered at full cost,
-    # the final pass only puts them together, so it is weighted at a third of its length.
-    weights = [float(piece["duration_seconds"]) for piece in pieces] + [float(spec["duration_seconds"]) / 3]
     level = spec.get("loudness")
-    measuring = weights[-1] * LOUDNESS_SHARE if level is not None else 0.0
+    length = float(spec["duration_seconds"])
+    # The bar is shared out by how long each part is expected to take here, so that how far
+    # it has come says how much time has gone: guessed from seconds of picture at first, a
+    # finished video's one long pass at a third of a piece's cost, until this computer has
+    # rendered something of the same kind and its own pace can be used.
+    parts = (["pieces"] if pieces else []) + (["loudness"] if level is not None else []) + ["final"]
+    computer = machine.identity() if repo is not None else ""
+    costs = (speed.render_costs(repo, computer, job.preview, parts) if repo is not None
+             else {part: speed.RENDER_COST[part] for part in parts})
+    weights = [float(piece["duration_seconds"]) * costs.get("pieces", 0.0) for piece in pieces]
+    weights.append(length * costs["final"])
+    measuring = length * costs["loudness"] if level is not None else 0.0
     total = (sum(weights) + measuring) or 1.0
     done = 0.0
+    taken: Dict[str, Tuple[float, float]] = {}
+    began = time.monotonic()
     for number, piece in enumerate(pieces, start=1):
         start, share = done / total, weights[number - 1] / total
         context.report(start, f"rendering picture {number} of {len(pieces)}")
@@ -432,8 +441,11 @@ def _run_render(job: Job, spec: Dict[str, Any], context: JobContext) -> None:
         # picture meanwhile; either copy is the same picture.
         os.replace(piece["part"], piece["path"])
         done += weights[number - 1]
+    if pieces:
+        taken["pieces"] = (time.monotonic() - began, sum(float(piece["duration_seconds"]) for piece in pieces))
     command = spec["command"]
     if level is not None:
+        began = time.monotonic()
         start, share = done / total, measuring / total
         context.report(start, "measuring loudness")
         try:
@@ -448,15 +460,20 @@ def _run_render(job: Job, spec: Dict[str, Any], context: JobContext) -> None:
                 os.remove(level["mix_path"])
         command = loudness.with_gain(command, gain)
         done += measuring
+        taken["loudness"] = (time.monotonic() - began, length)
     start, share = done / total, weights[-1] / total
     context.report(start, "rendering")
+    began = time.monotonic()
     run_ffmpeg(
         command,
         log,
-        float(spec["duration_seconds"]),
+        length,
         lambda fraction: context.report(start + fraction * share),
         context.is_cancelled,
     )
+    taken["final"] = (time.monotonic() - began, length)
+    if repo is not None:
+        speed.record_render(repo, computer, job.preview, taken)
     if spec.get("deliver"):
         # A finished video is the user's: it leaves the workspace for where they keep
         # their videos, under its own name, never over one already there.
@@ -580,7 +597,7 @@ def run_worker(repo: Repository, job_id: str) -> None:
     with JobContext(repo, job_id) as context:
         try:
             if job.kind == JobKind.RENDER:
-                _run_render(job, spec, context)
+                _run_render(job, spec, context, repo)
             elif job.kind == JobKind.PREPARE:
                 _run_prepare(job, spec, context)
             else:
