@@ -19,6 +19,7 @@ from typing import List, Mapping, Optional, Sequence, Tuple
 
 from app.engine.builder import DUCK_DEPTH_DB, Talking
 from app.engine.continuity import Shot, stray_runs
+from app.engine.looks import alike
 from app.engine.plan import LENGTH_TOLERANCE
 from app.engine.semantic import clean_cuts, share_covered, was_audible, was_made_up
 from app.engine.subtitles import caption_overflow, captioned_clips
@@ -37,7 +38,8 @@ CLIPPED_PEAK_DB = -0.5
 CLIPPED_FLATNESS = 5.0
 # The kinds of finding a render can be told to go ahead in spite of.
 CHECKS = (
-    "bad_picture", "clipping", "music", "mid_speech", "repeated", "continuity", "unplanned", "captions", "length",
+    "bad_picture", "clipping", "music", "mid_speech", "repeated", "look_alike", "continuity", "unplanned", "captions",
+    "length",
 )
 # How far under the talking music has to sit while somebody speaks, in dB. Under that it
 # competes with the words: the first edits made with the server had music two decibels
@@ -207,6 +209,7 @@ def check_delivery(
     style: Optional[CaptionStyle] = None,
     talking: Optional[Talking] = None,
     recorded: Optional[Mapping[str, datetime]] = None,
+    looks: Optional[Mapping[str, Sequence[int]]] = None,
 ) -> List[Finding]:
     """Find what would be noticed in the finished file, before it is rendered.
 
@@ -225,6 +228,9 @@ def check_delivery(
             finding a shot dropped between two from another moment. Only the
             clips put on by hand are checked: a compiled plan was already
             checked for the same thing, with its reasons to hand.
+        looks: The fingerprints of the clips `look_candidates` names, keyed
+            by clip ID, for finding two from different files a viewer could
+            not tell apart. Without them that is not checked.
 
     Returns:
         The findings, grouped by check in the order of `CHECKS`.
@@ -280,6 +286,7 @@ def check_delivery(
     findings.extend(_music_over_talking(project, talking))
     findings.extend(_speech_cuts(base.clips if base else [], analyses))
     findings.extend(_repeats(base.clips if base else []))
+    findings.extend(_look_alikes(base.clips if base else [], looks or {}))
     findings.extend(_out_of_time(project, recorded or {}))
     if base and len(base.clips) >= UNPLANNED_CLIPS and any(clip.from_plan_id is None for clip in base.clips):
         findings.append(Finding("unplanned", (
@@ -568,6 +575,62 @@ def _repeats(clips: Sequence[Clip]) -> List[Finding]:
                 found.append(Finding("repeated", (
                     f"clips {first.id} (at {clock(float(first.timeline_in))}) and {second.id} "
                     f"(at {clock(float(second.timeline_in))}) show the same {float(overlap):.1f}s of the same file"
+                ), tuple((float(at),) * 2 for clip in (first, second) for at in (clip.timeline_in, clip.timeline_out))))
+    return found
+
+def look_candidates(project: Project, analyses: Mapping[str, MediaAnalysis]) -> List[Clip]:
+    """Name the clips of the sequence that only their picture tells apart.
+
+    A clip somebody talks over is told apart by what they say, and one with
+    words over the footage by those: neither can be mistaken for another that
+    looks like it.
+
+    Args:
+        project: The project.
+        analyses: The analyses of its files, keyed by asset ID.
+
+    Returns:
+        The clips worth fingerprinting, in timeline order.
+    """
+    base = project.base_video_track
+    found = []
+    for clip in sorted((clip for clip in (base.clips if base else []) if clip.card is None),
+                       key=lambda clip: clip.timeline_in):
+        analysis = analyses.get(clip.asset_id)
+        said = clip.volume != 0 and analysis is not None and analysis.transcript is not None and any(
+            segment.text.strip() and segment.start < clip.source_range.end and segment.end > clip.source_range.start
+            for segment in analysis.transcript.segments
+        )
+        if not said and not clip.shown_texts:
+            found.append(clip)
+    return found
+
+def _look_alikes(clips: Sequence[Clip], looks: Mapping[str, Sequence[int]]) -> List[Finding]:
+    """Find two clips from different files that look so alike a viewer could not tell which is which.
+
+    Two side by side play as one shot, which is not a question of telling them
+    apart; anything between them that is not alike is what a viewer would go by.
+
+    Args:
+        clips: The sequence's clips.
+        looks: Fingerprints by clip ID, of the clips only their picture tells apart.
+
+    Returns:
+        One finding per pair.
+    """
+    found: List[Finding] = []
+    ordered = sorted((clip for clip in clips if clip.card is None), key=lambda item: item.timeline_in)
+    for index, first in enumerate(ordered):
+        for second in ordered[index + 2:]:
+            if first.asset_id == second.asset_id or first.id not in looks or second.id not in looks:
+                continue
+            same, bits = alike(looks[first.id], looks[second.id])
+            if same:
+                found.append(Finding("look_alike", (
+                    f"clips {first.id} (at {clock(float(first.timeline_in))}) and {second.id} "
+                    f"(at {clock(float(second.timeline_in))}) are different files that look alike ({bits} of 64 "
+                    "bits apart), and nothing said or written over them tells them apart; give the second a line, "
+                    "words over it or a card that says which it is"
                 ), tuple((float(at),) * 2 for clip in (first, second) for at in (clip.timeline_in, clip.timeline_out))))
     return found
 

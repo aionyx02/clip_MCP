@@ -21,6 +21,7 @@ from app.engine.delivery import (
     chapters,
     check_delivery,
     cover_candidates,
+    look_candidates,
 )
 from app.engine.interchange import left_behind, write_edl, write_fcpxml, write_otio, write_srt
 from app.engine.subtitles import build_ass, caption_overflow
@@ -203,7 +204,7 @@ def test_render_is_refused_until_the_user_says_to_go_ahead(media: Path) -> None:
 def test_a_final_render_waits_for_a_preview_of_the_cut_as_it_is_now(media: Path) -> None:
     asset = import_asset(str(media / "wide.mp4"))["id"]
     project = build_project([video_track(), insert("a", asset, 0, 2)], width=640, height=360)
-    anything = ["bad_picture", "clipping", "music", "mid_speech", "repeated", "continuity", "unplanned",
+    anything = ["bad_picture", "clipping", "music", "mid_speech", "repeated", "look_alike", "continuity", "unplanned",
                 "captions", "length"]
     with pytest.raises(ValueError, match="no preview of the cut as it is now has finished"):
         render_project(project, is_preview=False, allow=anything)
@@ -607,3 +608,46 @@ def test_how_long_a_caption_has_to_stay_is_the_users_to_change() -> None:
     placed = place_cues(relaxed, [cue("c1", 12.0, 12.36)])
     assert not [f for f in check_delivery(relaxed, {}, captions=placed, style=relaxed.caption_style)
                 if f.check == "captions"]
+
+
+def test_two_files_that_look_alike_apart_in_the_cut_are_found() -> None:
+    project = project_of(clip("a", "x", 0, 4, 0), clip("b", "y", 0, 4, 4), clip("c", "z", 0, 4, 8),
+                         clip("d", "x", 5, 9, 12))
+    same, other = (0x0F0F0F0F0F0F0F0F,) * 3, (0xF0F0F0F0F0F0F0F0,) * 3
+    def alike(looks: dict) -> list:
+        return [finding.message for finding in check_delivery(project, {}, looks=looks)
+                if finding.check == "look_alike"]
+
+    # a and c are different files with b between, and so are b and d; a and b play side by side,
+    # and a and d are one file.
+    found = alike({"a": same, "b": same, "c": same, "d": same})
+    assert len(found) == 2 and found[0].startswith("clips a (at 0:00) and c (at 0:08)")
+    assert found[1].startswith("clips b (at 0:04) and d (at 0:12)")
+    assert alike({}) == [] and alike({"a": same, "c": other}) == []
+
+def test_only_a_clip_nothing_is_said_or_written_over_is_told_apart_by_its_look() -> None:
+    from app.models.media import Transcript, TranscriptSegment
+    from app.models.timeline import TextLayer
+
+    spoken = MediaAnalysis(asset_id="x", duration=10.0, transcript=Transcript(language="zh", model="test", segments=[
+        TranscriptSegment(start=1.0, end=2.0, text="成功了")]))
+    words = clip("c", "z", 0, 4, 8)
+    words.texts.append(TextLayer(id="t1", text="第二次", start=0, end=4))
+    project = project_of(clip("a", "x", 0, 4, 0), clip("b", "y", 0, 4, 4), words)
+    assert [found.id for found in look_candidates(project, {"x": spoken})] == ["b"]
+
+def test_a_render_is_checked_for_two_files_that_look_alike(media: Path, tmp_path: Path) -> None:
+    from app.engine import looks
+
+    # The same picture at half the size is another file that looks the same.
+    small = tmp_path / "small.mp4"
+    subprocess.run(["ffmpeg", "-y", "-loglevel", "error", "-i", str(media / "wide.mp4"), "-vf", "scale=320:180",
+                    "-an", "-c:v", "libx264", "-preset", "ultrafast", str(small)], check=True)
+    first, second = import_asset(str(media / "wide.mp4"))["id"], import_asset(str(small))["id"]
+    black = import_asset(str(media / "black.mp4"))["id"]
+    project = build_project([video_track(), insert("a", first, 0, 2), insert("b", black, 0, 2),
+                             insert("c", second, 0, 2)], width=640, height=360)
+    found = [finding for finding in check_render(project)["findings"] if finding["check"] == "look_alike"]
+    assert len(found) == 1 and "clips a" in found[0]["message"] and "and c" in found[0]["message"]
+    # Read once: the frames are kept against their files.
+    assert set(repo.looks(second)) == {round(2 * share, 1) for share in looks.SAMPLES}

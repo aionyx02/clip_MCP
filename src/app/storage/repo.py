@@ -110,6 +110,12 @@ _MIGRATIONS: List[List[str]] = [
         "CREATE TABLE IF NOT EXISTS comments (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, data TEXT NOT NULL)",
         "CREATE INDEX IF NOT EXISTS comments_project ON comments (project_id)",
     ],
+    [
+        # A frame's fingerprint, kept by file and second: reading a frame is the slow part of
+        # telling apart two shots that look alike, and the frame never changes.
+        "CREATE TABLE IF NOT EXISTS looks (asset_id TEXT NOT NULL, at REAL NOT NULL, look TEXT NOT NULL, "
+        "PRIMARY KEY (asset_id, at))",
+    ],
 ]
 # Footage and music are filed apart, each in folders of its own; projects in theirs.
 FOLDER_KINDS = ("assets", "music", "projects")
@@ -836,6 +842,31 @@ class Repository:
             found.update({row[0]: (row[1], row[2]) for row in rows})
         return found
 
+    def looks(self, asset_id: str) -> Dict[float, int]:
+        """Read the fingerprints kept for a file's frames.
+
+        Args:
+            asset_id: The file.
+
+        Returns:
+            The fingerprint by second of the file.
+        """
+        rows = self._query("SELECT at, look FROM looks WHERE asset_id = ?", (asset_id,))
+        return {row[0]: int(row[1], 16) for row in rows}
+
+    def save_looks(self, asset_id: str, looks: Mapping[float, int]) -> None:
+        """Keep fingerprints of a file's frames.
+
+        Args:
+            asset_id: The file.
+            looks: The fingerprint by second of the file.
+        """
+        with self._transaction() as conn:
+            conn.executemany(
+                "INSERT OR REPLACE INTO looks (asset_id, at, look) VALUES (?, ?, ?)",
+                [(asset_id, at, f"{look:016x}") for at, look in looks.items()],
+            )
+
     def save_clip_vectors(self, rows: Iterable[tuple]) -> None:
         """Store search vectors.
 
@@ -1442,7 +1473,7 @@ class Repository:
                      (asset_id,))
         for statement in ("DELETE FROM assets WHERE id = ?", "DELETE FROM analyses WHERE asset_id = ?",
                           "DELETE FROM reviewed_captions WHERE asset_id = ?",
-                          "DELETE FROM semantic_clips WHERE asset_id = ?"):
+                          "DELETE FROM semantic_clips WHERE asset_id = ?", "DELETE FROM looks WHERE asset_id = ?"):
             conn.execute(statement, (asset_id,))
         conn.execute("DELETE FROM folder_items WHERE kind = 'assets' AND item_id = ?", (asset_id,))
         planned = {row[0] for row in conn.execute("SELECT timeline_id FROM plans")}

@@ -18,7 +18,7 @@ from app.storage import housekeeping
 from app.workspace import output_dir
 from helpers import finished
 
-ANYTHING = ["bad_picture", "clipping", "music", "mid_speech", "repeated", "continuity", "unplanned", "captions", "length"]
+ANYTHING = ["bad_picture", "clipping", "music", "mid_speech", "repeated", "look_alike", "continuity", "unplanned", "captions", "length"]
 
 def one_clip_project(media: Path, name: str) -> str:
     """A project of one short clip, named.

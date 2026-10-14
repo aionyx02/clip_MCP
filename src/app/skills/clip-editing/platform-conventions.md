@@ -66,14 +66,16 @@ without the word-by-word lighting.
 
 `render_project` checks the cut first and refuses a full render while it finds
 anything; `check_render` runs the same check without rendering, so run it
-first. It finds nine kinds of thing: `bad_picture` (black or frozen picture
+first. It finds ten kinds of thing: `bad_picture` (black or frozen picture
 that reaches the screen), `clipping` (a recording squared off at the ceiling —
 turning it down does not undo it), `music` (music too close under somebody
 talking — `set_music_level` down, or let it duck), `mid_speech` (a cut inside a word or a
 phrase; it names the nearest pause — move the cut there, or, when the words
 there sound clear of the cut, hear the stretch with `listen_again` and `keep`
 so its word times replace the transcript's, then check again), `repeated` (the same
-stretch of a file shown twice), `continuity` (a clip put on by hand between
+stretch of a file shown twice), `look_alike` (two different files a viewer could
+not tell apart, such as the timelapse that failed and the one that worked — give
+the second a line, words over it or a card), `continuity` (a clip put on by hand between
 two shot hours away from it — move it, or let it stand if it is a
 flash-forward), `unplanned` (three or more clips put together
 by hand, with no plan saying how its parts hold together — ask which structure,

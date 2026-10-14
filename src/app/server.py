@@ -51,7 +51,7 @@ from app.models.timeline import (
 )
 from app.models.comment import Comment, Reply
 from app.models.job import Job, JobKind, JobStatus
-from app.engine import cards, texts, loudness, machine, meaning, resources, speed, stills
+from app.engine import cards, texts, looks, loudness, machine, meaning, resources, speed, stills
 from app.engine.analysis import listen_again as listen_again_in_file
 from app.engine.analysis import (
     BALANCED_JOIN, current_recipe, doubtful_spots, marked_text, marked_words, second_listen, sound_note,
@@ -84,7 +84,7 @@ from app.engine.compare import compare
 from app.engine.compare import parts_of as cut_parts
 from app.engine.merge import WHOLE_PICKS, merge, merge_plans
 from app.engine.delivery import (
-    CHECKS, Finding, chapter_metadata, chapters, check_delivery, clock, cover_candidates,
+    CHECKS, Finding, chapter_metadata, chapters, check_delivery, clock, cover_candidates, look_candidates,
 )
 from app.engine.joins import HeardWord, Join, joins_in, words_heard
 from app.engine.frames import format_timestamp, still, storyboard_sheet
@@ -5472,11 +5472,45 @@ def _findings(project: Project, burn_subtitles: bool) -> list:
         What `delivery.check_delivery` finds.
     """
     placed = place_cues(project, project.subtitles) if burn_subtitles and project.subtitles else None
-    dated = _dated(_referenced_assets(project))
+    assets = _referenced_assets(project)
+    dated = _dated(assets)
+    analyses = _analyses(project, listened=True)
     return check_delivery(
-        project, _analyses(project, listened=True), _plan_target(project), placed, project.caption_style,
+        project, analyses, _plan_target(project), placed, project.caption_style,
         _talking(project, _voices(project)), {asset_id: asset.recorded_at for asset_id, asset in dated.items()},
+        _looks(look_candidates(project, analyses), assets),
     )
+
+def _looks(clips: Sequence[Clip], assets: Mapping[str, Asset]) -> Dict[str, Tuple[int, ...]]:
+    """Fingerprint clips at `looks.SAMPLES`, reading only the frames not fingerprinted before.
+
+    Args:
+        clips: The clips.
+        assets: Their files, keyed by asset ID.
+
+    Returns:
+        The fingerprints by clip ID, for the clips whose file has a picture to read.
+    """
+    found: Dict[str, Tuple[int, ...]] = {}
+    for asset_id in {clip.asset_id for clip in clips}:
+        asset = assets.get(asset_id)
+        if asset is None or not asset.has_video or not os.path.exists(asset.path):
+            continue
+        kept = repo.looks(asset_id)
+        new: Dict[float, int] = {}
+        for clip in (clip for clip in clips if clip.asset_id == asset_id):
+            start, length = float(clip.source_range.start), float(clip.source_range.end - clip.source_range.start)
+            moments = [round(start + length * share, 1) for share in looks.SAMPLES]
+            try:
+                for at in moments:
+                    if at not in kept and at not in new:
+                        new[at] = looks.look_of(asset.path, at)
+            except RuntimeError:
+                continue
+            found[clip.id] = tuple(kept.get(at, new.get(at)) for at in moments)
+        if new:
+            repo.save_looks(asset_id, new)
+    return found
 
 @mcp.tool()
 def check_render(
@@ -5487,13 +5521,15 @@ def check_render(
     """Check a cut for what would be noticed in the finished file, without rendering it.
 
     The same check `render_project` runs first and refuses a render over. It
-    looks for nine things: `bad_picture`, black or frozen source picture that
+    looks for ten things: `bad_picture`, black or frozen source picture that
     reaches the screen; `clipping`, a recording squared off at the ceiling,
     which no amount of turning down undoes; `music`, music heard too close
     under somebody talking; `mid_speech`, a cut that lands
     inside a word or between two words of one phrase, or takes the start or
     the end off a sound the microphone measured, with where to move it; `repeated`, the same stretch of a file shown twice;
-    `continuity`, a clip put on by hand between two shot at another
+    `look_alike`, two clips from different files that look so alike, with
+    nothing said or written over them, that a viewer could not tell which is
+    which; `continuity`, a clip put on by hand between two shot at another
     moment; `unplanned`, a sequence of three or more clips put together by hand
     rather than compiled from a plan, so nothing says how it opens, turns
     and ends; `captions`, a caption too tall for
