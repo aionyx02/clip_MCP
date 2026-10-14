@@ -2778,7 +2778,9 @@ def music_fit_notes(
         ends_with_cut = abs(last.timeline_in + last.end - last.start - total) < 0.01
         still = energy_at(energy, last.end)
         if ends_with_cut and length - last.end > CUT_OFF_SECONDS and still is not None and still >= MIDDLE:
-            start = length - heard
+            # From the part's own length, not the rounded one said above, and rounded down as it is
+            # said: a start a hundredth late leaves the song short of the part, and it loops.
+            start = math.floor((length - (last.timeline_in + last.end - last.start - first.timeline_in)) * 10) / 10
             notes.append(Note(
                 f"the cut ends {length - last.end:.0f}s before {name} does, while it is still going; it is faded "
                 f"out over {last.fade_out:g}s. For the song to end with the video, start the cue at "
