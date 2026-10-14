@@ -93,6 +93,19 @@ version says in the history the user reads. A plan's own versions are still
 there too: `list_plan_versions`, `revert_plan`, and `get_plan` with a
 `version`.
 
+## Trying a change blind
+
+You are the worst judge of your own fix: you read the result through the
+reason you wrote. When a change is meant to fix one thing — a jumpy join, a
+line cut short — `start_trial` before making it, with the problem, its
+evidence, what you will change and what should be better, on a finished render
+of the cut as it is. Make the change, render a preview, `trial_candidate` it.
+Then start a fresh subagent with no part in this conversation and give it only
+`trial_pack`; where you cannot, show the pack to the user. Record what they
+said with `judge_trial` — `same_ai` if you judged it yourself, which is not
+blind — and keep the change only if it says to; otherwise `restore_version`.
+`get_trials` reads them back.
+
 ## What you could not decide
 
 The checks say whether something is wrong, not whether it works. After a

@@ -4,6 +4,7 @@ import math
 import os
 from datetime import datetime, timezone
 import re
+import secrets
 import shutil
 import subprocess
 import threading
@@ -53,6 +54,7 @@ from app.models.timeline import (
 )
 from app.models.comment import Comment, Preference, Question, Reply
 from app.models.offer import OfferedSong, SongOffer
+from app.models.trial import Trial, Verdict
 from app.models.job import Job, JobKind, JobStatus
 from app.engine import cards, texts, looks, loudness, machine, meaning, resources, speed, stills
 from app.engine.analysis import listen_again as listen_again_in_file
@@ -7085,6 +7087,246 @@ def open_comments(project_id: str) -> int:
     """
     return sum(comment.status == "open" and (not comment.question or any(reply.by == "你" for reply in comment.replies))
                for comment in repo.comments(project_id))
+
+# How far either side of the problem a judge sees, for whether the change broke what is
+# around it. Provisional.
+TRIAL_MARGIN_SECONDS = 2.0
+
+def _render_length(path: str) -> Optional[float]:
+    """How long a rendered file runs, or None when it cannot be read."""
+    try:
+        return float(probe_file(path)["format"]["duration"])
+    except (OSError, RuntimeError, KeyError, ValueError):
+        return None
+
+def _trial_dir(trial_id: str) -> str:
+    """Where a trial keeps its own copies of the two renders."""
+    return os.path.join(WORKSPACE_DIR, "trials", trial_id)
+
+@mcp.tool()
+def start_trial(
+    project_id: str,
+    before_job: str,
+    problem: Annotated[str, Field(min_length=1)],
+    hypothesis: Annotated[str, Field(min_length=1)],
+    expected: Annotated[str, Field(min_length=1)],
+    at: Annotated[float, Field(ge=0)],
+    end: Annotated[float, Field(gt=0)],
+    evidence: str = "",
+) -> dict:
+    """Put a change you are about to make to a blind test, before you make it.
+
+    Whoever makes a change reads the result through their own reason for it,
+    and says it worked. So when you change a cut to fix something — your own
+    check found it, or the user's feedback — write the problem down first:
+    where it is, what shows it, what you will change and what should be better.
+    Then change the cut, render a preview and give it with `trial_candidate`;
+    the two are handed over blind as X and Y with `trial_pack`; and only the
+    verdict in `judge_trial` says whether the change is kept.
+
+    Args:
+        project_id: The video.
+        before_job: A finished render of the cut before the change. A copy is
+            kept, since a newer preview replaces it.
+        problem: What is wrong and where, as it was seen or heard.
+        hypothesis: What you will change and why it should help. Never shown
+            to whoever judges.
+        expected: What should be better afterwards. Never shown either.
+        at: Where the problem starts in that render, in seconds.
+        end: Where it ends.
+        evidence: What shows it — a join's words and levels from
+            `inspect_join`, a comment, a finding.
+
+    Returns:
+        The trial's `trial_id`, and what to do next.
+
+    Raises:
+        ValueError: If the render is not a finished one of this project, or
+            the stretch is outside it.
+    """
+    job, path = _finished_render(before_job)
+    if job.project_id != project_id:
+        raise ValueError(f"render {before_job} is not of project {project_id}")
+    length = _render_length(path)
+    if end <= at or (length is not None and at >= length):
+        raise ValueError(f"the stretch {at:g}–{end:g}s is not in the {length or 0:.1f}s render")
+    trial = Trial(id="t" + uuid.uuid4().hex[:7], project_id=project_id, problem=problem.strip(),
+                  evidence=evidence.strip(), hypothesis=hypothesis.strip(), expected=expected.strip(),
+                  at=at, end=end, before_job=before_job, before_version=job.project_version)
+    os.makedirs(_trial_dir(trial.id), exist_ok=True)
+    shutil.copyfile(path, os.path.join(_trial_dir(trial.id), "before.mp4"))
+    repo.save_trial(trial)
+    return {"trial_id": trial.id, "next": (
+        "make the change, render a preview of it, and give it with `trial_candidate`")}
+
+@mcp.tool()
+def trial_candidate(
+    trial_id: str,
+    after_job: str,
+    candidate_at: Optional[Annotated[float, Field(ge=0)]] = None,
+    candidate_end: Optional[Annotated[float, Field(gt=0)]] = None,
+) -> dict:
+    """Give a trial the render of the cut after the change.
+
+    Args:
+        trial_id: The trial, from `start_trial`.
+        after_job: A finished render of the cut after the change.
+        candidate_at: Where the same stretch starts in it, when the change
+            moved it; the same seconds as before when not given.
+        candidate_end: Where it ends.
+
+    Returns:
+        What to do next: who judges it.
+
+    Raises:
+        ValueError: If the trial does not exist or has been judged, or the
+            render is not a finished one of the same project after the first.
+    """
+    trial = repo.trial(trial_id)
+    if trial is None:
+        raise ValueError(f"there is no trial {trial_id}")
+    if trial.verdict is not None:
+        raise ValueError(f"trial {trial_id} has been judged; start another")
+    job, path = _finished_render(after_job)
+    if job.project_id != trial.project_id or after_job == trial.before_job:
+        raise ValueError(f"render {after_job} is not a render of the change to project {trial.project_id}")
+    shutil.copyfile(path, os.path.join(_trial_dir(trial.id), "after.mp4"))
+    trial.after_job, trial.after_version = after_job, job.project_version
+    trial.candidate_at = trial.at if candidate_at is None else candidate_at
+    trial.candidate_end = trial.end if candidate_end is None else candidate_end
+    trial.candidate_is = secrets.choice(["X", "Y"])
+    repo.save_trial(trial)
+    return {"trial_id": trial.id, "next": (
+        "have it judged by someone who has not seen the change: start a fresh subagent with no part in this "
+        "conversation, give it only `trial_pack` and ask which of X and Y handles the problem better and whether "
+        "either breaks what is around it; or show the pack to the user. Then record it with `judge_trial`. "
+        "Judging it yourself is not blind — you know which you made — and the record says so")}
+
+@mcp.tool()
+def trial_pack(trial_id: str) -> ToolResult:
+    """Hand over the two versions of a trial blind, as X and Y, for someone to judge.
+
+    It holds the problem and its evidence, and for each of X and Y the frames
+    of the stretch and a little either side, and its sound to hear — nothing
+    that says which is the change or why it was made. Give it to whoever
+    judges, as it is.
+
+    Args:
+        trial_id: The trial.
+
+    Returns:
+        The problem and evidence, where each sound file is, and the frames of
+        X above Y.
+
+    Raises:
+        ValueError: If the trial does not exist or has no candidate yet.
+    """
+    trial = repo.trial(trial_id)
+    if trial is None:
+        raise ValueError(f"there is no trial {trial_id}")
+    if trial.candidate_is is None:
+        raise ValueError(f"trial {trial_id} has no change to compare yet; `trial_candidate` gives it one")
+    folder = _trial_dir(trial.id)
+    files = {"before": (os.path.join(folder, "before.mp4"), trial.at, trial.end),
+             "after": (os.path.join(folder, "after.mp4"), trial.candidate_at, trial.candidate_end)}
+    labels = {trial.candidate_is: "after", ("Y" if trial.candidate_is == "X" else "X"): "before"}
+    per_side = MAX_STORYBOARD_TILES // 2
+    shots, lines = [], [f"The problem: {trial.problem}"]
+    if trial.evidence:
+        lines.append(f"What shows it: {trial.evidence}")
+    lines.append(f"Below, X above Y: the same stretch in two versions of the cut, with {TRIAL_MARGIN_SECONDS:g}s "
+                 "either side. Say which handles the problem better, or that neither does, and whether either makes "
+                 "what is around it worse.")
+    for label in ("X", "Y"):
+        path, start, finish = files[labels[label]]
+        length = _render_length(path) or finish
+        opened, closed = max(0.0, start - TRIAL_MARGIN_SECONDS), min(length, finish + TRIAL_MARGIN_SECONDS)
+        step = (closed - opened) / (per_side - 1)
+        for index in range(per_side):
+            moment = round(min(opened + index * step, length - 0.05), 3)
+            shots.append((path, moment, f"{label} {moment - start:+.1f}s"))
+        heard = os.path.join(folder, f"{label}.wav")
+        try:
+            cut_sound(path, opened, closed, heard)
+            lines.append(f"{label} sound: {heard}")
+        except RuntimeError:
+            lines.append(f"{label} has no sound here")
+    return ToolResult(content=["\n".join(lines), Image(data=storyboard_sheet(shots, columns=per_side // 2),
+                                                         format="jpeg")])
+
+@mcp.tool()
+def judge_trial(
+    trial_id: str,
+    better: Literal["X", "Y", "same"],
+    broke: bool,
+    why: Annotated[str, Field(min_length=1)],
+    judged_by: Literal["subagent", "user", "same_ai"],
+) -> dict:
+    """Write down the verdict on a trial, and only then hear which was the change.
+
+    Args:
+        trial_id: The trial.
+        better: Which handles the problem better, as whoever judged said; `same`
+            when neither does.
+        broke: Whether they said either makes what is around the problem worse.
+        why: What they saw and heard, in their words.
+        judged_by: `subagent` for a fresh one that saw none of the change,
+            `user`, or `same_ai` when you judged it yourself — which is not
+            blind, and the record says so.
+
+    Returns:
+        `change_was`, the change's label; `keep`, `change` only when it made
+        the problem better and broke nothing, otherwise `original` — then put
+        the cut back with `restore_version` to the version before; and the
+        trial as recorded.
+
+    Raises:
+        ValueError: If the trial does not exist, has no change yet, or was
+            judged already.
+    """
+    trial = repo.trial(trial_id)
+    if trial is None:
+        raise ValueError(f"there is no trial {trial_id}")
+    if trial.candidate_is is None:
+        raise ValueError(f"trial {trial_id} has no change to judge yet")
+    if trial.verdict is not None:
+        raise ValueError(f"trial {trial_id} was judged already: {trial.verdict.better}")
+    trial.verdict = Verdict(better=better, broke=broke, why=why.strip(), judged_by=judged_by)
+    repo.save_trial(trial)
+    shutil.rmtree(_trial_dir(trial.id), ignore_errors=True)
+    keep = "change" if better == trial.candidate_is and not broke else "original"
+    said = {
+        "change_was": trial.candidate_is, "keep": keep, "blind": judged_by != "same_ai",
+        "trial": _trial_said(trial),
+    }
+    if keep == "original":
+        said["next"] = (f"the change is not kept: put the cut back as it was in version {trial.before_version} with "
+                        "`project_history` and `restore_version`, and tell the user what was tried and why it was not "
+                        "kept")
+    return said
+
+def _trial_said(trial: Trial) -> dict:
+    """A trial as it is read back."""
+    said = {"trial_id": trial.id, "problem": trial.problem, "hypothesis": trial.hypothesis,
+            "expected": trial.expected, "before_version": trial.before_version, "after_version": trial.after_version}
+    if trial.verdict is not None:
+        said["verdict"] = {"better": trial.verdict.better, "change_was": trial.candidate_is,
+                           "broke": trial.verdict.broke, "why": trial.verdict.why,
+                           "judged_by": trial.verdict.judged_by}
+    return said
+
+@mcp.tool()
+def get_trials(project_id: str) -> dict:
+    """Read back the changes to a video that were tried blind, and what came of each.
+
+    Args:
+        project_id: The video.
+
+    Returns:
+        `trials`, oldest first: the problem, what was changed and expected,
+        and the verdict with who gave it.
+    """
+    return {"trials": [_trial_said(trial) for trial in repo.trials(project_id)]}
 
 @mcp.tool()
 def ask_user(project_id: str, questions: Annotated[List[Question], Field(min_length=1, max_length=8)]) -> dict:

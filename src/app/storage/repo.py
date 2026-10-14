@@ -13,6 +13,7 @@ from app.models.media import Asset, MediaAnalysis
 from app.models.offer import SongOffer
 from app.models.plan import EditPlan
 from app.models.semantic import ClipKind, ClipLevel, SemanticClip, SemanticTimeline
+from app.models.trial import Trial
 from app.models.timeline import Project, SubtitleCue
 from app.storage.history import History, canonical, describe_project, file_stem, fingerprint
 
@@ -124,6 +125,11 @@ _MIGRATIONS: List[List[str]] = [
     [
         # How the user likes their videos, said once and kept for every project after.
         "CREATE TABLE IF NOT EXISTS preferences (id TEXT PRIMARY KEY, data TEXT NOT NULL)",
+    ],
+    [
+        # Changes to a cut tried blind before they are kept, and what whoever judged them said.
+        "CREATE TABLE IF NOT EXISTS trials (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, data TEXT NOT NULL)",
+        "CREATE INDEX IF NOT EXISTS trials_project ON trials (project_id)",
     ],
 ]
 # Footage and music are filed apart, each in folders of its own; projects in theirs.
@@ -681,6 +687,22 @@ class Repository:
         found = [Comment.model_validate_json(data) for (data,) in
                  self._query("SELECT data FROM comments WHERE project_id = ?", (project_id,))]
         return sorted(found, key=lambda comment: comment.created_at)
+
+    def trial(self, trial_id: str) -> Optional[Trial]:
+        """Read one trial."""
+        rows = self._query("SELECT data FROM trials WHERE id = ?", (trial_id,))
+        return Trial.model_validate_json(rows[0][0]) if rows else None
+
+    def trials(self, project_id: str) -> List[Trial]:
+        """Read a project's trials, oldest first."""
+        rows = self._query("SELECT data FROM trials WHERE project_id = ?", (project_id,))
+        return sorted((Trial.model_validate_json(row[0]) for row in rows), key=lambda trial: trial.started_at)
+
+    def save_trial(self, trial: Trial) -> None:
+        """Keep a trial as it now stands."""
+        with self._transaction() as conn:
+            conn.execute("INSERT OR REPLACE INTO trials (id, project_id, data) VALUES (?, ?, ?)",
+                         (trial.id, trial.project_id, trial.model_dump_json()))
 
     def preferences(self) -> List[Preference]:
         """Read how the user likes their videos, oldest first."""
