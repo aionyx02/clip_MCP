@@ -46,6 +46,9 @@ MERGE_GAP_SECONDS = 0.3
 # second and never more than about two, so this buys a clean cut for almost nothing.
 # Provisional until there is a corpus to tune it against.
 SNAP_SECONDS = 1.0
+# `query_clips` reads a clip's range back to the hundredth, so evidence copied from it can sit
+# that far outside the range it was read from.
+EVIDENCE_SLACK_SECONDS = 0.01
 # How long a silence has to run before it is dead air rather than a breath. It has to
 # exceed `2 * BREATH_SECONDS + MERGE_GAP_SECONDS`: taking a pause out leaves a breath on
 # each side, and if what is left between the two halves fits inside the merge gap they
@@ -183,6 +186,10 @@ def note_record(note: str) -> dict:
 def _first_clips(pieces: Iterable["Piece"]) -> List[str]:
     """Name windows by the first clip each is made of, as the plan names them."""
     return [piece.from_clip_ids[0] for piece in pieces if piece.from_clip_ids]
+
+def _edge_of(piece: "Piece", side: str, seconds: float) -> str:
+    """Say where one edge of a window is: `u0410 starts at 2.23s of its file`."""
+    return f"{(piece.from_clip_ids or (piece.asset_id,))[0]} {side} at {seconds:.2f}s of its file"
 
 @dataclass(frozen=True)
 class Piece:
@@ -534,6 +541,10 @@ def _same_line(first: Piece, second: Piece, cuts: Mapping[str, CleanCuts]) -> bo
         return False
     return SequenceMatcher(None, said, again).ratio() >= RETAKE_SIMILARITY
 
+# A window's edge moved further than this to reach the sound is more than a word placed a
+# little late: it is said, with where it was asked for and where it went. Provisional.
+MOVED_FAR_SECONDS = 0.3
+
 def _on_the_sound(
     pieces: Sequence[Piece],
     cuts: Optional[Mapping[str, CleanCuts]],
@@ -561,6 +572,9 @@ def _on_the_sound(
     out: List[Piece] = []
     moved = 0
     shifted: List[Piece] = []
+    # Moves too long to be a slip of the transcript, said one by one so none is made unseen.
+    far: List[str] = []
+    far_in: List[Piece] = []
     for piece in pieces:
         known = cuts.get(piece.asset_id)
         if known is None:
@@ -576,6 +590,11 @@ def _on_the_sound(
         if (start, end) != (piece.start, piece.end):
             moved += (start != piece.start) + (end != piece.end)
             shifted.append(piece)
+            pulled = [(side, asked, made) for side, asked, made in (("starts", piece.start, start), ("ends", piece.end, end))
+                      if abs(made - asked) > MOVED_FAR_SECONDS]
+            if pulled:
+                far_in.append(piece)
+                far += [f"{_edge_of(piece, side, made)}, not the {asked:.2f}s asked" for side, asked, made in pulled]
             out.append(replace(piece, start=start, end=end))
         else:
             out.append(piece)
@@ -585,6 +604,12 @@ def _on_the_sound(
             f"{moved} cut(s) moved out to where the sound really starts or stops: the transcript placed a word "
             "inside the talking, and cutting there would take the start or end of it off",
             "cuts_moved_to_the_sound", clip_ids=_first_clips(shifted),
+        ))
+    if far:
+        notes.append(Note(
+            "moved further than a slip of the transcript: " + "; ".join(far) + ". If the words there were meant "
+            "to go, start or end the window on the edge of the first or last word kept, and it stays",
+            "cuts_moved_far", clip_ids=_first_clips(far_in), look=True,
         ))
     return out, notes
 
@@ -1276,7 +1301,7 @@ def compile_pieces(
     notes += said
     # Last, because the beat moves cuts, and how much a transition can reach back into
     # depends on exactly where its window starts.
-    pieces, said = _joined_beats(plan, pieces, assets)
+    pieces, said = _joined_beats(plan, pieces, assets, cuts)
     return pieces, notes + said
 
 def _reach(kind: str) -> float:
@@ -1292,8 +1317,13 @@ def _joined_beats(
     plan: EditPlan,
     pieces: Sequence[Piece],
     assets: Mapping[str, Asset],
+    cuts: Optional[Mapping[str, CleanCuts]],
 ) -> Tuple[List[Piece], List[str]]:
-    """Put each beat's transition and sound lead on the window it begins with.
+    """Put each beat's pause, transition and sound lead on the window it begins with.
+
+    The pause first: it opens the window earlier, into the quiet of its shot
+    before the first word, and the transition then runs in from where the
+    window now starts.
 
     Both are fed from before the window's start in its file, and a shot that
     begins at the very start of its file has nothing there. Refusing the plan
@@ -1306,6 +1336,8 @@ def _joined_beats(
         plan: The plan.
         pieces: Its windows, settled.
         assets: The assets they play from, keyed by asset ID.
+        cuts: What is known about each file, keyed by asset ID: where the
+            words are, so a pause never opens a window onto the line before.
 
     Returns:
         `(pieces, notes)`.
@@ -1314,9 +1346,29 @@ def _joined_beats(
     out = list(pieces)
     notes: List[str] = []
     for position, beat in enumerate(plan.beats):
+        at = first.get(beat.id)
+        if position > 0 and beat.pause_before is not None and at:
+            piece = out[at]
+            known = (cuts or {}).get(piece.asset_id)
+            # Back no further than the last word before it, nor into what the cut already plays of
+            # the same take: opening onto either would hear it twice or start mid-line.
+            said = [closed for _, closed in (known.words if known is not None else ())
+                    if closed <= piece.start + EDGE_TOLERANCE_SECONDS]
+            played = [other.end for other in out[:at] if other.asset_id == piece.asset_id and other.end <= piece.start]
+            quiet = piece.start - max(said + played, default=0.0)
+            # Rounded first, so a time already in whole milliseconds is not floored a millisecond short.
+            fits = math.floor(round(min(beat.pause_before * piece.speed, max(0.0, quiet)) * 1000, 6)) / 1000
+            if fits < beat.pause_before * piece.speed:
+                notes.append(Note(
+                    f"beat {beat.id}: it opens on {fits / piece.speed:g}s of quiet rather than {beat.pause_before:g}s, "
+                    "all its first shot has before somebody speaks or the cut has already played",
+                    "join_shortened", beat_id=beat.id, clip_ids=_first_clips([piece]),
+                    seconds=round(fits / piece.speed, 3), look=True,
+                ))
+            if fits > 0:
+                out[at] = replace(piece, start=round(piece.start - fits, 3))
         if position == 0 or (beat.transition_in is None and beat.sound_lead is None):
             continue
-        at = first.get(beat.id)
         if at is None or at == 0:
             notes.append(Note(
                 f"beat {beat.id} has no shot of its own to begin with — its first one was joined to the shot "
@@ -1818,14 +1870,22 @@ def _cut_notes(
             "cuts_moved_off_words", seconds=max(moved),
         ))
 
-    stuck = [
-        piece for piece in pieces
-        if (known := cuts.get(piece.asset_id))
-        and any(known.splits_a_word(edge) for edge in (piece.start, piece.end))
-    ]
+    stuck: List[Piece] = []
+    where: List[str] = []
+    for piece in pieces:
+        known = cuts.get(piece.asset_id)
+        if known is None:
+            continue
+        # Which end, at which second of the file, inside which word: a window has two edges.
+        edges = [(side, edge, word) for side, edge in (("starts", piece.start), ("ends", piece.end))
+                 if (word := known.word_split_at(edge)) is not None]
+        if edges:
+            stuck.append(piece)
+            where += [f"{_edge_of(piece, side, edge)}, inside the word at {word[0]:.2f}–{word[1]:.2f}s"
+                      for side, edge, word in edges]
     if stuck:
         said.append(Note(
-            f"{len(stuck)} cut(s) still land inside a word: {', '.join(_first_clips(stuck))}. "
+            f"{len(where)} cut(s) still land inside a word: {'; '.join(where)}. "
             f"No clean point is within {SNAP_SECONDS:g}s of them, so they were left as asked",
             "cuts_inside_words", clip_ids=_first_clips(stuck), look=True,
         ))
@@ -2083,8 +2143,9 @@ def _knowledge_problems(plan: EditPlan, clips: Mapping[str, SemanticClip]) -> Li
         clip = clips.get(selection.clip_id)
         for item in selection.establishes:
             start, end = item.evidence
-            if clip is not None and not (clip.source_range.start - 1e-3 <= start
-                                         and end <= clip.source_range.end + 1e-3):
+            # The slack is the rounding a clip's range is read back with, not a judgement.
+            if clip is not None and not (clip.source_range.start - EVIDENCE_SLACK_SECONDS <= start
+                                         and end <= clip.source_range.end + EVIDENCE_SLACK_SECONDS):
                 problems.append(
                     f"{where}: the evidence for {item.fact}, {start:g}–{end:g}s, is not in the clip, which runs "
                     f"{clip.source_range.start:g}–{clip.source_range.end:g}s of its file"
@@ -2849,11 +2910,16 @@ def music_fit_notes(
         return []
     total = compiled_duration(pieces)
     payoff = next((beat.id for beat in plan.beats if beat.role == BeatRole.PAYOFF), None)
-    climax, position = None, 0.0
-    for piece in pieces:
+    climax, position, opens = None, 0.0, None
+    for index, piece in enumerate(pieces):
         if piece.beat_id == payoff and climax is None:
-            climax = position
+            climax, opens = position, index
         position += piece.played
+    # The cue the payoff opens under, told by the window it came in on rather than by seconds:
+    # one cross-fading out as the payoff begins runs past it, but is leaving, not playing there.
+    entries = _cue_entries(plan, pieces)
+    under = max((index for index in entries if opens is not None and index <= opens), default=None)
+    playing = f"cue:{entries[under].beat_id or '^'}" if under is not None else None
     # Where each cue holds the cut, and the second of its song it is at when it takes over: a
     # cross-fade lends it a little either side, but this is the stretch it was asked to play under.
     spans = {f"cue:{cue.beat_id or '^'}": (at, until, song_entry(cue, cuts.get(cue.asset_id) if cuts else None))
@@ -2883,33 +2949,61 @@ def music_fit_notes(
             continue
         peak = fullest(energy)
         span = spans.get(first.key[0])
-        # Only the song playing when the payoff begins: one another song takes over from before
-        # then cannot land its fullest part there, wherever it starts.
-        if (len(passes) == 1 and peak is not None and climax is not None and span is not None
-                and span[0] <= climax < span[1]):
-            at, until, entry = span
-            lands = at + peak[0] - entry if entry <= peak[0] < entry + until - at else None
+        ends_with_cut = abs(last.timeline_in + last.end - last.start - total) < 0.01
+        # How much of the song the part plays, from its own length rather than the rounded one said above.
+        played = last.timeline_in + last.end - last.start - first.timeline_in
+
+        def cut_off_from(start: float) -> Optional[float]:
+            """How long before the song's end the cut stops it, still going, when the cue starts here."""
+            stops = start + played
+            going = energy_at(energy, stops)
+            if ends_with_cut and length - stops > CUT_OFF_SECONDS and going is not None and going >= MIDDLE:
+                return length - stops
+            return None
+
+        def lands_at(start: float) -> Optional[float]:
+            """Where in the cut the fullest part is heard when the cue starts here, or None."""
+            at, until, _ = span
+            return at + peak[0] - start if start <= peak[0] < start + until - at else None
+
+        # Only the song the payoff opens under: one another song takes over from before then, or
+        # one fading out as it begins, cannot land its fullest part there, wherever it starts.
+        aims = (len(passes) == 1 and peak is not None and climax is not None and span is not None
+                and first.key[0] == playing)
+        if aims:
+            lands = lands_at(span[2])
             if lands is None or abs(lands - climax) > PEAK_TOLERANCE_SECONDS:
-                start = peak[0] - (climax - at)
+                start = peak[0] - (climax - span[0])
                 fix = (f"start the cue at {start:.1f}s of the song (set_music_cue) to land it there"
                        if 0 <= start < length else "a song that builds later would land it there")
+                short = cut_off_from(start) if 0 <= start < length else None
+                if short is not None:
+                    fix += (f" — but then the cut ends {short:.0f}s before the song does, while it is still going, "
+                            "and it is faded out: with this song, landing its fullest part on the payoff and ending "
+                            "with the video cannot both be had, so choose one, or another song")
                 notes.append(Note(
                     f"the fullest part of {name} ({peak[0]}–{peak[1]}s of the song) "
                     + (f"lands at {lands:.1f}s of the cut" if lands is not None else "is never heard")
                     + f", and the payoff ({payoff}) starts at {climax:.1f}s; {fix}",
                     "music_peak_off", beat_id=beat_id, seconds=climax, look=True,
                 ))
-        ends_with_cut = abs(last.timeline_in + last.end - last.start - total) < 0.01
-        still = energy_at(energy, last.end)
-        if ends_with_cut and length - last.end > CUT_OFF_SECONDS and still is not None and still >= MIDDLE:
-            # From the part's own length, not the rounded one said above, and rounded down as it is
-            # said: a start a hundredth late leaves the song short of the part, and it loops.
-            start = math.floor((length - (last.timeline_in + last.end - last.start - first.timeline_in)) * 10) / 10
+        short = cut_off_from(last.end - played)
+        if short is not None:
+            # Rounded down as it is said: a start a hundredth late leaves the song short of the part, and it loops.
+            start = math.floor((length - played) * 10) / 10
+            cost = ""
+            if aims and start >= 0:
+                moved = lands_at(start)
+                if moved is None or abs(moved - climax) > PEAK_TOLERANCE_SECONDS:
+                    cost = (" — but then its fullest part "
+                            + (f"lands at {moved:.1f}s of the cut" if moved is not None else "is never heard")
+                            + f", not on the payoff at {climax:.1f}s: the two cannot both be had with this song, "
+                              "so choose one")
             notes.append(Note(
-                f"the cut ends {length - last.end:.0f}s before {name} does, while it is still going; it is faded "
+                f"the cut ends {short:.0f}s before {name} does, while it is still going; it is faded "
                 f"out over {last.fade_out:g}s. For the song to end with the video, start the cue at "
                 f"{max(0.0, start):.1f}s of the song (set_music_cue)" + ("" if start >= 0 else " — it is shorter than the part, so "
-                                                         "it loops first") + ", or give it a longer fade_out",
+                                                         "it loops first") + cost + ", or give it a longer fade_out",
                 "music_cut_off", beat_id=beat_id, seconds=total, look=True,
             ))
     return notes

@@ -21,6 +21,7 @@ that cannot be picked honestly without a corpus to pick them against.
 import hashlib
 import json
 import math
+import re
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
@@ -29,7 +30,9 @@ from app.models.semantic import ClipKind, ClipLevel, SemanticClip, SemanticTimel
 
 # Bumped whenever the rules below change, so timelines built by an older
 # version are recognised as out of date rather than silently reused.
-DERIVATION_VERSION = 7
+# 8: lines the recogniser made up are told by more than their confidence, a stretch
+# without speech has no speaker, and voices join across files by their average.
+DERIVATION_VERSION = 8
 # A stretch without speech shorter than this is not a thing on its own; it is the
 # breath between two sentences, and it is already described by their headroom.
 MIN_UTTERANCE_SECONDS = 0.4
@@ -64,6 +67,10 @@ HEARD_PROBABILITY = 0.5
 # Two heard words this close together are one phrase, so a cut between them takes the
 # first off the second. Provisional (roadmap §13).
 PHRASE_GAP_SECONDS = 0.3
+# A cut this close to where the transcript has one word end and the next begin was put on
+# that edge: the word on the far side is being taken off on purpose — 「各位」 off the front
+# of 「各位我到高鐵了」 — however the sound runs on across it. Provisional.
+WORD_EDGE_SECONDS = 0.05
 MOSTLY = 0.5
 NEARLY_ALL = 0.9
 # How much of the talking in a stretch one voice has to hold before the stretch is called
@@ -77,6 +84,10 @@ SPEAKER_MAJORITY = 0.8
 # and a recording made on another day in another room is further from itself than two
 # people in one room are from each other. Provisional, like that one.
 VOICE_DISTANCE = 0.45
+# How far a file's only voice may sit from a voice already heard and still be them. A
+# vlogger alone on a street measured 0.5 from themselves on another day, so a single
+# voice is given more room than one of several. Provisional.
+LONE_VOICE_DISTANCE = 0.6
 
 def share_covered(start: float, end: float, spans: Sequence[Span]) -> float:
     """Measure how much of a stretch is covered by a set of spans.
@@ -354,24 +365,66 @@ def speaker_at(
 # shot of a drone taking off. Real mumbling still averages well above it.
 MADE_UP_PROBABILITY = 0.1
 
+# Provisional: a sentence most of whose words the model gave no length at all — start and end
+# the same instant — was not heard; the recogniser wrote it out of nothing, as it does
+# 「中文字幕——YK」 over the hum of a café.
+MADE_UP_EMPTY_SHARE = 0.5
+# Provisional: a sentence whose first word the model gave under this chance, and that has a
+# word of no length, was made up; a real line can open unsure, but not with nothing under it.
+MADE_UP_FIRST_PROBABILITY = 0.02
+# Provisional: the same word this many times running is the recogniser stuck in a loop —
+# 「沒興趣,」 forty times over street noise — not someone repeating themselves.
+MADE_UP_REPEATS = 6
+# What the recogniser was trained on most: subtitle credits and a channel's sign-off and
+# plea to subscribe, in either script, as it writes them rather than as anyone says them.
+# 「謝謝大家」 is left out: people say it at the end of their own videos.
+_MADE_UP_LINES = [
+    re.compile(pattern) for pattern in (
+        r"^中文字幕|字幕[組组由提供志]",
+        # Its plea, word for word: 「請不吝點贊 訂閱 轉發 打賞支持明鏡與點點欄目」. A vlogger
+        # asking for a subscription in their own words says neither 不吝 nor 點點欄目.
+        r"不吝[點点][贊赞讚]|[點点]{2}[欄栏]目",
+        r"^([謝谢][謝谢]|感[謝谢]|多[謝谢])(觀看|观看|收看|收聽|收听)$",
+    )
+]
+
 def was_made_up(segment: TranscriptSegment) -> bool:
     """Decide whether the speech model invented a sentence nobody said.
 
     The silence detector catches sentences written over silence; this catches
-    the ones written over sound that is not talking — wind, engines, music —
-    which the model hands back with almost no confidence in a single word.
+    the ones written over sound that is not talking — wind, engines, a café —
+    which the model hands back with almost no confidence in a single word,
+    with words that take no time at all, stuck repeating one word, or as one
+    of the lines it was trained on most: a subtitle credit, a sign-off.
 
     Args:
         segment: The sentence.
 
     Returns:
-        True when every word carries a probability and they average under
-        `MADE_UP_PROBABILITY`. A transcript made before probabilities were
-        kept is never judged.
+        True when any of those holds. Probabilities are only judged when
+        every word carries one, so a transcript made before they were kept
+        is judged by the rest.
     """
-    chances = [word.probability for word in segment.words]
-    if not chances or any(chance is None for chance in chances):
+    words = segment.words
+    bare = re.sub(r"[\s\W_]+", "", segment.text)
+    if any(line.search(bare) for line in _MADE_UP_LINES):
+        return True
+    if not words:
         return False
+    empty = sum(1 for word in words if word.end <= word.start)
+    if empty / len(words) >= MADE_UP_EMPTY_SHARE:
+        return True
+    said = [re.sub(r"[\s\W_]+", "", word.text) for word in words]
+    run = 1
+    for before, word in zip(said, said[1:]):
+        run = run + 1 if word and word == before else 1
+        if run >= MADE_UP_REPEATS:
+            return True
+    chances = [word.probability for word in words]
+    if any(chance is None for chance in chances):
+        return False
+    if chances[0] < MADE_UP_FIRST_PROBABILITY and empty:
+        return True
     return sum(chances) / len(chances) < MADE_UP_PROBABILITY
 
 def was_audible(silence_share: float, has_audio: bool) -> bool:
@@ -591,8 +644,14 @@ def join_voices(analyses: Mapping[str, MediaAnalysis]) -> Dict[Tuple[str, str], 
     happened to be read in.
 
     Greedy rather than a proper clustering: with a handful of voices the two
-    agree, and a greedy pass can be read straight through. If a corpus ever
-    shows them disagreeing, that is the moment to pay for the better one.
+    agree, and a greedy pass can be read straight through. Each joined voice
+    is compared by where its files sit on average, weighted by how much
+    talking each was measured over, so a week of one person's vlog gathers
+    around them instead of drifting off a voice at a time. A file with only
+    one voice in it is given more room, up to `LONE_VOICE_DISTANCE`: a person
+    alone with a camera on a noisy street is further from themselves than two
+    people in one room are from each other, and there is nobody else in the
+    file for them to be.
 
     Args:
         analyses: The analyses to join, keyed by asset ID.
@@ -603,19 +662,46 @@ def join_voices(analyses: Mapping[str, MediaAnalysis]) -> Dict[Tuple[str, str], 
         same as their being nobody: it means nobody looked.
     """
     joined: Dict[Tuple[str, str], str] = {}
-    known: List[Tuple[str, List[float]]] = []
+    # Each joined voice: its label, the sum of its files' voices weighted by seconds, and the seconds.
+    known: List[Tuple[str, List[float], float]] = []
     for asset_id in sorted(analyses):
-        for voice in sorted(analyses[asset_id].voices, key=lambda item: item.speaker):
-            nearest, distance = None, VOICE_DISTANCE
-            for label, embedding in known:
-                apart = _cosine_distance(voice.embedding, embedding)
+        voices = analyses[asset_id].voices
+        reach = LONE_VOICE_DISTANCE if len(voices) == 1 else VOICE_DISTANCE
+        taken: set[str] = set()
+        for voice in sorted(voices, key=lambda item: item.speaker):
+            nearest, distance = None, reach
+            for index, (label, total, _) in enumerate(known):
+                if label in taken:
+                    # Two voices the speaker split told apart in one file are two people.
+                    continue
+                apart = _cosine_distance(voice.embedding, total)
                 if apart < distance:
-                    nearest, distance = label, apart
+                    nearest, distance = index, apart
             if nearest is None:
-                nearest = f"V{len(known) + 1}"
-                known.append((nearest, list(voice.embedding)))
-            joined[(asset_id, voice.speaker)] = nearest
+                known.append((f"V{len(known) + 1}", [0.0] * len(voice.embedding), 0.0))
+                nearest = len(known) - 1
+            # Joined only within `reach`, which a vector of another length never is, so the two always match.
+            label, total, seconds = known[nearest]
+            total = [held + value * voice.seconds for held, value in zip(total, voice.embedding)]
+            known[nearest] = (label, total, seconds + voice.seconds)
+            taken.add(label)
+            joined[(asset_id, voice.speaker)] = label
     return joined
+
+def voice_seconds(clips: Sequence[SemanticClip]) -> Dict[str, float]:
+    """Add up how long each joined voice talks, so one person split in several is plain to see.
+
+    Args:
+        clips: The clips of a timeline.
+
+    Returns:
+        Seconds of talking by joined label, the most talkative first.
+    """
+    held: Dict[str, float] = {}
+    for clip in clips:
+        if clip.speaker is not None:
+            held[clip.speaker] = held.get(clip.speaker, 0.0) + clip.source_range.end - clip.source_range.start
+    return {label: round(seconds, 1) for label, seconds in sorted(held.items(), key=lambda item: -item[1])}
 
 def timeline_input_hash(analyses: Mapping[str, MediaAnalysis]) -> str:
     """Fingerprint everything a build depends on.
@@ -693,9 +779,10 @@ def build_timeline(
                 source_range=Span(start=round(start, 3), end=round(end, 3)),
                 safe_in=round(safe_in, 3),
                 safe_out=round(safe_out, 3),
-                kind=_kind(bool(text) and not was_made_up(segment), asset.has_audio, scores),
+                kind=(kind := _kind(bool(text) and not was_made_up(segment), asset.has_audio, scores)),
                 text=text,
-                speaker=voices.get((asset_id, said_by)) if (
+                # Nobody is speaking in a stretch without words, whatever the speaker split heard there.
+                speaker=voices.get((asset_id, said_by)) if kind == ClipKind.SPEECH and (
                     said_by := speaker_at(analysis.speakers, start, end)
                 ) else None,
                 scores=scores,
@@ -771,6 +858,11 @@ class CleanCuts:
     listened: bool = False
     duration: Optional[float] = None
 
+    def word_split_at(self, seconds: float) -> Optional[Tuple[float, float]]:
+        """Find the word a cut here would land inside, as `(start, end)`; None when it lands in none."""
+        return next((word for word in self.words
+                     if word[0] + EDGE_TOLERANCE_SECONDS < seconds < word[1] - EDGE_TOLERANCE_SECONDS), None)
+
     def splits_a_word(self, seconds: float) -> bool:
         """Say whether a cut here would land inside a word.
 
@@ -785,10 +877,7 @@ class CleanCuts:
             answers False: nothing is *known* to break, which is not the same
             as nothing breaking.
         """
-        return any(
-            start + EDGE_TOLERANCE_SECONDS < seconds < end - EDGE_TOLERANCE_SECONDS
-            for start, end in self.words
-        )
+        return self.word_split_at(seconds) is not None
 
     def splits_a_sentence(self, seconds: float) -> bool:
         """Say whether a cut here would leave a sentence unfinished.
@@ -966,7 +1055,7 @@ class CleanCuts:
             cut here would take the start of it off. None otherwise, for a cut
             inside a measured silence, and for a file nobody transcribed.
         """
-        if not self.transcribed or self._in_silence(seconds):
+        if not self.transcribed or self._in_silence(seconds) or self.drops_words(seconds, opens=True):
             return None
         found = [onset for onset in (self._silence_onset(seconds), self._voice_onset(seconds)) if onset is not None]
         return min(found) if found else None
@@ -985,6 +1074,42 @@ class CleanCuts:
             return None
         found = [fall for fall in (self._silence_fall(seconds), self._voice_fall(seconds)) if fall is not None]
         return max(found) if found else None
+
+    def drops_words(self, seconds: float, opens: bool) -> bool:
+        """Say whether a cut opening a window sits on a word edge, taking whole words off the front of a line.
+
+        The transcript knows the word being cut away — it ends where the first
+        one kept begins — so the cut was put there to take it off, 「各位」
+        off 「各位我到高鐵了」, and the sound running on up to the edge is
+        that word, not one the transcript missed. A cut a missed word runs up
+        to has no transcribed word right against it, and is still moved to
+        the sound. Only the front of a line: a line stopped short of its end
+        between two words that close together is bitten off, and is still
+        found as one.
+
+        Args:
+            seconds: Where the cut is, in source seconds.
+            opens: Whether it opens a window rather than closing one.
+
+        Returns:
+            True when the cut opens a window inside one sentence, a
+            transcribed word starts within `WORD_EDGE_SECONDS` of it, and
+            another ends within it, mostly before it and not run on across a
+            measured silence.
+        """
+        if not opens:
+            return False
+        edge = WORD_EDGE_SECONDS
+
+        def placed(start: float, end: float) -> bool:
+            # A word run on across a measured silence is misplaced: what it says is heard on one side.
+            return not any(min(end, loud) - max(start, quiet) > EDGE_TOLERANCE_SECONDS for quiet, loud in self.pauses)
+
+        kept = any(abs(start - seconds) <= edge for start, _ in self.words)
+        gone = any(abs(end - seconds) <= edge and (start + end) / 2 < seconds and placed(start, end)
+                   for start, end in self.words)
+        within = any(begins < seconds < ends for begins, ends in self.sentences)
+        return kept and gone and within
 
     def room_before(self, onset: float) -> float:
         """Find how far before the start of some talking a window may open.
@@ -1063,7 +1188,8 @@ class CleanCuts:
             The words as heard, or an empty string when it takes none off.
         """
         lost = self._lost_words(seconds, opens)
-        if not lost or self._known_word(*((lost[0][0], seconds) if opens else (seconds, lost[-1][1]))):
+        if (not lost or self.drops_words(seconds, opens)
+                or self._known_word(*((lost[0][0], seconds) if opens else (seconds, lost[-1][1])))):
             return ""
         return "".join(text for _, _, text in lost)
 

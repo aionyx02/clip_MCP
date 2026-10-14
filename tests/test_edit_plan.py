@@ -40,7 +40,7 @@ from app.engine.plan import (
     plan_pieces,
 )
 from app.engine.sections import build_sections
-from app.engine.semantic import build_timeline, clean_cuts, join_voices
+from app.engine.semantic import CleanCuts, build_timeline, clean_cuts, join_voices
 from app.models.media import (
     Asset, MediaAnalysis, Rhythm, SoundMeasurement, Span, SpeakerTurn, Transcript, TranscriptSegment,
     TranscriptWord, Voice,
@@ -342,6 +342,8 @@ def test_a_word_longer_than_the_snap_allows_is_left_alone_and_said_so() -> None:
     assert plan_pieces(plan, by_id, {}, assets, cuts)[0].end == pytest.approx(4.0)
     _, notes = check_plan(plan, timeline, by_id, {}, assets, cuts)
     assert any("still land inside a word" in note for note in notes)
+    # Which end, at which second, inside which word: a window has two edges to guess between.
+    assert any("ends at 4.00s of its file, inside the word at 2.00–6.00s" in note for note in notes)
 
 def test_moving_a_cut_is_reported_even_though_it_is_arithmetic() -> None:
     # It is still a change to somebody's edit. 「不要默默修正」 is about not doing things
@@ -2610,3 +2612,35 @@ def test_a_song_picked_by_ear_under_the_plan_s_music_is_written_into_its_cue(pla
     assert "已寫進計畫" in picked["text"]
     cue = get_plan(planned["plan_id"])["plan"]["music"]["cues"][0]
     assert (cue["asset_id"], cue["start"], cue["volume"]) == (song, 2, 0.3)
+
+def test_a_beat_can_open_on_a_moment_of_quiet() -> None:
+    plan, by_id, children, assets = joined_plan(None, None, opening=5.0)
+    plan.beats[1].pause_before = 0.8
+    pieces, notes = compile_pieces(plan, by_id, children, assets)
+    assert pieces[1].start == pytest.approx(4.2)
+    assert notes == []
+    # With less of the shot before it, it opens on what there is, and says so.
+    plan, by_id, children, assets = joined_plan(None, None, opening=0.3)
+    plan.beats[1].pause_before = 0.8
+    pieces, notes = compile_pieces(plan, by_id, children, assets)
+    assert pieces[1].start == 0.0
+    assert any("0.3s of quiet rather than 0.8s" in note for note in notes)
+
+def test_a_pause_never_opens_a_shot_onto_the_line_before() -> None:
+    from app.engine.plan import _joined_beats
+
+    plan = plan_for([]).model_copy(update={"beats": [Beat(id="b1", name="講"), Beat(id="b2", name="走", pause_before=1.0)]})
+    pieces = [Piece(asset_id="a", start=0.0, end=2.0, from_clip_ids=("u1",), beat_id="b1"),
+              Piece(asset_id="a", start=5.0, end=8.0, from_clip_ids=("u2",), beat_id="b2")]
+    cuts = {"a": CleanCuts(words=((3.0, 4.6), (5.0, 6.0)), transcribed=True)}
+    out, notes = _joined_beats(plan, pieces, {}, cuts)
+    assert out[1].start == pytest.approx(4.6) and notes
+
+def test_a_pause_never_opens_a_shot_onto_what_the_cut_already_played_of_its_take() -> None:
+    from app.engine.plan import _joined_beats
+
+    plan = plan_for([]).model_copy(update={"beats": [Beat(id="b1", name="講"), Beat(id="b2", name="走", pause_before=1.0)]})
+    pieces = [Piece(asset_id="a", start=0.0, end=4.7, from_clip_ids=("u1",), beat_id="b1"),
+              Piece(asset_id="a", start=5.0, end=8.0, from_clip_ids=("u2",), beat_id="b2")]
+    out, _ = _joined_beats(plan, pieces, {}, {"a": CleanCuts(transcribed=True)})
+    assert out[1].start == pytest.approx(4.7)

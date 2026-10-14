@@ -305,6 +305,14 @@ class Beat(BaseModel):
                     "beat before (a J-cut): the next place is heard before it is seen. Shortened, with a note, "
                     "where the footage has less sound before the shot",
     )
+    pause_before: Optional[float] = Field(
+        default=None,
+        gt=0,
+        le=3,
+        description="Open this beat's first shot this many seconds earlier in its file, before anybody speaks in "
+                    "it, so a new part begins with a breath rather than straight on from the last line. Ignored on "
+                    "the first beat. Shortened, with a note, where the shot has less quiet before its first word",
+    )
     title_card: Optional[PlanTitleCard] = Field(
         default=None,
         description="A title card opening this part. Only when the user asked for one; suggest it otherwise",
@@ -707,6 +715,7 @@ class SetBeatJoinOp(BaseModel):
     beat_id: str
     transition_in: Optional[BeatTransition] = Field(default=None, description="As on a beat; null for a straight cut")
     sound_lead: Optional[float] = Field(default=None, gt=0, le=3, description="As on a beat; null for none")
+    pause_before: Optional[float] = Field(default=None, gt=0, le=3, description="As on a beat; null for none")
 
 class SetBeatTitleOp(BaseModel):
     """Amendment that gives a beat a title card, changes it, or takes it away."""
@@ -781,7 +790,8 @@ def describe_amendment(op: "PlanAmendment") -> str:
         return f"{op.clip_id} plays at x{op.speed or 1:g}, volume {1 if op.volume is None else op.volume:g}"
     if isinstance(op, SetBeatJoinOp):
         joined = op.transition_in.kind if op.transition_in else "a straight cut"
-        return f"{op.beat_id} comes in on {joined}" + (f", sound {op.sound_lead:g}s early" if op.sound_lead else "")
+        return (f"{op.beat_id} comes in on {joined}" + (f", sound {op.sound_lead:g}s early" if op.sound_lead else "")
+                + (f", after {op.pause_before:g}s of quiet" if op.pause_before else ""))
     if isinstance(op, SetTargetOp):
         return f"target {op.target.seconds or 'none'}s" + (f" for {op.target.platform}" if op.target.platform else "")
     if isinstance(op, SetBeatTitleOp):
@@ -874,7 +884,7 @@ def apply_amendment(plan: EditPlan, op: PlanAmendment) -> None:
         if beat is None:
             known = ", ".join(beat.id for beat in plan.beats) or "none"
             raise ValueError(f"the plan has no beat {op.beat_id}; its beats are {known}")
-        beat.transition_in, beat.sound_lead = op.transition_in, op.sound_lead
+        beat.transition_in, beat.sound_lead, beat.pause_before = op.transition_in, op.sound_lead, op.pause_before
         return
 
     if isinstance(op, SetMusicLevelOp):

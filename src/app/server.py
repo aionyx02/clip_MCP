@@ -72,7 +72,7 @@ from app.engine.plan import (
 )
 from app.engine.sections import build_sections, candidate_hash, check_sections, propose_candidates
 from app.engine.semantic import (
-    build_timeline, clean_cuts, content_scores, join_voices, timeline_input_hash, was_made_up,
+    build_timeline, clean_cuts, content_scores, join_voices, timeline_input_hash, voice_seconds, was_made_up,
 )
 from app.engine.ffmpeg import graph_from_file, hidden_window_flags
 from app.engine.probe import picture_size, probe_file, recorded_at, rights_tags, speech_loudness, timecode_start
@@ -1836,7 +1836,8 @@ def listen_again(
     Start and end the stretch in a pause, so it holds whole words.
 
     Given a render's `job_id` instead of a file, it hears what the viewer
-    will: whether a word was cut into at an edit, and, from `levels`, whether
+    will, a shot at a time so the words after a cut are not lost to the ones
+    before it: whether a word was cut into at an edit, and, from `levels`, whether
     the music dips under speech and two songs really cross-fade where the
     plan says.
 
@@ -1855,7 +1856,10 @@ def listen_again(
         sits well above a ducked bed, a gap is near -60; `audio_path`, a WAV of
         the stretch for the user to play; for a file, `stored`, what the
         transcript says there, or null, `agrees`, whether the two say the
-        same words, and, when `keep` was given, `kept` or `not_kept`; for a render, `captions`, the ones on screen in the
+        same words — never when the hearing has the marks of a line the
+        recogniser makes up (a subtitle credit, a sign-off, words that take
+        no time, one word looping), and `made_up` is then true — and, when
+        `keep` was given, `kept` or `not_kept`; for a render, `captions`, the ones on screen in the
         stretch, and `changed_since`, true when the project has been edited
         since it was rendered.
 
@@ -1890,11 +1894,16 @@ def listen_again(
                 if word.end > start and word.start < end]
         stored = "".join(said).strip() or None
     plain_heard = "".join(segment.text for segment in fresh.segments)
+    # The same recogniser makes the same lines up over the same café hum, so two hearings
+    # of a made-up line agreeing says nothing about whether anyone said it.
+    made_up = any(was_made_up(segment) for segment in fresh.segments)
     result = {
         **_heard(fresh, keep_as, start),
         "stored": stored,
-        "agrees": stored is not None and _bare_words(plain_heard) == _bare_words(stored),
+        "agrees": not made_up and stored is not None and _bare_words(plain_heard) == _bare_words(stored),
     }
+    if made_up:
+        result["made_up"] = True
     if keep:
         result.update(_keep_hearing(known, HeardAgain(start=start, end=end, words=[word for segment in fresh.segments for word in segment.words]), result["agrees"]))
     return result
@@ -2015,6 +2024,10 @@ def _hearable(start: float, end: float) -> None:
         raise ValueError(f"hear a stretch of at most {LISTEN_AGAIN_SECONDS:g} seconds at a time; this one is "
                          f"{end - start:g}s")
 
+# A piece of a render shorter than this either side of a cut is heard with the shot it
+# belongs to rather than on its own: too short to hold a word. Provisional.
+MIN_HEARD_SECONDS = 0.3
+
 def _listen_to_render(job_id: str, start: float, end: float, language: Optional[str]) -> dict:
     """`listen_again` over a finished render rather than a file.
 
@@ -2040,10 +2053,25 @@ def _listen_to_render(job_id: str, start: float, end: float, language: Optional[
         if analysis is not None and analysis.transcript is not None:
             known = analysis.transcript
             break
-    fresh = listen_again_in_file(
-        path, start, end, language or (known.language if known else None), keep_as,
-        chinese_variant=known.chinese_variant if known else None,
-    )
+    # Heard a shot at a time: the speech model, given a stretch across a cut, wrote down the
+    # words before it and nothing after, though the voice there was loud and clear.
+    cuts = sorted({float(clip.timeline_in) for clip in project.base_video_track.clips} if (
+        project is not None and project.base_video_track is not None and not _changed_since(job)) else set())
+    edges = [start] + [at for at in cuts if start + MIN_HEARD_SECONDS <= at <= end - MIN_HEARD_SECONDS] + [end]
+    language = language or (known.language if known else None)
+    variant = known.chinese_variant if known else None
+    if len(edges) == 2:
+        fresh = listen_again_in_file(path, start, end, language, keep_as, chinese_variant=variant)
+    else:
+        stem, extension = os.path.splitext(keep_as)
+        pieces = []
+        for index, (opened, closed) in enumerate(zip(edges, edges[1:])):
+            # Each shot's own sound is only what the model is handed; the user plays the whole stretch.
+            piece_as = f"{stem}-{index}{extension}"
+            pieces.append(listen_again_in_file(path, opened, closed, language, piece_as, chinese_variant=variant))
+            os.remove(piece_as)
+        cut_sound(path, start, end, keep_as)
+        fresh = pieces[0].model_copy(update={"segments": [segment for piece in pieces for segment in piece.segments]})
     shown = [cue for cue in (place_cues(project, project.subtitles) if project and job.captioned else [])
              if float(cue.end) > start and float(cue.start) < end]
     return {
@@ -2273,7 +2301,10 @@ def build_semantic_timeline(asset_ids: List[str], rebuild: bool = False) -> dict
     Returns:
         A dictionary with the `timeline_id`, the `asset_ids` it covers,
         `reused` saying whether an existing build was returned untouched,
-        `total_clips`, `counts` of clips by level and kind, and `stale`.
+        `total_clips`, `counts` of clips by level and kind, `voices`, the
+        seconds each voice talks, most first — one voice holding nearly all of
+        it and the rest a few seconds each is one person heard several ways,
+        so do not tell the user there are many — and `stale`.
 
         `stale` lists assets analyzed with detection settings or a speech
         model the server no longer uses. The build goes ahead with them,
@@ -2303,6 +2334,7 @@ def build_semantic_timeline(asset_ids: List[str], rebuild: bool = False) -> dict
             "reused": True,
             "total_clips": sum(repo.count_semantic_clips(existing.id).values()),
             "counts": repo.count_semantic_clips(existing.id),
+            "voices": voice_seconds(repo.query_semantic_clips(existing.id, kinds=[ClipKind.SPEECH], limit=-1)),
             "stale": stale,
         }
 
@@ -2314,6 +2346,7 @@ def build_semantic_timeline(asset_ids: List[str], rebuild: bool = False) -> dict
         "reused": False,
         "total_clips": len(clips),
         "counts": repo.count_semantic_clips(timeline.id),
+        "voices": voice_seconds(clips),
     }
 
 @mcp.tool()
@@ -2685,7 +2718,7 @@ def _clip_line(clip: SemanticClip, file_name: str) -> str:
     """
     parts = [
         clip.id.split(":", 1)[-1], file_name,
-        f"{clip.source_range.start:.1f}-{clip.source_range.end:.1f}", clip.kind.value,
+        f"{clip.source_range.start:.2f}-{clip.source_range.end:.2f}", clip.kind.value,
     ]
     if clip.speaker:
         parts.append(clip.speaker)
@@ -3281,7 +3314,8 @@ def inspect_join(
     Returns:
         The list; or for each join its frames, a row before the cut and a row
         from it with the two either side framed red; the transcribed words
-        laid onto the render's time, ✂ on any a cut takes into; where a line
+        laid onto the render's time, ✂ on any a cut takes into, and what
+        they read as, corrected with the captions' glossary; where a line
         ends and another begins across the cut, the pause between them beside
         the pauses the speaker makes between sentences; the render's
         sound level every 0.1s with ‖ at the cut; and a WAV of the stretch to
@@ -3355,7 +3389,13 @@ def inspect_join(
             f"  frames: a row of {steps + 1} up to the cut, then {steps + 1} from it",
             "  words: " + _words_across(join, heard),
         ]
-        pause = pause_across(join.at, heard, analyses)
+        if heard:
+            # The words above are as the transcriber timed them; this is what they say, corrected
+            # with the glossary the captions use, so a misheard word fixed once reads fixed here.
+            sides = [_glossed("".join(word.text for word in heard if (word.start >= join.at) == later))
+                     for later in (False, True)]
+            text.append(f"  reads: 「{sides[0]}」 ‖ 「{sides[1]}」")
+        pause = pause_across(join.at, heard, analyses, join.part)
         if pause:
             text.append("  pause: " + pause)
         text += [
@@ -5063,9 +5103,7 @@ def _corrected(cue: SubtitleCue, glossary: Mapping[str, str]) -> SubtitleCue:
         The caption with every glossary word replaced, and its word timings
         kept where the correction left them fitting.
     """
-    text = cue.text
-    for heard, meant in glossary.items():
-        text = text.replace(heard, meant)
+    text = _glossed(cue.text, glossary)
     if text == cue.text:
         return cue
     return cue.model_copy(update={"text": text, "words": retimed_words(cue.words, text)})
@@ -5780,7 +5818,8 @@ def read_cut(project_id: str) -> dict:
     Returns:
         `script`: one line per shot of the sequence — when it plays, the part
         of the video it is in, the clip and what is on screen (the footage's
-        description, or its file), what is said over it, the captions shown
+        description, or its file), what is said over it with the captions' glossary
+        words corrected, the captions shown
         and the words on screen; what plays over it on a track above is under
         it, indented.
     """
@@ -6814,14 +6853,28 @@ WORD_INSIDE_SECONDS = 0.05
 SHORTEST_STRETCH_SECONDS = 0.05
 
 def _said_between(asset_id: str, start: float, end: float) -> str:
-    """What the transcript has said in a file between two of its seconds; empty when nothing was."""
+    """What the transcript has said in a file between two of its seconds, glossary words corrected; empty when nothing was."""
     analysis = repo.get_analysis(asset_id)
     if analysis is None or analysis.transcript is None:
         return ""
-    return "".join(
+    return _glossed("".join(
         word.text for segment in analysis.transcript.segments if not was_made_up(segment) for word in segment.words
         if word.start < end - WORD_INSIDE_SECONDS and word.end > start + WORD_INSIDE_SECONDS
-    ).strip()
+    ).strip())
+
+def _glossed(text: str, glossary: Optional[Mapping[str, str]] = None) -> str:
+    """Text the transcriber wrote, with every word in the glossary corrected as the captions are.
+
+    Args:
+        text: The text.
+        glossary: Heard words mapped to meant ones; the workspace's when not given.
+
+    Returns:
+        The text corrected.
+    """
+    for heard, meant in (repo.glossary() if glossary is None else glossary).items():
+        text = text.replace(heard, meant)
+    return text
 
 def _version_at(project_id: str, commit: Optional[str]) -> Tuple[Project, dict]:
     """A project at one of its versions, or as it is now, with that version as the AI reads it.
@@ -7886,10 +7939,15 @@ def _frame_spots(job: Job) -> dict:
             if kind == "black" and clip.video_fade_out and end <= finish + slack and start >= finish - float(
                     clip.video_fade_out) - slack:
                 return f"fade out of {clip.id}"
-            dip = clip.transition_in
+        # A dip ends on the cut, so its black lies wholly inside the clip before the one it leads
+        # into; every clip's dip is looked at, not only the clips the black falls in.
+        for clip in clips:
+            begin, dip = float(clip.timeline_in), clip.transition_in
             if (kind in ("black", "flash") and dip is not None and dip.kind == "dip"
                     and start >= begin - float(dip.seconds) - slack and end <= begin + slack):
-                return f"dip into {clip.id}"
+                part = next((marker.name for marker in project.markers
+                             if abs(float(marker.timeline_in) - begin) <= slack), None) if project is not None else None
+                return f"dip into {clip.id}" + (f", where 「{part}」 begins" if part else "")
         return None
 
     found, kept = [], []

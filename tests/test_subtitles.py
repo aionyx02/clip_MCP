@@ -899,3 +899,18 @@ def test_each_caption_says_where_it_came_from(spoken: str) -> None:
     assert cues["c1"]["marked"] == "整個用起來⟦怎麼⟧那麼順" and cues["c1"]["text"] == "整個用起來怎麼那麼順"
     assert cues["c2"]["from"] == "reviewed" and "unsure" not in cues["c2"]
     assert cues["c3"]["from"] == "this_project"
+
+def test_a_word_the_cut_takes_off_is_not_captioned(media: Path) -> None:
+    asset = import_asset(str(media / "wide.mp4"))["id"]
+    transcribe(asset, [TranscriptSegment(start=1.0, end=2.5, text="各位我到高鐵",
+                                         words=words(("各位", 1.0, 1.43), ("我到高鐵", 1.43, 2.5)))])
+    # Started 0.03s before the end of 各位, on purpose to take it off.
+    project = build_project([video_track(), insert("a", asset, 1.4, 3.0)])
+    assert [cue["text"] for cue in caption(project)["cues"]] == ["我到高鐵"]
+
+def test_the_cut_read_back_says_the_words_as_the_glossary_corrects_them(spoken: str) -> None:
+    from app.server import read_cut
+
+    project = build_project([video_track(), insert("a", spoken, 0.0, 9.0)])
+    caption(project, fix_words={"句": "局"})
+    assert "said: 「第一局第二局第三局」" in read_cut(project)["script"][0]

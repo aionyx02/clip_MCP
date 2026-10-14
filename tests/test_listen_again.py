@@ -113,3 +113,33 @@ def test_a_sentence_that_ends_inside_a_kept_stretch_still_ends_there() -> None:
     assert [(segment.start, segment.end) for segment in after.transcript.segments] == [(1.0, 2.6), (4.3, 5.8)]
     # And the second listen's own word there gives way to the hearing, or the two would argue.
     assert [word.text for word in after.second_listen.words] == ["第一句", "第二句"]
+
+def test_a_render_is_heard_a_shot_at_a_time_across_its_cuts(heard: dict, monkeypatch: pytest.MonkeyPatch) -> None:
+    from helpers import build_project, finished, insert, video_track
+
+    # Two shots meeting at 2s of the render; each is heard on its own, and both are said.
+    project = build_project([video_track(), insert("a", heard["asset"], 0, 2), insert("b", heard["asset"], 4, 6)],
+                            width=640, height=360)
+    job = finished(server.render_project(project))
+    lengths = []
+
+    def model(device, path, duration, language, prompt, on_progress, is_cancelled, on_measured=None,
+              model_name=None):
+        lengths.append(round(duration, 2))
+        return Transcript(language="zh", model="large-v3-turbo", segments=[TranscriptSegment(
+            start=0.2, end=0.6, text="對", words=[TranscriptWord(start=0.2, end=0.6, text="對", probability=0.9)])])
+
+    monkeypatch.setattr(analysis, "_run_whisper", model)
+    found = server.listen_again(job_id=job["job_id"], start=1.0, end=3.5)
+    assert lengths == [1.0, 1.5]
+    assert [word["start"] for word in found["words"]] == pytest.approx([1.2, 2.2])
+    with wave.open(found["audio_path"]) as sound:
+        assert sound.getnframes() / sound.getframerate() == pytest.approx(2.5, abs=0.05)
+
+def test_two_hearings_of_a_made_up_line_do_not_agree(heard: dict, monkeypatch: pytest.MonkeyPatch) -> None:
+    server.repo.save_analysis(server.repo.get_analysis(heard["asset"]).model_copy(update={"transcript": Transcript(
+        language="zh", model="test", segments=[TranscriptSegment(start=2.0, end=3.0, text="謝謝觀看", words=[
+            TranscriptWord(start=2.0, end=3.0, text="謝謝觀看", probability=0.9)])])}))
+    monkeypatch.setattr(analysis, "_run_whisper", hears("謝謝觀看"))
+    found = server.listen_again(asset_id=heard["asset"], start=1.5, end=3.5)
+    assert found["made_up"] is True and found["agrees"] is False

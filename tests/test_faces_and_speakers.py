@@ -12,6 +12,7 @@ What is not tested here is how good the models are. That is their business,
 and this suite has no ground truth to hold them to.
 """
 
+import math
 import os
 import subprocess
 from pathlib import Path
@@ -31,7 +32,9 @@ from app.engine.analysis import (
 from app.engine.ffmpeg import OperationCancelled
 from app.engine.diarize import find_speakers
 from app.engine.faces import _per_second, detect_faces, framing_note, frames_dir
-from app.engine.semantic import SPEAKER_MAJORITY, build_timeline, join_voices, speaker_at
+from app.engine.semantic import (
+    LONE_VOICE_DISTANCE, SPEAKER_MAJORITY, VOICE_DISTANCE, build_timeline, join_voices, speaker_at, voice_seconds,
+)
 from app.models.media import (
     Asset,
     FaceMeasurement,
@@ -40,8 +43,10 @@ from app.models.media import (
     Transcript,
     TranscriptSegment,
     TranscriptWord,
+    Span,
     Voice,
 )
+from app.models.semantic import ClipKind, ClipLevel, SemanticClip
 
 FFMPEG = os.environ.get("FFMPEG", "ffmpeg")
 # Voices far enough apart that telling them apart is a fair thing to ask.
@@ -528,3 +533,45 @@ def test_two_voices_far_enough_apart_stay_apart() -> None:
     assert len(set(apart.values())) == 2
     together = join_voices({"one": alone("one", [1.0, 0.0]), "two": alone("two", [1.0, 0.05])})
     assert len(set(together.values())) == 1
+
+def test_a_lone_voice_a_little_further_off_is_still_the_same_person() -> None:
+    """A vlogger alone on a noisy street, on another day, sits further from themselves."""
+    def alone(asset_id: str, embedding: List[float]) -> MediaAnalysis:
+        return MediaAnalysis(asset_id=asset_id, duration=10.0, voices=[Voice(speaker="S1", embedding=embedding, seconds=5.0)])
+
+    angle = math.acos(1 - (VOICE_DISTANCE + LONE_VOICE_DISTANCE) / 2)
+    off = [math.cos(angle), math.sin(angle)]
+    assert len(set(join_voices({"one": alone("one", [1.0, 0.0]), "two": alone("two", off)}).values())) == 1
+    # The same distance between two people in one file keeps them apart.
+    pair = MediaAnalysis(asset_id="two", duration=10.0, voices=[
+        Voice(speaker="S1", embedding=off, seconds=5.0), Voice(speaker="S2", embedding=[-1.0, 0.0], seconds=5.0)])
+    joined = join_voices({"one": alone("one", [1.0, 0.0]), "two": pair})
+    assert joined[("two", "S1")] != joined[("one", "S1")]
+
+def test_two_voices_one_file_told_apart_are_never_joined_into_one() -> None:
+    both = MediaAnalysis(asset_id="b", duration=10.0, voices=[
+        Voice(speaker="S1", embedding=[1.0, 0.0], seconds=5.0), Voice(speaker="S2", embedding=[1.0, 0.01], seconds=5.0)])
+    joined = join_voices({"a": MediaAnalysis(asset_id="a", duration=10.0, voices=[
+        Voice(speaker="S1", embedding=[1.0, 0.0], seconds=5.0)]), "b": both})
+    assert joined[("b", "S1")] != joined[("b", "S2")]
+
+def test_voice_seconds_puts_the_most_talkative_first() -> None:
+    def clip(speaker: str, seconds: float) -> SemanticClip:
+        return SemanticClip(id=f"t:{speaker}{seconds}", timeline_id="t", asset_id="a", level=ClipLevel.UTTERANCE,
+                            source_range=Span(start=0.0, end=seconds), kind=ClipKind.SPEECH, speaker=speaker)
+    assert list(voice_seconds([clip("V2", 3.0), clip("V1", 40.0), clip("V1", 10.0)]).items()) == [("V1", 50.0), ("V2", 3.0)]
+
+def test_a_stretch_nobody_speaks_in_has_no_speaker() -> None:
+    """The speaker split hears a voice in street noise; a stretch without words is still nobody's."""
+    asset = Asset(id="street", path="street.mp4", duration=10.0, has_video=True, has_audio=True)
+    analysis = MediaAnalysis(
+        asset_id="street", duration=10.0,
+        transcript=Transcript(language="zh", model="test", segments=[TranscriptSegment(start=0.0, end=4.0, text="我到了", words=[
+            TranscriptWord(start=0.0, end=1.0, text="我", probability=0.9),
+            TranscriptWord(start=1.0, end=2.0, text="到", probability=0.9),
+            TranscriptWord(start=2.0, end=4.0, text="了", probability=0.9)])]),
+        speakers=[SpeakerTurn(start=0.0, end=10.0, speaker="S1")],
+        voices=[Voice(speaker="S1", embedding=[1.0, 0.0], seconds=8.0)],
+    )
+    _, clips = build_timeline({"street": asset}, {"street": analysis})
+    assert [(clip.kind, clip.speaker) for clip in clips] == [(ClipKind.SPEECH, "V1"), (ClipKind.AMBIENT, None)]

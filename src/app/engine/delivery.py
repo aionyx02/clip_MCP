@@ -425,6 +425,9 @@ def _inside_speech(analysis: MediaAnalysis, at: float, opens: bool) -> bool:
            for span in analysis.silences):
         return False
     known = clean_cuts(analysis)
+    if known.drops_words(at, opens):
+        # On a word edge, taking whole words off on purpose: nothing kept is cut into.
+        return False
     if (known.sound_before(at) if opens else known.sound_after(at)) is not None:
         return True
     if known.quiet_on_second_listen(at):
@@ -513,8 +516,17 @@ def _speech_cuts(clips: Sequence[Clip], analyses: Mapping[str, MediaAnalysis]) -
             really = known.sound_before(at) if opens else known.sound_after(at)
             lost = known.heard_cut_off(at, opens)
             if really is not None:
-                # What the sound says beats the nearest pause in a transcript that got this wrong.
+                # What the sound says beats the nearest pause in a transcript that got this wrong. Where
+                # that is itself inside talking, the clean point past it is offered, so that moving the
+                # cut where this says is never refused by this same check.
                 advice = f"; the talking really {'starts' if opens else 'stops'} at {really:.2f}s of the file"
+                if _inside_speech(analysis, really, opens):
+                    beyond = [point for point in _clean_points(analysis)
+                              if (point <= really if opens else point >= really)
+                              and abs(point - really) <= CLEAN_SEARCH_SECONDS]
+                    if beyond:
+                        clean = max(beyond) if opens else min(beyond)
+                        advice += f"; {'start' if opens else 'end'} at {clean:.2f}s to keep all of it"
             else:
                 near = [point for point in _clean_points(analysis) if abs(point - at) <= CLEAN_SEARCH_SECONDS]
                 advice = (

@@ -4,7 +4,7 @@ import pytest
 
 from app.engine.plan import BREATH_SECONDS
 from app.engine.semantic import clean_cuts
-from app.models.media import HeardWord, SecondListen, Span
+from app.models.media import HeardWord, MediaAnalysis, SecondListen, Span
 from test_delivery import checks, clip, project_of, talking
 from test_edit_plan import compiled
 from test_semantic_timeline import analysis, spans
@@ -94,3 +94,39 @@ def test_a_cut_that_takes_off_a_word_heard_on_the_second_listen_names_it() -> No
     found = checks(project_of(clip("a", "x", 6.0, 9.5, 0)), {"x": made})
     assert [check for check, _ in found] == ["mid_speech"]
     assert "「我們」" in found[0][1] and "really starts at 5.70s" in found[0][1]
+
+
+def opening_with(*words) -> MediaAnalysis:
+    """One line 「各位我到高鐵了」 with a word per `(start, end, text)`, heard straight through."""
+    from app.models.media import TranscriptWord
+
+    made = analysis(duration=12.0, segments=[(words[0][0], words[-1][1], "".join(text for _, _, text in words))])
+    made.transcript.segments[0].words = [TranscriptWord(start=start, end=end, text=text) for start, end, text in words]
+    made.second_listen = listened(voiced=[(1.75, 4.0)], heard=[(1.8, 2.2, "各位"), (2.2, 2.4, "我")])
+    return made
+
+
+def test_a_word_taken_off_the_front_of_a_line_on_its_edge_stays_off() -> None:
+    # Starting on 我 takes 各位 off; it is in the transcript, ending where 我 begins.
+    made = opening_with((1.81, 2.23, "各位"), (2.23, 2.45, "我"), (2.45, 3.0, "到高鐵了"))
+    known = clean_cuts(made)
+    assert known.sound_before(2.23) is None and known.sound_before(2.2) is None
+    assert known.heard_cut_off(2.2, opens=True) == ""
+    assert checks(project_of(clip("a", "x", 2.2, 3.0, 0)), {"x": made}) == []
+
+
+def test_starting_inside_a_word_is_still_starting_in_the_middle_of_it() -> None:
+    made = opening_with((1.81, 2.23, "各位"), (2.23, 2.45, "我"), (2.45, 3.0, "到高鐵了"))
+    assert [check for check, _ in checks(project_of(clip("a", "x", 2.0, 3.0, 0)), {"x": made})] == ["mid_speech"]
+
+
+def test_a_cut_moved_far_to_the_sound_says_where_it_was_asked_for_and_where_it_went() -> None:
+    from app.engine.plan import MOVED_FAR_SECONDS
+
+    # The transcript missed 我們 altogether; the second listen hears it 0.4s before 可能.
+    made = analysis(duration=20.0, segments=[(10.56, 12.0, "可能要拆")])
+    made.second_listen = listened(voiced=[(10.56, 11.84)], heard=[(10.16, 10.6, "我們"), (10.6, 10.8, "可能")])
+    pieces, notes = compiled(made)
+    assert 10.56 - pieces[0].start > MOVED_FAR_SECONDS
+    [far] = [note for note in notes if note.kind == "cuts_moved_far"]
+    assert far.look and "not the 10.56s asked" in far

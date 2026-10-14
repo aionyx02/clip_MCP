@@ -91,3 +91,13 @@ def test_the_pause_a_cut_leaves_is_set_beside_the_pauses_the_speaker_makes() -> 
     assert line.endswith("shorter than this speaker's usual pause")
     # The same clip talking on across a join is not a pause the cut made.
     assert pause_across(2.0, [words[0], HeardWord(2.0, 2.5, "各位", "a", False, "x", 4.8)], {"x": heard}) is None
+
+
+def test_a_part_that_begins_straight_on_from_the_last_line_is_pointed_out() -> None:
+    from app.engine.joins import HeardWord, pause_across
+
+    words = [HeardWord(start=1.0, end=2.0, text="吧", clip_id="a", cut=False, asset_id="x", said_at=4.0),
+             HeardWord(start=2.0, end=2.5, text="各位", clip_id="b", cut=False, asset_id="x", said_at=8.0)]
+    assert "pause_before" in pause_across(2.0, words, {}, part="收尾")
+    # Inside a part, a tight join is only measured.
+    assert "pause_before" not in pause_across(2.0, words, {})
