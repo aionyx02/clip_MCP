@@ -41,3 +41,30 @@ def test_black_nobody_asked_for_is_found_in_a_render_and_a_fade_is_not(media: Pa
     # And it is looked at: the frame before each, its middle, and the frame after.
     shown = view_render(job["job_id"], at="spots").content[0].text
     assert "black 2.00–2.50s, the frame before" in shown and "black 2.00–2.50s, the frame after" in shown
+
+
+def test_a_render_whose_frames_were_not_read_says_so_rather_than_that_nothing_was_found(
+    monkeypatch, tmp_path: Path,
+) -> None:
+    from app.engine import renderer
+    from app.models.job import Job
+
+    assert scan.kept(str(tmp_path)) is None
+
+    def ffmpeg(command, log, seconds, on_progress, is_cancelled) -> None:
+        if "[levels]" in command:
+            raise RuntimeError("the scan broke")
+
+    monkeypatch.setattr(renderer, "run_ffmpeg", ffmpeg)
+
+    class Reported:
+        def report(self, *_):
+            pass
+
+        def is_cancelled(self):
+            return False
+
+    # The video is made; the scan failing leaves it unread, not lost.
+    renderer._run_render(Job(work_dir=str(tmp_path)), {"pieces": [], "duration_seconds": 5.0, "command": ["ffmpeg"],
+                                                        "render_path": str(tmp_path / "out.mp4")}, Reported())
+    assert scan.kept(str(tmp_path)) is None

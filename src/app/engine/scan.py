@@ -12,7 +12,7 @@ spots to say; they know the cut, and this only knows the picture.
 import json
 import os
 import re
-from typing import Dict, List, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 from app.engine.analysis import _frame_records
 from app.engine.ffmpeg import escape_filter_path
@@ -118,10 +118,10 @@ def keep(work_dir: str, duration: float) -> None:
         if os.path.exists(os.path.join(work_dir, name)):
             os.remove(os.path.join(work_dir, name))
 
-def kept(work_dir: str) -> List[Dict[str, object]]:
-    """Read what a render's scan found, or nothing when it was not scanned."""
+def kept(work_dir: str) -> Optional[List[Dict[str, object]]]:
+    """Read what a render's scan found; None when it was not scanned, which is not the same as nothing found."""
     try:
         with open(os.path.join(work_dir, SPOTS_FILE_NAME), encoding="utf-8") as handle:
             return json.load(handle)
     except (OSError, ValueError):
-        return []
+        return None

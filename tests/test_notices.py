@@ -38,6 +38,9 @@ def test_everything_that_needs_a_word_before_publishing_is_listed() -> None:
     assert "artist: Kevin MacLeod" in music["Carefree.mp3"].detail
     assert "the user said: Kevin MacLeod, CC BY 4.0" in music["Carefree.mp3"].detail
     assert "credit it asks for: Wepa by Gloria" in music["Wepa.mp3"].detail
+    # The footage's own sound on a track of its own is the user's recording, not one to license.
+    project.tracks[1].clips.append(clip("j", "v", 10, 12, 14))
+    assert [fact.subject for fact in rights_facts(project, analyses, assets, {}) if fact.kind == "recording"] == []
     kinds = {fact.kind: fact for fact in facts}
     # Nobody told the voices apart, which is said rather than taken to mean nobody else talks.
     assert kinds["unchecked_voices"].spans == ((0.0, 10.0),)

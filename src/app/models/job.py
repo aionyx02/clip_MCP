@@ -60,10 +60,10 @@ class Job(BaseModel):
     )
     preview: bool = Field(default=False, description="Whether the render is a preview rather than the finished video")
     work_dir: Optional[str] = Field(default=None, description="Directory holding the job's specification and logs")
-    spots: List[Dict[str, Any]] = Field(
-        default_factory=list,
+    spots: Optional[List[Dict[str, Any]]] = Field(
+        default=None,
         description="Where every frame of a finished render was read and found black, frozen or a flash: "
-                    "`{kind, start, end}` in seconds of the render (render jobs)",
+                    "`{kind, start, end}` in seconds of the render; null when it was not read (render jobs)",
     )
     error_message: Optional[str] = None
     cancel_requested: bool = False

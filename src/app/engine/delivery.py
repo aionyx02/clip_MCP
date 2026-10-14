@@ -910,9 +910,12 @@ def rights_facts(
     """
     facts: List[RightsFact] = []
     audio = [track for track in project.tracks if track.track_type == TrackType.AUDIO]
+    # The footage's own sound laid on a track of its own — a J or an L cut, sound recorded apart —
+    # is the user's recording, not something laid under the cut that needs a licence.
+    pictured = {clip.asset_id for track in project.video_tracks for clip in track.clips}
     for asset_id in dict.fromkeys(clip.asset_id for track in audio for clip in track.clips if clip.volume != 0):
         asset = assets.get(asset_id)
-        if asset is None:
+        if asset is None or (asset_id in pictured and library_of(asset) != MUSIC):
             continue
         spans = _joined_spans((float(clip.timeline_in), float(clip.timeline_out)) for track in audio
                               for clip in track.clips if clip.asset_id == asset_id and clip.volume != 0)

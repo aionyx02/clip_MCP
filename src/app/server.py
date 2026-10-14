@@ -3138,11 +3138,13 @@ def view_render(
     if times:
         wanted = [(seconds, "") for seconds in times]
     elif at == "spots":
-        if not job.spots:
-            said.append("every frame of this render was read and nothing was found black, frozen or a flash"
-                        if job.status == JobStatus.COMPLETED else "this render was not read frame by frame")
+        if job.spots is None:
+            said.append("this render was not read frame by frame — the check failed or was stopped — so nothing "
+                        "is known about black, frozen or flashing frames in it; render again to have it read")
+        elif not job.spots:
+            said.append("every frame of this render was read and nothing was found black, frozen or a flash")
         step = 1 / (project.fps_num / project.fps_den) if project is not None else 0.04
-        for spot in job.spots:
+        for spot in job.spots or []:
             begin, finish = float(spot["start"]), float(spot["end"])
             if finish <= start or (last is not None and begin >= last):
                 continue
@@ -7758,7 +7760,8 @@ def get_job(
         `note` to pass on, and for a finished render whose every frame was
         found black, frozen or a flash somewhere, `frames`: `found`, what the
         cut did not ask for — look at them with `view_render` `at: "spots"` —
-        and `meant`, inside a fade, a dip, a card or a photo; and a summary
+        and `meant`, inside a fade, a dip, a card or a photo; or `not_read`
+        when the check could not read it, which says nothing about its frames; and a summary
         over all of them: `finished` and
         `total` counts, `failed` counting those that failed or were
         cancelled, and `progress`, the average.
@@ -7831,8 +7834,12 @@ def _job_states(job_ids: List[str]) -> List[dict]:
             entry["ahead"] = ahead[job.job_id]
         if job.error_message:
             entry["error_message"] = job.error_message
-        if job.kind == JobKind.RENDER and job.status == JobStatus.COMPLETED and job.spots:
-            entry["frames"] = _frame_spots(job)
+        if job.kind == JobKind.RENDER and job.status == JobStatus.COMPLETED:
+            if job.spots is None:
+                entry["frames"] = {"not_read": "every frame was not read — the check failed or was stopped — so "
+                                               "black, frozen or flashing frames in it are not known"}
+            elif job.spots:
+                entry["frames"] = _frame_spots(job)
         if job.kind == JobKind.ANALYZE and job.status == JobStatus.COMPLETED and job.asset_id:
             heard = repo.get_analysis(job.asset_id)
             voices = len({turn.speaker for turn in heard.speakers}) if heard else 0
