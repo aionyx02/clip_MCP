@@ -24,7 +24,7 @@ from datetime import timedelta
 from difflib import SequenceMatcher
 from typing import AbstractSet, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
 
-from app.engine.continuity import Shot, strays
+from app.engine.continuity import Shot, backward_steps, strays
 from app.engine.music import MIDDLE, energy_at, fullest
 from app.models.media import Asset
 from app.models.plan import (
@@ -2228,11 +2228,22 @@ def check_plan(
             notes.append(Note(f"the rejected clip {rejection.clip_id} is not in this timeline",
                               "rejected_clip_missing", clip_ids=[rejection.clip_id]))
     problems.extend(_knowledge_problems(plan, clips))
-    for stray in strays(_shots(plan, clips, assets)):
+    shots = _shots(plan, clips, assets)
+    for stray in strays(shots):
         problems.append(
             f"continuity: {stray}. Move it next to what it belongs with, drop it, or say in its `jump_reason` "
             "why it belongs here — a flash-forward, a callback"
         )
+    if plan.structure != Structure.FLASHBACK:
+        by_time, by_light = backward_steps(shots)
+        for step in by_time:
+            problems.append(
+                f"continuity: {step}. Put the part in the order it happened, or say in the later shot's "
+                "`jump_reason` why it goes back — a memory, a callback"
+            )
+        for step, pair in by_light:
+            notes.append(Note(f"{step}: if that is night going back to day, put them in order or give a "
+                              "`jump_reason`", "dark_to_bright", clip_ids=list(pair), look=True))
     both = sorted({rejection.clip_id for rejection in plan.rejected} & {item.clip_id for item in plan.selections})
     if both:
         problems.append(
@@ -2441,6 +2452,7 @@ def _shots(
             topic=clip.topic or (parent.topic if parent is not None else None),
             opens_part=selection.beat_id not in begun,
             exempt=selection.beat_id in hook or bool(selection.jump_reason),
+            exposure=clip.scores.get("exposure"),
         ))
         begun.add(selection.beat_id)
     return shots

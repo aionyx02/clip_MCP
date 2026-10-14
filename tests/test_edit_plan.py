@@ -2448,6 +2448,26 @@ def test_a_piece_from_another_time_between_two_that_belong_together_is_handed_ba
     problems, _ = check_plan(plan, timeline, by_id, children, assets)
     assert not any(problem.startswith("continuity:") for problem in problems)
 
+def test_a_part_that_opens_later_and_goes_back_in_time_is_handed_back() -> None:
+    by_id, children, assets, clips = covered()
+    first, second = speech_of(clips)[:2]
+    walk = next(clip for clip in clips if clip.asset_id == BROLL_ASSET)
+    # The afternoon walk opens the part, and the morning's talking follows it.
+    assets = {
+        ASSET_ID: assets[ASSET_ID].model_copy(update={"recorded_at": datetime(2026, 8, 31, 2, 0, tzinfo=timezone.utc)}),
+        BROLL_ASSET: assets[BROLL_ASSET].model_copy(update={"recorded_at": datetime(2026, 8, 31, 8, 0, tzinfo=timezone.utc)}),
+    }
+    selections = [Selection(clip_id=walk.id, beat_id="b1"), Selection(clip_id=first.id, beat_id="b1"),
+                  Selection(clip_id=second.id, beat_id="b1")]
+    timeline = SemanticTimeline(id="tl_test", asset_ids=[], input_hash="hash", derivation_version=6)
+    problems, _ = check_plan(plan_for(selections), timeline, by_id, children, assets)
+    assert [problem for problem in problems if problem.startswith("continuity:")] == [
+        problem for problem in problems if problem.startswith(f"continuity: {first.id} was shot at")]
+    assert any(problem.startswith("continuity:") for problem in problems)
+    # Told backwards on purpose, it stands.
+    problems, _ = check_plan(plan_for(selections, structure=Structure.FLASHBACK), timeline, by_id, children, assets)
+    assert not any(problem.startswith("continuity:") for problem in problems)
+
 def knowing(plan: EditPlan, by_id: dict, *said: dict) -> EditPlan:
     """Say, piece by piece in playing order, what each establishes and relies on.
 
