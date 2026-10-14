@@ -21,6 +21,7 @@ that cannot be picked honestly without a corpus to pick them against.
 import hashlib
 import json
 import math
+import re
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
@@ -354,24 +355,65 @@ def speaker_at(
 # shot of a drone taking off. Real mumbling still averages well above it.
 MADE_UP_PROBABILITY = 0.1
 
+# Provisional: a sentence most of whose words the model gave no length at all — start and end
+# the same instant — was not heard; the recogniser wrote it out of nothing, as it does
+# 「中文字幕——YK」 over the hum of a café.
+MADE_UP_EMPTY_SHARE = 0.5
+# Provisional: a sentence whose first word the model gave under this chance, and that has a
+# word of no length, was made up; a real line can open unsure, but not with nothing under it.
+MADE_UP_FIRST_PROBABILITY = 0.02
+# Provisional: the same word this many times running is the recogniser stuck in a loop —
+# 「沒興趣,」 forty times over street noise — not someone repeating themselves.
+MADE_UP_REPEATS = 6
+# What the recogniser was trained on most: subtitle credits and a channel's sign-off and
+# plea to subscribe. A sentence that is nothing but one of these, in either script, was
+# not said in a video someone shot themselves.
+_MADE_UP_LINES = [
+    re.compile(pattern) for pattern in (
+        r"^中文字幕|字幕[組组由提供志]",
+        r"明[鏡镜]|[點点]{2}[欄栏]目",
+        r"([點点][贊赞讚]|[訂订][閱阅]|[轉转][發发]|打[賞赏]).*([點点][贊赞讚]|[訂订][閱阅]|[轉转][發发]|打[賞赏])",
+        r"^([謝谢][謝谢]|感[謝谢]|多[謝谢])(觀看|观看|收看|收聽|收听)$",
+    )
+]
+
 def was_made_up(segment: TranscriptSegment) -> bool:
     """Decide whether the speech model invented a sentence nobody said.
 
     The silence detector catches sentences written over silence; this catches
-    the ones written over sound that is not talking — wind, engines, music —
-    which the model hands back with almost no confidence in a single word.
+    the ones written over sound that is not talking — wind, engines, a café —
+    which the model hands back with almost no confidence in a single word,
+    with words that take no time at all, stuck repeating one word, or as one
+    of the lines it was trained on most: a subtitle credit, a sign-off.
 
     Args:
         segment: The sentence.
 
     Returns:
-        True when every word carries a probability and they average under
-        `MADE_UP_PROBABILITY`. A transcript made before probabilities were
-        kept is never judged.
+        True when any of those holds. Probabilities are only judged when
+        every word carries one, so a transcript made before they were kept
+        is judged by the rest.
     """
-    chances = [word.probability for word in segment.words]
-    if not chances or any(chance is None for chance in chances):
+    words = segment.words
+    bare = re.sub(r"[\s\W_]+", "", segment.text)
+    if any(line.search(bare) for line in _MADE_UP_LINES):
+        return True
+    if not words:
         return False
+    empty = sum(1 for word in words if word.end <= word.start)
+    if empty / len(words) >= MADE_UP_EMPTY_SHARE:
+        return True
+    said = [re.sub(r"[\s\W_]+", "", word.text) for word in words]
+    run = 1
+    for before, word in zip(said, said[1:]):
+        run = run + 1 if word and word == before else 1
+        if run >= MADE_UP_REPEATS:
+            return True
+    chances = [word.probability for word in words]
+    if any(chance is None for chance in chances):
+        return False
+    if chances[0] < MADE_UP_FIRST_PROBABILITY and empty:
+        return True
     return sum(chances) / len(chances) < MADE_UP_PROBABILITY
 
 def was_audible(silence_share: float, has_audio: bool) -> bool:

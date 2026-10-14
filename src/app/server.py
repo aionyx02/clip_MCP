@@ -1855,7 +1855,10 @@ def listen_again(
         sits well above a ducked bed, a gap is near -60; `audio_path`, a WAV of
         the stretch for the user to play; for a file, `stored`, what the
         transcript says there, or null, `agrees`, whether the two say the
-        same words, and, when `keep` was given, `kept` or `not_kept`; for a render, `captions`, the ones on screen in the
+        same words — never when the hearing has the marks of a line the
+        recogniser makes up (a subtitle credit, a sign-off, words that take
+        no time, one word looping), and `made_up` is then true — and, when
+        `keep` was given, `kept` or `not_kept`; for a render, `captions`, the ones on screen in the
         stretch, and `changed_since`, true when the project has been edited
         since it was rendered.
 
@@ -1890,11 +1893,16 @@ def listen_again(
                 if word.end > start and word.start < end]
         stored = "".join(said).strip() or None
     plain_heard = "".join(segment.text for segment in fresh.segments)
+    # The same recogniser makes the same lines up over the same café hum, so two hearings
+    # of a made-up line agreeing says nothing about whether anyone said it.
+    made_up = any(was_made_up(segment) for segment in fresh.segments)
     result = {
         **_heard(fresh, keep_as, start),
         "stored": stored,
-        "agrees": stored is not None and _bare_words(plain_heard) == _bare_words(stored),
+        "agrees": not made_up and stored is not None and _bare_words(plain_heard) == _bare_words(stored),
     }
+    if made_up:
+        result["made_up"] = True
     if keep:
         result.update(_keep_hearing(known, HeardAgain(start=start, end=end, words=[word for segment in fresh.segments for word in segment.words]), result["agrees"]))
     return result
