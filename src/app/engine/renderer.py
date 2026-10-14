@@ -7,7 +7,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from app.engine import loudness, machine, resources, speed
+from app.engine import loudness, machine, resources, scan, speed
 from app.engine.analysis import analyze_media, whisper_model_for
 from app.engine.ffmpeg import OperationCancelled, run_ffmpeg
 from app.models.job import Job, JobKind, JobStatus
@@ -412,14 +412,15 @@ def _run_render(job: Job, spec: Dict[str, Any], context: JobContext, repo: Optio
     # it has come says how much time has gone: guessed from seconds of picture at first, a
     # finished video's one long pass at a third of a piece's cost, until this computer has
     # rendered something of the same kind and its own pace can be used.
-    parts = (["pieces"] if pieces else []) + (["loudness"] if level is not None else []) + ["final"]
+    parts = (["pieces"] if pieces else []) + (["loudness"] if level is not None else []) + ["final", "scan"]
     computer = machine.identity() if repo is not None else ""
     costs = (speed.render_costs(repo, computer, job.preview, parts) if repo is not None
              else {part: speed.RENDER_COST[part] for part in parts})
     weights = [float(piece["duration_seconds"]) * costs.get("pieces", 0.0) for piece in pieces]
     weights.append(length * costs["final"])
     measuring = length * costs["loudness"] if level is not None else 0.0
-    total = (sum(weights) + measuring) or 1.0
+    scanning = length * costs["scan"]
+    total = (sum(weights) + measuring + scanning) or 1.0
     done = 0.0
     taken: Dict[str, Tuple[float, float]] = {}
     began = time.monotonic()
@@ -472,6 +473,19 @@ def _run_render(job: Job, spec: Dict[str, Any], context: JobContext, repo: Optio
         context.is_cancelled,
     )
     taken["final"] = (time.monotonic() - began, length)
+    # Every frame read once more, for a flaw too short for a look at a few of them to catch.
+    start, share = (done + weights[-1]) / total, scanning / total
+    context.report(start, "checking every frame")
+    began = time.monotonic()
+    run_ffmpeg(
+        scan.command(command[0], spec["render_path"], job.work_dir),
+        os.path.join(job.work_dir, scan.LOG_FILE_NAME),
+        length,
+        lambda fraction: context.report(start + fraction * share),
+        context.is_cancelled,
+    )
+    scan.keep(job.work_dir, length)
+    taken["scan"] = (time.monotonic() - began, length)
     if repo is not None:
         speed.record_render(repo, computer, job.preview, taken)
     if spec.get("deliver"):
@@ -628,6 +642,9 @@ def run_worker(repo: Repository, job_id: str) -> None:
             current.progress = 1.0
         if spec.get("delivered"):
             current.output_path = spec["delivered"]
+        if job.kind == JobKind.RENDER and status == JobStatus.COMPLETED:
+            # Kept on the job: a finished video's working folder is cleared away once it is saved.
+            current.spots = scan.kept(job.work_dir)
 
     repo.update_job(job_id, finish)
     # This worker's slot and its memory are free now, so hand them to whatever is waiting

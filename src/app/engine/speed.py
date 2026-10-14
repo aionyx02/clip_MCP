@@ -163,7 +163,7 @@ def estimate(repo: Repository, here: Machine, footage: Dict[str, float], speaker
 # before this computer has rendered anything: a piece of picture at full cost, the pass that
 # puts the cut together a third of that, and measuring its loudness half that pass, since it
 # mixes the sound without drawing any picture. Only their proportions matter.
-RENDER_COST = {"pieces": 1.0, "final": 1 / 3, "loudness": 1 / 6}
+RENDER_COST = {"pieces": 1.0, "final": 1 / 3, "loudness": 1 / 6, "scan": 1 / 12}
 # Provisional (roadmap §13): a part of a render shorter than this is mostly FFmpeg starting up,
 # so its pace says little about the next one.
 MIN_RENDER_MEASURED_SECONDS = 10.0
@@ -180,7 +180,7 @@ def render_costs(repo: Repository, computer: str, preview: bool, parts: List[str
         repo: Where past renders' pace is kept.
         computer: This computer.
         preview: Whether it is a preview, which puts pieces together, or a finished video, drawn whole.
-        parts: The parts this render has: `pieces`, `loudness`, `final`.
+        parts: The parts this render has: `pieces`, `loudness`, `final`, `scan`.
 
     Returns:
         Seconds of work per second of picture, by part.

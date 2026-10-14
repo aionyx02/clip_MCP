@@ -7061,8 +7061,12 @@ def get_job(
         analysis or the `output_path` of a render, `remaining_seconds` once a
         running job has gone far enough for its pace to say, `ahead` — how
         many queued jobs go before a queued one — for a failed job its
-        `error_message`, and for a finished analysis worth a second look a
-        `note` to pass on; and a summary over all of them: `finished` and
+        `error_message`, for a finished analysis worth a second look a
+        `note` to pass on, and for a finished render whose every frame was
+        found black, frozen or a flash somewhere, `frames`: `found`, what the
+        cut did not ask for — look at each with `view_render` at its time —
+        and `meant`, inside a fade, a dip, a card or a photo; and a summary
+        over all of them: `finished` and
         `total` counts, `failed` counting those that failed or were
         cancelled, and `progress`, the average.
 
@@ -7134,6 +7138,8 @@ def _job_states(job_ids: List[str]) -> List[dict]:
             entry["ahead"] = ahead[job.job_id]
         if job.error_message:
             entry["error_message"] = job.error_message
+        if job.kind == JobKind.RENDER and job.status == JobStatus.COMPLETED and job.spots:
+            entry["frames"] = _frame_spots(job)
         if job.kind == JobKind.ANALYZE and job.status == JobStatus.COMPLETED and job.asset_id:
             heard = repo.get_analysis(job.asset_id)
             voices = len({turn.speaker for turn in heard.speakers}) if heard else 0
@@ -7145,6 +7151,57 @@ def _job_states(job_ids: List[str]) -> List[dict]:
                 )
         listed.append(entry)
     return listed
+
+def _frame_spots(job: Job) -> dict:
+    """Say where every frame of a render was found black, frozen or a flash, and which of it the cut meant.
+
+    Black inside a fade or a dip through black, and a card or a photo held
+    still, are what the cut asked for; the rest is what nobody asked for — two
+    pieces that do not quite meet, a frame of the wrong shot — and is said
+    first, as `found`.
+
+    Args:
+        job: A finished render.
+
+    Returns:
+        `found` and `meant`, a line each: when, what, and the clips there.
+    """
+    project, _ = _project_as_rendered(job)
+    clips = sorted(project.base_video_track.clips, key=lambda clip: clip.timeline_in) if (
+        project is not None and project.base_video_track is not None) else []
+    assets = _referenced_assets(project) if project is not None else {}
+    slack = 1 / (project.fps_num / project.fps_den) if project is not None else 0.04
+
+    def meant(kind: str, start: float, end: float, here: List[Clip]) -> Optional[str]:
+        for clip in here:
+            begin, finish = float(clip.timeline_in), float(clip.timeline_out)
+            if clip.card is not None:
+                return f"card {clip.id}"
+            asset = assets.get(clip.asset_id)
+            if kind == "frozen" and asset is not None and stills.is_image(asset.path):
+                return f"photo {clip.id}"
+            if kind == "black" and clip.video_fade_in and start >= begin - slack and end <= begin + float(
+                    clip.video_fade_in) + slack:
+                return f"fade in of {clip.id}"
+            if kind == "black" and clip.video_fade_out and end <= finish + slack and start >= finish - float(
+                    clip.video_fade_out) - slack:
+                return f"fade out of {clip.id}"
+            dip = clip.transition_in
+            if (kind in ("black", "flash") and dip is not None and dip.kind == "dip"
+                    and start >= begin - float(dip.seconds) - slack and end <= begin + slack):
+                return f"dip into {clip.id}"
+        return None
+
+    found, kept = [], []
+    for spot in job.spots:
+        start, end = float(spot["start"]), float(spot["end"])
+        here = [clip for clip in clips if float(clip.timeline_in) < max(end, start + slack)
+                and float(clip.timeline_out) > start]
+        where = " → ".join(f"clip {clip.id}" for clip in here) or "past the cut"
+        line = f"{start:.2f}–{end:.2f}s {spot['kind']} ({end - start:.2f}s) in {where}"
+        reason = meant(str(spot["kind"]), start, end, here)
+        (kept if reason else found).append(line + (f": the {reason}" if reason else ""))
+    return {"found": found, "meant": kept}
 
 # Provisional (roadmap §13): more voices than this in one file is far more likely a noisy
 # recording split apart than that many people — 40 for two friends talking over traffic.
