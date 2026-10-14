@@ -54,7 +54,9 @@ from app.models.media import (
 # with a newer one as if the two were the same measurement.
 # 2: exposure is measured on the full luma range, and motion no longer counts the cut
 # into a shot as movement inside it.
-ANALYSIS_VERSION = 2
+# 3: a word placed across a whole pause is kept to one side of it, a long unpunctuated
+# sentence is split at its pauses, and Chinese is converted into Traditional a word at a time.
+ANALYSIS_VERSION = 3
 SCENE_THRESHOLD = 10.0
 BLACK_MIN_SECONDS = 0.5
 FREEZE_MIN_SECONDS = 2.0
@@ -84,6 +86,12 @@ SOUND_SAMPLE_RATE = 48000
 MERGE_GAP_SECONDS = 0.05
 SNAP_TOLERANCE_SECONDS = 0.5
 SENTENCE_PAUSE_SECONDS = 0.6
+# Spoken Chinese comes back without punctuation, and a vlogger talking on for half a
+# minute came back as one 43-second sentence, too coarse to pick a line out of or to cut
+# at. A sentence longer than this is split again at its longest pause, down to pauses this
+# short. Both provisional.
+LONG_SENTENCE_SECONDS = 12.0
+INNER_PAUSE_SECONDS = 0.25
 SENTENCE_END_PUNCTUATION = "。！？!?…"
 DEFAULT_WHISPER_MODEL = "large-v3-turbo"
 # What a fast transcription runs: about twice as quick on a processor, at the price of
@@ -726,8 +734,9 @@ def snap_words_to_silences(words: List[TranscriptWord], silences: List[Span], to
     hundred milliseconds off. Silence edges measured from the audio signal are
     far more precise, so a word that starts within `tolerance` of the end of a
     silence starts there instead, and a word that ends within `tolerance` of
-    the start of a silence ends there. Words inside continuous speech keep
-    their timings, and word order is never changed.
+    the start of a silence ends there. A word placed across the whole of a
+    silence is kept to the side of it holding more of the word. Words inside
+    continuous speech keep their timings, and word order is never changed.
 
     Args:
         words: Words in time order. They are modified in place.
@@ -740,6 +749,17 @@ def snap_words_to_silences(words: List[TranscriptWord], silences: List[Span], to
     """
     silence_ends = sorted(span.end for span in silences)
     silence_starts = sorted(span.start for span in silences)
+    for word in words:
+        # A word run on straight across a pause — 「那」 placed from 27.21 to 28.05 over a silence
+        # measured from 27.27 to 27.91 — was said on one side of it: the side with more of it.
+        inside = [span for span in silences if word.start < span.start and span.end < word.end]
+        if inside:
+            before = inside[0].start - word.start
+            after = word.end - inside[-1].end
+            if after >= before:
+                word.start = round(inside[-1].end, 3)
+            else:
+                word.end = round(inside[0].start, 3)
     previous_end = 0.0
     for index, word in enumerate(words):
         next_start = words[index + 1].start if index + 1 < len(words) else float("inf")
@@ -756,7 +776,10 @@ def split_sentences(words: List[TranscriptWord], pause: float = SENTENCE_PAUSE_S
     """Group words into sentence-like segments.
 
     A segment ends after a word with sentence-final punctuation, or before a
-    pause of at least `pause` seconds between two words.
+    pause of at least `pause` seconds between two words. One still longer
+    than `LONG_SENTENCE_SECONDS` is split at its longest pause of at least
+    `INNER_PAUSE_SECONDS`, and again, until it is short enough or has no
+    pause left to split at.
 
     Args:
         words: Words in time order.
@@ -775,13 +798,28 @@ def split_sentences(words: List[TranscriptWord], pause: float = SENTENCE_PAUSE_S
             segments.append(TranscriptSegment(start=current[0].start, end=current[-1].end, text=text, words=list(current)))
         current.clear()
 
+    def split(run: List[TranscriptWord]) -> None:
+        """Flush a run of words as one sentence, or split it at its longest pause first if it is long."""
+        gaps = [(run[index + 1].start - run[index].end, index) for index in range(len(run) - 1)]
+        widest = max(gaps, default=(0.0, -1))
+        if run[-1].end - run[0].start > LONG_SENTENCE_SECONDS and widest[0] >= INNER_PAUSE_SECONDS:
+            split(run[:widest[1] + 1])
+            split(run[widest[1] + 1:])
+            return
+        current.extend(run)
+        flush()
+
+    run: List[TranscriptWord] = []
     for word in words:
-        if current and word.start - current[-1].end >= pause:
-            flush()
-        current.append(word)
+        if run and word.start - run[-1].end >= pause:
+            split(run)
+            run = []
+        run.append(word)
         if word.text.strip()[-1:] in SENTENCE_END_PUNCTUATION:
-            flush()
-    flush()
+            split(run)
+            run = []
+    if run:
+        split(run)
     return segments
 
 def convert_chinese_variant(segments: List[TranscriptSegment], variant: str) -> List[TranscriptSegment]:

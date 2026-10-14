@@ -2,9 +2,9 @@
 
 import pytest
 
-from app.engine.analysis import convert_chinese_variant
+from app.engine.analysis import convert_chinese_variant, snap_words_to_silences, split_sentences
 from app.engine.semantic import was_made_up
-from app.models.media import TranscriptSegment, TranscriptWord
+from app.models.media import Span, TranscriptSegment, TranscriptWord
 
 def segment_of(*texts: str) -> TranscriptSegment:
     """A segment with one word per text, a tenth of a second each."""
@@ -46,3 +46,21 @@ def test_an_ordinary_line_is_kept() -> None:
     line = timed(("我", 0.0, 0.2, 0.3), ("到", 0.2, 0.4, 0.9), ("高", 0.4, 0.6, 0.9), ("鐵", 0.6, 0.8, 0.9),
                  ("了", 0.8, 0.8, 0.9), ("對", 1.0, 1.2, 0.9), ("對", 1.2, 1.4, 0.9), ("謝謝大家", 1.4, 2.0, 0.9))
     assert not was_made_up(line)
+
+
+def test_a_word_placed_across_a_whole_pause_is_kept_to_the_side_holding_more_of_it() -> None:
+    words = [TranscriptWord(start=26.9, end=27.21, text="說"), TranscriptWord(start=27.21, end=28.05, text="那"),
+             TranscriptWord(start=28.05, end=28.3, text="個")]
+    snap_words_to_silences(words, [Span(start=27.265, end=27.91)])
+    assert (words[1].start, words[1].end) == (27.91, 28.05)
+    assert words[0].end <= 27.265
+
+
+def test_a_long_sentence_without_punctuation_is_split_at_its_pauses() -> None:
+    # Half a minute of talk, a word a second, with one clear breath 0.43s long after 「真的」.
+    words = [TranscriptWord(start=float(second), end=second + 0.95, text="字") for second in range(30)]
+    words[17] = TranscriptWord(start=17.0, end=17.57, text="真的")
+    segments = split_sentences(words)
+    assert len(segments) == 2 and segments[0].words[-1].text == "真的"
+    # A short line keeps its breaths inside it.
+    assert len(split_sentences(words[:10])) == 1
