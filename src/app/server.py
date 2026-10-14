@@ -3824,6 +3824,8 @@ def amend_plan(plan_id: str, expected_version: int, amendments: list[PlanAmendme
     `set_music_level` for 「音樂太大聲」 (everywhere, or from one beat),
     `set_target` for a new length or platform, and `drop_beat` for
     「這整段不要」, which files every selection in it under the rejections.
+    What the viewer has to know is `set_facts` for the plan and
+    `set_knowledge` for what one piece establishes and relies on.
 
     Every version is kept: `revert_plan` goes back to any of them.
 

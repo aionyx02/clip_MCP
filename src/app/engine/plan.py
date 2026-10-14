@@ -2012,6 +2012,112 @@ def _story_problems(beats: Sequence[Beat], structure: Structure = Structure.STOR
             latest = beat.role
     return problems
 
+def _knowledge_problems(plan: EditPlan, clips: Mapping[str, SemanticClip]) -> List[str]:
+    """Check that every fact the viewer needs is established, and before what relies on it.
+
+    Only names and order are checked here. Whether a piece really shows what
+    it says it establishes is for whoever looks at its evidence.
+
+    Args:
+        plan: The plan.
+        clips: The timeline's clips, keyed by ID.
+
+    Returns:
+        What is wrong, one line each.
+    """
+    problems: List[str] = []
+    named = [fact.id for fact in plan.facts]
+    if len(set(named)) != len(named):
+        problems.append("two facts share an id")
+    if len(plan.beats) > 1 and not plan.facts:
+        problems.append(
+            "facts: a plan of more than one part says what the viewer has to come to know — list it in `facts`, "
+            "and in each selection's `establishes` where the footage shows or says it"
+        )
+    hook = {beat.id for beat in plan.beats if beat.role == BeatRole.HOOK}
+    told: Dict[str, str] = {}
+    owed: Dict[str, str] = {}
+    for selection in _ordered_selections(plan):
+        where = f"selection {selection.clip_id}"
+        for fact in [*selection.requires, *selection.ahead, *(item.fact for item in selection.establishes)]:
+            if fact not in named:
+                problems.append(f"{where}: names the fact {fact}, which is not in the plan's `facts`")
+        for fact in selection.requires:
+            if fact in told or fact not in named:
+                continue
+            if selection.beat_id in hook:
+                owed.setdefault(fact, selection.clip_id)
+            else:
+                problems.append(
+                    f"{where}: relies on {fact}, which nothing before it establishes. Put the piece that does "
+                    "first, or if this comes before it on purpose, list it in `ahead`"
+                )
+        for fact in selection.ahead:
+            if fact in told:
+                problems.append(f"{where}: lists {fact} in `ahead`, but {told[fact]} has already established it")
+            elif fact in named:
+                owed.setdefault(fact, selection.clip_id)
+        clip = clips.get(selection.clip_id)
+        for item in selection.establishes:
+            start, end = item.evidence
+            if clip is not None and not (clip.source_range.start - 1e-3 <= start
+                                         and end <= clip.source_range.end + 1e-3):
+                problems.append(
+                    f"{where}: the evidence for {item.fact}, {start:g}–{end:g}s, is not in the clip, which runs "
+                    f"{clip.source_range.start:g}–{clip.source_range.end:g}s of its file"
+                )
+            told.setdefault(item.fact, selection.clip_id)
+            owed.pop(item.fact, None)
+    for fact, clip_id in owed.items():
+        problems.append(f"selection {clip_id}: relies on {fact} coming later, and nothing after it establishes it")
+    for fact in named:
+        if fact not in told:
+            problems.append(f"facts: nothing establishes {fact}; say which piece shows or says it, or take it out")
+    return problems
+
+def _unplayed_evidence(
+    plan: EditPlan,
+    pieces: Sequence[Piece],
+    clips: Mapping[str, SemanticClip],
+    children: Mapping[str, List[SemanticClip]],
+) -> List[str]:
+    """Find evidence for a fact that the cut does not play, because the piece was trimmed off it.
+
+    A pause taken out in the middle of a piece leaves what is around it, so
+    evidence counts as played when it lies between the first second the
+    piece plays and the last.
+
+    Args:
+        plan: The plan.
+        pieces: Its compiled windows.
+        clips: The timeline's clips, keyed by ID.
+        children: Each section's own clips, keyed by section ID.
+
+    Returns:
+        One line per piece of evidence that is not played.
+    """
+    problems: List[str] = []
+    for selection in plan.selections:
+        clip = clips.get(selection.clip_id)
+        if clip is None or not selection.establishes:
+            continue
+        own = {selection.clip_id, *selection.trim.keep_clip_ids,
+               *(child.id for child in children.get(selection.clip_id, []))}
+        played = [(piece.start, piece.end) for piece in pieces
+                  if piece.asset_id == clip.asset_id and own & set(piece.from_clip_ids)]
+        if not played:
+            continue
+        first, last = min(start for start, _ in played), max(end for _, end in played)
+        for item in selection.establishes:
+            start, end = item.evidence
+            if start < first - 1e-3 or end > last + 1e-3:
+                problems.append(
+                    f"selection {selection.clip_id}: the evidence for {item.fact}, {start:g}–{end:g}s, is not "
+                    f"all played — the piece plays {first:.2f}–{last:.2f}s of its file once trimmed. Trim it to "
+                    "keep what shows it, or say where in what it plays it does"
+                )
+    return problems
+
 def check_plan(
     plan: EditPlan,
     timeline: SemanticTimeline,
@@ -2119,6 +2225,7 @@ def check_plan(
         if rejection.clip_id not in clips:
             notes.append(Note(f"the rejected clip {rejection.clip_id} is not in this timeline",
                               "rejected_clip_missing", clip_ids=[rejection.clip_id]))
+    problems.extend(_knowledge_problems(plan, clips))
     for stray in strays(_shots(plan, clips, assets)):
         problems.append(
             f"continuity: {stray}. Move it next to what it belongs with, drop it, or say in its `jump_reason` "
@@ -2187,6 +2294,7 @@ def check_plan(
         notes.extend(cleaned)
         problems.extend(_cue_problems(plan, pieces))
         problems.extend(_unfit_transitions(plan, pieces))
+        problems.extend(_unplayed_evidence(plan, pieces, clips, children))
         for position, cue in enumerate(cues, start=1):
             entry = song_entry(cue, (cuts or {}).get(cue.asset_id) if cue.asset_id is not None else None)
             if entry != cue.start:
