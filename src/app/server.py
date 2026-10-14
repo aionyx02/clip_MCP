@@ -5212,6 +5212,10 @@ def _start_render(
 
     project = _reshaped(project, frame)
     findings = _findings(project, burn_subtitles)
+    # The words on screen are laid out at the size the video is delivered at, and libass shrinks
+    # them with a preview's frame: laid out again at the preview's size, pixels rounded otherwise
+    # break a caption into lines elsewhere than the finished video does.
+    drawn_at = project
     if is_preview:
         project = _preview_sized(project, preview_side)
     blocking = [finding for finding in findings if finding.check not in (allow or [])]
@@ -5254,13 +5258,13 @@ def _start_render(
             )
     # Title cards' words and the words over the footage go through the same file as the
     # captions, burned or not.
-    titles = cards.ass_events(project, project.caption_style) + texts.ass_events(project, project.caption_style)
+    titles = cards.ass_events(drawn_at, drawn_at.caption_style) + texts.ass_events(drawn_at, drawn_at.caption_style)
     if placed or titles:
         os.makedirs(job.work_dir, exist_ok=True)
         subtitle_path = os.path.join(job.work_dir, "subtitles.ass")
         with open(subtitle_path, "w", encoding="utf-8") as handle:
-            handle.write(build_ass(placed, project.width, project.height, project.caption_style, titles,
-                                   texts.ass_styles(project, project.caption_style)))
+            handle.write(build_ass(placed, drawn_at.width, drawn_at.height, drawn_at.caption_style, titles,
+                                   texts.ass_styles(drawn_at, drawn_at.caption_style)))
 
     chapters_path = None
     listed, _ = chapters(project)
