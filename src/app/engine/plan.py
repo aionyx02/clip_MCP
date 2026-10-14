@@ -2849,11 +2849,16 @@ def music_fit_notes(
         return []
     total = compiled_duration(pieces)
     payoff = next((beat.id for beat in plan.beats if beat.role == BeatRole.PAYOFF), None)
-    climax, position = None, 0.0
-    for piece in pieces:
+    climax, position, opens = None, 0.0, None
+    for index, piece in enumerate(pieces):
         if piece.beat_id == payoff and climax is None:
-            climax = position
+            climax, opens = position, index
         position += piece.played
+    # The cue the payoff opens under, told by the window it came in on rather than by seconds:
+    # one cross-fading out as the payoff begins runs past it, but is leaving, not playing there.
+    entries = _cue_entries(plan, pieces)
+    under = max((index for index in entries if opens is not None and index <= opens), default=None)
+    playing = f"cue:{entries[under].beat_id or '^'}" if under is not None else None
     # Where each cue holds the cut, and the second of its song it is at when it takes over: a
     # cross-fade lends it a little either side, but this is the stretch it was asked to play under.
     spans = {f"cue:{cue.beat_id or '^'}": (at, until, song_entry(cue, cuts.get(cue.asset_id) if cuts else None))
@@ -2883,33 +2888,61 @@ def music_fit_notes(
             continue
         peak = fullest(energy)
         span = spans.get(first.key[0])
-        # Only the song playing when the payoff begins: one another song takes over from before
-        # then cannot land its fullest part there, wherever it starts.
-        if (len(passes) == 1 and peak is not None and climax is not None and span is not None
-                and span[0] <= climax < span[1]):
-            at, until, entry = span
-            lands = at + peak[0] - entry if entry <= peak[0] < entry + until - at else None
+        ends_with_cut = abs(last.timeline_in + last.end - last.start - total) < 0.01
+        # How much of the song the part plays, from its own length rather than the rounded one said above.
+        played = last.timeline_in + last.end - last.start - first.timeline_in
+
+        def cut_off_from(start: float) -> Optional[float]:
+            """How long before the song's end the cut stops it, still going, when the cue starts here."""
+            stops = start + played
+            going = energy_at(energy, stops)
+            if ends_with_cut and length - stops > CUT_OFF_SECONDS and going is not None and going >= MIDDLE:
+                return length - stops
+            return None
+
+        def lands_at(start: float) -> Optional[float]:
+            """Where in the cut the fullest part is heard when the cue starts here, or None."""
+            at, until, _ = span
+            return at + peak[0] - start if start <= peak[0] < start + until - at else None
+
+        # Only the song the payoff opens under: one another song takes over from before then, or
+        # one fading out as it begins, cannot land its fullest part there, wherever it starts.
+        aims = (len(passes) == 1 and peak is not None and climax is not None and span is not None
+                and first.key[0] == playing)
+        if aims:
+            lands = lands_at(span[2])
             if lands is None or abs(lands - climax) > PEAK_TOLERANCE_SECONDS:
-                start = peak[0] - (climax - at)
+                start = peak[0] - (climax - span[0])
                 fix = (f"start the cue at {start:.1f}s of the song (set_music_cue) to land it there"
                        if 0 <= start < length else "a song that builds later would land it there")
+                short = cut_off_from(start) if 0 <= start < length else None
+                if short is not None:
+                    fix += (f" — but then the cut ends {short:.0f}s before the song does, while it is still going, "
+                            "and it is faded out: with this song, landing its fullest part on the payoff and ending "
+                            "with the video cannot both be had, so choose one, or another song")
                 notes.append(Note(
                     f"the fullest part of {name} ({peak[0]}–{peak[1]}s of the song) "
                     + (f"lands at {lands:.1f}s of the cut" if lands is not None else "is never heard")
                     + f", and the payoff ({payoff}) starts at {climax:.1f}s; {fix}",
                     "music_peak_off", beat_id=beat_id, seconds=climax, look=True,
                 ))
-        ends_with_cut = abs(last.timeline_in + last.end - last.start - total) < 0.01
-        still = energy_at(energy, last.end)
-        if ends_with_cut and length - last.end > CUT_OFF_SECONDS and still is not None and still >= MIDDLE:
-            # From the part's own length, not the rounded one said above, and rounded down as it is
-            # said: a start a hundredth late leaves the song short of the part, and it loops.
-            start = math.floor((length - (last.timeline_in + last.end - last.start - first.timeline_in)) * 10) / 10
+        short = cut_off_from(last.end - played)
+        if short is not None:
+            # Rounded down as it is said: a start a hundredth late leaves the song short of the part, and it loops.
+            start = math.floor((length - played) * 10) / 10
+            cost = ""
+            if aims and start >= 0:
+                moved = lands_at(start)
+                if moved is None or abs(moved - climax) > PEAK_TOLERANCE_SECONDS:
+                    cost = (" — but then its fullest part "
+                            + (f"lands at {moved:.1f}s of the cut" if moved is not None else "is never heard")
+                            + f", not on the payoff at {climax:.1f}s: the two cannot both be had with this song, "
+                              "so choose one")
             notes.append(Note(
-                f"the cut ends {length - last.end:.0f}s before {name} does, while it is still going; it is faded "
+                f"the cut ends {short:.0f}s before {name} does, while it is still going; it is faded "
                 f"out over {last.fade_out:g}s. For the song to end with the video, start the cue at "
                 f"{max(0.0, start):.1f}s of the song (set_music_cue)" + ("" if start >= 0 else " — it is shorter than the part, so "
-                                                         "it loops first") + ", or give it a longer fade_out",
+                                                         "it loops first") + cost + ", or give it a longer fade_out",
                 "music_cut_off", beat_id=beat_id, seconds=total, look=True,
             ))
     return notes
