@@ -3294,7 +3294,8 @@ def inspect_join(
     Returns:
         The list; or for each join its frames, a row before the cut and a row
         from it with the two either side framed red; the transcribed words
-        laid onto the render's time, ✂ on any a cut takes into; where a line
+        laid onto the render's time, ✂ on any a cut takes into, and what
+        they read as, corrected with the captions' glossary; where a line
         ends and another begins across the cut, the pause between them beside
         the pauses the speaker makes between sentences; the render's
         sound level every 0.1s with ‖ at the cut; and a WAV of the stretch to
@@ -3368,6 +3369,12 @@ def inspect_join(
             f"  frames: a row of {steps + 1} up to the cut, then {steps + 1} from it",
             "  words: " + _words_across(join, heard),
         ]
+        if heard:
+            # The words above are as the transcriber timed them; this is what they say, corrected
+            # with the glossary the captions use, so a misheard word fixed once reads fixed here.
+            sides = [_glossed("".join(word.text for word in heard if (word.start >= join.at) == later))
+                     for later in (False, True)]
+            text.append(f"  reads: 「{sides[0]}」 ‖ 「{sides[1]}」")
         pause = pause_across(join.at, heard, analyses)
         if pause:
             text.append("  pause: " + pause)
@@ -5793,7 +5800,8 @@ def read_cut(project_id: str) -> dict:
     Returns:
         `script`: one line per shot of the sequence — when it plays, the part
         of the video it is in, the clip and what is on screen (the footage's
-        description, or its file), what is said over it, the captions shown
+        description, or its file), what is said over it with the captions' glossary
+        words corrected, the captions shown
         and the words on screen; what plays over it on a track above is under
         it, indented.
     """
@@ -6827,14 +6835,20 @@ WORD_INSIDE_SECONDS = 0.05
 SHORTEST_STRETCH_SECONDS = 0.05
 
 def _said_between(asset_id: str, start: float, end: float) -> str:
-    """What the transcript has said in a file between two of its seconds; empty when nothing was."""
+    """What the transcript has said in a file between two of its seconds, glossary words corrected; empty when nothing was."""
     analysis = repo.get_analysis(asset_id)
     if analysis is None or analysis.transcript is None:
         return ""
-    return "".join(
+    return _glossed("".join(
         word.text for segment in analysis.transcript.segments if not was_made_up(segment) for word in segment.words
         if word.start < end - WORD_INSIDE_SECONDS and word.end > start + WORD_INSIDE_SECONDS
-    ).strip()
+    ).strip())
+
+def _glossed(text: str) -> str:
+    """Text the transcriber wrote, with every word in the workspace glossary corrected as the captions are."""
+    for heard, meant in repo.glossary().items():
+        text = text.replace(heard, meant)
+    return text
 
 def _version_at(project_id: str, commit: Optional[str]) -> Tuple[Project, dict]:
     """A project at one of its versions, or as it is now, with that version as the AI reads it.

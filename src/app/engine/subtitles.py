@@ -904,7 +904,11 @@ def _pieces(
         transcribed without them yields none, and such a caption lights up
         whole.
     """
-    words = [word for word in segment.words if word.end > start and word.start < end]
+    # A word belongs to the clip its middle is in: one the cut takes off, ending a few hundredths
+    # past the start of the clip, was taken off on purpose and is not captioned.
+    words = [word for word in segment.words if start <= (word.start + word.end) / 2 <= end]
+    if not words and segment.words:
+        return
     if not words:
         text = segment.text.strip()
         piece_start, piece_end = max(segment.start, start), min(segment.end, end)
