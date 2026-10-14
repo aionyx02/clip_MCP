@@ -46,6 +46,9 @@ MERGE_GAP_SECONDS = 0.3
 # second and never more than about two, so this buys a clean cut for almost nothing.
 # Provisional until there is a corpus to tune it against.
 SNAP_SECONDS = 1.0
+# `query_clips` reads a clip's range back to the hundredth, so evidence copied from it can sit
+# that far outside the range it was read from.
+EVIDENCE_SLACK_SECONDS = 0.01
 # How long a silence has to run before it is dead air rather than a breath. It has to
 # exceed `2 * BREATH_SECONDS + MERGE_GAP_SECONDS`: taking a pause out leaves a breath on
 # each side, and if what is left between the two halves fits inside the merge gap they
@@ -1837,14 +1840,23 @@ def _cut_notes(
             "cuts_moved_off_words", seconds=max(moved),
         ))
 
-    stuck = [
-        piece for piece in pieces
-        if (known := cuts.get(piece.asset_id))
-        and any(known.splits_a_word(edge) for edge in (piece.start, piece.end))
-    ]
+    stuck: List[Piece] = []
+    where: List[str] = []
+    for piece in pieces:
+        known = cuts.get(piece.asset_id)
+        if known is None:
+            continue
+        # Which end, at which second of the file, inside which word: a window has two edges.
+        edges = [(side, edge, word) for side, edge in (("starts", piece.start), ("ends", piece.end))
+                 for word in known.words if word[0] + EDGE_TOLERANCE_SECONDS < edge < word[1] - EDGE_TOLERANCE_SECONDS]
+        if edges:
+            stuck.append(piece)
+            name = (piece.from_clip_ids or [piece.asset_id])[0]
+            where += [f"{name} {side} at {edge:.2f}s of its file, inside the word at {word[0]:.2f}–{word[1]:.2f}s"
+                      for side, edge, word in edges]
     if stuck:
         said.append(Note(
-            f"{len(stuck)} cut(s) still land inside a word: {', '.join(_first_clips(stuck))}. "
+            f"{len(where)} cut(s) still land inside a word: {'; '.join(where)}. "
             f"No clean point is within {SNAP_SECONDS:g}s of them, so they were left as asked",
             "cuts_inside_words", clip_ids=_first_clips(stuck), look=True,
         ))
@@ -2102,8 +2114,9 @@ def _knowledge_problems(plan: EditPlan, clips: Mapping[str, SemanticClip]) -> Li
         clip = clips.get(selection.clip_id)
         for item in selection.establishes:
             start, end = item.evidence
-            if clip is not None and not (clip.source_range.start - 1e-3 <= start
-                                         and end <= clip.source_range.end + 1e-3):
+            # The slack is the rounding a clip's range is read back with, not a judgement.
+            if clip is not None and not (clip.source_range.start - EVIDENCE_SLACK_SECONDS <= start
+                                         and end <= clip.source_range.end + EVIDENCE_SLACK_SECONDS):
                 problems.append(
                     f"{where}: the evidence for {item.fact}, {start:g}–{end:g}s, is not in the clip, which runs "
                     f"{clip.source_range.start:g}–{clip.source_range.end:g}s of its file"

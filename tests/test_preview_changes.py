@@ -122,3 +122,18 @@ def test_a_cut_with_no_music_says_so(audio_media: Path) -> None:
     loud = import_asset(str(audio_media / "loud.mp4"))["id"]
     project = build_project([video_track(), insert("l", loud, 0, 4)], width=320, height=240)
     assert "no music" in preview_sound(project).content[0].text
+
+
+def test_the_sound_chart_writes_chinese_part_names_in_a_font_that_has_them() -> None:
+    import os
+
+    from PIL import ImageFont
+
+    from app.engine.listen import CJK_FONTS, label_font
+
+    if not any(os.path.exists(path) for path in CJK_FONTS):
+        pytest.skip("no Chinese font on this machine")
+    font = label_font(14)
+    assert isinstance(font, ImageFont.FreeTypeFont)
+    # A font without the character draws the same empty box for any two of them.
+    assert bytes(font.getmask("開")) != bytes(font.getmask("場"))

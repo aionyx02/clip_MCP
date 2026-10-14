@@ -541,7 +541,7 @@ def test_footage_can_be_read_through_one_line_a_clip(media: Path) -> None:
     ))
     built = build_semantic_timeline([asset_id], rebuild=True)["timeline_id"]
     lines = query_clips(timeline_id=built, kinds=["speech"], brief=True)["lines"]
-    assert lines[0].split(" ")[1:] == ["wide.mp4", "1.0-3.0", "speech", "第一句話"]
+    assert lines[0].split(" ")[1:] == ["wide.mp4", "1.00-3.00", "speech", "第一句話"]
     # The next page starts where the first one stopped.
     first = query_clips(timeline_id=built, kinds=["speech"], brief=True, limit=1)
     second = query_clips(timeline_id=built, kinds=["speech"], brief=True, limit=1, offset=1)

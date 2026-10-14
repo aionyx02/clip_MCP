@@ -342,6 +342,8 @@ def test_a_word_longer_than_the_snap_allows_is_left_alone_and_said_so() -> None:
     assert plan_pieces(plan, by_id, {}, assets, cuts)[0].end == pytest.approx(4.0)
     _, notes = check_plan(plan, timeline, by_id, {}, assets, cuts)
     assert any("still land inside a word" in note for note in notes)
+    # Which end, at which second, inside which word: a window has two edges to guess between.
+    assert any("ends at 4.00s of its file, inside the word at 2.00–6.00s" in note for note in notes)
 
 def test_moving_a_cut_is_reported_even_though_it_is_arithmetic() -> None:
     # It is still a change to somebody's edit. 「不要默默修正」 is about not doing things

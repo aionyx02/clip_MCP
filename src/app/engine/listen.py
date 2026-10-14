@@ -212,6 +212,26 @@ def describe(parts: Sequence[PartSound]) -> List[str]:
         lines.append(" ".join(said))
     return lines
 
+# Fonts with Chinese in them, where each system keeps one. The default font Pillow ships has
+# none, and a part named 「開場：暴雨」 came out as a row of empty boxes.
+CJK_FONTS = (
+    os.path.join(os.environ.get("WINDIR", r"C:\Windows"), "Fonts", "msjh.ttc"),
+    os.path.join(os.environ.get("WINDIR", r"C:\Windows"), "Fonts", "msyh.ttc"),
+    "/System/Library/Fonts/PingFang.ttc",
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+    "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
+)
+
+def label_font(size: int) -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
+    """A font for labels a user wrote, which are often Chinese: the first CJK font found, else Pillow's own."""
+    for path in CJK_FONTS:
+        if os.path.exists(path):
+            try:
+                return ImageFont.truetype(path, size)
+            except OSError:
+                continue
+    return ImageFont.load_default(size=size)
+
 def chart(project: Project, voice: np.ndarray, music: np.ndarray) -> bytes:
     """Draw the two levels along the cut, with its cuts and parts marked.
 
@@ -227,7 +247,7 @@ def chart(project: Project, voice: np.ndarray, music: np.ndarray) -> bytes:
     left, right, top, bottom = 50, 20, 30, 40
     image = Image.new("RGB", (width, height), (24, 24, 24))
     draw = ImageDraw.Draw(image)
-    font = ImageFont.load_default(size=14)
+    font = label_font(14)
     duration = max(float(project.duration), WINDOW_SECONDS)
     x_of = lambda seconds: left + (width - left - right) * seconds / duration
     y_of = lambda level: top + (height - top - bottom) * (level / FLOOR_DB)

@@ -1836,7 +1836,8 @@ def listen_again(
     Start and end the stretch in a pause, so it holds whole words.
 
     Given a render's `job_id` instead of a file, it hears what the viewer
-    will: whether a word was cut into at an edit, and, from `levels`, whether
+    will, a shot at a time so the words after a cut are not lost to the ones
+    before it: whether a word was cut into at an edit, and, from `levels`, whether
     the music dips under speech and two songs really cross-fade where the
     plan says.
 
@@ -2023,6 +2024,10 @@ def _hearable(start: float, end: float) -> None:
         raise ValueError(f"hear a stretch of at most {LISTEN_AGAIN_SECONDS:g} seconds at a time; this one is "
                          f"{end - start:g}s")
 
+# A piece of a render shorter than this either side of a cut is heard with the shot it
+# belongs to rather than on its own: too short to hold a word. Provisional.
+MIN_HEARD_SECONDS = 0.3
+
 def _listen_to_render(job_id: str, start: float, end: float, language: Optional[str]) -> dict:
     """`listen_again` over a finished render rather than a file.
 
@@ -2048,10 +2053,21 @@ def _listen_to_render(job_id: str, start: float, end: float, language: Optional[
         if analysis is not None and analysis.transcript is not None:
             known = analysis.transcript
             break
-    fresh = listen_again_in_file(
-        path, start, end, language or (known.language if known else None), keep_as,
-        chinese_variant=known.chinese_variant if known else None,
-    )
+    # Heard a shot at a time: the speech model, given a stretch across a cut, wrote down the
+    # words before it and nothing after, though the voice there was loud and clear.
+    cuts = sorted({float(clip.timeline_in) for clip in project.base_video_track.clips} if (
+        project is not None and project.base_video_track is not None and not _changed_since(job)) else set())
+    edges = [start] + [at for at in cuts if start + MIN_HEARD_SECONDS <= at <= end - MIN_HEARD_SECONDS] + [end]
+    language = language or (known.language if known else None)
+    variant = known.chinese_variant if known else None
+    if len(edges) == 2:
+        fresh = listen_again_in_file(path, start, end, language, keep_as, chinese_variant=variant)
+    else:
+        pieces = [listen_again_in_file(path, opened, closed, language, f"{keep_as[:-4]}-{index}.wav",
+                                       chinese_variant=variant)
+                  for index, (opened, closed) in enumerate(zip(edges, edges[1:]))]
+        cut_sound(path, start, end, keep_as)
+        fresh = pieces[0].model_copy(update={"segments": [segment for piece in pieces for segment in piece.segments]})
     shown = [cue for cue in (place_cues(project, project.subtitles) if project and job.captioned else [])
              if float(cue.end) > start and float(cue.start) < end]
     return {
@@ -2698,7 +2714,7 @@ def _clip_line(clip: SemanticClip, file_name: str) -> str:
     """
     parts = [
         clip.id.split(":", 1)[-1], file_name,
-        f"{clip.source_range.start:.1f}-{clip.source_range.end:.1f}", clip.kind.value,
+        f"{clip.source_range.start:.2f}-{clip.source_range.end:.2f}", clip.kind.value,
     ]
     if clip.speaker:
         parts.append(clip.speaker)
