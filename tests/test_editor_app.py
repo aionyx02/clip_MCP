@@ -2,6 +2,7 @@
 
 import json
 import os
+import shutil
 from pathlib import Path
 
 import pytest
@@ -98,8 +99,11 @@ def test_the_version_can_be_asked_alone_to_notice_the_ai(client: TestClient) -> 
     made = client.post("/api/projects", json={"name": "版本"}).json()
     assert client.get(f"/api/projects/{made['id']}/version").json() == {"version": server.repo.get_project(made["id"]).version}
 
-def test_words_say_when_nothing_was_transcribed(client: TestClient, media: Path) -> None:
-    asset = server.import_asset(str(media / "silent.mp4"))["id"]
+def test_words_say_when_nothing_was_transcribed(client: TestClient, media: Path, tmp_path: Path) -> None:
+    # A file of its own: the shared one is the same asset in every test, and others transcribe it.
+    alone = tmp_path / "alone.mp4"
+    shutil.copyfile(media / "silent.mp4", alone)
+    asset = server.import_asset(str(alone))["id"]
     assert client.get(f"/api/words/{asset}?at=1").json() == {"words": [], "transcribed": False}
 
 def test_an_empty_project_has_no_preview_to_make(client: TestClient) -> None:
