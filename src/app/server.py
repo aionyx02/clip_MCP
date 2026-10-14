@@ -41,6 +41,7 @@ from app.models.timeline import (
     EditSubtitleOp,
     FitTrackOp,
     Project,
+    SetCaptionStyleOp,
     SetSubtitlesOp,
     SubtitleCue,
     TrackType,
@@ -3344,7 +3345,8 @@ def apply_edits(project_id: str, expected_version: int, operations: list[EditOpe
         when captions were stored or corrected, `captions`: each one touched,
         as it now reads, one line apiece, marked `(this project only)` where it
         is — read them back rather than assume — and `captions_kept`, which says
-        where the rest are now remembered.
+        where the rest are now remembered; and, when the caption style was
+        set, `caption_style`: the whole of it as it now stands.
 
     Raises:
         ValueError: If the project does not exist, the version does not match,
@@ -3358,6 +3360,8 @@ def apply_edits(project_id: str, expected_version: int, operations: list[EditOpe
     gap = _music_ends_early(saved)
     if gap:
         result["music"] = gap
+    if any(isinstance(op, SetCaptionStyleOp) for op in operations):
+        result["caption_style"] = saved.caption_style.model_dump(mode="json")
     touched = _touched_captions(before, saved, operations)
     if touched:
         shared = [cue for cue in touched if not cue.local]
