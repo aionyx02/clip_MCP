@@ -18,6 +18,10 @@ def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
 
 
+# Who the user is in a comment and its replies: the editor's own word for them.
+USER = "你"
+
+
 class Anchor(BaseModel):
     """The moment of footage under a comment's edge."""
 
@@ -41,7 +45,7 @@ class Comment(BaseModel):
     id: str
     project_id: str
     text: str
-    by: str = "你"
+    by: str = USER
     created_at: datetime = Field(default_factory=_utc_now)
     commit: Optional[str] = Field(default=None, description="The version it was written on")
     start: float = Field(..., ge=0, description="Where on the cut it was written, in seconds")
@@ -52,6 +56,16 @@ class Comment(BaseModel):
     question: bool = Field(default=False, description="Whether the AI asked it, for the user to answer")
     replies: List[Reply] = Field(default_factory=list)
     resolved_commit: Optional[str] = Field(default=None, description="The version it was dealt with in")
+
+    @property
+    def answered(self) -> bool:
+        """Whether the user has said something back on it: for a question the AI asked, its answer."""
+        return any(reply.by == USER for reply in self.replies)
+
+    @property
+    def waiting(self) -> bool:
+        """Whether it waits on the AI: open, and not a question still waiting on the user."""
+        return self.status == "open" and (not self.question or self.answered)
 
 
 class Question(BaseModel):

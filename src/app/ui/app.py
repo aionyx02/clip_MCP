@@ -31,6 +31,7 @@ from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 
 from app import clients, server
+from app.models.comment import USER
 from app.engine.ffmpeg import hidden_window_flags
 from app.engine import models
 from app.engine import playback as playback_module
@@ -554,7 +555,7 @@ async def comment(request: Request) -> Response:
         status = body.get("status")
         if status not in (None, "open", "resolved"):
             return _error("a comment is open or resolved", 400)
-        changed = await run_in_threadpool(server.change_comment, project_id, comment_id, "你",
+        changed = await run_in_threadpool(server.change_comment, project_id, comment_id, USER,
                                           str(body.get("reply", "")), status)
     except ValueError as error:
         return _error(str(error), 400)

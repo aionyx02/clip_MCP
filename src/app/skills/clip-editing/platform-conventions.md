@@ -116,27 +116,12 @@ least three, and each is at least ten seconds; `problems` says what breaks
 that. Fixing it means merging or renaming parts — a change to the plan, so
 ask.
 
-**The cover is your judgement, not the server's.** It has two jobs, and no
-measurement knows either: it shows what the video is about, and it reads at a
-glance at the size people first see it. `propose_covers` only lays the frames
-out — it opens with the plan's goal and parts, and puts what is being said under
-each frame. Choose like this:
-
-1. Say to yourself what the video is about in a few words — the goal, and where
-   it lands (the finished thing, the result, the payoff part). The cover shows
-   that: for a video about making something, the thing made, in use; for a
-   story, its decisive moment; the person only when the video is about them.
-   The frame with the biggest face is often the wrong one.
-2. Look at the sheet with `per_shot` 2 or 3 over the parts that carry the point
-   (`part` for one at a time), and pick two or three candidates.
-3. For each, call again with `around` at its time and choose the exact frame:
-   one subject filling a good part of the frame, sharp, not mid-motion, not
-   cluttered, eyes open, nothing important at the very edge.
-4. Offer the user your best one or two, each with a sentence on why, and let
-   them choose. Save it with `export_cover`, whose `reason` says why.
-5. `export_cover` shows the cover at feed size, and a vertical one cropped to the
-   3:4 middle a profile grid shows. If the subject is lost at that size or falls
-   outside the middle, choose again before saying it is done.
+The cover is chosen for what the video is about, not for what the frames
+measure: an `export_cover` on the sheet's biggest face is often the wrong cover
+for a video about the thing in that person's hands. Say to yourself where the
+video lands — the thing made, the result, the payoff part — and look for that
+with `propose_covers` `part` and `per_shot`, then `around` your picks; offer the
+user your best one or two with why.
 
 A title on the cover is the user's to add in another program; say so if the
 frame needs one to be understood.

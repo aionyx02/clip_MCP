@@ -19,7 +19,8 @@ class Verdict(BaseModel):
     """What whoever judged said, before they knew which was the change."""
 
     better: Literal["X", "Y", "same"] = Field(..., description="Which handles the problem better, or neither")
-    broke: bool = Field(..., description="Whether either made what is around the problem worse")
+    broke: Literal["neither", "X", "Y", "both"] = Field(
+        ..., description="Which, if either, makes what is around the problem worse")
     why: str = Field(..., min_length=1, description="What they saw and heard, in their words")
     judged_by: Literal["subagent", "user", "same_ai"] = Field(
         ..., description="A fresh subagent that saw none of the change, the user, or the AI that made it",

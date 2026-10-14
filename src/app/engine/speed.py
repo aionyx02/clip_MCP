@@ -162,7 +162,8 @@ def estimate(repo: Repository, here: Machine, footage: Dict[str, float], speaker
 # Provisional (roadmap §13): seconds of work per second of picture for each part of a render,
 # before this computer has rendered anything: a piece of picture at full cost, the pass that
 # puts the cut together a third of that, and measuring its loudness half that pass, since it
-# mixes the sound without drawing any picture. Only their proportions matter.
+# mixes the sound without drawing any picture; reading every frame back for flaws a quarter of
+# that pass, since it only decodes, at a small size. Only their proportions matter.
 RENDER_COST = {"pieces": 1.0, "final": 1 / 3, "loudness": 1 / 6, "scan": 1 / 12}
 # Provisional (roadmap §13): a part of a render shorter than this is mostly FFmpeg starting up,
 # so its pace says little about the next one.

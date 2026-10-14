@@ -28,8 +28,8 @@ from mcp.types import TextContent
 from pydantic import BaseModel, Field, TypeAdapter
 from app.models.media import Asset, HeardAgain, Measured, MediaAnalysis, Source, Span, SpeakerTurn, Transcript
 from app.models.plan import (
-    EditPlan, PlanAmendment, Trim, TrimKind, apply_amendment, describe_amendment, short_clip_ids, whole_clip_id,
-    with_whole_clip_ids,
+    EditPlan, MusicCue, PlanAmendment, SetMusicCueOp, Trim, TrimKind, apply_amendment, describe_amendment,
+    short_clip_ids, whole_clip_id, with_whole_clip_ids,
 )
 from app.models.semantic import (
     ClipDescription, ClipKind, ClipLevel, SectionChoice, SemanticClip, SemanticTimeline, Tag, TagSource,
@@ -53,7 +53,7 @@ from app.models.timeline import (
     validate_project,
 )
 from app.models.comment import Comment, Preference, Question, Reply
-from app.models.offer import OfferedSong, SongOffer
+from app.models.offer import TRIAL_VOLUME, OfferedSong, SongOffer
 from app.models.trial import Trial, Verdict
 from app.models.job import Job, JobKind, JobStatus
 from app.engine import cards, texts, looks, loudness, machine, meaning, resources, speed, stills
@@ -90,7 +90,7 @@ from app.engine.compare import parts_of as cut_parts
 from app.engine.merge import WHOLE_PICKS, merge, merge_plans
 from app.engine.delivery import (
     CHECKS, Finding, chapter_metadata, chapters, check_delivery, clock, cover_candidates, frames_around, light_steps,
-    look_candidates, on_screen, rights_facts,
+    look_candidates, marked_parts, on_screen, rights_facts,
 )
 from app.engine.joins import HeardWord, Join, joins_in, pause_across, words_heard
 from app.engine.frames import feed_preview, format_timestamp, still, storyboard_sheet
@@ -1093,11 +1093,13 @@ def export_notices(
     if not project:
         raise ValueError(f"project {project_id} not found")
     assets = _referenced_assets(project)
+    # Every file looked up before any is written, so a refusal changes nothing.
+    named = {asset_id: assets.get(asset_id) or repo.get_assets([asset_id]).get(asset_id) for asset_id in licences or {}}
+    unknown = [asset_id for asset_id, asset in named.items() if asset is None]
+    if unknown:
+        raise ValueError(f"asset {', '.join(unknown)} not found; no licence was kept")
     for asset_id, licence in (licences or {}).items():
-        asset = assets.get(asset_id) or repo.get_assets([asset_id]).get(asset_id)
-        if asset is None:
-            raise ValueError(f"asset {asset_id} not found")
-        asset = asset.model_copy(update={"licence": licence.strip() or None})
+        asset = named[asset_id].model_copy(update={"licence": licence.strip() or None})
         repo.save_asset(asset)
         assets[asset_id] = asset
     tags: Dict[str, Dict[str, str]] = {}
@@ -1118,8 +1120,10 @@ def export_notices(
             "and call again with `text`" + ("" if next_to else " and `next_to` the rendered file")
         )}
     if next_to:
+        if not os.path.isdir(os.path.dirname(os.path.abspath(next_to))):
+            raise ValueError(f"there is no folder for {next_to}; give the rendered file's path")
         stem, _ = os.path.splitext(next_to)
-        path = f"{stem}_notices.txt"
+        path = housekeeping.unique_path(os.path.dirname(os.path.abspath(next_to)), f"{os.path.basename(stem)}_notices.txt")
     else:
         path = housekeeping.unique_path(str(output_dir()), _delivery_name(project, "notices", ".txt"))
     os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -3087,7 +3091,7 @@ def view_frames(
 @mcp.tool()
 def view_render(
     job_id: str,
-    at: Literal["even", "captions"] = "even",
+    at: Literal["even", "captions", "spots"] = "even",
     times: Optional[List[Annotated[float, Field(ge=0)]]] = None,
     start: Annotated[float, Field(ge=0)] = 0,
     end: Optional[float] = None,
@@ -3108,7 +3112,9 @@ def view_render(
     Args:
         job_id: The render, preview or full, from `render_project`.
         at: `even` spreads `count` frames over the stretch; `captions` takes
-            one from the middle of each caption on screen.
+            one from the middle of each caption on screen; `spots` takes, for
+            each stretch reading every frame found black, frozen or a flash,
+            the frame before it, its middle and the frame after.
         times: Exact seconds of the render to look at instead.
         start: Only look from here, in seconds of the render.
         end: Only look up to here; omit for the end.
@@ -3131,6 +3137,18 @@ def view_render(
     wanted: List[tuple] = []
     if times:
         wanted = [(seconds, "") for seconds in times]
+    elif at == "spots":
+        if not job.spots:
+            said.append("every frame of this render was read and nothing was found black, frozen or a flash"
+                        if job.status == JobStatus.COMPLETED else "this render was not read frame by frame")
+        step = 1 / (project.fps_num / project.fps_den) if project is not None else 0.04
+        for spot in job.spots:
+            begin, finish = float(spot["start"]), float(spot["end"])
+            if finish <= start or (last is not None and begin >= last):
+                continue
+            name = f"{spot['kind']} {begin:.2f}–{finish:.2f}s"
+            wanted += [(max(0.0, begin - step), f"{name}, the frame before"), ((begin + finish) / 2, f"{name}, middle"),
+                       (finish + step, f"{name}, the frame after")]
     elif at == "captions":
         if not job.captioned:
             said.append("this render has no captions burned in; render with burn_subtitles to look at them")
@@ -5257,10 +5275,8 @@ def render_project(
     burn_subtitles: bool = False,
     frame: Optional[Literal["landscape", "portrait", "square"]] = None,
     follow_faces: bool = True,
-    allow: Optional[List[Literal[
-        "bad_picture", "clipping", "music", "mid_speech", "repeated", "continuity", "unplanned", "captions",
-        "length",
-    ]]] = None,
+    # Every kind of finding the check makes, from the check's own list, so a new one can always be allowed.
+    allow: Optional[List[Literal[CHECKS]]] = None,
 ) -> dict:
     """Start rendering a project to an MP4 file in the background.
 
@@ -5628,12 +5644,16 @@ def _plan_target(project: Project) -> Optional[float]:
         The plan's target length, or None when the sequence did not all come
         from one plan or that plan named no length.
     """
+    plan = _compiled_plan(project)
+    return plan.target.seconds if plan is not None else None
+
+def _compiled_plan(project: Project) -> Optional[EditPlan]:
+    """The plan a project's whole sequence was compiled from; None when it did not all come from one."""
     base = project.base_video_track
     compiled_from = {clip.from_plan_id for clip in base.clips} if base else set()
     if len(compiled_from) != 1 or None in compiled_from:
         return None
-    plan = repo.get_plan(next(iter(compiled_from)))
-    return plan.target.seconds if plan is not None else None
+    return repo.get_plan(next(iter(compiled_from)))
 
 def _findings(project: Project, burn_subtitles: bool) -> list:
     """Check a cut before it is rendered.
@@ -5769,7 +5789,7 @@ def read_cut(project_id: str) -> dict:
     if base is None or not base.clips:
         raise ValueError(f"project {project_id} has nothing on its sequence to read")
     assets = _referenced_assets(project)
-    markers = sorted(project.markers, key=lambda marker: marker.timeline_in)
+    parts = marked_parts(project)
     placed = place_cues(project, project.subtitles) if project.subtitles else []
 
     def seen(clip: Clip) -> str:
@@ -5800,7 +5820,7 @@ def read_cut(project_id: str) -> dict:
     part = None
     above = [clip for track in project.video_tracks[1:] for clip in track.clips]
     for clip in sorted(base.clips, key=lambda clip: clip.timeline_in):
-        now = next((marker.name for marker in reversed(markers) if marker.timeline_in <= clip.timeline_in), None)
+        now = next((marker.name for opens, _, marker in reversed(parts) if opens <= float(clip.timeline_in)), None)
         if now != part and now is not None:
             script.append(f"== {now}")
             part = now
@@ -5901,13 +5921,13 @@ def propose_covers(
     else:
         offered = frames_around(project, analyses, around)
     if part is not None:
-        marks = sorted(project.markers, key=lambda marker: marker.timeline_in)
-        named = [index for index, marker in enumerate(marks) if part in (marker.name, marker.id, marker.from_beat_id)]
-        if not named:
+        parts = marked_parts(project)
+        span = next(((opens, closes) for opens, closes, marker in parts
+                     if part in (marker.name, marker.id, marker.from_beat_id)), None)
+        if span is None:
             raise ValueError(f"no part called {part!r}; the parts are: "
-                             f"{', '.join(marker.name for marker in marks) or 'none'}")
-        opens = float(marks[named[0]].timeline_in)
-        closes = float(marks[named[0] + 1].timeline_in) if named[0] + 1 < len(marks) else float(project.duration)
+                             f"{', '.join(marker.name for _, _, marker in parts) or 'none'}")
+        opens, closes = span
         offered = [item for item in offered if opens <= item[2] < closes]
     if not offered:
         raise ValueError(f"project {project_id} has no picture to take a cover from")
@@ -5926,9 +5946,7 @@ def propose_covers(
                        + (f" | 「{words}」" if words else ""))
     header = [f"{len(offered)} cover candidate(s) for project {project_id}, {project.width}x{project.height}"
               + (f", around {around:g}s" if around is not None else "") + ":"]
-    base = project.base_video_track
-    compiled_from = {clip.from_plan_id for clip in base.clips} if base else set()
-    plan = repo.get_plan(next(iter(compiled_from))) if len(compiled_from) == 1 and None not in compiled_from else None
+    plan = _compiled_plan(project)
     if plan is not None and (plan.goal or plan.beats):
         parts = " → ".join(beat.name or beat.id for beat in plan.beats)
         header.insert(0, "What the video is for: " + (plan.goal or "(no goal written)")
@@ -7059,7 +7077,7 @@ def _comment_said(project: Project, comment: Comment) -> dict:
         if comment.start_anchor else None
     return {
         "id": comment.id, "text": comment.text, "by": comment.by, "status": comment.status,
-        **({"question": True, "answered": any(reply.by == "你" for reply in comment.replies)}
+        **({"question": True, "answered": comment.answered}
            if comment.question else {}),
         "at": clock(now["start"]) + (f"–{clock(now['end'])}" if now["end"] is not None else ""),
         "start": now["start"], "end": now["end"], "clip_id": now["clip_id"], "gone": now["gone"],
@@ -7085,8 +7103,7 @@ def open_comments(project_id: str) -> int:
     Returns:
         The number of open comments.
     """
-    return sum(comment.status == "open" and (not comment.question or any(reply.by == "你" for reply in comment.replies))
-               for comment in repo.comments(project_id))
+    return sum(comment.waiting for comment in repo.comments(project_id))
 
 # How far either side of the problem a judge sees, for whether the change broke what is
 # around it. Provisional.
@@ -7148,7 +7165,7 @@ def start_trial(
     if job.project_id != project_id:
         raise ValueError(f"render {before_job} is not of project {project_id}")
     length = _render_length(path)
-    if end <= at or (length is not None and at >= length):
+    if end <= at or (length is not None and end > length + 0.05):
         raise ValueError(f"the stretch {at:g}–{end:g}s is not in the {length or 0:.1f}s render")
     trial = Trial(id="t" + uuid.uuid4().hex[:7], project_id=project_id, problem=problem.strip(),
                   evidence=evidence.strip(), hypothesis=hypothesis.strip(), expected=expected.strip(),
@@ -7188,8 +7205,10 @@ def trial_candidate(
     if trial.verdict is not None:
         raise ValueError(f"trial {trial_id} has been judged; start another")
     job, path = _finished_render(after_job)
-    if job.project_id != trial.project_id or after_job == trial.before_job:
-        raise ValueError(f"render {after_job} is not a render of the change to project {trial.project_id}")
+    if (job.project_id != trial.project_id or after_job == trial.before_job
+            or (job.project_version or 0) <= (trial.before_version or 0)):
+        raise ValueError(f"render {after_job} is not a render of project {trial.project_id} made after the change; "
+                         f"the cut before was version {trial.before_version}")
     shutil.copyfile(path, os.path.join(_trial_dir(trial.id), "after.mp4"))
     trial.after_job, trial.after_version = after_job, job.project_version
     trial.candidate_at = trial.at if candidate_at is None else candidate_at
@@ -7198,8 +7217,8 @@ def trial_candidate(
     repo.save_trial(trial)
     return {"trial_id": trial.id, "next": (
         "have it judged by someone who has not seen the change: start a fresh subagent with no part in this "
-        "conversation, give it only `trial_pack` and ask which of X and Y handles the problem better and whether "
-        "either breaks what is around it; or show the pack to the user. Then record it with `judge_trial`. "
+        "conversation, give it only `trial_pack` and ask which of X and Y handles the problem better and which, "
+        "if either, breaks what is around it; or show the pack to the user. Then record it with `judge_trial`. "
         "Judging it yourself is not blind — you know which you made — and the record says so")}
 
 @mcp.tool()
@@ -7235,8 +7254,8 @@ def trial_pack(trial_id: str) -> ToolResult:
     if trial.evidence:
         lines.append(f"What shows it: {trial.evidence}")
     lines.append(f"Below, X above Y: the same stretch in two versions of the cut, with {TRIAL_MARGIN_SECONDS:g}s "
-                 "either side. Say which handles the problem better, or that neither does, and whether either makes "
-                 "what is around it worse.")
+                 "either side. Say which handles the problem better, or that neither does, and which, if either, "
+                 "makes what is around it worse.")
     for label in ("X", "Y"):
         path, start, finish = files[labels[label]]
         length = _render_length(path) or finish
@@ -7258,7 +7277,7 @@ def trial_pack(trial_id: str) -> ToolResult:
 def judge_trial(
     trial_id: str,
     better: Literal["X", "Y", "same"],
-    broke: bool,
+    broke: Literal["neither", "X", "Y", "both"],
     why: Annotated[str, Field(min_length=1)],
     judged_by: Literal["subagent", "user", "same_ai"],
 ) -> dict:
@@ -7268,7 +7287,8 @@ def judge_trial(
         trial_id: The trial.
         better: Which handles the problem better, as whoever judged said; `same`
             when neither does.
-        broke: Whether they said either makes what is around the problem worse.
+        broke: Which, if either, they said makes what is around the problem
+            worse. Only the change breaking something counts against it.
         why: What they saw and heard, in their words.
         judged_by: `subagent` for a fresh one that saw none of the change,
             `user`, or `same_ai` when you judged it yourself — which is not
@@ -7294,7 +7314,7 @@ def judge_trial(
     trial.verdict = Verdict(better=better, broke=broke, why=why.strip(), judged_by=judged_by)
     repo.save_trial(trial)
     shutil.rmtree(_trial_dir(trial.id), ignore_errors=True)
-    keep = "change" if better == trial.candidate_is and not broke else "original"
+    keep = "change" if better == trial.candidate_is and broke not in (trial.candidate_is, "both") else "original"
     said = {
         "change_was": trial.candidate_is, "keep": keep, "blind": judged_by != "same_ai",
         "trial": _trial_said(trial),
@@ -7355,14 +7375,20 @@ def ask_user(project_id: str, questions: Annotated[List[Question], Field(min_len
     if project is None:
         raise ValueError(f"project {project_id} not found")
     asked = []
+    length = float(project.duration)
     for question in questions:
-        end = (question.end if question.end is not None
-               and question.end - question.start >= SHORTEST_STRETCH_SECONDS else None)
+        if question.start > length or (question.end is not None and not (
+                question.start + SHORTEST_STRETCH_SECONDS <= question.end <= length + 0.001)):
+            raise ValueError(f"「{question.question[:20]}」 is asked at {question.start:g}"
+                             + (f"–{question.end:g}" if question.end is not None else "")
+                             + f"s, which is not a moment or a stretch of the {length:.1f}s cut; nothing was asked")
+    for question in questions:
+        end = question.end
         comment = Comment(
             id="c" + uuid.uuid4().hex[:7], project_id=project_id, by=f"AI（{_calling_client.get()}）",
             text=question.question.strip() + (f"\n（{question.why.strip()}）" if question.why.strip() else ""),
             commit=_current_commit(project_id), question=True,
-            start=round(max(0.0, question.start), 3), end=round(end, 3) if end is not None else None,
+            start=round(question.start, 3), end=round(end, 3) if end is not None else None,
             start_anchor=anchor_at(project, question.start),
             end_anchor=anchor_at(project, end) if end is not None else None,
         )
@@ -7425,10 +7451,13 @@ def offer_songs(
     You cannot hear whether a song suits the pictures; its tags are a guess at
     its mood, about half the time right. Narrow the music down to two or three
     with `find_music`, then offer them here: the editor plays the stretch with
-    each in turn in place of its music, as loud as the music there is, and the
-    user picks by ear. Their pick comes back as a comment on the stretch —
-    which song, from which second — for you to set with `set_music_cue` or
-    `fit_track`. A new offer replaces the last.
+    each in turn in place of its music — at the level and fades of the plan's
+    cue there, or else as loud as the music there is — and the user picks by
+    ear. Their pick comes back as a comment on the stretch: which song, from
+    which second. When the stretch is a music cue of the plan the cut was
+    compiled from (`beat_id`, or the start of the cut), the pick is already
+    written into that cue, and the comment says so — compile the plan to hear
+    it; otherwise set it with `fit_track`. A new offer replaces the last.
 
     Args:
         project_id: The video.
@@ -7452,18 +7481,19 @@ def offer_songs(
     if project is None:
         raise ValueError(f"project {project_id} not found")
     length = float(project.duration)
+    if beat_id is not None and (start is not None or end is not None):
+        raise ValueError("give the part as `beat_id`, or the stretch as `start` and `end`, not both")
     if beat_id is not None:
-        markers = sorted(project.markers, key=lambda marker: marker.timeline_in)
-        at = next((index for index, marker in enumerate(markers) if marker.from_beat_id == beat_id), None)
-        if at is None:
+        parts = marked_parts(project)
+        span = next(((opens, closes) for opens, closes, marker in parts if marker.from_beat_id == beat_id), None)
+        if span is None:
             raise ValueError(f"the cut has no part {beat_id}; its parts: "
-                             + (", ".join(marker.from_beat_id or marker.name for marker in markers) or "none"))
-        start = float(markers[at].timeline_in)
-        end = float(markers[at + 1].timeline_in) if at + 1 < len(markers) else length
-    start = 0.0 if start is None else max(0.0, start)
-    end = length if end is None else min(end, length)
-    if end <= start:
-        raise ValueError(f"the stretch {start:g}–{end:g}s of a {length:.1f}s cut is empty")
+                             + (", ".join(marker.from_beat_id or marker.name for _, _, marker in parts) or "none"))
+        start, end = span
+    start = 0.0 if start is None else start
+    end = length if end is None else end
+    if not 0 <= start < end <= length + 0.001:
+        raise ValueError(f"the stretch {start:g}–{end:g}s is not inside the {length:.1f}s cut")
     names = []
     for song in songs:
         asset = repo.get_assets([asset_id_for(song.asset_id)]).get(asset_id_for(song.asset_id))
@@ -7476,11 +7506,19 @@ def offer_songs(
                              f"so it cannot be heard from {song.start:g}s")
         song.asset_id = asset.id
         names.append(os.path.basename(asset.path))
-    playing = [clip for track in project.tracks if track.track_type == TrackType.AUDIO and track.duck_under_speech
-               for clip in track.clips if float(clip.timeline_in) < end and float(clip.timeline_out) > start]
-    repo.save_song_offer(SongOffer(project_id=project_id, start=round(start, 3), end=round(end, 3), songs=songs,
-                                   volume=playing[0].volume if playing else SongOffer.model_fields["volume"].default,
-                                   beat_id=beat_id), project_id)
+    offer = SongOffer(project_id=project_id, start=round(start, 3), end=round(end, 3), songs=songs, beat_id=beat_id)
+    # Heard as the plan's cue there would play it; else as loud as the music the cut has there.
+    found = _offered_cue(project, offer)
+    if found is not None:
+        cue = found[1]
+        offer = offer.model_copy(update={"volume": cue.volume, "fade_in": cue.fade_in, "fade_out": cue.fade_out})
+    else:
+        playing = [clip for track in project.tracks if track.track_type == TrackType.AUDIO
+                   and track.duck_under_speech for clip in track.clips
+                   if float(clip.timeline_in) < end and float(clip.timeline_out) > start]
+        if playing:
+            offer = offer.model_copy(update={"volume": playing[0].volume})
+    repo.save_song_offer(offer, project_id)
     return {"offered": names, "say": (
         f"tell the user {len(names)} songs are waiting in the editor to hear under {clock(start)}–{clock(end)}; "
         "their pick comes back as a comment")}
@@ -7513,13 +7551,25 @@ def song_trial(project: Project, offer: SongOffer, number: int) -> Project:
     music[0].clips.append(Clip(
         id="trial", asset_id=song.asset_id, timeline_in=Decimal(str(offer.start)),
         source_range=TimeRange(start=Decimal(str(song.start)), end=Decimal(str(round(song.start + heard, 3)))),
-        volume=offer.volume, audio_fade_in=Decimal("1"), audio_fade_out=Decimal("1.5"),
+        volume=offer.volume, audio_fade_in=Decimal(str(offer.fade_in)), audio_fade_out=Decimal(str(offer.fade_out)),
     ))
     music[0].clips.sort(key=lambda clip: clip.timeline_in)
     return trial
 
+def _offered_cue(project: Project, offer: SongOffer) -> Optional[Tuple[EditPlan, MusicCue]]:
+    """The music cue of the plan the cut was compiled from that the offered stretch is, if it is one."""
+    plan = _compiled_plan(project)
+    if plan is None or plan.music is None or (offer.beat_id is None and offer.start > 0):
+        return None
+    cue = next((cue for cue in plan.music.cues if cue.beat_id == offer.beat_id), None)
+    return (plan, cue) if cue is not None else None
+
 def pick_song(project_id: str, number: int) -> dict:
     """Take the user's pick of the offered songs to the AI, as a comment on the stretch.
+
+    Where the stretch is a music cue of the plan the cut was compiled from,
+    the pick is written into that cue too, so compiling the plan again plays
+    it; the comment says so.
 
     The editor's, never the AI's: the pick is the user speaking.
 
@@ -7539,8 +7589,14 @@ def pick_song(project_id: str, number: int) -> dict:
     song = offer.songs[number - 1]
     asset = repo.get_assets([song.asset_id]).get(song.asset_id)
     name = os.path.basename(asset.path) if asset is not None else song.asset_id
-    made = add_comment(project_id, f"配樂選「{name}」，從歌的 {song.start:g} 秒開始（{song.asset_id}）",
-                       offer.start, offer.end)
+    said = f"配樂選「{name}」，從歌的 {song.start:g} 秒開始（{song.asset_id}）"
+    found = _offered_cue(repo.get_project(project_id), offer)
+    if found is not None:
+        plan, cue = found
+        amended = amend_plan(plan.id, plan.version, [SetMusicCueOp(beat_id=cue.beat_id, asset_id=song.asset_id,
+                                                                     start=song.start)], note=said)
+        said += f"；已寫進計畫 {plan.id} 第 {amended['version']} 版，重新 compile_plan 後生效"
+    made = add_comment(project_id, said, offer.start, offer.end)
     repo.save_song_offer(None, project_id)
     return made
 
@@ -7701,7 +7757,7 @@ def get_job(
         `error_message`, for a finished analysis worth a second look a
         `note` to pass on, and for a finished render whose every frame was
         found black, frozen or a flash somewhere, `frames`: `found`, what the
-        cut did not ask for — look at each with `view_render` at its time —
+        cut did not ask for — look at them with `view_render` `at: "spots"` —
         and `meant`, inside a fade, a dip, a card or a photo; and a summary
         over all of them: `finished` and
         `total` counts, `failed` counting those that failed or were

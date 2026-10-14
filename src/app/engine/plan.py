@@ -930,6 +930,26 @@ def _cue_entries(plan: EditPlan, pieces: Sequence[Piece]) -> Dict[int, MusicCue]
             entries[at] = cue
     return entries
 
+def cue_stretches(plan: EditPlan, pieces: Sequence[Piece]) -> List[Tuple[MusicCue, float, float]]:
+    """Say where in the cut each music cue holds: from where its beat begins to where the next cue's does.
+
+    Args:
+        plan: The plan.
+        pieces: Its windows, in order.
+
+    Returns:
+        `(cue, at, until)` in seconds of the cut, in the order they come in;
+        the last runs to the end of the cut.
+    """
+    starts: List[float] = []
+    position = 0.0
+    for piece in pieces:
+        starts.append(round(position, 3))
+        position += piece.played
+    entries = sorted(_cue_entries(plan, pieces).items())
+    return [(cue, starts[index], starts[entries[order + 1][0]] if order + 1 < len(entries) else round(position, 3))
+            for order, (index, cue) in enumerate(entries)]
+
 def _song_length(source: Optional[Asset]) -> Optional[float]:
     """Say how long a song runs, to the millisecond the timeline keeps.
 
@@ -2730,19 +2750,10 @@ def music_beds(
     """
     if plan.music is None or not pieces:
         return []
-    starts: List[float] = []
-    position = 0.0
-    for piece in pieces:
-        starts.append(round(position, 3))
-        position += piece.played
-    total = round(position, 3)
-    entries = sorted(_cue_entries(plan, pieces).items())
     crossfade = plan.music.crossfade_seconds
     beds: List[Bed] = []
     lane, sounding = 0, False
-    for order, (index, cue) in enumerate(entries):
-        at = starts[index]
-        until = starts[entries[order + 1][0]] if order + 1 < len(entries) else total
+    for cue, at, until in cue_stretches(plan, pieces):
         if cue.asset_id is None or until <= at:
             sounding = False
             continue
@@ -2838,20 +2849,15 @@ def music_fit_notes(
         return []
     total = compiled_duration(pieces)
     payoff = next((beat.id for beat in plan.beats if beat.role == BeatRole.PAYOFF), None)
-    climax, position, starts = None, 0.0, []
+    climax, position = None, 0.0
     for piece in pieces:
         if piece.beat_id == payoff and climax is None:
             climax = position
-        starts.append(round(position, 3))
         position += piece.played
     # Where each cue holds the cut, and the second of its song it is at when it takes over: a
     # cross-fade lends it a little either side, but this is the stretch it was asked to play under.
-    entries = sorted(_cue_entries(plan, pieces).items())
-    spans: Dict[str, Tuple[float, float, float]] = {}
-    for order, (index, cue) in enumerate(entries):
-        until = starts[entries[order + 1][0]] if order + 1 < len(entries) else round(position, 3)
-        spans[f"cue:{cue.beat_id or '^'}"] = (
-            starts[index], until, song_entry(cue, cuts.get(cue.asset_id) if cuts else None))
+    spans = {f"cue:{cue.beat_id or '^'}": (at, until, song_entry(cue, cuts.get(cue.asset_id) if cuts else None))
+             for cue, at, until in cue_stretches(plan, pieces)}
     by_cue: Dict[str, List[Bed]] = {}
     for bed in beds:
         by_cue.setdefault(bed.key[0], []).append(bed)

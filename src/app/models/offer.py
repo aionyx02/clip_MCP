@@ -12,6 +12,13 @@ from typing import List, Optional
 from pydantic import BaseModel, Field
 
 
+# How loud a song is heard, and how it fades in and out, where neither the plan nor the cut
+# has music to take them from: what a plan's music cue starts at. Provisional, as those are.
+TRIAL_VOLUME = 0.35
+TRIAL_FADE_IN = 1.0
+TRIAL_FADE_OUT = 1.5
+
+
 class OfferedSong(BaseModel):
     """One song to hear, from where in it."""
 
@@ -26,7 +33,9 @@ class SongOffer(BaseModel):
     project_id: str
     start: float = Field(..., ge=0, description="Where the stretch begins, in seconds of the cut")
     end: float = Field(..., gt=0, description="Where it ends")
-    volume: float = Field(default=0.35, ge=0, description="How loud each is played, as the music would be")
+    volume: float = Field(default=TRIAL_VOLUME, ge=0, description="How loud each is played, as the music would be")
+    fade_in: float = Field(default=TRIAL_FADE_IN, ge=0, description="How it fades in, as the music would")
+    fade_out: float = Field(default=TRIAL_FADE_OUT, ge=0, description="How it fades out")
     songs: List[OfferedSong]
     offered_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     beat_id: Optional[str] = Field(default=None, description="The part of the plan the stretch is, if it is one")

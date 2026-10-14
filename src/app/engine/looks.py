@@ -16,7 +16,8 @@ from PIL import Image
 from app.engine.frames import extract_frame
 
 # Where in a clip its frames are taken, as shares of its length: one frame can catch the
-# moment two otherwise different shots pass through the same picture.
+# moment two otherwise different shots pass through the same picture. Provisional: three is
+# what one decode each could afford, not a count anything was measured against.
 SAMPLES = (0.25, 0.5, 0.75)
 # Two frames this many bits apart of 64 look alike. Provisional: what a viewer would
 # not tell apart has not been measured against anyone looking.

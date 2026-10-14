@@ -3,7 +3,7 @@
 from pathlib import Path
 
 from app.engine import scan
-from app.server import import_asset, render_project
+from app.server import import_asset, render_project, view_render
 from helpers import build_project, edit, finished, insert, video_track
 
 
@@ -34,6 +34,10 @@ def test_black_nobody_asked_for_is_found_in_a_render_and_a_fade_is_not(media: Pa
     project = build_project([video_track(), insert("a", wide, 0, 2), insert("b", black, 0, 0.5),
                              insert("c", wide, 2, 4)], width=640, height=360)
     edit(project, [{"action": "set_clip_look", "track_id": "main", "clip_id": "c", "video_fade_out": 0.5}])
-    frames = finished(render_project(project))["frames"]
+    job = finished(render_project(project))
+    frames = job["frames"]
     assert len(frames["found"]) == 1 and frames["found"][0].startswith("2.00–2.50s black (0.50s) in clip b")
     assert any("fade out of c" in line for line in frames["meant"])
+    # And it is looked at: the frame before each, its middle, and the frame after.
+    shown = view_render(job["job_id"], at="spots").content[0].text
+    assert "black 2.00–2.50s, the frame before" in shown and "black 2.00–2.50s, the frame after" in shown

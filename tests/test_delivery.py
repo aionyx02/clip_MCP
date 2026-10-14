@@ -662,6 +662,11 @@ def test_two_files_that_look_alike_apart_in_the_cut_are_found() -> None:
     assert found[1].startswith("clips b (at 0:04) and d (at 0:12)")
     assert alike({}) == [] and alike({"a": same, "c": other}) == []
 
+    # Marked off by a transition into it, the second is told apart; so would a card just before it be.
+    from app.models.timeline import Dissolve
+    project.tracks[0].clips[2].transition_in = Dissolve(kind="dissolve", seconds=Decimal("0.5"))
+    assert [message[:15] for message in alike({"a": same, "b": same, "c": same, "d": same})] == ["clips b (at 0:0"]
+
 def test_only_a_clip_nothing_is_said_or_written_over_is_told_apart_by_its_look() -> None:
     from app.models.media import Transcript, TranscriptSegment
     from app.models.timeline import TextLayer
@@ -708,7 +713,13 @@ def test_a_shot_darker_than_the_ones_either_side_is_offered_the_brightness_that_
     project.tracks[0].clips[1].color = None
     assert light_steps(project_of(clip("a", "x", 0, 4, 0), clip("b", "y", 0, 4, 4), markers=[(0, "一"), (4, "二")]),
                        analyses) == []
+    # A part beginning inside a shot puts the shots either side of it in different parts.
+    assert light_steps(project_of(clip("a", "x", 0, 4, 0), clip("b", "y", 0, 4, 4), markers=[(0, "一"), (2, "二")]),
+                       analyses) == []
     # A colour cast is said with the way to set it.
     warm = {"x": lit("x", 0.5, warmth=0.0), "y": lit("y", 0.5, warmth=0.06)}
     [step] = light_steps(project_of(clip("a", "x", 0, 4, 0), clip("b", "y", 0, 4, 4)), warm)
     assert "clip b is warmer by 0.06; a color temperature above 6500 on it cools it" in step
+    warmed = project_of(clip("a", "x", 0, 4, 0), clip("b", "y", 0, 4, 4))
+    warmed.tracks[0].clips[1].color = ColorAdjust(temperature=7500)
+    assert light_steps(warmed, warm) == []

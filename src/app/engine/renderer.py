@@ -477,15 +477,19 @@ def _run_render(job: Job, spec: Dict[str, Any], context: JobContext, repo: Optio
     start, share = (done + weights[-1]) / total, scanning / total
     context.report(start, "checking every frame")
     began = time.monotonic()
-    run_ffmpeg(
-        scan.command(command[0], spec["render_path"], job.work_dir),
-        os.path.join(job.work_dir, scan.LOG_FILE_NAME),
-        length,
-        lambda fraction: context.report(start + fraction * share),
-        context.is_cancelled,
-    )
-    scan.keep(job.work_dir, length)
-    taken["scan"] = (time.monotonic() - began, length)
+    # The video is made by now: a scan that fails, or is cancelled, leaves it unscanned, never lost.
+    try:
+        run_ffmpeg(
+            scan.command(command[0], spec["render_path"], job.work_dir),
+            os.path.join(job.work_dir, scan.LOG_FILE_NAME),
+            length,
+            lambda fraction: context.report(start + fraction * share),
+            context.is_cancelled,
+        )
+        scan.keep(job.work_dir, length)
+        taken["scan"] = (time.monotonic() - began, length)
+    except (RuntimeError, OSError, OperationCancelled):
+        pass
     if repo is not None:
         speed.record_render(repo, computer, job.preview, taken)
     if spec.get("deliver"):

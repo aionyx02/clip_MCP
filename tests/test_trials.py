@@ -17,7 +17,7 @@ def test_a_change_is_judged_blind_and_kept_only_when_it_helped(media: Path) -> N
                                  "接點不再那麼跳", at=3.0, end=5.0, evidence="inspect_join #1")
     trial = started["trial_id"]
     with pytest.raises(ValueError, match="no change to judge yet"):
-        server.judge_trial(trial, "X", False, "看不出來", "subagent")
+        server.judge_trial(trial, "X", "neither", "看不出來", "subagent")
 
     edit(project, [{"action": "trim_clip", "track_id": "main", "clip_id": "b",
                     "new_source_range": {"start": 4.5, "end": 9}}])
@@ -33,11 +33,13 @@ def test_a_change_is_judged_blind_and_kept_only_when_it_helped(media: Path) -> N
     assert pack.content[1].type == "image"
 
     change = server.repo.trial(trial).candidate_is
-    judged = server.judge_trial(trial, change, False, "Y 的接點比較順", "subagent")
+    original = "Y" if change == "X" else "X"
+    # The original breaking what is around the problem does not count against the change.
+    judged = server.judge_trial(trial, change, original, "新的接點比較順，舊的後面那句被切掉", "subagent")
     assert judged["change_was"] == change and judged["keep"] == "change" and judged["blind"] is True
     assert not os.path.exists(server._trial_dir(trial))
     with pytest.raises(ValueError, match="was judged already"):
-        server.judge_trial(trial, "same", False, "再看一次", "user")
+        server.judge_trial(trial, "same", "neither", "再看一次", "user")
     [kept] = server.get_trials(project)["trials"]
     assert kept["verdict"]["judged_by"] == "subagent" and kept["hypothesis"] == "把 b 的開頭往前多留半秒"
 
@@ -49,5 +51,5 @@ def test_a_change_that_broke_what_is_around_it_is_not_kept() -> None:
                   before_job="j1", before_version=3, after_job="j2", after_version=4, candidate_at=0,
                   candidate_end=1, candidate_is="Y")
     server.repo.save_trial(trial)
-    judged = server.judge_trial("tbroke1", "Y", True, "Y 比較好，但後面那句被切掉", "same_ai")
+    judged = server.judge_trial("tbroke1", "Y", "Y", "Y 比較好，但後面那句被切掉", "same_ai")
     assert judged["keep"] == "original" and judged["blind"] is False and "version 3" in judged["next"]

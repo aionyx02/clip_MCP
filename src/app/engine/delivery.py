@@ -27,7 +27,7 @@ from app.engine.library import MUSIC, library_of
 from app.engine.semantic import clean_cuts, combined_over, join_voices, share_covered, was_audible, was_made_up
 from app.engine.subtitles import caption_overflow, captioned_clips
 from app.models.media import Asset, MediaAnalysis
-from app.models.timeline import CaptionStyle, Clip, PlacedCue, Project, TrackType
+from app.models.timeline import CaptionStyle, Clip, Marker, PlacedCue, Project, TrackType
 
 # YouTube's rules for chapters written into a description: the first at 0:00, at least
 # three of them, each at least ten seconds long. The platform's rules, not a taste, and
@@ -102,6 +102,21 @@ def clock(seconds: float) -> str:
     minutes, secs = divmod(rest, 60)
     return f"{hours}:{minutes:02d}:{secs:02d}" if hours else f"{minutes}:{secs:02d}"
 
+def marked_parts(project: Project) -> List[Tuple[float, float, Marker]]:
+    """The parts of a cut: each marker, in timeline order, running to the next or to the end.
+
+    Args:
+        project: The cut.
+
+    Returns:
+        `(start, end, marker)` per marker that begins inside the cut.
+    """
+    duration = float(project.duration)
+    marks = sorted((marker for marker in project.markers if float(marker.timeline_in) < duration),
+                   key=lambda marker: marker.timeline_in)
+    return [(float(marker.timeline_in), float(marks[index + 1].timeline_in) if index + 1 < len(marks) else duration,
+             marker) for index, marker in enumerate(marks)]
+
 def chapters(project: Project) -> Tuple[List[Tuple[float, float, str]], List[str]]:
     """Read a project's parts back as chapters.
 
@@ -118,16 +133,7 @@ def chapters(project: Project) -> Tuple[List[Tuple[float, float, str]], List[str
         `(chapters, problems)` — one `(start, end, name)` per marker in
         timeline order, and what stops YouTube from taking them as chapters.
     """
-    duration = float(project.duration)
-    marks = sorted(
-        (marker for marker in project.markers if float(marker.timeline_in) < duration),
-        key=lambda marker: marker.timeline_in,
-    )
-    listed = [
-        (float(marker.timeline_in), float(marks[index + 1].timeline_in) if index + 1 < len(marks) else duration,
-         marker.name)
-        for index, marker in enumerate(marks)
-    ]
+    listed = [(start, end, marker.name) for start, end, marker in marked_parts(project)]
     problems: List[str] = []
     if not listed:
         return [], ["the project has no markers; compiling a plan writes one per beat, or add them with set_markers"]
@@ -625,7 +631,9 @@ def light_steps(project: Project, analyses: Mapping[str, MediaAnalysis]) -> List
     found: List[str] = []
     for index in range(1, len(clips)):
         before, after = clips[index - 1], clips[index]
-        if (before.id not in measured or after.id not in measured or float(after.timeline_in) in parts
+        # Measured against its own part only: a new part, wherever its marker falls, is a change made on purpose.
+        if (before.id not in measured or after.id not in measured or part_of(before) != part_of(after)
+                or float(after.timeline_in) in parts
                 or (after.transition_in is not None and after.transition_in.kind == "dip")):
             continue
         (light_before, warm_before), (light_after, warm_after) = measured[before.id], measured[after.id]
@@ -645,7 +653,11 @@ def light_steps(project: Project, analyses: Mapping[str, MediaAnalysis]) -> List
             lift = round(max(-1.0, min(1.0, current + target - measured[odd.id][0])), 2)
             said.append(f"brightness {light_before:.2f} → {light_after:.2f}; set_clip_look on clip {odd.id} with "
                         f"color brightness {lift:+.2f} puts it at {target:.2f}, between its neighbours")
-        if warm_before is not None and warm_after is not None and abs(warm_after - warm_before) >= WARMTH_STEP:
+        # A colour temperature set on either is the step dealt with: what kelvin does to the cast is
+        # not measured here, so it is not checked again, and the next render is the one to look at.
+        tempered = any(clip.color is not None and clip.color.temperature is not None for clip in (before, after))
+        if (warm_before is not None and warm_after is not None and not tempered
+                and abs(warm_after - warm_before) >= WARMTH_STEP):
             warmer = warm_after > warm_before
             said.append(f"clip {after.id} is {'warmer' if warmer else 'cooler'} by {abs(warm_after - warm_before):.2f}; "
                         f"a color temperature {'above' if warmer else 'below'} 6500 on it "
@@ -696,9 +708,14 @@ def _look_alikes(clips: Sequence[Clip], looks: Mapping[str, Sequence[int]]) -> L
     """
     found: List[Finding] = []
     ordered = sorted((clip for clip in clips if clip.card is None), key=lambda item: item.timeline_in)
+    # A card just before a clip, or a transition into it, marks it off from what came before.
+    carded = {float(clip.timeline_out) for clip in clips if clip.card is not None}
+    marked = {clip.id for clip in ordered
+              if clip.transition_in is not None or any(abs(float(clip.timeline_in) - out) < 0.01 for out in carded)}
     for index, first in enumerate(ordered):
         for second in ordered[index + 2:]:
-            if first.asset_id == second.asset_id or first.id not in looks or second.id not in looks:
+            if (first.asset_id == second.asset_id or first.id not in looks or second.id not in looks
+                    or second.id in marked):
                 continue
             same, bits = alike(looks[first.id], looks[second.id])
             if same:
@@ -706,7 +723,7 @@ def _look_alikes(clips: Sequence[Clip], looks: Mapping[str, Sequence[int]]) -> L
                     f"clips {first.id} (at {clock(float(first.timeline_in))}) and {second.id} "
                     f"(at {clock(float(second.timeline_in))}) are different files that look alike ({bits} of 64 "
                     "bits apart), and nothing said or written over them tells them apart; give the second a line, "
-                    "words over it or a card that says which it is"
+                    "words over it, a card before it that says which it is, or a transition into it"
                 ), tuple((float(at),) * 2 for clip in (first, second) for at in (clip.timeline_in, clip.timeline_out))))
     return found
 
@@ -850,7 +867,9 @@ class RightsFact:
     """Something in a cut its publisher may need permission for, or has to say.
 
     Attributes:
-        kind: `music` for a song laid under the cut, `other_voice` for
+        kind: `music` for a song laid under the cut, `recording` for any
+            other sound laid on a sound track — a song filed with the footage,
+            a voice-over, a sound effect — `other_voice` for
             somebody heard who is not the main speaker, `unchecked_voices` for
             talking nobody told the voices apart in, and `faces` for more than
             one face on screen at once.
@@ -893,7 +912,7 @@ def rights_facts(
     audio = [track for track in project.tracks if track.track_type == TrackType.AUDIO]
     for asset_id in dict.fromkeys(clip.asset_id for track in audio for clip in track.clips if clip.volume != 0):
         asset = assets.get(asset_id)
-        if asset is None or library_of(asset) != MUSIC:
+        if asset is None:
             continue
         spans = _joined_spans((float(clip.timeline_in), float(clip.timeline_out)) for track in audio
                               for clip in track.clips if clip.asset_id == asset_id and clip.volume != 0)
@@ -907,7 +926,9 @@ def rights_facts(
         if asset.source is None and not asset.licence:
             known.append("licence: nobody has said")
         known += [f"{key}: {value}" for key, value in tags.get(asset_id, {}).items() if value]
-        facts.append(RightsFact("music", os.path.basename(asset.path), spans, tuple(known)))
+        # Every recording laid on the sound tracks: a song filed with the footage is still a song.
+        kind = "music" if library_of(asset) == MUSIC else "recording"
+        facts.append(RightsFact(kind, os.path.basename(asset.path), spans, tuple(known)))
 
     tracks = ([project.base_video_track] if project.base_video_track else []) + audio
     heard = [clip for track in tracks for clip in track.clips

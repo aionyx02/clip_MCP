@@ -2588,3 +2588,25 @@ def test_evidence_outside_the_clip_or_trimmed_off_is_handed_back() -> None:
     })
     problems, _ = checked(plan.model_copy(update={"selections": [late, *plan.selections[1:]]}), by_id, assets)
     assert any("is not all played" in problem for problem in problems), problems
+
+def test_a_song_picked_by_ear_under_the_plan_s_music_is_written_into_its_cue(planned: dict, media: Path) -> None:
+    from app.models.offer import OfferedSong
+    from app.server import offer_songs, pick_song, set_asset_library, song_trial
+
+    song = import_asset(str(media / "song.mp3"))["id"]
+    jingle = import_asset(str(media / "jingle.wav"))["id"]
+    set_asset_library([song, jingle], "music")
+    stored = EditPlan.model_validate(get_plan(planned["plan_id"])["plan"])
+    save_plan(stored.model_copy(update={"music": MusicPlan(cues=[MusicCue(asset_id=jingle, volume=0.3, fade_in=0.4)])}))
+    project = create_project(name="配樂", width=640, height=360)["id"]
+    compile_plan(project_id=project, expected_version=1, plan_id=planned["plan_id"])
+    offer_songs(project, [OfferedSong(asset_id=song, start=2)])
+    # Heard as the plan's cue would play it.
+    offer = server_repo.song_offer(project)
+    assert (offer.volume, offer.fade_in) == (0.3, 0.4)
+    trial = song_trial(server_repo.get_project(project), offer, 1)
+    assert any(clip.asset_id == song and float(clip.audio_fade_in) == 0.4 for track in trial.tracks for clip in track.clips)
+    picked = pick_song(project, 1)
+    assert "已寫進計畫" in picked["text"]
+    cue = get_plan(planned["plan_id"])["plan"]["music"]["cues"][0]
+    assert (cue["asset_id"], cue["start"], cue["volume"]) == (song, 2, 0.3)
