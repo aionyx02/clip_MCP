@@ -200,7 +200,7 @@ wheels = [
 
 [[package]]
 name = "clip-mcp"
-version = "0.6.3"
+version = "0.6.4"
 source = { editable = "." }
 dependencies = [
     { name = "av" },
