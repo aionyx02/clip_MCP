@@ -5561,6 +5561,76 @@ def check_render(
     }
 
 @mcp.tool()
+def read_cut(project_id: str) -> dict:
+    """Read a cut back as a script: every shot in the order it plays, as a viewer meets it.
+
+    The checks find what is wrong with a cut mechanically — a black frame, a
+    cut inside a word. Whether the story holds is read, not measured: a line
+    that says why somebody did something, landing after what they did, passes
+    every check. Read this through before a final render and tell the user the
+    story in a few sentences, as it plays, so they can say where it goes wrong.
+
+    Args:
+        project_id: The project.
+
+    Returns:
+        `script`: one line per shot of the sequence — when it plays, the part
+        of the video it is in, the clip and what is on screen (the footage's
+        description, or its file), what is said over it, the captions shown
+        and the words on screen; what plays over it on a track above is under
+        it, indented.
+    """
+    project = repo.get_project(project_id)
+    if not project:
+        raise ValueError(f"project {project_id} not found")
+    base = project.base_video_track
+    if base is None or not base.clips:
+        raise ValueError(f"project {project_id} has nothing on its sequence to read")
+    assets = _referenced_assets(project)
+    markers = sorted(project.markers, key=lambda marker: marker.timeline_in)
+    placed = place_cues(project, project.subtitles) if project.subtitles else []
+
+    def seen(clip: Clip) -> str:
+        if clip.card is not None:
+            return f"card 「{clip.card.title}」" + (f" 「{clip.card.subtitle}」" if clip.card.subtitle else "")
+        described = [repo.get_semantic_clip(clip_id) for clip_id in clip.from_clip_ids]
+        words = "; ".join(found.description for found in described if found is not None and found.description)
+        asset = assets.get(clip.asset_id)
+        name = os.path.basename(asset.path) if asset is not None else clip.asset_id
+        return f"{name} {float(clip.source_range.start):.1f}–{float(clip.source_range.end):.1f}s" + (
+            f": {words}" if words else "")
+
+    def line(clip: Clip) -> str:
+        start, end = float(clip.timeline_in), float(clip.timeline_out)
+        parts = [f"{clock(start)}–{clock(end)}", f"clip {clip.id}", seen(clip)]
+        said = "" if clip.card is not None or clip.volume == 0 else _said_between(
+            clip.asset_id, float(clip.source_range.start), float(clip.source_range.end))
+        if said:
+            parts.append(f"said: 「{said}」")
+        shown = [cue.text for cue in placed if float(cue.start) < end and float(cue.end) > start]
+        if shown:
+            parts.append("captions: " + " / ".join(dict.fromkeys(shown)))
+        if clip.shown_texts:
+            parts.append("on screen: " + " / ".join(text.text for text in clip.shown_texts))
+        return " | ".join(parts)
+
+    script: List[str] = []
+    part = None
+    above = [clip for track in project.video_tracks[1:] for clip in track.clips]
+    for clip in sorted(base.clips, key=lambda clip: clip.timeline_in):
+        now = next((marker.name for marker in reversed(markers) if marker.timeline_in <= clip.timeline_in), None)
+        if now != part and now is not None:
+            script.append(f"== {now}")
+            part = now
+        script.append(line(clip))
+        for over in sorted((other for other in above
+                            if other.timeline_in < clip.timeline_out and other.timeline_out > clip.timeline_in
+                            and clip.timeline_in <= other.timeline_in),
+                           key=lambda other: other.timeline_in):
+            script.append("    over it: " + line(over))
+    return {"project_id": project_id, "version": project.version, "script": script}
+
+@mcp.tool()
 def get_chapters(project_id: str) -> dict:
     """Read the parts of a cut back as chapters, ready for a video description.
 

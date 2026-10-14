@@ -239,8 +239,9 @@ was not there to agree to them.
    B-roll comes in or goes off, and any moment the user points at. Whether a
    movement or a sentence carries across a cut is in those frames and words,
    not in what the plan says the clips are about.
-10. Render with `is_preview: false` once the user is happy, or as soon as the
-    preview checks out if they asked for the final file.
+10. Before `is_preview: false`, tell the user the story as `read_cut` reads it
+    (checks pass a line explaining what already happened), then render it once
+    they are happy, or once the preview checks out if they asked for the file.
 
 For later edits, call `get_project` first so your operations match the current
 clips and version.
