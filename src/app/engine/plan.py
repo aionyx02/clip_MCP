@@ -2736,11 +2736,20 @@ def music_fit_notes(
         return []
     total = compiled_duration(pieces)
     payoff = next((beat.id for beat in plan.beats if beat.role == BeatRole.PAYOFF), None)
-    climax, position = None, 0.0
+    climax, position, starts = None, 0.0, []
     for piece in pieces:
         if piece.beat_id == payoff and climax is None:
             climax = position
+        starts.append(round(position, 3))
         position += piece.played
+    # Where each cue holds the cut, and the second of its song it is at when it takes over: a
+    # cross-fade lends it a little either side, but this is the stretch it was asked to play under.
+    entries = sorted(_cue_entries(plan, pieces).items())
+    spans: Dict[str, Tuple[float, float, float]] = {}
+    for order, (index, cue) in enumerate(entries):
+        until = starts[entries[order + 1][0]] if order + 1 < len(entries) else round(position, 3)
+        spans[f"cue:{cue.beat_id or '^'}"] = (
+            starts[index], until, song_entry(cue, cuts.get(cue.asset_id) if cuts else None))
     by_cue: Dict[str, List[Bed]] = {}
     for bed in beds:
         by_cue.setdefault(bed.key[0], []).append(bed)
@@ -2765,10 +2774,15 @@ def music_fit_notes(
         if not energy or length is None:
             continue
         peak = fullest(energy)
-        if len(passes) == 1 and peak is not None and climax is not None and first.timeline_in <= climax:
-            lands = first.timeline_in + peak[0] - first.start if first.start <= peak[0] < first.end else None
+        span = spans.get(first.key[0])
+        # Only the song playing when the payoff begins: one another song takes over from before
+        # then cannot land its fullest part there, wherever it starts.
+        if (len(passes) == 1 and peak is not None and climax is not None and span is not None
+                and span[0] <= climax < span[1]):
+            at, until, entry = span
+            lands = at + peak[0] - entry if entry <= peak[0] < entry + until - at else None
             if lands is None or abs(lands - climax) > PEAK_TOLERANCE_SECONDS:
-                start = peak[0] - (climax - first.timeline_in)
+                start = peak[0] - (climax - at)
                 fix = (f"start the cue at {start:.1f}s of the song (set_music_cue) to land it there"
                        if 0 <= start < length else "a song that builds later would land it there")
                 notes.append(Note(

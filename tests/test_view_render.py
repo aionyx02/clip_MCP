@@ -105,3 +105,13 @@ def test_a_render_is_heard_with_its_levels(rendered: dict, monkeypatch: pytest.M
     assert heard["captions"] and heard["captions"][0].endswith("第一句")
     with pytest.raises(ValueError, match="either"):
         server.listen_again(start=0.0, end=3.0)
+
+
+def test_a_preview_breaks_its_captions_where_the_finished_video_does(rendered: dict) -> None:
+    # Laid out at the delivered size and shrunk by libass: laid out at the preview's own size,
+    # rounded pixels gave a line room for 13.47 characters there and 13.35 in the finished video.
+    project = server.repo.get_project(rendered["project"])
+    job = server.repo.get_job(rendered["job_id"])
+    script = (Path(job.work_dir) / "subtitles.ass").read_text(encoding="utf-8")
+    assert f"PlayResX: {project.width}" in script and f"PlayResY: {project.height}" in script
+    assert min(project.width, project.height) > server.PREVIEW_SHORT_SIDE

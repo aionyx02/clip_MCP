@@ -1281,7 +1281,9 @@ class SetCaptionStyleOp(BaseModel):
 
     A preset is a starting point, not a lock: anything given alongside it wins,
     so `{"preset": "tiktok", "karaoke": false}` is that platform's safe area
-    without the word-by-word lighting.
+    without the word-by-word lighting. Without a preset, only the settings
+    given change and the rest stay as the project has them, a vertical
+    video's placement included.
     """
 
     action: Literal["set_caption_style"] = "set_caption_style"
@@ -1294,7 +1296,10 @@ class SetCaptionStyleOp(BaseModel):
                       "size and the outline",
     )
     style: Optional[CaptionStyle] = Field(
-        default=None, description="Settings to apply on top of the preset, or on their own",
+        default=None,
+        description="Settings to change. With a preset they go on top of it, which replaces the whole style; "
+                    "on their own they change only themselves, and every setting not given stays as it is. The "
+                    "result gives the style as it now stands",
     )
 
     @model_validator(mode="after")

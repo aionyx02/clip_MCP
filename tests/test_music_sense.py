@@ -54,7 +54,7 @@ def test_a_plan_is_told_when_its_song_loops_or_is_cut_off(monkeypatch: pytest.Mo
                          key=("cue:^", "pass:2"))]
     monkeypatch.setattr(compiler, "music_beds", lambda *_: beds)
     monkeypatch.setattr(compiler, "compiled_duration", lambda *_: 42.0)
-    plan = type("Plan", (), {"beats": []})()
+    plan = type("Plan", (), {"beats": [], "music": None})()
     notes = compiler.music_fit_notes(plan, [], {"song": song}, cuts)
     kinds = [note.kind for note in notes]
     assert "music_loops" in kinds and "music_cut_off" in kinds
@@ -75,8 +75,37 @@ def test_a_song_started_where_the_plan_is_told_ends_with_the_cut_rather_than_loo
                          key=("cue:^", "pass:1"))]
     monkeypatch.setattr(compiler, "music_beds", lambda *_: beds)
     monkeypatch.setattr(compiler, "compiled_duration", lambda *_: 58.74)
-    plan = type("Plan", (), {"beats": []})()
+    plan = type("Plan", (), {"beats": [], "music": None})()
     notes = compiler.music_fit_notes(plan, [], {"song": song}, cuts)
     [cut_off] = [note for note in notes if note.kind == "music_cut_off"]
     start = float(re.search(r"start the cue at ([\d.]+)s", cut_off).group(1))
     assert start + 58.74 <= 250
+
+
+def test_only_the_song_playing_at_the_payoff_is_told_where_to_start(monkeypatch: pytest.MonkeyPatch) -> None:
+    from types import SimpleNamespace
+
+    from app.engine import plan as compiler
+    from app.models.plan import Beat, BeatRole, MusicCue, MusicPlan
+
+    # The first song hands over at the payoff, so its fullest part can never land there; told to
+    # start at 27.0s, it was told 27.0s again for ever. The second cross-fades in 1.5s early.
+    songs = {"a": Asset(id="a", path="a.mp3", duration=140, has_video=False, has_audio=True, library="music"),
+             "b": Asset(id="b", path="b.mp3", duration=60, has_video=False, has_audio=True, library="music")}
+    cuts = {"a": compiler.CleanCuts(energy=tuple([0.2] * 125 + [1.0] * 8 + [0.2] * 7), beats=None),
+            "b": compiler.CleanCuts(energy=tuple([0.2] * 30 + [1.0] * 8 + [0.2] * 22), beats=None)}
+    plan = SimpleNamespace(
+        beats=[Beat(id="payoff", name="收尾", role=BeatRole.PAYOFF)],
+        music=MusicPlan(cues=[MusicCue(asset_id="a", start=27.0), MusicCue(beat_id="payoff", asset_id="b", start=10.0)]),
+    )
+    pieces = [SimpleNamespace(beat_id="intro", played=98.0), SimpleNamespace(beat_id="payoff", played=20.0)]
+    beds = [compiler.Bed(asset_id="a", start=27.0, end=125.0, timeline_in=0, volume=0.35, fade_in=0.5, fade_out=1.5,
+                         key=("cue:^", "pass:1")),
+            compiler.Bed(asset_id="b", start=8.5, end=30.0, timeline_in=96.5, volume=0.35, fade_in=1.5, fade_out=2,
+                         key=("cue:payoff", "pass:1"), lane=1)]
+    monkeypatch.setattr(compiler, "music_beds", lambda *_: beds)
+    monkeypatch.setattr(compiler, "compiled_duration", lambda *_: 118.0)
+    notes = [note for note in compiler.music_fit_notes(plan, pieces, songs, cuts) if note.kind == "music_peak_off"]
+    assert [note.beat_id for note in notes] == ["payoff"]
+    # Its fullest part begins 30s in; the cue takes over at the payoff, so that is where it starts.
+    assert "start the cue at 30.0s" in notes[0]

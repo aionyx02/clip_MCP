@@ -391,6 +391,15 @@ def test_captions_are_proposed_one_line_wide_for_the_frame(media: Path) -> None:
     # A tiktok line holds twelve characters at 1080 wide, well under the default count.
     assert len(cues) > 1 and all(len(cue["text"]) <= 12 for cue in cues)
 
+def test_one_caption_setting_changes_only_itself_and_the_style_is_read_back(media: Path) -> None:
+    asset = import_asset(str(media / "silent.mp4"))["id"]
+    project = build_project([video_track(), insert("a", asset, 0, 4)], width=1080, height=1920)
+    edit(project, [{"action": "set_caption_style", "preset": "tiktok"}])
+    # Unsure whether one setting reset the rest, a caller set them all again: the result says.
+    style = edit(project, [{"action": "set_caption_style", "style": {"karaoke": False}}])["caption_style"]
+    assert style["karaoke"] is False and style["bottom_fraction"] == 0.18 and style["size_fraction"] == 1 / 15
+    assert "caption_style" not in edit(project, [{"action": "rename_project", "name": "別的事"}])
+
 def test_captions_come_only_from_the_base_track(spoken: str, media: Path) -> None:
     # An inset is a picture over the sequence's sound, not a second voice to caption.
     inset = import_asset(str(media / "tall.mp4"))["id"]
