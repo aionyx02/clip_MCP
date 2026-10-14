@@ -211,6 +211,7 @@ SCORE_RULES: Dict[str, ScoreRule] = {
     "contrast": ScoreRule(precision=4),
     "motion": ScoreRule(precision=4),
     "shake": ScoreRule(precision=5),
+    "warmth": ScoreRule(precision=4),
     "loudness": ScoreRule(combine=_decibel_mean, precision=2),
     "peak": ScoreRule(combine=_highest, precision=2),
     "noise_floor": ScoreRule(combine=_typical, precision=2),

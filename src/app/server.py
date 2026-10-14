@@ -84,7 +84,7 @@ from app.engine.compare import compare
 from app.engine.compare import parts_of as cut_parts
 from app.engine.merge import WHOLE_PICKS, merge, merge_plans
 from app.engine.delivery import (
-    CHECKS, Finding, chapter_metadata, chapters, check_delivery, clock, cover_candidates, look_candidates,
+    CHECKS, Finding, chapter_metadata, chapters, check_delivery, clock, cover_candidates, light_steps, look_candidates,
 )
 from app.engine.joins import HeardWord, Join, joins_in, pause_across, words_heard
 from app.engine.frames import format_timestamp, still, storyboard_sheet
@@ -5622,7 +5622,11 @@ def check_render(
 
     Returns:
         A dictionary with `ok` and `findings`, each with its `check` and a
-        `message` saying what and where.
+        `message` saying what and where; and `light`, where the picture jumps
+        in brightness or colour from one shot to the next within a part, with
+        the adjustment that would even it out. `light` never stops a render:
+        a jump may be the point. Offer the adjustment, and check again once
+        it is set.
 
     Raises:
         ValueError: If the project does not exist.
@@ -5631,10 +5635,14 @@ def check_render(
     if not project:
         raise ValueError(f"project {project_id} not found")
     findings = _findings(_reshaped(project, frame), burn_subtitles)
-    return {
+    checked = {
         "ok": not findings,
         "findings": [{"check": finding.check, "message": finding.message} for finding in findings],
     }
+    light = light_steps(project, _analyses(project))
+    if light:
+        checked["light"] = light
+    return checked
 
 @mcp.tool()
 def read_cut(project_id: str) -> dict:

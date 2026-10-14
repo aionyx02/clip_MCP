@@ -148,6 +148,14 @@ class ShotMeasurement(Measured):
         description="Mean change in the camera's own movement, in frame widths; near 0 for a tripod or a smooth pan, "
                     "and far higher for handheld. Null when FFmpeg was built without libvidstab",
     )
+    # Left out of the record when not measured, so an analysis made before it was measured
+    # reads, and fingerprints, exactly as it did: its timelines keep their IDs.
+    warmth: Optional[float] = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+        description="Colour cast, red against blue, from about -0.5 to 0.5: above 0 warmer, below cooler. Null in an "
+                    "analysis made before it was measured",
+    )
 
 # Digital silence measures as minus infinity decibels, which no arithmetic survives, so
 # this stands for it. Nothing real is ever this quiet, which is the point: it reads as

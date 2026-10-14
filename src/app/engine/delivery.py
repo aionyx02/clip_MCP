@@ -13,15 +13,16 @@ answer every time.
 """
 
 import math
+import statistics
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import List, Mapping, Optional, Sequence, Tuple
+from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 
 from app.engine.builder import DUCK_DEPTH_DB, Talking
 from app.engine.continuity import Shot, stray_runs
 from app.engine.looks import alike
 from app.engine.plan import LENGTH_TOLERANCE
-from app.engine.semantic import clean_cuts, share_covered, was_audible, was_made_up
+from app.engine.semantic import clean_cuts, combined_over, share_covered, was_audible, was_made_up
 from app.engine.subtitles import caption_overflow, captioned_clips
 from app.models.media import MediaAnalysis
 from app.models.timeline import CaptionStyle, Clip, PlacedCue, Project
@@ -576,6 +577,79 @@ def _repeats(clips: Sequence[Clip]) -> List[Finding]:
                     f"clips {first.id} (at {clock(float(first.timeline_in))}) and {second.id} "
                     f"(at {clock(float(second.timeline_in))}) show the same {float(overlap):.1f}s of the same file"
                 ), tuple((float(at),) * 2 for clip in (first, second) for at in (clip.timeline_in, clip.timeline_out))))
+    return found
+
+# Two shots side by side in one part this far apart in brightness, on 0 to 1, jump when one
+# cuts to the other. Provisional.
+LIGHT_STEP = 0.12
+# And this far apart in colour cast. Provisional.
+WARMTH_STEP = 0.03
+
+def light_steps(project: Project, analyses: Mapping[str, MediaAnalysis]) -> List[str]:
+    """Find where the picture jumps in brightness or colour from one shot to the next within a part.
+
+    Brightness is what the footage measured plus what the clip's own
+    adjustment adds, so a step already evened out by hand is not found again.
+    For the shot further from the rest of its part, the brightness that would
+    put it between its neighbours is worked out and offered; whether to use it
+    is the caller's, and `check_render` measures again once it is set. A dip
+    or a new part between two shots is a change the cut makes on purpose.
+
+    Args:
+        project: The cut.
+        analyses: The analyses of its files, keyed by asset ID.
+
+    Returns:
+        One line per step.
+    """
+    base = project.base_video_track
+    clips = sorted((clip for clip in (base.clips if base else []) if clip.card is None),
+                   key=lambda clip: clip.timeline_in)
+    parts = {float(marker.timeline_in) for marker in project.markers}
+    measured: Dict[str, Tuple[float, Optional[float]]] = {}
+    for clip in clips:
+        analysis = analyses.get(clip.asset_id)
+        if analysis is None:
+            continue
+        scores = combined_over(float(clip.source_range.start), float(clip.source_range.end), analysis.shots)
+        if "exposure" in scores:
+            lift = clip.color.brightness if clip.color is not None else 0.0
+            measured[clip.id] = (scores["exposure"] + lift, scores.get("warmth"))
+    starts = sorted(parts)
+
+    def part_of(clip: Clip) -> int:
+        return sum(1 for start in starts if start <= float(clip.timeline_in))
+
+    found: List[str] = []
+    for index in range(1, len(clips)):
+        before, after = clips[index - 1], clips[index]
+        if (before.id not in measured or after.id not in measured or float(after.timeline_in) in parts
+                or (after.transition_in is not None and after.transition_in.kind == "dip")):
+            continue
+        (light_before, warm_before), (light_after, warm_after) = measured[before.id], measured[after.id]
+        said = []
+        if abs(light_after - light_before) >= LIGHT_STEP:
+            # The one to change is the one further from how bright the rest of its part is, and it
+            # is brought to between its neighbours in the part.
+            part = [other for other in clips if other.id in measured and part_of(other) == part_of(after)]
+            typical = statistics.median(measured[other.id][0] for other in part)
+            odd_at = index - 1 if abs(light_before - typical) > abs(light_after - typical) else index
+            odd = clips[odd_at]
+            around = [measured[clips[other].id][0] for other in (odd_at - 1, odd_at + 1)
+                      if 0 <= other < len(clips) and clips[other].id in measured
+                      and part_of(clips[other]) == part_of(odd)]
+            target = sum(around) / len(around)
+            current = odd.color.brightness if odd.color is not None else 0.0
+            lift = round(max(-1.0, min(1.0, current + target - measured[odd.id][0])), 2)
+            said.append(f"brightness {light_before:.2f} → {light_after:.2f}; set_clip_look on clip {odd.id} with "
+                        f"color brightness {lift:+.2f} puts it at {target:.2f}, between its neighbours")
+        if warm_before is not None and warm_after is not None and abs(warm_after - warm_before) >= WARMTH_STEP:
+            warmer = warm_after > warm_before
+            said.append(f"clip {after.id} is {'warmer' if warmer else 'cooler'} by {abs(warm_after - warm_before):.2f}; "
+                        f"a color temperature {'above' if warmer else 'below'} 6500 on it "
+                        f"{'cools' if warmer else 'warms'} it towards clip {before.id}")
+        if said:
+            found.append(f"clip {before.id} → clip {after.id} at {clock(float(after.timeline_in))}: " + "; ".join(said))
     return found
 
 def look_candidates(project: Project, analyses: Mapping[str, MediaAnalysis]) -> List[Clip]:

@@ -21,6 +21,7 @@ from app.engine.delivery import (
     chapters,
     check_delivery,
     cover_candidates,
+    light_steps,
     look_candidates,
 )
 from app.engine.interchange import left_behind, write_edl, write_fcpxml, write_otio, write_srt
@@ -651,3 +652,27 @@ def test_a_render_is_checked_for_two_files_that_look_alike(media: Path, tmp_path
     assert len(found) == 1 and "clips a" in found[0]["message"] and "and c" in found[0]["message"]
     # Read once: the frames are kept against their files.
     assert set(repo.looks(second)) == {round(2 * share, 1) for share in looks.SAMPLES}
+
+
+def test_a_shot_darker_than_the_ones_either_side_is_offered_the_brightness_that_evens_it_out() -> None:
+    from app.models.timeline import ColorAdjust
+
+    def lit(asset_id: str, exposure: float, warmth=None) -> MediaAnalysis:
+        return MediaAnalysis(asset_id=asset_id, duration=10.0, shots=[
+            ShotMeasurement(start=0, end=10, exposure=exposure, contrast=0.5, warmth=warmth)])
+
+    analyses = {"x": lit("x", 0.5), "y": lit("y", 0.2), "z": lit("z", 0.52)}
+    project = project_of(clip("a", "x", 0, 4, 0), clip("b", "y", 0, 4, 4), clip("c", "z", 0, 4, 8))
+    found = light_steps(project, analyses)
+    assert len(found) == 2 and all("set_clip_look on clip b with color brightness +0.31" in line for line in found)
+    # Set, it is measured again and nothing is left.
+    project.tracks[0].clips[1].color = ColorAdjust(brightness=0.31)
+    assert light_steps(project, analyses) == []
+    # A new part, or a dip, is a change made on purpose.
+    project.tracks[0].clips[1].color = None
+    assert light_steps(project_of(clip("a", "x", 0, 4, 0), clip("b", "y", 0, 4, 4), markers=[(0, "一"), (4, "二")]),
+                       analyses) == []
+    # A colour cast is said with the way to set it.
+    warm = {"x": lit("x", 0.5, warmth=0.0), "y": lit("y", 0.5, warmth=0.06)}
+    [step] = light_steps(project_of(clip("a", "x", 0, 4, 0), clip("b", "y", 0, 4, 4)), warm)
+    assert "clip b is warmer by 0.06; a color temperature above 6500 on it cools it" in step

@@ -512,6 +512,8 @@ def _shot_measurements(
         # worth of movement, which is a shot where nothing happens at all.
         moving = inside[1:]
         shake = _shake(movement, scene.start, scene.end)
+        cast = [values["lavfi.signalstats.VAVG"] - values["lavfi.signalstats.UAVG"] for values in inside
+                if "lavfi.signalstats.VAVG" in values and "lavfi.signalstats.UAVG" in values]
         shots.append(ShotMeasurement(
             start=scene.start,
             end=scene.end,
@@ -522,6 +524,7 @@ def _shot_measurements(
             blur=round(statistics.fmean(blurs), 3) if blurs else None,
             motion=round(statistics.fmean(v["lavfi.signalstats.YDIF"] for v in moving) / 255, 4) if moving else None,
             shake=None if shake is None else round(shake, 5),
+            warmth=round(statistics.fmean(cast) / 255, 4) if cast else None,
         ))
     return shots
 
