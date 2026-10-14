@@ -68,3 +68,13 @@ def test_a_render_whose_frames_were_not_read_says_so_rather_than_that_nothing_wa
     renderer._run_render(Job(work_dir=str(tmp_path)), {"pieces": [], "duration_seconds": 5.0, "command": ["ffmpeg"],
                                                         "render_path": str(tmp_path / "out.mp4")}, Reported())
     assert scan.kept(str(tmp_path)) is None
+
+
+def test_the_black_of_a_dip_is_meant_though_it_lies_wholly_before_the_cut(media: Path) -> None:
+    wide = import_asset(str(media / "wide.mp4"))["id"]
+    project = build_project([video_track(), insert("a", wide, 0, 2), insert("c", wide, 2, 4)], width=640, height=360)
+    edit(project, [{"action": "set_clip_look", "track_id": "main", "clip_id": "c",
+                    "transition_in": {"kind": "dip", "seconds": 0.6, "through": "black"}}])
+    frames = finished(render_project(project)).get("frames", {"found": [], "meant": []})
+    assert frames["found"] == []
+    assert any("dip into c" in line for line in frames["meant"]), frames

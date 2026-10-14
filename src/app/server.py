@@ -7899,10 +7899,15 @@ def _frame_spots(job: Job) -> dict:
             if kind == "black" and clip.video_fade_out and end <= finish + slack and start >= finish - float(
                     clip.video_fade_out) - slack:
                 return f"fade out of {clip.id}"
-            dip = clip.transition_in
+        # A dip ends on the cut, so its black lies wholly inside the clip before the one it leads
+        # into; every clip's dip is looked at, not only the clips the black falls in.
+        for clip in clips:
+            begin, dip = float(clip.timeline_in), clip.transition_in
             if (kind in ("black", "flash") and dip is not None and dip.kind == "dip"
                     and start >= begin - float(dip.seconds) - slack and end <= begin + slack):
-                return f"dip into {clip.id}"
+                part = next((marker.name for marker in project.markers
+                             if abs(float(marker.timeline_in) - begin) <= slack), None) if project is not None else None
+                return f"dip into {clip.id}" + (f", where 「{part}」 begins" if part else "")
         return None
 
     found, kept = [], []
