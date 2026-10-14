@@ -4,7 +4,7 @@ import pytest
 
 from app.engine.plan import BREATH_SECONDS
 from app.engine.semantic import clean_cuts
-from app.models.media import HeardWord, SecondListen, Span
+from app.models.media import HeardWord, MediaAnalysis, SecondListen, Span
 from test_delivery import checks, clip, project_of, talking
 from test_edit_plan import compiled
 from test_semantic_timeline import analysis, spans
@@ -96,7 +96,7 @@ def test_a_cut_that_takes_off_a_word_heard_on_the_second_listen_names_it() -> No
     assert "「我們」" in found[0][1] and "really starts at 5.70s" in found[0][1]
 
 
-def opening_with(*words) -> "MediaAnalysis":
+def opening_with(*words) -> MediaAnalysis:
     """One line 「各位我到高鐵了」 with a word per `(start, end, text)`, heard straight through."""
     from app.models.media import TranscriptWord
 
