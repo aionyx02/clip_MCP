@@ -188,6 +188,7 @@ project keeps playing the file from where it went.
 | Request | Operations |
 |---|---|
 | 「這支影片在講什麼」 / what is this video about | `analyze_asset`, `build_semantic_timeline`, then summarize what `query_clips` returns with times, and `view_frames` for the visuals |
+| 「時間軸太多」「片段編號一直變」 / too many timelines | `list_timelines`, then `delete_timelines` for the ones no plan is built on; `with_past_versions` only once the user agrees, since going back to those plan versions then needs `copy_plan` |
 | 「剪掉講錯／重講的地方」 / remove flubbed takes | In a plan the compiler already keeps only the last complete go at a repeated line. By hand: from the transcript, keep only the last complete version of each repeated sentence |
 | 「去掉停頓／氣口」 / remove pauses | In a plan it is done for you. By hand: `query_clips` for `kind: speech`, then place them as consecutive clips, each widened by its own `safe_in` / `safe_out` |
 | 「只留有講到 X 的段落」 / keep only parts about X | `query_clips` with `about: "X"` (or `text` for the exact word), keep those sections plus enough context to make sense |
