@@ -384,21 +384,42 @@
         ctx.globalAlpha = shown;
         ctx.textBaseline = "middle";
         for (const row of event.rows) {
-          ctx.font = `${row.bold ? "bold " : ""}${row.size}px "${font}", ${FONTS}`;
-          ctx.textAlign = row.align;
+          // Full-width punctuation in its own font, as the render draws it, so a comma is not a dot.
+          const weight = row.bold ? "bold " : "";
+          const runs = row.text.split(/([，。、；：])/).filter(Boolean).map((text) => ({
+            text,
+            font: /^[，。、；：]$/.test(text)
+              ? `${weight}${row.size}px "${style.punctuation_font}", "${font}", ${FONTS}`
+              : `${weight}${row.size}px "${font}", ${FONTS}`,
+          }));
+          for (const run of runs) {
+            ctx.font = run.font;
+            run.width = ctx.measureText(run.text).width;
+          }
+          const width = runs.reduce((sum, run) => sum + run.width, 0);
+          const left = row.align === "left" ? row.x : row.x - width / 2;
+          ctx.textAlign = "left";
           if (row.box) {
-            const width = ctx.measureText(row.text).width;
-            const left = row.align === "left" ? row.x : row.x - width / 2;
             ctx.fillStyle = `rgba(0,0,0,${style.box_opacity})`;
             ctx.fillRect(left - row.box, row.y - row.size * 0.62 - row.box, width + row.box * 2, row.size * 1.24 + row.box * 2);
           } else if (row.outline) {
             ctx.lineJoin = "round";
             ctx.lineWidth = row.outline * 2;
             ctx.strokeStyle = "#000";
-            ctx.strokeText(row.text, row.x, row.y);
+            let x = left;
+            for (const run of runs) {
+              ctx.font = run.font;
+              ctx.strokeText(run.text, x, row.y);
+              x += run.width;
+            }
           }
           ctx.fillStyle = "#fff";
-          ctx.fillText(row.text, row.x, row.y);
+          let x = left;
+          for (const run of runs) {
+            ctx.font = run.font;
+            ctx.fillText(run.text, x, row.y);
+            x += run.width;
+          }
         }
         ctx.restore();
       }
