@@ -3822,6 +3822,8 @@ def amend_plan(plan_id: str, expected_version: int, amendments: list[PlanAmendme
     own amendments rather than a trim to every selection: `set_pacing` for
     「整體節奏太慢」 (shorter pauses, less air around every cut),
     `set_music_level` for 「音樂太大聲」 (everywhere, or from one beat),
+    `set_music_cue` to change one cue's start, volume, fades or cutting on
+    its beat without sending the plan again,
     `set_target` for a new length or platform, and `drop_beat` for
     「這整段不要」, which files every selection in it under the rejections.
     What the viewer has to know is `set_facts` for the plan and

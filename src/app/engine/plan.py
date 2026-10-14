@@ -2769,8 +2769,8 @@ def music_fit_notes(
             lands = first.timeline_in + peak[0] - first.start if first.start <= peak[0] < first.end else None
             if lands is None or abs(lands - climax) > PEAK_TOLERANCE_SECONDS:
                 start = peak[0] - (climax - first.timeline_in)
-                fix = (f"start the cue at {start:.1f}s of the song to land it there" if 0 <= start < length
-                       else "a song that builds later would land it there")
+                fix = (f"start the cue at {start:.1f}s of the song (set_music_cue) to land it there"
+                       if 0 <= start < length else "a song that builds later would land it there")
                 notes.append(Note(
                     f"the fullest part of {name} ({peak[0]}–{peak[1]}s of the song) "
                     + (f"lands at {lands:.1f}s of the cut" if lands is not None else "is never heard")
@@ -2786,7 +2786,7 @@ def music_fit_notes(
             notes.append(Note(
                 f"the cut ends {length - last.end:.0f}s before {name} does, while it is still going; it is faded "
                 f"out over {last.fade_out:g}s. For the song to end with the video, start the cue at "
-                f"{max(0.0, start):.1f}s of the song" + ("" if start >= 0 else " — it is shorter than the part, so "
+                f"{max(0.0, start):.1f}s of the song (set_music_cue)" + ("" if start >= 0 else " — it is shorter than the part, so "
                                                          "it loops first") + ", or give it a longer fade_out",
                 "music_cut_off", beat_id=beat_id, seconds=total, look=True,
             ))
