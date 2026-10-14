@@ -51,7 +51,7 @@ from app.models.timeline import (
     apply_operation,
     validate_project,
 )
-from app.models.comment import Comment, Reply
+from app.models.comment import Comment, Preference, Question, Reply
 from app.models.offer import OfferedSong, SongOffer
 from app.models.job import Job, JobKind, JobStatus
 from app.engine import cards, texts, looks, loudness, machine, meaning, resources, speed, stills
@@ -3288,7 +3288,8 @@ def create_project(
 
     Returns:
         The new project serialized as a dictionary, including its generated
-        `id` and initial `version`.
+        `id` and initial `version`, and `preferences`: how the user likes
+        their videos, as they said it on earlier ones — cut it that way.
     """
     if not name.strip():
         raise ValueError("a project needs a name: what the video is about, such as 'EP1 台北'")
@@ -3297,7 +3298,14 @@ def create_project(
         width=width, height=height, fps_num=fps_num, fps_den=fps_den,
     )
     repo.add_project(project)
-    return _plain(project.model_dump())
+    return _with_preferences(_plain(project.model_dump()))
+
+def _with_preferences(result: dict) -> dict:
+    """Add how the user likes their videos to what a tool says, when anything is kept."""
+    kept = repo.preferences()
+    if kept:
+        result["preferences"] = [{"id": preference.id, "text": preference.text} for preference in kept]
+    return result
 
 @mcp.tool()
 def list_projects() -> dict:
@@ -3305,12 +3313,13 @@ def list_projects() -> dict:
 
     Returns:
         A dictionary with a `projects` list, each item holding a project's
-        `id`, its `name` if it was given one, and its current `version`.
+        `id`, its `name` if it was given one, and its current `version`; and
+        `preferences`, how the user likes their videos, when any are kept.
     """
-    return {"projects": [
+    return _with_preferences({"projects": [
         {"id": project.id, "name": project.name, "version": project.version}
         for project in repo.list_projects()
-    ]}
+    ]})
 
 @mcp.tool()
 def get_project(project_id: str, include_subtitles: bool = False) -> dict:
@@ -3329,7 +3338,8 @@ def get_project(project_id: str, include_subtitles: bool = False) -> dict:
 
     Returns:
         The project serialized as a dictionary, including `duration`, the
-        length of the edited video in seconds, and `subtitle_count`.
+        length of the edited video in seconds, and `subtitle_count`; and
+        `preferences`, how the user likes their videos, when any are kept.
 
     Raises:
         ValueError: If no project with `project_id` exists.
@@ -3360,7 +3370,7 @@ def get_project(project_id: str, include_subtitles: bool = False) -> dict:
         state["subtitles"] = [cue.model_dump() for cue in project.subtitles]
     else:
         state.pop("subtitles", None)
-    return _plain(state)
+    return _with_preferences(_plain(state))
 
 @mcp.tool()
 def apply_edits(project_id: str, expected_version: int, operations: list[EditOperation], note: str = "") -> dict:
@@ -6905,6 +6915,8 @@ def _comment_said(project: Project, comment: Comment) -> dict:
         if comment.start_anchor else None
     return {
         "id": comment.id, "text": comment.text, "by": comment.by, "status": comment.status,
+        **({"question": True, "answered": any(reply.by == "你" for reply in comment.replies)}
+           if comment.question else {}),
         "at": clock(now["start"]) + (f"–{clock(now['end'])}" if now["end"] is not None else ""),
         "start": now["start"], "end": now["end"], "clip_id": now["clip_id"], "gone": now["gone"],
         "file": os.path.basename(asset.path) if asset else None,
@@ -6920,13 +6932,98 @@ def _comment_said(project: Project, comment: Comment) -> dict:
 def open_comments(project_id: str) -> int:
     """How many things the user said about a project are still waiting.
 
+    A question the AI asked waits on the user until they answer it, so it is
+    not counted before then.
+
     Args:
         project_id: The video.
 
     Returns:
         The number of open comments.
     """
-    return sum(comment.status == "open" for comment in repo.comments(project_id))
+    return sum(comment.status == "open" and (not comment.question or any(reply.by == "你" for reply in comment.replies))
+               for comment in repo.comments(project_id))
+
+@mcp.tool()
+def ask_user(project_id: str, questions: Annotated[List[Question], Field(min_length=1, max_length=8)]) -> dict:
+    """Put what you are not sure of about a cut to the user, each on the moment it is about.
+
+    The checks say whether something is wrong; none says whether it is good —
+    whether four seconds of opening hook anybody, whether a 57-second test
+    loses them. Do not settle those by yourself: after a preview, ask about
+    the few you weighed and could not decide, with why. Each shows in the
+    editor as a question on its moment of the cut, and the answer comes back
+    as a reply to it in `get_comments`. When an answer says how the user
+    likes their videos in general, not only this one, `remember_preference`.
+
+    Args:
+        project_id: The video.
+        questions: Each with where it is (`start`, and `end` for a stretch),
+            the `question` in the user's language and `why` it is in doubt.
+
+    Returns:
+        The questions as `get_comments` shows them.
+
+    Raises:
+        ValueError: If the project does not exist.
+    """
+    project = repo.get_project(project_id)
+    if project is None:
+        raise ValueError(f"project {project_id} not found")
+    asked = []
+    for question in questions:
+        end = (question.end if question.end is not None
+               and question.end - question.start >= SHORTEST_STRETCH_SECONDS else None)
+        comment = Comment(
+            id="c" + uuid.uuid4().hex[:7], project_id=project_id, by=f"AI（{_calling_client.get()}）",
+            text=question.question.strip() + (f"\n（{question.why.strip()}）" if question.why.strip() else ""),
+            commit=_current_commit(project_id), question=True,
+            start=round(max(0.0, question.start), 3), end=round(end, 3) if end is not None else None,
+            start_anchor=anchor_at(project, question.start),
+            end_anchor=anchor_at(project, end) if end is not None else None,
+        )
+        repo.save_comment(comment, f"AI 問：{question.question[:30]}")
+        asked.append(_comment_said(project, comment))
+    return {"asked": asked}
+
+@mcp.tool()
+def remember_preference(text: Annotated[str, Field(min_length=1, max_length=300)],
+                        project_id: Optional[str] = None) -> dict:
+    """Keep how the user likes their videos, for every project after this one.
+
+    Only what the user said, in their words — 「開場不要超過三秒」, 「不要用
+    轉場」 — and only when it is about their videos in general rather than
+    this cut. What is kept comes back with `list_projects`, `create_project`
+    and `get_project`, so the next video starts from it. Read it back to them
+    when you keep it.
+
+    Args:
+        text: The preference, as they said it.
+        project_id: The video it was said about, if one.
+
+    Returns:
+        `kept`, the preference with its `id`; and `preferences`, all of them.
+    """
+    preference = Preference(id="p" + uuid.uuid4().hex[:7], text=text.strip(), project_id=project_id)
+    repo.save_preference(preference)
+    return _with_preferences({"kept": {"id": preference.id, "text": preference.text}})
+
+@mcp.tool()
+def forget_preference(preference_id: str) -> dict:
+    """Stop keeping a preference, when the user says it no longer holds.
+
+    Args:
+        preference_id: Its ID, from `preferences` in `list_projects`.
+
+    Returns:
+        `forgotten`, its ID; and `preferences`, what is still kept.
+
+    Raises:
+        ValueError: If no preference has that ID.
+    """
+    if not repo.delete_preference(preference_id):
+        raise ValueError(f"there is no preference {preference_id}")
+    return _with_preferences({"forgotten": preference_id})
 
 # More songs than this to hear under the same stretch is a library, not a choice. Provisional.
 MOST_OFFERED_SONGS = 4
@@ -7139,7 +7236,9 @@ def get_comments(project_id: str, include_resolved: bool = False) -> dict:
     stretch) in seconds, `at` as a timecode, the `clip_id` under it, and the
     `file` and `file_seconds`. `gone` means that footage has since been cut
     out. Read it, do what it asks — or ask the user if it can be read two
-    ways — then close it with `resolve_comment`, saying what you did.
+    ways — then close it with `resolve_comment`, saying what you did. One
+    marked `question` is one you asked with `ask_user`: it waits on the user
+    until it is `answered`, in its replies.
 
     Args:
         project_id: The video.

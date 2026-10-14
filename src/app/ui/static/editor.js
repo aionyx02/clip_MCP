@@ -1489,6 +1489,7 @@
     const replies = comment.replies.map((reply) => `<li class="${reply.by === T.comments.you ? "mine" : "theirs"}"><b>${esc(reply.by)}</b>${esc(reply.text)}</li>`).join("");
     return `<li class="citem ${comment.status}${comment.id === E.focusComment ? " on" : ""}" data-cid="${esc(comment.id)}">
       <div class="chead"><button class="ctime" data-jump ${comment.gone ? "disabled" : ""}>${esc(where)}</button>
+        ${comment.question ? `<span class="badge">${esc(comment.answered ? T.comments.answered : T.comments.asked)}</span>` : ""}
         ${comment.gone ? `<span class="badge warn">${esc(T.comments.gone)}</span>` : ""}
         ${comment.status === "resolved" ? `<span class="badge">${esc(T.comments.resolvedTag)}</span>` : ""}
         ${comment.resolved_in ? `<button class="ctime" data-open-version="${esc(comment.resolved_in)}">${esc(T.comments.seeVersion)}</button>` : ""}</div>

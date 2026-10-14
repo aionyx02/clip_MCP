@@ -7,7 +7,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Callable, Dict, Iterable, Iterator, List, Mapping, Optional, Set, Tuple
 
-from app.models.comment import Comment
+from app.models.comment import Comment, Preference
 from app.models.job import Job
 from app.models.media import Asset, MediaAnalysis
 from app.models.offer import SongOffer
@@ -120,6 +120,10 @@ _MIGRATIONS: List[List[str]] = [
     [
         # The songs put to the user to hear under a stretch of a cut, one set a project at a time.
         "CREATE TABLE IF NOT EXISTS song_offers (project_id TEXT PRIMARY KEY, data TEXT NOT NULL)",
+    ],
+    [
+        # How the user likes their videos, said once and kept for every project after.
+        "CREATE TABLE IF NOT EXISTS preferences (id TEXT PRIMARY KEY, data TEXT NOT NULL)",
     ],
 ]
 # Footage and music are filed apart, each in folders of its own; projects in theirs.
@@ -677,6 +681,22 @@ class Repository:
         found = [Comment.model_validate_json(data) for (data,) in
                  self._query("SELECT data FROM comments WHERE project_id = ?", (project_id,))]
         return sorted(found, key=lambda comment: comment.created_at)
+
+    def preferences(self) -> List[Preference]:
+        """Read how the user likes their videos, oldest first."""
+        kept = [Preference.model_validate_json(row[0]) for row in self._query("SELECT data FROM preferences")]
+        return sorted(kept, key=lambda preference: preference.said_at)
+
+    def save_preference(self, preference: Preference) -> None:
+        """Keep one."""
+        with self._transaction() as conn:
+            conn.execute("INSERT OR REPLACE INTO preferences (id, data) VALUES (?, ?)",
+                         (preference.id, preference.model_dump_json()))
+
+    def delete_preference(self, preference_id: str) -> bool:
+        """Forget one; False when there was none by that ID."""
+        with self._transaction() as conn:
+            return conn.execute("DELETE FROM preferences WHERE id = ?", (preference_id,)).rowcount > 0
 
     def song_offer(self, project_id: str) -> Optional[SongOffer]:
         """Read the songs put to the user for a project, if any are."""

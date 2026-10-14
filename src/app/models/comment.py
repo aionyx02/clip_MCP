@@ -49,5 +49,25 @@ class Comment(BaseModel):
     start_anchor: Optional[Anchor] = None
     end_anchor: Optional[Anchor] = None
     status: Literal["open", "resolved"] = "open"
+    question: bool = Field(default=False, description="Whether the AI asked it, for the user to answer")
     replies: List[Reply] = Field(default_factory=list)
     resolved_commit: Optional[str] = Field(default=None, description="The version it was dealt with in")
+
+
+class Question(BaseModel):
+    """Something the AI is not sure of about a moment of the cut, put to the user."""
+
+    start: float = Field(..., ge=0, description="Where on the cut, in seconds")
+    end: Optional[float] = Field(default=None, description="Where the stretch it is about ends; None for a moment")
+    question: str = Field(..., min_length=1, max_length=300, description="What to ask, in the user's language")
+    why: str = Field(default="", max_length=300,
+                     description="Why it is in doubt — what was weighed — so the user can answer the real question")
+
+
+class Preference(BaseModel):
+    """How the user likes their videos, in their words, kept for every project after."""
+
+    id: str
+    text: str = Field(..., min_length=1, max_length=300)
+    said_at: datetime = Field(default_factory=_utc_now)
+    project_id: Optional[str] = Field(default=None, description="The video it was said about")

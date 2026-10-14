@@ -93,6 +93,19 @@ version says in the history the user reads. A plan's own versions are still
 there too: `list_plan_versions`, `revert_plan`, and `get_plan` with a
 `version`.
 
+## What you could not decide
+
+The checks say whether something is wrong, not whether it works. After a
+preview, put the two or three things you weighed and could not settle — an
+opening that may be too slow, a long stretch that may lose people — to the
+user with `ask_user`, each on its moment and with why it is in doubt, rather
+than deciding them for the user. Answers come back as replies in `get_comments`.
+
+When an answer, or anything the user says, is about how they like their
+videos in general — 「開場都要短」「不要用轉場」 — keep it with
+`remember_preference` in their words and say so; the next project starts with
+it. `forget_preference` when they say it no longer holds.
+
 ## What the complaint means
 
 Complaints are about how it feels, and more than one change fits most of

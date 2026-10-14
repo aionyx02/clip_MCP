@@ -381,6 +381,8 @@ window.T = {
     picked: "已經把選擇留言給 AI 了",
   },
   comments: {
+    asked: "AI 想問你，按回覆回答",
+    answered: "已回答",
     add: "留言",
     addTitle: "在這裡留言給 AI（C）；按住 Shift 在時間軸上拖曳可以選一段",
     addHere: (at) => `在 ${at} 留言`,
