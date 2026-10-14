@@ -344,7 +344,8 @@ class Selection(BaseModel):
         le=8,
         description="Play this piece faster or slower than shot: 4 or 8 for a timelapse of a long walk or a "
                     "street, 0.5 for slow motion. Everything laid over the cut — music, markers, covering "
-                    "picture — is placed at the new length. Null for as shot. Multiplied by the pacing speed",
+                    "picture — is placed at the new length. Null for as shot, or the pacing speed when it has one; a "
+                    "speed given here is not multiplied by it",
     )
     volume: Optional[float] = Field(
         default=None,
@@ -485,7 +486,8 @@ class Pacing(BaseModel):
         default=None,
         ge=0.5,
         le=2.0,
-        description="Play the whole sequence this much faster, voices at their own pitch: 1.1 is a tenth quicker, "
+        description="Play every piece that does not set its own `speed` this much faster, voices at their own pitch: "
+                    "1.1 is a tenth quicker, "
                     "which most viewers do not notice as speed. Markers, covering picture, music and cuts on the "
                     "beat are all laid out at the new pace. Covering picture itself plays at normal speed. Null "
                     "for 1.0",

@@ -70,7 +70,9 @@ first. It finds nine kinds of thing: `bad_picture` (black or frozen picture
 that reaches the screen), `clipping` (a recording squared off at the ceiling —
 turning it down does not undo it), `music` (music too close under somebody
 talking — `set_music_level` down, or let it duck), `mid_speech` (a cut inside a word or a
-phrase; it names the nearest pause — move the cut there), `repeated` (the same
+phrase; it names the nearest pause — move the cut there, or, when the words
+there sound clear of the cut, hear the stretch with `listen_again` and `keep`
+so its word times replace the transcript's, then check again), `repeated` (the same
 stretch of a file shown twice), `continuity` (a clip put on by hand between
 two shot hours away from it — move it, or let it stand if it is a
 flash-forward), `unplanned` (three or more clips put together

@@ -1,5 +1,6 @@
 import hashlib
 import json
+import math
 import os
 from datetime import datetime, timezone
 import re
@@ -24,7 +25,7 @@ from fastmcp.tools import ToolResult
 from fastmcp.utilities.types import Image
 from mcp.types import TextContent
 from pydantic import BaseModel, Field, TypeAdapter
-from app.models.media import Asset, Measured, MediaAnalysis, Source, Span, SpeakerTurn, Transcript
+from app.models.media import Asset, HeardAgain, Measured, MediaAnalysis, Source, Span, SpeakerTurn, Transcript
 from app.models.plan import (
     EditPlan, PlanAmendment, Trim, TrimKind, apply_amendment, describe_amendment, short_clip_ids, whole_clip_id,
     with_whole_clip_ids,
@@ -53,7 +54,7 @@ from app.engine import cards, texts, loudness, machine, meaning, resources, spee
 from app.engine.analysis import listen_again as listen_again_in_file
 from app.engine.analysis import (
     BALANCED_JOIN, current_recipe, doubtful_spots, marked_text, marked_words, second_listen, sound_note,
-    transcription_of, unsure_words, whisper_model_for, whisper_model_name,
+    transcription_of, unsure_words, whisper_model_for, whisper_model_name, with_words_heard_again,
 )
 from app.engine.diarize import speaker_model_name
 from app.engine.rhythm import rhythm_model_name
@@ -71,7 +72,7 @@ from app.engine.ffmpeg import graph_from_file, hidden_window_flags
 from app.engine.probe import picture_size, probe_file, recorded_at, speech_loudness, timecode_start
 from app.engine.reframe import Framing, frame_project, placement_at
 from app.engine import playback
-from app.engine.library import FOLDER_KINDS, FOOTAGE, LIBRARIES, MUSIC, classify, library_of
+from app.engine.library import FOLDER_KINDS, FOOTAGE, LIBRARIES, MUSIC, SPEECH_SHARE, classify, library_of, speech_share
 from app.engine import clap
 from app.engine import fetch
 from app.engine import music as music_energy
@@ -1616,6 +1617,15 @@ def analyze_asset(
         with an accurate one. With `dry_run`, `would_start` lists the files
         in place of `jobs`.
 
+        Files in the music library are beat-tracked and never transcribed.
+        `music` lists the ones started, or with `dry_run` the ones that
+        would be, each with how much of what was listened to is speech; one
+        that is mostly speech, or named like a narration, may have been filed
+        there by mistake — ask the user, and move it with `set_asset_library`
+        before analyzing it. A file never sorted into a library is sorted
+        first; `unsorted` lists any that could not be, with why — one with no
+        picture is then analyzed as music.
+
         When anything started is transcribed, `estimate` says how long that
         takes here for all of it together: `footage_minutes`,
         `transcription_minutes` and `speakers_minutes` as `[low, high]` (high
@@ -1640,8 +1650,23 @@ def analyze_asset(
             to_start, skipped, upgrading = _plan_analyses(assets, transcribe, choice, again)
             choices[choice] = _estimate(to_start, transcribe, diarize, upgrading)
         to_start, skipped, upgrading = _plan_analyses(assets, transcribe, transcription, again)
-        return {"would_start": [asset.id for asset, _ in to_start], "skipped": skipped, "upgrading": upgrading,
-                "estimates": choices}
+        result = {"would_start": [asset.id for asset, _ in to_start], "skipped": skipped, "upgrading": upgrading,
+                  "estimates": choices}
+        music = _music_heard(asset for asset, _ in to_start)
+        if music:
+            result["music"] = music
+        return result
+
+    unsorted = []
+    for asset in assets:
+        if asset.library is None:
+            # Sorted when it was added, or when the server started; listened to now if neither managed.
+            try:
+                asset.library = classify(asset)
+            except (OSError, RuntimeError, ValueError) as error:
+                unsorted.append({"asset_id": asset.id, "reason": str(error)})
+                continue
+            repo.save_asset(asset)
 
     started: List[dict] = []
     to_start, skipped, upgrading = _plan_analyses(assets, transcribe, transcription, again)
@@ -1649,10 +1674,38 @@ def analyze_asset(
         job = _start_analysis(asset, transcribe, chosen, language, prompt, chinese_variant, diarize, speakers)
         started.append({"asset_id": asset.id, "job_id": job.job_id, "status": job.status.value, "stage": job.stage})
     result: dict = {"jobs": started, "skipped": skipped, "upgrading": upgrading}
+    if unsorted:
+        result["unsorted"] = unsorted
+    music = _music_heard(asset for asset, _ in to_start)
+    if music:
+        result["music"] = music
     found = _estimate(to_start, transcribe, diarize, upgrading)
     if found is not None:
         result["estimate"] = found
     return result
+
+def _music_heard(assets: Iterable[Asset]) -> List[dict]:
+    """Say, for each file in the music library, how much of it is somebody talking.
+
+    Args:
+        assets: The files about to be analyzed.
+
+    Returns:
+        One entry per music file: its `asset_id`, `name`, `speech_share`
+        (null when its sound could not be read), and `sounds_like_speech`
+        when that share is what would have filed it as footage.
+    """
+    heard = []
+    for asset in assets:
+        if not asset.has_audio or library_of(asset) != MUSIC:
+            continue
+        share = speech_share(asset.path, float(asset.duration or 0))
+        entry = {"asset_id": asset.id, "name": os.path.basename(asset.path),
+                 "speech_share": None if share is None else round(share, 2)}
+        if share is not None and share >= SPEECH_SHARE:
+            entry["sounds_like_speech"] = True
+        heard.append(entry)
+    return heard
 
 # Provisional (roadmap §13): the longest stretch heard again at once, short enough to come back
 # inside the time most AI clients allow a tool call.
@@ -1671,6 +1724,7 @@ def listen_again(
     asset_id: Optional[str] = None,
     language: Optional[str] = None,
     job_id: Optional[str] = None,
+    keep: bool = False,
 ) -> dict:
     """Hear one stretch of a file or of a finished render again, to check a word, a line or the mix.
 
@@ -1679,6 +1733,14 @@ def listen_again(
     transcribes only that stretch of sound, from scratch: no prompt, no text
     before it. Where the two disagree, or the words come back unsure, believe
     neither — give the user `audio_path` to listen to and ask.
+
+    When a cut is refused for landing in a word the transcript placed wrong,
+    hear that stretch with `keep`: its word times are then what cuts in this
+    file are judged and moved by, in place of the transcript's. Only what was
+    heard is kept, never a time you write; the plans stay valid. A hearing
+    that does not say the same words as the transcript, or is unsure of any,
+    is not kept — `not_kept` says why; play `audio_path` to the user and ask.
+    Start and end the stretch in a pause, so it holds whole words.
 
     Given a render's `job_id` instead of a file, it hears what the viewer
     will: whether a word was cut into at an edit, and, from `levels`, whether
@@ -1691,6 +1753,7 @@ def listen_again(
         asset_id: The file to hear. Give this or `job_id`.
         language: Spoken language code; omit to detect it.
         job_id: A finished render to hear, preview or full.
+        keep: For a file: keep these word times over the transcript's.
 
     Returns:
         A dictionary with `heard`, the new hearing with unsure words in ⟦ ⟧;
@@ -1698,8 +1761,8 @@ def listen_again(
         the sound's level in dBFS every `every_seconds` from `start` — speech
         sits well above a ducked bed, a gap is near -60; `audio_path`, a WAV of
         the stretch for the user to play; for a file, `stored`, what the
-        transcript says there, or null, and `agrees`, whether the two say the
-        same words; for a render, `captions`, the ones on screen in the
+        transcript says there, or null, `agrees`, whether the two say the
+        same words, and, when `keep` was given, `kept` or `not_kept`; for a render, `captions`, the ones on screen in the
         stretch, and `changed_since`, true when the project has been edited
         since it was rendered.
 
@@ -1709,6 +1772,8 @@ def listen_again(
     """
     if (asset_id is None) == (job_id is None):
         raise ValueError("give either asset_id, to hear a file, or job_id, to hear a render")
+    if keep and job_id is not None:
+        raise ValueError("only what a file says is kept; a render is the cut, and is heard to check it")
     if job_id is not None:
         return _listen_to_render(job_id, start, end, language)
     asset = _get_asset(asset_id)
@@ -1719,6 +1784,8 @@ def listen_again(
         raise ValueError(f"the file is only {float(asset.duration):g}s long")
     known = repo.get_analysis(asset_id)
     transcript = known.transcript if known is not None else None
+    if keep and transcript is None:
+        raise ValueError(f"asset {asset_id} has no transcript to correct; analyze it first")
     keep_as = os.path.join(WORKSPACE_DIR, "temp", "listen", f"{asset_id[:8]}-{start:.2f}-{end:.2f}.wav")
     fresh = listen_again_in_file(
         asset.path, start, end, language or (transcript.language if transcript else None), keep_as,
@@ -1730,11 +1797,55 @@ def listen_again(
                 if word.end > start and word.start < end]
         stored = "".join(said).strip() or None
     plain_heard = "".join(segment.text for segment in fresh.segments)
-    return {
+    result = {
         **_heard(fresh, keep_as, start),
         "stored": stored,
         "agrees": stored is not None and _bare_words(plain_heard) == _bare_words(stored),
     }
+    if keep:
+        result.update(_keep_hearing(known, HeardAgain(start=start, end=end, words=[word for segment in fresh.segments for word in segment.words]), result["agrees"]))
+    return result
+
+def _keep_hearing(known: MediaAnalysis, stretch: HeardAgain, agrees: bool) -> dict:
+    """Keep a stretch heard again over the transcript's word times, when it can be believed.
+
+    Args:
+        known: The file's analysis the hearing was taken against.
+        stretch: What was heard, and where.
+        agrees: Whether the hearing says the same words as the transcript there.
+
+    Returns:
+        `kept` when it was kept, or `not_kept` saying why it was not.
+    """
+    # A word half in the stretch would be kept twice: its outside part from the transcript,
+    # and the whole of it as heard. The stretch is moved to take it in or leave it out.
+    across = [word for segment in known.transcript.segments for word in segment.words
+              if word.start < stretch.start < word.end or word.start < stretch.end < word.end]
+    if across:
+        opens = min([stretch.start, *(word.start for word in across if word.start < stretch.start < word.end)])
+        closes = max([stretch.end, *(word.end for word in across if word.start < stretch.end < word.end)])
+        # Rounded outward, so the stretch said takes the word in however long the file is; snapped
+        # first, so a time already in whole milliseconds is not pushed into the next word.
+        opens, closes = math.floor(round(opens * 1000, 6)) / 1000, math.ceil(round(closes * 1000, 6)) / 1000
+        return {"not_kept": f"the transcript has {'、'.join(word.text.strip() for word in across)} running across the "
+                            f"edge of the stretch; hear {opens:.3f}s to {closes:.3f}s again with keep"}
+    if not agrees:
+        return {"not_kept": "the hearing and the transcript say different words here, so neither is believed; "
+                            "play audio_path to the user and ask, or hear a stretch that starts and ends in a pause"}
+    unsure = unsure_words(stretch.words)
+    if unsure:
+        return {"not_kept": f"the hearing was unsure of {'、'.join(unsure)}; play audio_path to the user and ask"}
+    # Read again before writing, so an analysis taken again meanwhile is not overwritten
+    # with the one this started from.
+    current = repo.get_analysis(known.asset_id)
+    if current is None or current.analyzed_at != known.analyzed_at:
+        return {"not_kept": "the file was analyzed again while this was heard; hear the stretch again"}
+    current.heard_again = [
+        *(item for item in current.heard_again if item.end <= stretch.start or item.start >= stretch.end), stretch,
+    ]
+    repo.save_analysis(current)
+    return {"kept": f"the word times heard from {stretch.start:g}s to {stretch.end:g}s are now what cuts in this "
+                    "file are judged by; check the cut again"}
 
 # Provisional (roadmap §13): how long each level `listen_again` reports covers — fine
 # enough to see a fade or a dip under a word, coarse enough that thirty seconds is sixty numbers.
@@ -3228,8 +3339,8 @@ def apply_edits(project_id: str, expected_version: int, operations: list[EditOpe
             `set_subtitles`, `edit_subtitle`, or `add_subtitle`. Captions stored
             or corrected here are also remembered against the file they belong
             to, and the next `generate_subtitles` over that file, in any
-            project, starts from them — unless `this_project_only` keeps one
-            to this project. Caption times can be given in the cut's own
+            project, starts from them — but only those given
+            `for_all_projects`; the rest stay in this project. Caption times can be given in the cut's own
             seconds with `timeline_start` and `timeline_end`.
 
     Returns:
@@ -3255,7 +3366,7 @@ def apply_edits(project_id: str, expected_version: int, operations: list[EditOpe
     if touched:
         shared = [cue for cue in touched if not cue.local]
         if shared:
-            repo.remember_captions(shared)
+            repo.remember_captions([cue.model_copy(update={"remembered_in": saved.id}) for cue in shared])
         result["captions"] = [_caption_line(saved, cue) for cue in touched]
         if not shared:
             result["captions_kept"] = "in this project only"
@@ -4538,7 +4649,10 @@ def generate_subtitles(
     Returns:
         A dictionary with the project's `new_version`; `captions`, each as
         one line — its ID, where it lands in the cut, and what it says;
-        `reused`, how many came from captions already reviewed; `sources`,
+        `reused`, how many came from captions already reviewed, and
+        `from_other_projects`, each of those as a line with the project it was
+        written in — read them back, since words put to another cut are wrong
+        in this one; `sources`,
         how many came from each of `reviewed`, `this_project` and
         `transcript`; `to_check`, the IDs of the ones straight from the
         transcript, those with the most words the speech model was unsure of
@@ -4615,7 +4729,14 @@ def generate_subtitles(
     })
     # What this project kept to itself comes first, then what was corrected on the footage
     # for every project, then the transcript: each fills only what the ones before left.
-    local = [cue.model_copy(update={"id": ""}) for cue in project.subtitles if cue.local]
+    # A correction stored before captions had to be said to be for every project is no longer
+    # handed on, but one this project already shows is its own: kept, not lost to the transcript.
+    unclaimed = {asset_id: repo.unclaimed_captions(asset_id) for asset_id in {cue.asset_id for cue in project.subtitles}}
+    local = [
+        cue.model_copy(update={"id": "", "local": True}) for cue in project.subtitles
+        if cue.local or (cue.remembered_in is None and any(
+            _overlaps(cue, old) and old.text == cue.text for old in unclaimed[cue.asset_id]))
+    ]
 
     def taken(cue: SubtitleCue, over: Sequence[SubtitleCue]) -> bool:
         return any(cue.asset_id == known.asset_id and _overlaps(cue, known) for known in over)
@@ -4626,7 +4747,10 @@ def generate_subtitles(
     ]
     reused = [known.model_copy(update={"id": ""}) for known_list in reviewed.values() for known in known_list]
     reused = [cue for cue in reused if place_cues(project, [cue]) and not taken(cue, local)]
-    saved = _apply(project_id, expected_version, [SetSubtitlesOp(cues=[*kept, *reused, *local])])
+    # Each caption's own `local` stands: the transcript's and the remembered ones are the
+    # footage's, for every project, and this project's stay its own. Nothing is remembered
+    # from here; only `apply_edits` writes to what every project starts from.
+    saved = _apply(project_id, expected_version, [SetSubtitlesOp(cues=[*kept, *reused, *local], for_all_projects=True)])
     # Counted where the captions land, not where the words were said: two lines from
     # different files overlap only once the cut puts them on screen together.
     placed = place_cues(saved, saved.subtitles)
@@ -4648,6 +4772,10 @@ def generate_subtitles(
             for cue in placed
         ],
         "reused": len(reused),
+        "from_other_projects": [
+            f"{cue.id} {cue.text} — 「{_project_name(cue.remembered_in)}」"
+            for cue in saved.subtitles if heard[cue.id]["from"] == "reviewed" and cue.remembered_in != project_id
+        ],
         "sources": {source: sum(1 for cue in saved.subtitles if heard[cue.id]["from"] == source)
                     for source in ("reviewed", "this_project", "transcript")},
         "to_check": [cue.id for cue in to_check],
@@ -4655,6 +4783,11 @@ def generate_subtitles(
         "assets_without_transcript": untranscribed,
         "overlapping": overlapping,
     }
+
+def _project_name(project_id: Optional[str]) -> str:
+    """A project's name to show the user, or what to say when it is gone."""
+    found = repo.get_project(project_id) if project_id else None
+    return found.name if found is not None else "a project since deleted"
 
 # How much of a file two captions, or a caption and a word, may share or miss by and still be
 # told apart: the rounding their times went through, not a judgement.
@@ -5251,6 +5384,18 @@ def _analyses(project: Project, listened: bool = False) -> Dict[str, MediaAnalys
 BACKFILL_SECONDS = 600.0
 
 def _listened_to(analysis: MediaAnalysis, budget: List[float]) -> MediaAnalysis:
+    """A file's analysis as cuts are judged by: its second listen taken, its kept hearings put in.
+
+    Args:
+        analysis: The file's analysis.
+        budget: As for `_second_listened`.
+
+    Returns:
+        The analysis, with the word times of every stretch heard again and kept.
+    """
+    return with_words_heard_again(_second_listened(analysis, budget))
+
+def _second_listened(analysis: MediaAnalysis, budget: List[float]) -> MediaAnalysis:
     """Give a transcribed file its second listen, if it was analyzed before there was one.
 
     Once per file, and kept: it takes a few seconds for a short clip and

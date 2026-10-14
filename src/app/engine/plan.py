@@ -194,8 +194,11 @@ class Piece:
             the piece's identity rather than a note about it.
         beat_id: The part of the video it belongs to, which is what the
             timeline's markers are made from.
-        speed: How fast it plays: its selection's own speed, multiplied by
-            the plan's pacing speed once the windows are settled.
+        speed: How fast it plays: its selection's own speed when it has one,
+            otherwise the plan's pacing speed, set once the windows are settled.
+        own_speed: Whether its selection said how fast it plays: a timelapse
+            or a slow motion is that piece's decision, and the pacing speed is
+            about the talking, so it is not put on top.
         gain: How loud its own sound plays, from its selection's volume.
         keep_level: Whether its talking stays at the level it was recorded,
             from its selection.
@@ -219,6 +222,7 @@ class Piece:
     from_clip_ids: Tuple[str, ...]
     beat_id: str = ""
     speed: float = 1.0
+    own_speed: bool = False
     gain: float = 1.0
     keep_level: bool = False
     transition: Optional[Tuple[str, float, str, str]] = None
@@ -415,7 +419,8 @@ def _merge(pieces: Sequence[Piece]) -> List[Piece]:
         if (
             last is not None and last.asset_id == piece.asset_id and piece.start - last.end <= MERGE_GAP_SECONDS
             # A window sped up or turned down on purpose is its own clip, however close it sits.
-            and (last.speed, last.gain, last.keep_level) == (piece.speed, piece.gain, piece.keep_level)
+            and (last.speed, last.own_speed, last.gain, last.keep_level)
+            == (piece.speed, piece.own_speed, piece.gain, piece.keep_level)
         ):
             # The first piece's beat wins. Two pieces this close are one shot, and a
             # marker inside a shot would say a new part starts partway through it.
@@ -477,6 +482,7 @@ def _selected(
             replace(
                 piece,
                 speed=1.0 if selection.speed is None else selection.speed,
+                own_speed=selection.speed is not None,
                 gain=1.0 if selection.volume is None else selection.volume,
                 keep_level=selection.keep_level,
             )
@@ -1241,7 +1247,8 @@ def compile_pieces(
     if pace.speed != 1.0:
         # Set once the windows are settled: every stage before this works in the file's own
         # seconds, and only where things land on the timeline cares how fast they play.
-        merged = [replace(piece, speed=round(piece.speed * pace.speed, 4)) for piece in merged]
+        merged = [piece if piece.own_speed else replace(piece, speed=round(piece.speed * pace.speed, 4))
+                  for piece in merged]
     pieces, said = _on_the_beat(plan, merged, assets, cuts)
     notes += said
     # Last, because the beat moves cuts, and how much a transition can reach back into
@@ -2099,12 +2106,12 @@ def check_plan(
                 problems.append(
                     f"{where}: `range` starts {trim.from_seconds:g}s in, but the clip runs {clip.duration:.3f}s"
                 )
-        # The timeline holds a clip to what the renderer can stretch sound to; the pacing
-        # speed multiplies on top of a selection's own.
-        speed = (selection.speed or 1.0) * (plan.pacing.speed or 1.0)
+        # The timeline holds a clip to what the renderer can stretch sound to. A selection's
+        # own speed stands; the pacing speed is for the pieces that set none.
+        speed = selection.speed if selection.speed is not None else (plan.pacing.speed or 1.0)
         if not MIN_SPEED <= speed <= MAX_SPEED:
             problems.append(
-                f"{where}: plays at x{speed:g} with the pacing speed on top, outside the x{MIN_SPEED:g} to "
+                f"{where}: plays at x{speed:g}, outside the x{MIN_SPEED:g} to "
                 f"x{MAX_SPEED:g} a clip can play at"
             )
 

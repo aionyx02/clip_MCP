@@ -212,8 +212,10 @@ was not there to agree to them.
    yet, unsure ones first; `get_subtitles` says where each came from and
    marks the unsure words. Correct a line with `edit_subtitle` (`cue_id`; times in the
    cut with `timeline_start`/`timeline_end`), add one with `add_subtitle`, and
-   read back what the edit returns. A correction of what was said serves every
-   project; words for this cut only take `this_project_only`.
+   read back what the edit returns. A caption stays in this project unless it
+   takes `for_all_projects`, which is only for a correction of what was said —
+   a misheard word or a name. Read `from_other_projects` back: those lines were
+   written in another project and may be worded for that cut.
    `set_subtitles` replaces every caption at once, for a set written
    elsewhere — a translation, a script. Lower
    `max_characters` or `max_seconds` for shorter lines on screen.

@@ -296,6 +296,13 @@ class AnalysisRecipe(BaseModel):
                 return True
         return False
 
+class HeardAgain(BaseModel):
+    """A stretch of a file heard again on its own, whose word times are kept over the transcript's."""
+
+    start: float = Field(..., ge=0, description="Where the stretch starts, in seconds of the file")
+    end: float = Field(..., gt=0, description="Where it ends")
+    words: List[TranscriptWord] = Field(default_factory=list, description="What was heard there; none is nobody")
+
 class MediaAnalysis(BaseModel):
     """Machine-readable description of an asset's content, used to plan edits."""
 
@@ -321,6 +328,12 @@ class MediaAnalysis(BaseModel):
     )
     transcript: Optional[Transcript] = None
     music: Optional[MusicSense] = Field(default=None, description="For a song: its mood, style and energy")
+    heard_again: List[HeardAgain] = Field(
+        default_factory=list,
+        description="Stretches heard again with `listen_again` and kept: where a cut may go is judged by these "
+                    "word times rather than the transcript's. Not part of what a timeline is built from, so "
+                    "keeping one leaves the plans written against the footage as they are",
+    )
     second_listen: Optional[SecondListen] = Field(
         default=None,
         description="The talking listened to again without the transcript, to check where it really starts and "

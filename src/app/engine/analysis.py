@@ -31,6 +31,8 @@ from app.models.media import (
     AnalysisRecipe,
     Asset,
     FaceMeasurement,
+    HeardAgain,
+    HeardWord,
     MediaAnalysis,
     MusicSense,
     Rhythm,
@@ -1053,6 +1055,63 @@ def _run_whisper(
     if on_measured is not None:
         on_measured("transcription", device, model_name, time.monotonic() - began)
     return Transcript(language=info.language, model=model_name, segments=result)
+
+def with_words_heard_again(analysis: MediaAnalysis) -> MediaAnalysis:
+    """Put the word times of every stretch heard again and kept over the transcript's.
+
+    A word whose time the transcript got wrong stops a cut being made beside
+    it; heard again on its own, that stretch says where the words really are.
+    The words the transcript has inside a kept stretch give way to the ones
+    heard there, and a stretch where nobody was heard keeps none; a stretch
+    is only kept when no transcript word runs across its edge. The
+    transcript's sentences stand: each word heard joins the one it falls in,
+    or the nearest, so a sentence that ends inside the stretch still ends
+    there. The second listen's words there give way to the same hearing, so
+    the two never argue over the stretch.
+
+    Args:
+        analysis: The file's analysis.
+
+    Returns:
+        A copy with those words, or the analysis itself when nothing was kept.
+    """
+    if analysis.transcript is None or not analysis.heard_again:
+        return analysis
+    segments = [segment.model_copy(deep=True) for segment in analysis.transcript.segments]
+    listened = analysis.second_listen.model_copy(deep=True) if analysis.second_listen is not None else None
+    for stretch in sorted(analysis.heard_again, key=lambda item: item.start):
+        touched = [segment for segment in segments if segment.end > stretch.start and segment.start < stretch.end]
+        spans = [(segment.start, segment.end) for segment in touched]
+        for segment in touched:
+            segment.words = [word for word in segment.words if word.end <= stretch.start or word.start >= stretch.end]
+        # Never none: a stretch is only kept where the hearing says the transcript's own words.
+        for word in stretch.words if touched else ():
+            middle = (word.start + word.end) / 2
+            nearest = min(range(len(touched)), key=lambda index: _distance(middle, spans[index]))
+            touched[nearest].words.append(word.model_copy())
+        for segment in touched:
+            if segment.words:
+                segment.words.sort(key=lambda word: word.start)
+                segment.start, segment.end = segment.words[0].start, segment.words[-1].end
+                segment.text = "".join(word.text for word in segment.words)
+        emptied = {id(segment) for segment in touched if not segment.words}
+        segments = [segment for segment in segments if id(segment) not in emptied]
+        if listened is not None:
+            listened.words = sorted([
+                *(word for word in listened.words if not stretch.start <= (word.start + word.end) / 2 <= stretch.end),
+                *(HeardWord(start=word.start, end=word.end, text=word.text,
+                            probability=1.0 if word.probability is None else word.probability)
+                  for word in stretch.words),
+            ], key=lambda word: word.start)
+    segments.sort(key=lambda segment: segment.start)
+    return analysis.model_copy(update={
+        "transcript": analysis.transcript.model_copy(update={"segments": segments}),
+        "second_listen": listened,
+    })
+
+def _distance(seconds: float, span: Tuple[float, float]) -> float:
+    """How far a moment is from a span: none inside it, else to its nearer edge."""
+    return max(span[0] - seconds, seconds - span[1], 0.0)
 
 def listen_again(
     path: str,
