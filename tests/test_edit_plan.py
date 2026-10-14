@@ -2491,6 +2491,18 @@ def test_files_numbered_by_hand_played_out_of_their_order_are_noted() -> None:
     assert noted(Selection(clip_id=walk.id, beat_id="b1"),
                  Selection(clip_id=first.id, beat_id="b1", jump_reason="回到開頭")) == []
 
+def test_a_chosen_clip_the_camera_shook_in_is_noted_with_how_much() -> None:
+    by_id, children, assets, clips = covered()
+    first = speech_of(clips)[0]
+    walk = next(clip for clip in clips if clip.asset_id == BROLL_ASSET)
+    by_id = {**by_id, walk.id: walk.model_copy(update={"scores": {**walk.scores, "shake": 0.04}}),
+             first.id: first.model_copy(update={"scores": {**first.scores, "shake": 0.002}})}
+    timeline = SemanticTimeline(id="tl_test", asset_ids=[], input_hash="hash", derivation_version=6)
+    _, notes = check_plan(plan_for([Selection(clip_id=first.id, beat_id="b1"), Selection(clip_id=walk.id, beat_id="b1")]),
+                          timeline, by_id, children, assets)
+    [shaky] = [note for note in notes if note.kind == "shaky"]
+    assert f"{walk.id} (0.040)" in shaky and first.id not in shaky and shaky.clip_ids == (walk.id,)
+
 def knowing(plan: EditPlan, by_id: dict, *said: dict) -> EditPlan:
     """Say, piece by piece in playing order, what each establishes and relies on.
 

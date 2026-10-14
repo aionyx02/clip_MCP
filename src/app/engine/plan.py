@@ -2230,6 +2230,7 @@ def check_plan(
                               "rejected_clip_missing", clip_ids=[rejection.clip_id]))
     problems.extend(_knowledge_problems(plan, clips))
     notes.extend(_file_order_notes(plan, clips, assets))
+    notes.extend(_shaky_notes(plan, clips))
     shots = _shots(plan, clips, assets)
     for stray in strays(shots):
         problems.append(
@@ -2458,6 +2459,34 @@ def _shots(
         ))
         begun.add(selection.beat_id)
     return shots
+
+# A clip whose camera was this unsteady — the mean change in its movement, in frame widths —
+# is handheld enough to be felt. Provisional: the steady side of what the search docs offer
+# as a bound, not measured against anyone watching.
+SHAKY = 0.01
+
+def _shaky_notes(plan: EditPlan, clips: Mapping[str, SemanticClip]) -> List[Note]:
+    """Say which chosen clips the camera shook in, with how much, so a steadier one can be looked for.
+
+    Args:
+        plan: The plan.
+        clips: The timeline's clips, keyed by ID.
+
+    Returns:
+        One note naming them all, or none.
+    """
+    shaky = []
+    for selection in plan.selections:
+        clip = clips.get(selection.clip_id)
+        shake = clip.scores.get("shake") if clip is not None else None
+        if shake is not None and shake > SHAKY:
+            shaky.append((selection.clip_id, shake))
+    if not shaky:
+        return []
+    listed = ", ".join(f"{clip_id} ({shake:.3f})" for clip_id, shake in sorted(shaky, key=lambda item: -item[1]))
+    return [Note(f"the camera shakes in {listed}, against {SHAKY:g} for a steady shot; if a shake is not wanted, "
+                 "query_clips with max_scores {\"shake\": " + f"{SHAKY:g}" + "} finds steadier footage of the same",
+                 "shaky", clip_ids=[clip_id for clip_id, _ in shaky], look=True)]
 
 # A number a file's name starts with, before a separator: `1-`, `01_`, `1.`, `1 `, `1、`, `(1)`.
 # Numbered by hand, it is the order somebody meant the files to be cut in.
