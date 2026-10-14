@@ -27,6 +27,7 @@ from app.engine import clap
 from app.engine.library import MUSIC, library_of
 from app.engine.listen import cut_sound
 from app.engine.music import energy_curve
+from app.engine.subtitles import _segmenter
 from app.models.media import (
     AnalysisRecipe,
     Asset,
@@ -787,8 +788,9 @@ def convert_chinese_variant(segments: List[TranscriptSegment], variant: str) -> 
     """Convert transcript text to a Chinese script and regional variant with OpenCC.
 
     Each segment is converted as a whole, so ambiguous characters are resolved
-    from context; for example, 头发 becomes 頭髮 rather than 頭發. When the
-    conversion keeps the segment's length, the converted characters are
+    from context; for example, 头发 becomes 頭髮 rather than 頭發. Into
+    Traditional it goes a word at a time, so a phrase is never read across two
+    words. When the conversion keeps the segment's length, the converted characters are
     mapped back onto the words one to one. When a vocabulary replacement
     changes the length, each word is converted on its own instead, so timings
     stay attached to the right text.
@@ -808,10 +810,23 @@ def convert_chinese_variant(segments: List[TranscriptSegment], variant: str) -> 
         raise ValueError(f"unsupported Chinese variant {variant!r}; use one of {', '.join(CHINESE_VARIANT_CONFIGS)}")
     import opencc
 
-    converter = opencc.OpenCC(f"{CHINESE_VARIANT_CONFIGS[variant]}.json")
+    config = CHINESE_VARIANT_CONFIGS[variant]
+    converter = opencc.OpenCC(f"{config}.json")
+    simplify = opencc.OpenCC("t2s.json").convert
+
+    def convert(text: str) -> str:
+        if not config.startswith("s2"):
+            return converter.convert(text)
+        # The recogniser often writes Traditional, or a mix, and OpenCC's phrase table read
+        # across words turns 裡面包含 into 裡麵包含 and 了然後 into 瞭然後. So the text is
+        # brought to Simplified first and converted a word at a time, the words found by
+        # the same splitter the captions break lines with.
+        simple = simplify(text)
+        return "".join(converter.convert(piece) for piece in _segmenter()(simple if len(simple) == len(text) else text))
+
     for segment in segments:
         joined = "".join(word.text for word in segment.words)
-        converted = converter.convert(joined)
+        converted = convert(joined)
         if len(converted) == len(joined):
             position = 0
             for word in segment.words:
@@ -820,7 +835,7 @@ def convert_chinese_variant(segments: List[TranscriptSegment], variant: str) -> 
                 position += length
         else:
             for word in segment.words:
-                word.text = converter.convert(word.text)
+                word.text = convert(word.text)
         segment.text = "".join(word.text for word in segment.words).strip()
     return segments
 
