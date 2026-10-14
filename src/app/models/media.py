@@ -34,6 +34,11 @@ class Asset(BaseModel):
     recorded_at: Optional[datetime] = Field(
         default=None, description="When recording started, from the file's own timestamp or its name; null if unknown",
     )
+    licence: Optional[str] = Field(
+        default=None,
+        description="Where the file came from and what it may be used for, as the user said — such as 'Kevin "
+                    "MacLeod, incompetech.com, CC BY 4.0'; null when nobody has said",
+    )
     notes: str = Field(
         default="",
         description="How this file may be used, in the user's words: 「請消音」, 「0:12 以後手入鏡，不要用」. Shown "

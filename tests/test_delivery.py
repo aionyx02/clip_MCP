@@ -21,6 +21,7 @@ from app.engine.delivery import (
     chapters,
     check_delivery,
     cover_candidates,
+    frames_around,
     light_steps,
     look_candidates,
 )
@@ -263,9 +264,44 @@ def test_without_a_face_the_sharpest_stretch_is_offered_and_never_black() -> Non
 def test_a_cover_is_saved_at_the_size_the_cut_is_rendered_at(media: Path) -> None:
     asset = import_asset(str(media / "wide.mp4"))["id"]
     project = build_project([video_track(), insert("a", asset, 0, 6)], width=640, height=360)
-    saved = export_cover(project, 2.0, frame="portrait")
+    saved = export_cover(project, 2.0, "test", frame="portrait").structured_content
     with PILImage.open(saved["output_path"]) as picture:
         assert picture.size == (360, 640) == (saved["width"], saved["height"])
+
+def test_a_cover_comes_back_at_feed_size_and_as_a_profile_grid_crops_it(media: Path) -> None:
+    import base64
+    import io
+
+    asset = import_asset(str(media / "wide.mp4"))["id"]
+    project = build_project([video_track(), insert("a", asset, 0, 6)], width=1080, height=1920)
+    shown = export_cover(project, 2.0, "the product, large and sharp").content[1]
+    with PILImage.open(io.BytesIO(base64.b64decode(shown.data))) as preview:
+        # 360 wide in the feed, and beside it the 3:4 middle at 360 by 480.
+        assert preview.size == (360 + 6 + 360, 640)
+
+def test_more_than_one_moment_of_a_shot_can_be_offered_and_never_black() -> None:
+    analysis = MediaAnalysis(asset_id="x", duration=10.0, black_frames=[Span(start=0.0, end=3.0)])
+    offered = cover_candidates(project_of(clip("a", "x", 0, 10, 0)), {"x": analysis}, per_shot=3)
+    assert len(offered) == 3 and all(seconds >= 3.0 for _, seconds in offered)
+
+def test_a_close_look_shows_what_is_on_screen_either_side_of_one_moment() -> None:
+    project = project_of(clip("a", "x", 0, 4, 0), clip("b", "y", 10, 14, 4))
+    found = frames_around(project, {}, 4.0, reach=0.5, step=0.25)
+    assert [(item.id, source, at) for item, source, at in found] == [
+        ("a", 3.5, 3.5), ("a", 3.75, 3.75), ("b", 10.0, 4.0), ("b", 10.25, 4.25), ("b", 10.5, 4.5),
+    ]
+
+def test_covers_are_offered_one_part_at_a_time_with_what_the_video_is_for(media: Path) -> None:
+    from app.server import propose_covers
+
+    asset = import_asset(str(media / "wide.mp4"))["id"]
+    project = build_project([video_track(), insert("a", asset, 0, 3), insert("b", asset, 4, 8)], width=640, height=360)
+    edit(project, [{"action": "set_markers", "markers": [{"id": "m1", "name": "開場", "timeline_in": 0},
+                                                         {"id": "m2", "name": "結果", "timeline_in": 3}]}])
+    listing = propose_covers(project, part="結果", per_shot=2).content[0].text
+    assert "ask the user what it is about" in listing and "clip b" in listing and "clip a" not in listing
+    with pytest.raises(ValueError, match="no part called '中段'"):
+        propose_covers(project, part="中段")
 
 # --- export ------------------------------------------------------------------------------
 

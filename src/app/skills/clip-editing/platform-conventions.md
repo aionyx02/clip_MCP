@@ -116,10 +116,44 @@ least three, and each is at least ten seconds; `problems` says what breaks
 that. Fixing it means merging or renaming parts — a change to the plan, so
 ask.
 
-`propose_covers` offers one frame per shot — never black, each the moment with
-the biggest face or the sharpest picture — as a labeled sheet. Show it, let the
-user choose, and save the one they pick with `export_cover` at its time in the
-cut.
+**The cover is your judgement, not the server's.** It has two jobs, and no
+measurement knows either: it shows what the video is about, and it reads at a
+glance at the size people first see it. `propose_covers` only lays the frames
+out — it opens with the plan's goal and parts, and puts what is being said under
+each frame. Choose like this:
+
+1. Say to yourself what the video is about in a few words — the goal, and where
+   it lands (the finished thing, the result, the payoff part). The cover shows
+   that: for a video about making something, the thing made, in use; for a
+   story, its decisive moment; the person only when the video is about them.
+   The frame with the biggest face is often the wrong one.
+2. Look at the sheet with `per_shot` 2 or 3 over the parts that carry the point
+   (`part` for one at a time), and pick two or three candidates.
+3. For each, call again with `around` at its time and choose the exact frame:
+   one subject filling a good part of the frame, sharp, not mid-motion, not
+   cluttered, eyes open, nothing important at the very edge.
+4. Offer the user your best one or two, each with a sentence on why, and let
+   them choose. Save it with `export_cover`, whose `reason` says why.
+5. `export_cover` shows the cover at feed size, and a vertical one cropped to the
+   3:4 middle a profile grid shows. If the subject is lost at that size or falls
+   outside the middle, choose again before saying it is done.
+
+A title on the cover is the user's to add in another program; say so if the
+frame needs one to be understood.
+
+## What the user has to take care of
+
+After the final render, write the notices that go with it: `export_notices`
+once without `text` for what is in the cut — the music, where each song came
+from and what each file says about itself, other voices, more than one face on
+screen — then write them in the user's language and call it again with `text`
+and `next_to` the rendered file. For each: what the concern is, and how to
+resolve it — the credit line a CC BY song needs in the description, a source to
+confirm where nobody said the licence, consent from somebody heard or seen. Add
+what you saw and heard that nothing measures: a brand or logo in shot, music
+playing in the room, somebody else's work on screen. When the user tells you
+where music came from, pass it in `licences`; it is kept with the file for the
+next video. Say plainly which questions are theirs to answer.
 
 ## Handing over to an editing program
 
@@ -141,7 +175,8 @@ the file.
 | 「字幕加英文」「中英對照」 / bilingual captions | Put the other language in each caption's `secondary`, with `set_subtitles` or `edit_subtitle` |
 | 「誰在講話要標出來」「兩個人不同顏色」 / show who is speaking | `set_caption_style` with `speaker_mark` and `speaker_names` |
 | 「幫我寫 YouTube 章節」 / YouTube chapters | `get_chapters`, paste its `description`; say what `problems` lists |
-| 「挑一張封面」「縮圖」 / pick a cover or thumbnail | `propose_covers`, let the user choose, then `export_cover` |
+| 「要注意什麼」「版權」 / what to watch out for, copyright | `export_notices` without `text`, write the notices, then again with `text` and `next_to` the render |
+| 「挑一張封面」「縮圖」 / pick a cover or thumbnail | `propose_covers` (then again `around` your picks), choose by what the video is about and what reads at feed size, offer your best one or two with reasons, then `export_cover` with the `reason` |
 | 「我要拿去 Premiere／達文西／Final Cut 修」 / finish it in another editor | `export_timeline` with `fcpxml` (or `otio`, `edl`), plus `srt` for the captions; read out `left_behind` |
 
 ## Where files go, and disk space

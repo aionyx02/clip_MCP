@@ -73,7 +73,7 @@ from app.engine.semantic import (
     build_timeline, clean_cuts, content_scores, join_voices, timeline_input_hash, was_made_up,
 )
 from app.engine.ffmpeg import graph_from_file, hidden_window_flags
-from app.engine.probe import picture_size, probe_file, recorded_at, speech_loudness, timecode_start
+from app.engine.probe import picture_size, probe_file, recorded_at, rights_tags, speech_loudness, timecode_start
 from app.engine.reframe import Framing, frame_project, placement_at
 from app.engine import playback
 from app.engine.library import FOLDER_KINDS, FOOTAGE, LIBRARIES, MUSIC, SPEECH_SHARE, classify, library_of, speech_share
@@ -87,10 +87,11 @@ from app.engine.compare import compare
 from app.engine.compare import parts_of as cut_parts
 from app.engine.merge import WHOLE_PICKS, merge, merge_plans
 from app.engine.delivery import (
-    CHECKS, Finding, chapter_metadata, chapters, check_delivery, clock, cover_candidates, light_steps, look_candidates,
+    CHECKS, Finding, chapter_metadata, chapters, check_delivery, clock, cover_candidates, frames_around, light_steps,
+    look_candidates, on_screen, rights_facts,
 )
 from app.engine.joins import HeardWord, Join, joins_in, pause_across, words_heard
-from app.engine.frames import format_timestamp, still, storyboard_sheet
+from app.engine.frames import feed_preview, format_timestamp, still, storyboard_sheet
 from app.engine.interchange import write_edl, write_fcpxml, write_otio, write_srt
 from app.engine.listen import WINDOW_SECONDS, chart, cut_sound, describe, levels, levels_every, parts_of
 from app.engine.subtitles import (
@@ -579,6 +580,7 @@ def register_asset(filepath: str, library: Optional[str] = None) -> Asset:
     asset.recorded_at = recorded_at(info, path)
     if existing is not None:
         asset.notes = existing.notes
+        asset.licence = existing.licence
         asset.library = existing.library
         asset.source = existing.source
     if library in LIBRARIES:
@@ -1042,6 +1044,87 @@ def music_credits(project_id: str) -> dict:
         if asset.source.personal_only:
             personal.append(asset.source.title)
     return {"credits": credits, "personal_only": personal, "unknown": unknown}
+
+@mcp.tool()
+def export_notices(
+    project_id: str,
+    text: Optional[str] = None,
+    licences: Optional[Dict[str, str]] = None,
+    next_to: Optional[str] = None,
+) -> dict:
+    """Write what the user has to take care of before publishing a cut, as a text file.
+
+    Call it after the final render, twice. The first time, without `text`, it
+    says what is in the cut that may need permission or has to be disclosed —
+    the music under it, where each song came from and what each file says
+    about itself, other voices, more than one face on screen — and nothing is
+    written. Write the notices from that, in the user's language, and call
+    again with `text`: for each thing, what the concern is and how to resolve
+    it (the credit line a CC BY song needs, a source to confirm for music
+    whose licence nobody gave, the consent of somebody heard or seen). Add
+    what you see in the frames and hear in the footage that no measurement
+    finds: a brand or a logo, music playing in the room, a screen, somebody's
+    work shown. Say plainly where a question is the user's to answer rather
+    than yours. `music_credits` gives the credit lines alone.
+
+    Args:
+        project_id: ID of the project.
+        text: The notices, as the user should read them. Leave it out to be
+            told what they have to cover.
+        licences: Where each file came from and what it may be used for, as
+            the user told you, keyed by asset ID — such as "Kevin MacLeod,
+            incompetech.com, CC BY 4.0". Kept with the file, so the next
+            video that uses it already knows.
+        next_to: The rendered file the notices go with; they are written
+            beside it. Left out, they go to the videos folder, named after
+            the project.
+
+    Returns:
+        `facts`, what the notices have to cover; and once `text` is given,
+        `output_path`, the file written — the text followed by those facts,
+        so none of them can be left out.
+
+    Raises:
+        ValueError: If the project, or a file named in `licences`, does not exist.
+    """
+    project = repo.get_project(project_id)
+    if not project:
+        raise ValueError(f"project {project_id} not found")
+    assets = _referenced_assets(project)
+    for asset_id, licence in (licences or {}).items():
+        asset = assets.get(asset_id) or repo.get_assets([asset_id]).get(asset_id)
+        if asset is None:
+            raise ValueError(f"asset {asset_id} not found")
+        asset = asset.model_copy(update={"licence": licence.strip() or None})
+        repo.save_asset(asset)
+        assets[asset_id] = asset
+    tags: Dict[str, Dict[str, str]] = {}
+    for asset_id, asset in assets.items():
+        try:
+            tags[asset_id] = rights_tags(probe_file(asset.path))
+        except (OSError, RuntimeError, ValueError):
+            tags[asset_id] = {}
+    facts = rights_facts(project, _analyses(project), assets, tags)
+    listed = [
+        " | ".join([fact.kind, fact.subject, ", ".join(f"{clock(start)}–{clock(end)}" for start, end in fact.spans),
+                    *fact.detail])
+        for fact in facts
+    ]
+    if text is None:
+        return {"facts": listed, "written": False, "next": (
+            "Write the notices from these facts and what you saw and heard in the cut, in the user's language, "
+            "and call again with `text`" + ("" if next_to else " and `next_to` the rendered file")
+        )}
+    if next_to:
+        stem, _ = os.path.splitext(next_to)
+        path = f"{stem}_notices.txt"
+    else:
+        path = housekeeping.unique_path(str(output_dir()), _delivery_name(project, "notices", ".txt"))
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    # With a byte-order mark and Windows line ends, so Notepad opens it right.
+    with open(path, "w", encoding="utf-8-sig", newline="\r\n") as out:
+        out.write(text.rstrip() + "\n\n---\n" + "\n".join(listed or ["(nothing found)"]) + "\n")
+    return {"facts": listed, "written": True, "output_path": path}
 
 def _folder_kind(library: str) -> str:
     """The kind of folder a library's files are filed in."""
@@ -5764,47 +5847,96 @@ def propose_covers(
     project_id: str,
     frame: Optional[Literal["landscape", "portrait", "square"]] = None,
     follow_faces: bool = True,
+    per_shot: Annotated[int, Field(ge=1, le=4)] = 1,
+    around: Optional[Annotated[float, Field(ge=0)]] = None,
+    part: Optional[str] = None,
 ) -> ToolResult:
-    """Offer frames of the cut as cover or thumbnail candidates, one per shot.
+    """Lay out frames of the cut for you to choose a cover or thumbnail from.
 
-    Which frame makes the cover is a judgement, so this only narrows the
-    field: a frame per shot, never one of black or frozen picture, each the
-    moment its shot's measurements favour — the largest face, or where nobody
-    is seen, the sharpest stretch. Look at the sheet, pick with the user, and
-    save the one they choose with `export_cover`.
+    Choosing is yours, not this tool's: the cover has to show what the video
+    is about, and nothing measured here knows that. So the listing opens with
+    what the plan says the video is for and its parts, and every frame comes
+    with what is being said over it. Pick the frame that shows the video's
+    point — the thing it is about, the result it leads to — and that reads at
+    a glance at the size a feed shows it: one subject, large in the frame,
+    sharp, uncluttered, a face with its eyes open if there is one. Then look
+    closer: call again with `around` set to that moment to see the frames
+    either side of it, and choose the exact one. Offer the user your best one
+    or two with the reason for each, and save the one they choose with
+    `export_cover`.
 
     Args:
         project_id: ID of the project.
         frame: Crop the candidates to another shape, as it would be rendered.
         follow_faces: Crop around the face, as the render does.
+        per_shot: How many moments to offer from each shot: the one its
+            measurements favour and others spread through it.
+        around: A moment of the cut, in seconds, to look at closely instead:
+            every quarter second for two seconds either side of it.
+        part: Only the frames of one part of the cut, by its name or the ID
+            of the beat it came from — the payoff, where the point of the
+            video usually is, or any part a long cut's sheet had no room for.
 
     Returns:
-        A listing — each candidate's number, time in the cut and clip — and
-        the candidates as one labeled image.
+        What the video is for, a listing — each candidate's number, time in
+        the cut, clip and what is said then — and the candidates as one
+        labeled image.
 
     Raises:
-        ValueError: If the project does not exist or has nothing to offer.
+        ValueError: If the project or the part does not exist, or there is
+            nothing to offer.
     """
     project = repo.get_project(project_id)
     if not project:
         raise ValueError(f"project {project_id} not found")
     project = _reshaped(project, frame)
-    offered = cover_candidates(project, _analyses(project))[:MAX_STORYBOARD_TILES]
+    analyses = _analyses(project)
+    if around is None:
+        offered = [
+            (clip, seconds, float(clip.timeline_in) + (seconds - float(clip.source_range.start)) / clip.speed)
+            for clip, seconds in cover_candidates(project, analyses, per_shot)
+        ]
+    else:
+        offered = frames_around(project, analyses, around)
+    if part is not None:
+        marks = sorted(project.markers, key=lambda marker: marker.timeline_in)
+        named = [index for index, marker in enumerate(marks) if part in (marker.name, marker.id, marker.from_beat_id)]
+        if not named:
+            raise ValueError(f"no part called {part!r}; the parts are: "
+                             f"{', '.join(marker.name for marker in marks) or 'none'}")
+        opens = float(marks[named[0]].timeline_in)
+        closes = float(marks[named[0] + 1].timeline_in) if named[0] + 1 < len(marks) else float(project.duration)
+        offered = [item for item in offered if opens <= item[2] < closes]
     if not offered:
         raise ValueError(f"project {project_id} has no picture to take a cover from")
+    left_out = max(0, len(offered) - MAX_STORYBOARD_TILES)
+    offered = offered[:MAX_STORYBOARD_TILES]
     assets = _referenced_assets(project)
     framing = _framing(project, assets, follow_faces)
     fps = Fraction(project.fps_num, project.fps_den)
+    said = place_cues(project, project.subtitles) if project.subtitles else []
     shots, listing = [], []
-    for number, (clip, seconds) in enumerate(offered, start=1):
-        at = float(clip.timeline_in) + (seconds - float(clip.source_range.start)) / clip.speed
-        framed = framing.get(clip.id)
+    for number, (clip, seconds, at) in enumerate(offered, start=1):
         shots.append((assets[clip.asset_id].path, seconds, f"#{number}  {format_timestamp(at)}",
-                      placement_at(framed, clip, seconds, fps)))
-        listing.append(f"#{number}: edit {at:.3f}s ({format_timestamp(at)}) | clip {clip.id}")
-    header = f"{len(offered)} cover candidate(s) for project {project_id}, {project.width}x{project.height}:"
+                      placement_at(framing.get(clip.id), clip, seconds, fps)))
+        words = next((cue.text for cue in said if float(cue.start) <= at < float(cue.end)), "")
+        listing.append(f"#{number}: edit {at:.3f}s ({format_timestamp(at)}) | clip {clip.id}"
+                       + (f" | 「{words}」" if words else ""))
+    header = [f"{len(offered)} cover candidate(s) for project {project_id}, {project.width}x{project.height}"
+              + (f", around {around:g}s" if around is not None else "") + ":"]
+    base = project.base_video_track
+    compiled_from = {clip.from_plan_id for clip in base.clips} if base else set()
+    plan = repo.get_plan(next(iter(compiled_from))) if len(compiled_from) == 1 and None not in compiled_from else None
+    if plan is not None and (plan.goal or plan.beats):
+        parts = " → ".join(beat.name or beat.id for beat in plan.beats)
+        header.insert(0, "What the video is for: " + (plan.goal or "(no goal written)")
+                      + (f"\nIts parts: {parts}" if parts else ""))
+    else:
+        header.insert(0, "No plan says what this video is for; ask the user what it is about before choosing.")
+    if left_out:
+        header.append(f"{left_out} more were left out, from the end of the cut; ask for one `part` at a time.")
     return ToolResult(content=[
-        "\n".join([header, *listing]),
+        "\n".join([*header, *listing]),
         Image(data=storyboard_sheet(shots, aspect=project.width / project.height), format="jpeg"),
     ])
 
@@ -5812,45 +5944,46 @@ def propose_covers(
 def export_cover(
     project_id: str,
     seconds: Annotated[float, Field(ge=0)],
+    reason: Annotated[str, Field(min_length=1)],
     frame: Optional[Literal["landscape", "portrait", "square"]] = None,
     follow_faces: bool = True,
-) -> dict:
+) -> ToolResult:
     """Save one frame of the cut as a full-size JPEG, for a cover or thumbnail.
 
     The frame is the one the viewer sees at that moment — covering picture
     where there is some — at the size the cut is rendered at and cropped the
-    way the render crops it.
+    way the render crops it. It comes back at the size a feed shows it too,
+    and for a vertical cut cropped to the 3:4 middle a profile grid shows:
+    look at both before telling the user it is done, and choose again if the
+    subject is lost at that size or falls outside the middle.
 
     Args:
         project_id: ID of the project.
         seconds: The moment in the cut, as `propose_covers` lists it.
+        reason: Why this frame: what of the video's point it shows, and why
+            it reads at a glance. Written for the user, who decides.
         frame: Save it in another shape.
         follow_faces: Crop around the face, as the render does.
 
     Returns:
-        A dictionary with the `output_path` of the JPEG and its `width` and
-        `height`.
+        The `output_path` of the JPEG, its `width` and `height`, the reason,
+        and the cover at feed size.
 
     Raises:
-        ValueError: If the project does not exist or nothing is on screen then.
+        ValueError: If the project does not exist, nothing is on screen then,
+            or what is on screen is a title card.
     """
     project = repo.get_project(project_id)
     if not project:
         raise ValueError(f"project {project_id} not found")
     project = _reshaped(project, frame)
-    on_screen = [
-        clip for track in project.video_tracks for clip in track.clips
-        if (track is project.base_video_track or clip.layout is None)
-        and float(clip.timeline_in) <= seconds < float(clip.timeline_out)
-    ]
-    if not on_screen:
+    clip = on_screen(project, seconds)
+    if clip is None:
         raise ValueError(f"nothing is on screen at {seconds:g}s of project {project_id}")
-    # The topmost full-frame picture is what the viewer sees.
-    clip = on_screen[-1]
-    assets = _referenced_assets(project)
-    source = float(clip.source_range.start) + (seconds - float(clip.timeline_in)) * clip.speed
     if clip.card is not None:
         raise ValueError(f"{seconds:g}s of project {project_id} is a title card; take the cover from a shot")
+    assets = _referenced_assets(project)
+    source = float(clip.source_range.start) + (seconds - float(clip.timeline_in)) * clip.speed
     framed = _framing(project, assets, follow_faces).get(clip.id)
     fps = Fraction(project.fps_num, project.fps_den)
     picture = still(assets[clip.asset_id].path, source, project.width, project.height,
@@ -5859,7 +5992,16 @@ def export_cover(
     os.makedirs(folder, exist_ok=True)
     path = housekeeping.unique_path(folder, _delivery_name(project, "cover" + (f"-{frame}" if frame else ""), ".jpg"))
     picture.save(path, "JPEG", quality=92)
-    return {"output_path": path, "width": project.width, "height": project.height}
+    saved = {"output_path": path, "width": project.width, "height": project.height, "reason": reason}
+    grid = ", and the 3:4 middle a profile grid crops a vertical video to" if project.height > project.width else ""
+    return ToolResult(
+        content=[
+            f"Saved {path} ({project.width}x{project.height}). Why: {reason}\n"
+            f"Below: the cover at the size a feed shows it{grid}.",
+            Image(data=feed_preview(picture), format="jpeg"),
+        ],
+        structured_content=saved,
+    )
 
 def _timecodes(assets: Mapping[str, Asset]) -> Dict[str, float]:
     """Read the timecode each file starts at, for an editing program to line it up by.

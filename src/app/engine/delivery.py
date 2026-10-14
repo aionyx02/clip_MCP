@@ -13,6 +13,7 @@ answer every time.
 """
 
 import math
+import os
 import statistics
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -22,10 +23,11 @@ from app.engine.builder import DUCK_DEPTH_DB, Talking
 from app.engine.continuity import Shot, stray_runs
 from app.engine.looks import alike
 from app.engine.plan import LENGTH_TOLERANCE
-from app.engine.semantic import clean_cuts, combined_over, share_covered, was_audible, was_made_up
+from app.engine.library import MUSIC, library_of
+from app.engine.semantic import clean_cuts, combined_over, join_voices, share_covered, was_audible, was_made_up
 from app.engine.subtitles import caption_overflow, captioned_clips
-from app.models.media import MediaAnalysis
-from app.models.timeline import CaptionStyle, Clip, PlacedCue, Project
+from app.models.media import Asset, MediaAnalysis
+from app.models.timeline import CaptionStyle, Clip, PlacedCue, Project, TrackType
 
 # YouTube's rules for chapters written into a description: the first at 0:00, at least
 # three of them, each at least ten seconds long. The platform's rules, not a taste, and
@@ -708,24 +710,61 @@ def _look_alikes(clips: Sequence[Clip], looks: Mapping[str, Sequence[int]]) -> L
                 ), tuple((float(at),) * 2 for clip in (first, second) for at in (clip.timeline_in, clip.timeline_out))))
     return found
 
+# Moments offered from one shot are at least this far apart. Provisional.
+COVER_APART_SECONDS = 0.5
+# Looking closely at one moment: this far either side of it, a frame every this often. Provisional.
+COVER_REACH_SECONDS = 2.0
+COVER_STEP_SECONDS = 0.25
+
+def _shows_picture(analysis: Optional[MediaAnalysis]):
+    """Build a test for whether a moment of a file is worth showing: not black, not frozen."""
+    bad = [*analysis.black_frames, *analysis.frozen_frames] if analysis else []
+    return lambda seconds: not any(span.start <= seconds < span.end for span in bad)
+
+def _favoured_moment(analysis: Optional[MediaAnalysis], inner: Tuple[float, float], clean) -> Optional[float]:
+    """Pick the moment of a shot its measurements favour: the largest face, else the sharpest stretch."""
+    if analysis is not None:
+        faced = [
+            (second.face_share or 0.0, -second.start, min(max((second.start + second.end) / 2, inner[0]), inner[1]))
+            for second in analysis.faces
+            if second.faces and second.end > inner[0] and second.start < inner[1]
+        ]
+        faced = [item for item in faced if clean(item[2])]
+        if faced:
+            return max(faced)[2]
+        sharp = [
+            (shot.blur, min(max((shot.start + shot.end) / 2, inner[0]), inner[1]))
+            for shot in analysis.shots
+            if shot.blur is not None and shot.end > inner[0] and shot.start < inner[1]
+        ]
+        sharp = [item for item in sharp if clean(item[1])]
+        if sharp:
+            return min(sharp)[1]
+    middle = (inner[0] + inner[1]) / 2
+    return middle if clean(middle) else None
+
 def cover_candidates(
     project: Project,
     analyses: Mapping[str, MediaAnalysis],
+    per_shot: int = 1,
 ) -> List[Tuple[Clip, float]]:
-    """Offer one frame per shot as a cover, the one its measurements favour.
+    """Offer frames of every shot as a cover, never one of black or frozen picture.
 
-    Which frame makes the cover is a judgement, so this only narrows the
-    field — one candidate per shot, never a frame of black or frozen picture —
-    and whoever chooses looks at them. Within a shot the pick is an argmax,
-    not a threshold: the second with the largest face in it, or where nobody
-    is seen, the middle of the sharpest stretch.
+    Which frame makes the cover is a judgement about what the video is for,
+    and no measurement here knows that: the second with the largest face in a
+    shot is the right cover for a talking head and the wrong one for a video
+    about the thing in the speaker's hands. So this only lays the field out —
+    the moment the shot's measurements favour (the largest face, or where
+    nobody is seen, the sharpest stretch), and, asked for more, moments spread
+    evenly through the shot beside it — and whoever is choosing looks.
 
     Args:
         project: The project.
         analyses: The analyses of its files, keyed by asset ID.
+        per_shot: How many moments to offer from each shot.
 
     Returns:
-        `(clip, source_seconds)` per shot, in timeline order. Full-frame
+        `(clip, source_seconds)` per moment, in timeline order. Full-frame
         covering picture counts as a shot: a good cover is often B-roll.
     """
     # A title card is a frame borrowed from a shot, blurred: never what a cover should be.
@@ -737,31 +776,184 @@ def cover_candidates(
         # Clear of the cut at either end, where a frame may still belong to the shot before.
         inner = (start + min(0.25, (end - start) / 4), end - min(0.25, (end - start) / 4))
         analysis = analyses.get(clip.asset_id)
-        bad = [*analysis.black_frames, *analysis.frozen_frames] if analysis else []
-        clean = lambda seconds: not any(span.start <= seconds < span.end for span in bad)
-        choice: Optional[float] = None
-        if analysis is not None:
-            faced = [
-                (second.face_share or 0.0, -second.start, min(max((second.start + second.end) / 2, inner[0]), inner[1]))
-                for second in analysis.faces
-                if second.faces and second.end > inner[0] and second.start < inner[1]
+        clean = _shows_picture(analysis)
+        moments = [moment for moment in (_favoured_moment(analysis, inner, clean),) if moment is not None]
+        count = max(1, per_shot)
+        # Each further moment is the clean one farthest from those already offered, so they
+        # spread through whatever of the shot is worth showing.
+        tried = [inner[0] + (inner[1] - inner[0]) * (index + 0.5) / (4 * count) for index in range(4 * count)]
+        while len(moments) < count:
+            apart = [
+                (min((abs(seconds - moment) for moment in moments), default=math.inf), seconds)
+                for seconds in tried if clean(seconds)
             ]
-            faced = [item for item in faced if clean(item[2])]
-            if faced:
-                choice = max(faced)[2]
-            else:
-                sharp = [
-                    (shot.blur, min(max((shot.start + shot.end) / 2, inner[0]), inner[1]))
-                    for shot in analysis.shots
-                    if shot.blur is not None and shot.end > inner[0] and shot.start < inner[1]
-                ]
-                sharp = [item for item in sharp if clean(item[1])]
-                if sharp:
-                    choice = min(sharp)[1]
-        if choice is None:
-            middle = (inner[0] + inner[1]) / 2
-            if not clean(middle):
-                continue
-            choice = middle
-        offered.append((clip, round(choice, 3)))
+            best = max(apart, default=None)
+            if best is None or best[0] < COVER_APART_SECONDS:
+                break
+            moments.append(best[1])
+        offered += [(clip, round(moment, 3)) for moment in sorted(moments)]
     return offered
+
+def on_screen(project: Project, seconds: float) -> Optional[Clip]:
+    """Find the picture the viewer sees at one moment of the cut: the topmost full-frame clip, or None."""
+    showing = [
+        clip for track in project.video_tracks for clip in track.clips
+        if (track is project.base_video_track or clip.layout is None)
+        and float(clip.timeline_in) <= seconds < float(clip.timeline_out)
+    ]
+    return showing[-1] if showing else None
+
+def frames_around(
+    project: Project,
+    analyses: Mapping[str, MediaAnalysis],
+    at: float,
+    reach: float = COVER_REACH_SECONDS,
+    step: float = COVER_STEP_SECONDS,
+) -> List[Tuple[Clip, float, float]]:
+    """Offer every few frames either side of one moment of the cut, for choosing the exact one.
+
+    A shot that is the right subject still has frames where the hand is a
+    blur or the eyes are shut, and which one reads at a glance is only seen
+    by looking at them side by side.
+
+    Args:
+        project: The project.
+        analyses: The analyses of its files, keyed by asset ID.
+        at: The moment of the cut, in seconds.
+        reach: How far either side of it to look.
+        step: How far apart the frames are, in seconds of the cut.
+
+    Returns:
+        `(clip, source_seconds, cut_seconds)` for each frame shown then — the
+        topmost full-frame picture, as `export_cover` saves it — never a card
+        or a frame of black or frozen picture.
+    """
+    found: List[Tuple[Clip, float, float]] = []
+    steps = int(round(reach / step))
+    for index in range(-steps, steps + 1):
+        seconds = round(at + index * step, 3)
+        if not 0 <= seconds < float(project.duration):
+            continue
+        clip = on_screen(project, seconds)
+        if clip is None or clip.card is not None:
+            continue
+        source = float(clip.source_range.start) + (seconds - float(clip.timeline_in)) * clip.speed
+        if _shows_picture(analyses.get(clip.asset_id))(source):
+            found.append((clip, round(source, 3), seconds))
+    return found
+
+# Stretches of the cut this close together are said as one. Provisional.
+NOTICE_JOIN_SECONDS = 1.0
+
+@dataclass(frozen=True)
+class RightsFact:
+    """Something in a cut its publisher may need permission for, or has to say.
+
+    Attributes:
+        kind: `music` for a song laid under the cut, `other_voice` for
+            somebody heard who is not the main speaker, `unchecked_voices` for
+            talking nobody told the voices apart in, and `faces` for more than
+            one face on screen at once.
+        subject: What it is — the file, the voice's label.
+        spans: Where in the cut, in seconds, joined where close together.
+        detail: What is known about it: where it came from and on what terms,
+            what the user said about it, and what the file says about itself.
+    """
+
+    kind: str
+    subject: str
+    spans: Tuple[Tuple[float, float], ...]
+    detail: Tuple[str, ...] = ()
+
+def rights_facts(
+    project: Project,
+    analyses: Mapping[str, MediaAnalysis],
+    assets: Mapping[str, Asset],
+    tags: Mapping[str, Mapping[str, str]],
+) -> List[RightsFact]:
+    """List what in a cut its publisher may need permission for, or has to disclose.
+
+    Only facts: which songs play under it and what is known of them, who else
+    is heard, where more than one face is on screen. Whether any of it is a
+    problem depends on where the video is going and what the user agreed with
+    whom, and is theirs to judge — this is what they need in front of them to
+    judge it.
+
+    Args:
+        project: The cut.
+        analyses: The analyses of its files, keyed by asset ID.
+        assets: Its files, keyed by asset ID.
+        tags: What each file's own metadata says — title, artist, copyright,
+            licence — keyed by asset ID.
+
+    Returns:
+        The facts, music first, in the order each first comes in.
+    """
+    facts: List[RightsFact] = []
+    audio = [track for track in project.tracks if track.track_type == TrackType.AUDIO]
+    for asset_id in dict.fromkeys(clip.asset_id for track in audio for clip in track.clips if clip.volume != 0):
+        asset = assets.get(asset_id)
+        if asset is None or library_of(asset) != MUSIC:
+            continue
+        spans = _joined_spans((float(clip.timeline_in), float(clip.timeline_out)) for track in audio
+                              for clip in track.clips if clip.asset_id == asset_id and clip.volume != 0)
+        known = []
+        if asset.source is not None:
+            known += [f"from: {asset.source.site} {asset.source.page}", f"licence: {asset.source.licence}"]
+            known += [f"credit it asks for: {asset.source.credit}"] if asset.source.credit else []
+            known += ["taken for a video only the user watches"] if asset.source.personal_only else []
+        if asset.licence:
+            known.append(f"the user said: {asset.licence}")
+        if asset.source is None and not asset.licence:
+            known.append("licence: nobody has said")
+        known += [f"{key}: {value}" for key, value in tags.get(asset_id, {}).items() if value]
+        facts.append(RightsFact("music", os.path.basename(asset.path), spans, tuple(known)))
+
+    tracks = ([project.base_video_track] if project.base_video_track else []) + audio
+    heard = [clip for track in tracks for clip in track.clips
+             if clip.volume != 0 and clip.card is None and clip.asset_id in assets
+             and library_of(assets[clip.asset_id]) != MUSIC]
+    joined = join_voices(analyses)
+    talk: dict = {}
+    for clip in heard:
+        analysis = analyses.get(clip.asset_id)
+        for turn in analysis.speakers if analysis is not None else []:
+            landed = _on_timeline(clip, turn.start, turn.end)
+            if landed is not None:
+                label = joined.get((clip.asset_id, turn.speaker), f"{clip.asset_id}:{turn.speaker}")
+                talk.setdefault(label, []).append(landed)
+    unchecked = [clip for clip in heard if (analysis := analyses.get(clip.asset_id)) is not None
+                 and analysis.transcript is not None and analysis.transcript.segments and not analysis.speakers]
+    if unchecked:
+        # Not knowing who else talks is not the same as nobody else talking.
+        facts.append(RightsFact("unchecked_voices", "talking whose voices were never told apart", _joined_spans(
+            (float(clip.timeline_in), float(clip.timeline_out)) for clip in unchecked)))
+    if len(talk) > 1:
+        main = max(talk, key=lambda label: sum(end - start for start, end in talk[label]))
+        for label, stretches in talk.items():
+            if label != main:
+                facts.append(RightsFact("other_voice", label, _joined_spans(stretches),
+                                        (f"the main speaker is {main}",)))
+
+    crowded = []
+    base = project.base_video_track
+    shown = list(base.clips) if base else []
+    shown += [clip for track in project.video_tracks[1:] for clip in track.clips if clip.layout is None]
+    for clip in shown:
+        analysis = analyses.get(clip.asset_id)
+        for second in analysis.faces if analysis else []:
+            if second.faces > 1 and (landed := _on_timeline(clip, second.start, second.end)) is not None:
+                crowded.append(landed)
+    if crowded:
+        facts.append(RightsFact("faces", "more than one face on screen", _joined_spans(crowded)))
+    return facts
+
+def _joined_spans(spans) -> Tuple[Tuple[float, float], ...]:
+    """Join stretches of the cut that touch or nearly do, rounded to tenths."""
+    joined: List[List[float]] = []
+    for start, end in sorted(spans):
+        if joined and start - joined[-1][1] <= NOTICE_JOIN_SECONDS:
+            joined[-1][1] = max(joined[-1][1], end)
+        else:
+            joined.append([start, end])
+    return tuple((round(start, 1), round(end, 1)) for start, end in joined)
