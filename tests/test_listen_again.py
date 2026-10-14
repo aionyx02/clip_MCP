@@ -143,3 +143,14 @@ def test_two_hearings_of_a_made_up_line_do_not_agree(heard: dict, monkeypatch: p
     monkeypatch.setattr(analysis, "_run_whisper", hears("謝謝觀看"))
     found = server.listen_again(asset_id=heard["asset"], start=1.5, end=3.5)
     assert found["made_up"] is True and found["agrees"] is False
+
+def test_a_render_loud_where_nothing_was_heard_says_so() -> None:
+    from app.server import UNHEARD_LOUD_SECONDS, _loud_without_words
+
+    said = Transcript(language="zh", model="t", segments=[TranscriptSegment(start=10.0, end=11.0, text="對", words=[
+        TranscriptWord(start=10.0, end=11.0, text="對", probability=0.9)])])
+    # Loud from 10s to 14s, a word only in the first second of it; quiet after.
+    levels = [-20.0] * 8 + [-60.0] * 4
+    found = _loud_without_words(levels, 10.0, said)
+    assert found == [(11.0, 14.0)] and found[0][1] - found[0][0] >= UNHEARD_LOUD_SECONDS
+    assert _loud_without_words([-60.0] * 8, 10.0, said) == []

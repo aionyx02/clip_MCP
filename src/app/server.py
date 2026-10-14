@@ -1860,8 +1860,10 @@ def listen_again(
         recogniser makes up (a subtitle credit, a sign-off, words that take
         no time, one word looping), and `made_up` is then true — and, when
         `keep` was given, `kept` or `not_kept`; for a render, `captions`, the ones on screen in the
-        stretch, and `changed_since`, true when the project has been edited
-        since it was rendered.
+        stretch, `changed_since`, true when the project has been edited
+        since it was rendered, and `unheard`, where it is loud enough to be
+        talking with no word heard — hear that stretch again on its own, or
+        play `audio_path`; it may be a song.
 
     Raises:
         ValueError: If neither or both of a file and a render are given, it
@@ -2024,6 +2026,12 @@ def _hearable(start: float, end: float) -> None:
         raise ValueError(f"hear a stretch of at most {LISTEN_AGAIN_SECONDS:g} seconds at a time; this one is "
                          f"{end - start:g}s")
 
+# A stretch of a render this loud for this long with no word heard in it is very likely
+# somebody talking that the speech model missed — or a song, which only listening tells
+# apart. Speech in a finished render sits near -20 dBFS and a ducked bed well under -30.
+# Provisional, both.
+UNHEARD_LOUD_DB = -28.0
+UNHEARD_LOUD_SECONDS = 1.0
 # A piece of a render shorter than this either side of a cut is heard with the shot it
 # belongs to rather than on its own: too short to hold a word. Provisional.
 MIN_HEARD_SECONDS = 0.3
@@ -2074,11 +2082,42 @@ def _listen_to_render(job_id: str, start: float, end: float, language: Optional[
         fresh = pieces[0].model_copy(update={"segments": [segment for piece in pieces for segment in piece.segments]})
     shown = [cue for cue in (place_cues(project, project.subtitles) if project and job.captioned else [])
              if float(cue.end) > start and float(cue.start) < end]
-    return {
+    result = {
         **_heard(fresh, keep_as, start),
         "captions": [f"{format_timestamp(float(cue.start))} {cue.text}" for cue in shown],
         "changed_since": _changed_since(job),
     }
+    unheard = _loud_without_words(result["levels"]["db"], start, fresh)
+    if unheard:
+        result["unheard"] = ", ".join(f"{opened:.1f}–{closed:.1f}s" for opened, closed in unheard)
+    return result
+
+def _loud_without_words(levels: Sequence[float], start: float, fresh: Transcript) -> List[Tuple[float, float]]:
+    """Find where a render is loud enough to be somebody talking and the hearing has no word.
+
+    Args:
+        levels: The sound's level every `LEVEL_EVERY_SECONDS`, in dBFS.
+        start: Where the levels start, in seconds of the render.
+        fresh: The hearing.
+
+    Returns:
+        Each such stretch as `(start, end)` in seconds of the render, at
+        least `UNHEARD_LOUD_SECONDS` long.
+    """
+    said = [(word.start, word.end) for segment in fresh.segments for word in segment.words]
+    found: List[Tuple[float, float]] = []
+    opened = None
+    for index, level in enumerate([*levels, None]):
+        at = start + index * LEVEL_EVERY_SECONDS
+        loud = level is not None and level >= UNHEARD_LOUD_DB and not any(
+            begins < at + LEVEL_EVERY_SECONDS and ends > at for begins, ends in said)
+        if loud and opened is None:
+            opened = at
+        elif not loud and opened is not None:
+            if at - opened >= UNHEARD_LOUD_SECONDS:
+                found.append((opened, at))
+            opened = None
+    return found
 
 @mcp.tool()
 def get_analysis(
@@ -3315,7 +3354,9 @@ def inspect_join(
         The list; or for each join its frames, a row before the cut and a row
         from it with the two either side framed red; the transcribed words
         laid onto the render's time, ✂ on any a cut takes into, and what
-        they read as, corrected with the captions' glossary; where a line
+        they read as, corrected with the captions' glossary; the captions on
+        screen there, as written or corrected by hand, which are what was
+        said where the two differ; where a line
         ends and another begins across the cut, the pause between them beside
         the pauses the speaker makes between sentences; the render's
         sound level every 0.1s with ‖ at the cut; and a WAV of the stretch to
@@ -3369,6 +3410,7 @@ def inspect_join(
     length = float(project.duration)
     frame = project.fps_den / project.fps_num
     analyses = _analyses(project)
+    placed = place_cues(project, project.subtitles) if project.subtitles else []
     shots: list = []
     borders: list = []
     text: List[str] = []
@@ -3395,6 +3437,12 @@ def inspect_join(
             sides = [_glossed("".join(word.text for word in heard if (word.start >= join.at) == later))
                      for later in (False, True)]
             text.append(f"  reads: 「{sides[0]}」 ‖ 「{sides[1]}」")
+        # The captions are what somebody read and corrected, word for word, where the transcript
+        # and its glossary only fix what was misheard the same way every time.
+        shown = [f"{float(cue.start) - join.at:+.2f} {cue.text}" for cue in placed
+                 if float(cue.end) > opened and float(cue.start) < closed]
+        if shown:
+            text.append("  captions: " + " / ".join(shown))
         pause = pause_across(join.at, heard, analyses, join.part)
         if pause:
             text.append("  pause: " + pause)

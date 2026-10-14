@@ -122,3 +122,9 @@ def test_a_cut_is_read_back_as_a_script(rendered: dict) -> None:
     assert len(script) == 2 and script[0].startswith("0:00–") and "| clip a | wide.mp4 0.0–" in script[0]
     assert "said: 「第一句」" in script[0] and "captions: 第一句" in script[0]
     assert "said: 「第二句」" in script[1] and "captions: 第二句" in script[1]
+
+
+def test_a_join_shows_the_captions_on_screen_around_it(rendered: dict) -> None:
+    text = server.inspect_join(rendered["job_id"], joins=[1]).content[0].text
+    # The captions are what somebody read and could correct; they sit beside the words.
+    assert "captions: +1.00 第二句" in text

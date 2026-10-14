@@ -1352,8 +1352,7 @@ def _joined_beats(
             known = (cuts or {}).get(piece.asset_id)
             # Back no further than the last word before it, nor into what the cut already plays of
             # the same take: opening onto either would hear it twice or start mid-line.
-            said = [closed for _, closed in (known.words if known is not None else ())
-                    if closed <= piece.start + EDGE_TOLERANCE_SECONDS]
+            said = [known.last_sound_before(piece.start)] if known is not None else []
             played = [other.end for other in out[:at] if other.asset_id == piece.asset_id and other.end <= piece.start]
             quiet = piece.start - max(said + played, default=0.0)
             # Rounded first, so a time already in whole milliseconds is not floored a millisecond short.
