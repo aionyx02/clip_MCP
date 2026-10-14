@@ -30,7 +30,9 @@ from app.models.semantic import ClipKind, ClipLevel, SemanticClip, SemanticTimel
 
 # Bumped whenever the rules below change, so timelines built by an older
 # version are recognised as out of date rather than silently reused.
-DERIVATION_VERSION = 7
+# 8: lines the recogniser made up are told by more than their confidence, a stretch
+# without speech has no speaker, and voices join across files by their average.
+DERIVATION_VERSION = 8
 # A stretch without speech shorter than this is not a thing on its own; it is the
 # breath between two sentences, and it is already described by their headroom.
 MIN_UTTERANCE_SECONDS = 0.4
@@ -78,6 +80,10 @@ SPEAKER_MAJORITY = 0.8
 # and a recording made on another day in another room is further from itself than two
 # people in one room are from each other. Provisional, like that one.
 VOICE_DISTANCE = 0.45
+# How far a file's only voice may sit from a voice already heard and still be them. A
+# vlogger alone on a street measured 0.5 from themselves on another day, so a single
+# voice is given more room than one of several. Provisional.
+LONE_VOICE_DISTANCE = 0.6
 
 def share_covered(start: float, end: float, spans: Sequence[Span]) -> float:
     """Measure how much of a stretch is covered by a set of spans.
@@ -633,8 +639,14 @@ def join_voices(analyses: Mapping[str, MediaAnalysis]) -> Dict[Tuple[str, str], 
     happened to be read in.
 
     Greedy rather than a proper clustering: with a handful of voices the two
-    agree, and a greedy pass can be read straight through. If a corpus ever
-    shows them disagreeing, that is the moment to pay for the better one.
+    agree, and a greedy pass can be read straight through. Each joined voice
+    is compared by where its files sit on average, weighted by how much
+    talking each was measured over, so a week of one person's vlog gathers
+    around them instead of drifting off a voice at a time. A file with only
+    one voice in it is given more room, up to `LONE_VOICE_DISTANCE`: a person
+    alone with a camera on a noisy street is further from themselves than two
+    people in one room are from each other, and there is nobody else in the
+    file for them to be.
 
     Args:
         analyses: The analyses to join, keyed by asset ID.
@@ -645,19 +657,46 @@ def join_voices(analyses: Mapping[str, MediaAnalysis]) -> Dict[Tuple[str, str], 
         same as their being nobody: it means nobody looked.
     """
     joined: Dict[Tuple[str, str], str] = {}
-    known: List[Tuple[str, List[float]]] = []
+    # Each joined voice: its label, the sum of its files' voices weighted by seconds, and the seconds.
+    known: List[Tuple[str, List[float], float]] = []
     for asset_id in sorted(analyses):
-        for voice in sorted(analyses[asset_id].voices, key=lambda item: item.speaker):
-            nearest, distance = None, VOICE_DISTANCE
-            for label, embedding in known:
-                apart = _cosine_distance(voice.embedding, embedding)
+        voices = analyses[asset_id].voices
+        reach = LONE_VOICE_DISTANCE if len(voices) == 1 else VOICE_DISTANCE
+        taken: set = set()
+        for voice in sorted(voices, key=lambda item: item.speaker):
+            nearest, distance = None, reach
+            for index, (label, total, _) in enumerate(known):
+                if label in taken:
+                    # Two voices the speaker split told apart in one file are two people.
+                    continue
+                apart = _cosine_distance(voice.embedding, total)
                 if apart < distance:
-                    nearest, distance = label, apart
+                    nearest, distance = index, apart
             if nearest is None:
-                nearest = f"V{len(known) + 1}"
-                known.append((nearest, list(voice.embedding)))
-            joined[(asset_id, voice.speaker)] = nearest
+                known.append((f"V{len(known) + 1}", [0.0] * len(voice.embedding), 0.0))
+                nearest = len(known) - 1
+            label, total, seconds = known[nearest]
+            if len(total) == len(voice.embedding):
+                total = [held + value * voice.seconds for held, value in zip(total, voice.embedding)]
+            known[nearest] = (label, total, seconds + voice.seconds)
+            taken.add(label)
+            joined[(asset_id, voice.speaker)] = label
     return joined
+
+def voice_seconds(clips: Sequence[SemanticClip]) -> Dict[str, float]:
+    """Add up how long each joined voice talks, so one person split in several is plain to see.
+
+    Args:
+        clips: The clips of a timeline.
+
+    Returns:
+        Seconds of talking by joined label, the most talkative first.
+    """
+    held: Dict[str, float] = {}
+    for clip in clips:
+        if clip.speaker is not None:
+            held[clip.speaker] = held.get(clip.speaker, 0.0) + clip.source_range.end - clip.source_range.start
+    return {label: round(seconds, 1) for label, seconds in sorted(held.items(), key=lambda item: -item[1])}
 
 def timeline_input_hash(analyses: Mapping[str, MediaAnalysis]) -> str:
     """Fingerprint everything a build depends on.
@@ -735,9 +774,10 @@ def build_timeline(
                 source_range=Span(start=round(start, 3), end=round(end, 3)),
                 safe_in=round(safe_in, 3),
                 safe_out=round(safe_out, 3),
-                kind=_kind(bool(text) and not was_made_up(segment), asset.has_audio, scores),
+                kind=(kind := _kind(bool(text) and not was_made_up(segment), asset.has_audio, scores)),
                 text=text,
-                speaker=voices.get((asset_id, said_by)) if (
+                # Nobody is speaking in a stretch without words, whatever the speaker split heard there.
+                speaker=voices.get((asset_id, said_by)) if kind == ClipKind.SPEECH and (
                     said_by := speaker_at(analysis.speakers, start, end)
                 ) else None,
                 scores=scores,

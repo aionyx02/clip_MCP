@@ -72,7 +72,7 @@ from app.engine.plan import (
 )
 from app.engine.sections import build_sections, candidate_hash, check_sections, propose_candidates
 from app.engine.semantic import (
-    build_timeline, clean_cuts, content_scores, join_voices, timeline_input_hash, was_made_up,
+    build_timeline, clean_cuts, content_scores, join_voices, timeline_input_hash, voice_seconds, was_made_up,
 )
 from app.engine.ffmpeg import graph_from_file, hidden_window_flags
 from app.engine.probe import picture_size, probe_file, recorded_at, rights_tags, speech_loudness, timecode_start
@@ -2281,7 +2281,10 @@ def build_semantic_timeline(asset_ids: List[str], rebuild: bool = False) -> dict
     Returns:
         A dictionary with the `timeline_id`, the `asset_ids` it covers,
         `reused` saying whether an existing build was returned untouched,
-        `total_clips`, `counts` of clips by level and kind, and `stale`.
+        `total_clips`, `counts` of clips by level and kind, `voices`, the
+        seconds each voice talks, most first — one voice holding nearly all of
+        it and the rest a few seconds each is one person heard several ways,
+        so do not tell the user there are many — and `stale`.
 
         `stale` lists assets analyzed with detection settings or a speech
         model the server no longer uses. The build goes ahead with them,
@@ -2311,6 +2314,7 @@ def build_semantic_timeline(asset_ids: List[str], rebuild: bool = False) -> dict
             "reused": True,
             "total_clips": sum(repo.count_semantic_clips(existing.id).values()),
             "counts": repo.count_semantic_clips(existing.id),
+            "voices": voice_seconds(repo.query_semantic_clips(existing.id, kinds=[ClipKind.SPEECH], limit=-1)),
             "stale": stale,
         }
 
@@ -2322,6 +2326,7 @@ def build_semantic_timeline(asset_ids: List[str], rebuild: bool = False) -> dict
         "reused": False,
         "total_clips": len(clips),
         "counts": repo.count_semantic_clips(timeline.id),
+        "voices": voice_seconds(clips),
     }
 
 @mcp.tool()
