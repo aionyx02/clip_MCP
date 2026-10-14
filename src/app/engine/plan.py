@@ -19,6 +19,7 @@ import bisect
 import hashlib
 import math
 import os
+import re
 from dataclasses import dataclass, replace
 from datetime import timedelta
 from difflib import SequenceMatcher
@@ -2228,6 +2229,7 @@ def check_plan(
             notes.append(Note(f"the rejected clip {rejection.clip_id} is not in this timeline",
                               "rejected_clip_missing", clip_ids=[rejection.clip_id]))
     problems.extend(_knowledge_problems(plan, clips))
+    notes.extend(_file_order_notes(plan, clips, assets))
     shots = _shots(plan, clips, assets)
     for stray in strays(shots):
         problems.append(
@@ -2456,6 +2458,65 @@ def _shots(
         ))
         begun.add(selection.beat_id)
     return shots
+
+# A number a file's name starts with, before a separator: `1-`, `01_`, `1.`, `1 `, `1、`, `(1)`.
+# Numbered by hand, it is the order somebody meant the files to be cut in.
+FILE_NUMBER = re.compile(r"^\(?(\d{1,4})\s*[-_.、)\s]")
+
+def file_number(path: str) -> Optional[int]:
+    """Read the number a file's name starts with, if it starts with one before a separator."""
+    found = FILE_NUMBER.match(os.path.basename(path))
+    return int(found.group(1)) if found else None
+
+def _file_order_notes(
+    plan: EditPlan,
+    clips: Mapping[str, SemanticClip],
+    assets: Mapping[str, Asset],
+) -> List[Note]:
+    """Say where the plan plays numbered files out of the order their names give.
+
+    Files numbered by hand in one folder are the order somebody meant them to
+    be cut in; files in different folders were numbered apart. Only where a
+    file first comes in counts, and the hook and a selection that says why it
+    is out of place are left out: both are meant to be. A note, not a refusal:
+    the numbers may be the order they were shot rather than the order wanted.
+
+    Args:
+        plan: The plan.
+        clips: The timeline's clips, keyed by ID.
+        assets: The files, keyed by asset ID.
+
+    Returns:
+        One note per folder played out of its order.
+    """
+    hook = {beat.id for beat in plan.beats if beat.role == BeatRole.HOOK}
+    seen: set = set()
+    highest: Dict[str, Tuple[int, str]] = {}
+    behind: Dict[str, List[str]] = {}
+    labels: Dict[str, List[str]] = {}
+    for selection in _ordered_selections(plan):
+        clip = clips.get(selection.clip_id)
+        asset = assets.get(clip.asset_id) if clip is not None else None
+        if asset is None or asset.id in seen:
+            continue
+        seen.add(asset.id)
+        number = file_number(asset.path)
+        if number is None or selection.beat_id in hook or selection.jump_reason:
+            continue
+        folder, name = os.path.dirname(os.path.abspath(asset.path)), os.path.basename(asset.path)
+        top = highest.get(folder)
+        if top is not None and number < top[0]:
+            behind.setdefault(folder, []).append(f"{name} after {top[1]}")
+            labels.setdefault(folder, []).append(selection.clip_id)
+        else:
+            highest[folder] = (number, name)
+    return [
+        Note(f"the files are numbered in the order they were meant to be cut, and the plan plays "
+             f"{'; '.join(steps[:3])}{f' and {len(steps) - 3} more' if len(steps) > 3 else ''}: put them in "
+             "their order, or say in the selection's `jump_reason` why it comes there",
+             "file_order", clip_ids=labels[folder], look=True)
+        for folder, steps in behind.items()
+    ]
 
 def check_recompile(
     plan: EditPlan,

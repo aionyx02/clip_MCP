@@ -2468,6 +2468,29 @@ def test_a_part_that_opens_later_and_goes_back_in_time_is_handed_back() -> None:
     problems, _ = check_plan(plan_for(selections, structure=Structure.FLASHBACK), timeline, by_id, children, assets)
     assert not any(problem.startswith("continuity:") for problem in problems)
 
+def test_files_numbered_by_hand_played_out_of_their_order_are_noted() -> None:
+    from app.engine.plan import file_number
+
+    assert [file_number(name) for name in ("1-開場.mp4", "01_a.mp4", "3.mov", "12 b.mp4", "2、c.mp4", "(4) d.mp4",
+                                           "IMG_0001.mp4", "20260829_1.mp4", "v2.mp4")] == [1, 1, 3, 12, 2, 4,
+                                                                                            None, None, None]
+    by_id, children, assets, clips = covered()
+    first = speech_of(clips)[0]
+    walk = next(clip for clip in clips if clip.asset_id == BROLL_ASSET)
+    assets = {ASSET_ID: assets[ASSET_ID].model_copy(update={"path": "D:/拍攝/1-聊天.mp4"}),
+              BROLL_ASSET: assets[BROLL_ASSET].model_copy(update={"path": "D:/拍攝/2-散步.mp4"})}
+    timeline = SemanticTimeline(id="tl_test", asset_ids=[], input_hash="hash", derivation_version=6)
+
+    def noted(*selections: Selection) -> list:
+        _, notes = check_plan(plan_for(list(selections)), timeline, by_id, children, assets)
+        return [note for note in notes if note.kind == "file_order"]
+
+    found = noted(Selection(clip_id=walk.id, beat_id="b1"), Selection(clip_id=first.id, beat_id="b1"))
+    assert len(found) == 1 and "1-聊天.mp4 after 2-散步.mp4" in found[0] and found[0].clip_ids == (first.id,)
+    assert noted(Selection(clip_id=first.id, beat_id="b1"), Selection(clip_id=walk.id, beat_id="b1")) == []
+    assert noted(Selection(clip_id=walk.id, beat_id="b1"),
+                 Selection(clip_id=first.id, beat_id="b1", jump_reason="回到開頭")) == []
+
 def knowing(plan: EditPlan, by_id: dict, *said: dict) -> EditPlan:
     """Say, piece by piece in playing order, what each establishes and relies on.
 
