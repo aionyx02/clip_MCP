@@ -1111,6 +1111,24 @@ class CleanCuts:
         within = any(begins < seconds < ends for begins, ends in self.sentences)
         return kept and gone and within
 
+    def last_sound_before(self, seconds: float) -> float:
+        """Find where the last thing said or heard before a moment ends: what a window may not open onto.
+
+        Args:
+            seconds: The moment, in source seconds.
+
+        Returns:
+            The latest end at or before it of a transcribed word, a word the
+            second listen heard, or a stretch its voice detector heard — or
+            the moment itself when a voiced stretch runs through it; 0 when
+            nothing was.
+        """
+        if any(start < seconds - EDGE_TOLERANCE_SECONDS and end > seconds + EDGE_TOLERANCE_SECONDS
+               for start, end in self.voiced):
+            return seconds
+        ends = [end for _, end in self.words] + [end for _, end, _ in self.heard] + [end for _, end in self.voiced]
+        return max((end for end in ends if end <= seconds + EDGE_TOLERANCE_SECONDS), default=0.0)
+
     def room_before(self, onset: float) -> float:
         """Find how far before the start of some talking a window may open.
 

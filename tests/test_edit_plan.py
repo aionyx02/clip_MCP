@@ -2644,3 +2644,14 @@ def test_a_pause_never_opens_a_shot_onto_what_the_cut_already_played_of_its_take
               Piece(asset_id="a", start=5.0, end=8.0, from_clip_ids=("u2",), beat_id="b2")]
     out, _ = _joined_beats(plan, pieces, {}, {"a": CleanCuts(transcribed=True)})
     assert out[1].start == pytest.approx(4.7)
+
+def test_a_pause_never_opens_onto_talking_only_the_second_listen_heard() -> None:
+    from app.engine.plan import _joined_beats
+
+    plan = plan_for([]).model_copy(update={"beats": [Beat(id="b1", name="講"), Beat(id="b2", name="走", pause_before=1.0)]})
+    pieces = [Piece(asset_id="a", start=0.0, end=2.0, from_clip_ids=("u1",), beat_id="b1"),
+              Piece(asset_id="b", start=5.0, end=8.0, from_clip_ids=("u2",), beat_id="b2")]
+    # The transcript has nothing before 5s; the voice detector heard somebody until 4.5s.
+    cuts = {"b": CleanCuts(words=((5.0, 6.0),), voiced=((3.0, 4.5),), transcribed=True)}
+    out, _ = _joined_beats(plan, pieces, {}, cuts)
+    assert out[1].start == pytest.approx(4.5)
