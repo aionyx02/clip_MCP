@@ -296,8 +296,41 @@ def test_measuring_loudness_moves_the_bar(monkeypatch: pytest.MonkeyPatch, tmp_p
     }, context)
     measuring = [progress for progress, stage in context.reports if stage is None]
     # Half way through the measuring, the bar is half way through its share, not where it started.
-    assert measuring[0] == pytest.approx(renderer.LOUDNESS_SHARE / (1 + renderer.LOUDNESS_SHARE) / 2, abs=0.01)
+    share = renderer.speed.RENDER_COST["loudness"] / (renderer.speed.RENDER_COST["loudness"] + renderer.speed.RENDER_COST["final"])
+    assert measuring[0] == pytest.approx(share / 2, abs=0.01)
     assert ("measuring loudness" in {stage for _, stage in context.reports})
+
+
+def test_the_bar_moves_at_the_pace_this_computer_renders(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from app.storage.repo import Repository
+
+    # Its own store: other tests' renders would otherwise have set this computer's pace.
+    repo = Repository(str(tmp_path / "pace.db"))
+    clock = [0.0]
+    # Measuring the loudness takes 10s of a minute's cut and the pass that draws it 80s.
+    took = {"mix": 10.0, "final": 80.0}
+
+    def ffmpeg(command, log, seconds, on_progress, is_cancelled) -> None:
+        clock[0] += took[command[0]]
+        on_progress(1.0)
+
+    monkeypatch.setattr(renderer, "run_ffmpeg", ffmpeg)
+    monkeypatch.setattr(renderer.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(renderer.loudness, "settle_gain", lambda path, target: 0.0)
+    monkeypatch.setattr(renderer.loudness, "with_gain", lambda command, gain: command)
+    spec = {"pieces": [], "duration_seconds": 60.0, "command": ["final"],
+            "loudness": {"mix_command": ["mix"], "mix_path": str(tmp_path / "mix.wav"), "target": -14.0}}
+    renderer._run_render(Job(work_dir=str(tmp_path), preview=False), dict(spec), Reported(), repo)
+    # The next one shares the bar out as the time went: a ninth of it for the loudness.
+    context = Reported()
+    renderer._run_render(Job(work_dir=str(tmp_path), preview=False), dict(spec), context, repo)
+    rendering = next(progress for progress, stage in context.reports if stage == "rendering")
+    assert rendering == pytest.approx(10 / 90, abs=0.001)
+    # A preview is another kind of render, and is not shared out by a finished video's pace.
+    context = Reported()
+    renderer._run_render(Job(work_dir=str(tmp_path), preview=True), dict(spec), context, repo)
+    rendering = next(progress for progress, stage in context.reports if stage == "rendering")
+    assert rendering == pytest.approx(1 / 3, abs=0.001)
 
 
 def test_how_long_is_left_comes_from_the_pace_so_far() -> None:

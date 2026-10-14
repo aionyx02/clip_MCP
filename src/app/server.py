@@ -2111,16 +2111,15 @@ def _semantic_clip(clip_id: str, timeline_id: Optional[str]) -> SemanticClip:
 
     Args:
         clip_id: `u0034`, or a whole ID.
-        timeline_id: The timeline a short one is in. Left out, the one
-            timeline that has such a clip; never a guess between several,
-            since the same short ID is a different moment in each.
+        timeline_id: The timeline a short one is in. Left out, the newest
+            build that has such a clip, as a search uses the newest build; the
+            clip says which timeline it is from.
 
     Returns:
         The clip.
 
     Raises:
-        ValueError: If there is no such clip, or a short ID is in more than
-            one timeline and none was named.
+        ValueError: If there is no such clip.
     """
     if ":" in clip_id:
         whole = clip_id
@@ -2128,10 +2127,7 @@ def _semantic_clip(clip_id: str, timeline_id: Optional[str]) -> SemanticClip:
         whole = whole_clip_id(clip_id, _require_timeline(timeline_id).id)
     else:
         holding = repo.timelines_holding(clip_id)
-        if len(holding) > 1:
-            raise ValueError(f"{clip_id} is in {len(holding)} timelines ({', '.join(holding)}); "
-                             "give the timeline_id of the one meant")
-        whole = whole_clip_id(clip_id, holding[0]) if holding else clip_id
+        whole = whole_clip_id(clip_id, holding[-1]) if holding else clip_id
     clip = repo.get_semantic_clip(whole)
     if clip is None:
         raise ValueError(f"semantic clip {clip_id} not found; query_clips lists the ones that exist")
@@ -2714,8 +2710,8 @@ def get_semantic_clip(clip_id: str, include_words: bool = False, timeline_id: Op
         clip_id: ID of the clip, as `query_clips` returned it.
         include_words: Whether to include each word's timing. Leave it off
             unless cutting inside a sentence.
-        timeline_id: The timeline the clip is in; needed only when more than
-            one timeline has been built.
+        timeline_id: The timeline the clip is in; left out, the newest
+            build that has the clip.
 
     Returns:
         The clip: its `clip_id`, `timeline_id`, `asset_id`, `level`, `kind`,
@@ -2761,8 +2757,8 @@ def frames_for_clips(
         clip_ids: Clips to sample, in the order to show them. One frame is
             taken from the middle of each.
         columns: Most tiles per row.
-        timeline_id: The timeline the clips are in; needed only when more
-            than one timeline has been built.
+        timeline_id: The timeline the clips are in; left out, the newest
+            build that has the clips.
 
     Returns:
         A text block naming each tile's clip and time, followed by the grid as
@@ -2826,8 +2822,8 @@ def set_clip_tags(
         written_by: Who or what is writing, such as the model and version that
             read the frames, or the user's name when they dictated a fix.
         reviewed: True once the user has seen these and agreed to them.
-        timeline_id: The timeline the clips are in; needed only when more
-            than one timeline has been built.
+        timeline_id: The timeline the clips are in; left out, the newest
+            build that has the clips.
 
     Returns:
         A dictionary with how many clips were `updated` and the total `tags`
@@ -3822,6 +3818,8 @@ def amend_plan(plan_id: str, expected_version: int, amendments: list[PlanAmendme
     own amendments rather than a trim to every selection: `set_pacing` for
     「整體節奏太慢」 (shorter pauses, less air around every cut),
     `set_music_level` for 「音樂太大聲」 (everywhere, or from one beat),
+    `set_music_cue` to change one cue's start, volume, fades or cutting on
+    its beat without sending the plan again,
     `set_target` for a new length or platform, and `drop_beat` for
     「這整段不要」, which files every selection in it under the rejections.
     What the viewer has to know is `set_facts` for the plan and

@@ -158,3 +158,50 @@ def estimate(repo: Repository, here: Machine, footage: Dict[str, float], speaker
         all_measured = all_measured and measured
     found["basis"] = MEASURED if all_measured else ROUGH
     return found
+
+# Provisional (roadmap §13): seconds of work per second of picture for each part of a render,
+# before this computer has rendered anything: a piece of picture at full cost, the pass that
+# puts the cut together a third of that, and measuring its loudness half that pass, since it
+# mixes the sound without drawing any picture. Only their proportions matter.
+RENDER_COST = {"pieces": 1.0, "final": 1 / 3, "loudness": 1 / 6}
+# Provisional (roadmap §13): a part of a render shorter than this is mostly FFmpeg starting up,
+# so its pace says little about the next one.
+MIN_RENDER_MEASURED_SECONDS = 10.0
+RENDER_DEVICE = "ffmpeg"
+
+def render_costs(repo: Repository, computer: str, preview: bool, parts: List[str]) -> Dict[str, float]:
+    """How long each part of a render takes per second of picture, so the bar moves as time does.
+
+    This computer's recent renders of the same kind once every part this
+    render has has been measured; until then the provisional proportions,
+    since measured and guessed figures do not mix into one bar.
+
+    Args:
+        repo: Where past renders' pace is kept.
+        computer: This computer.
+        preview: Whether it is a preview, which puts pieces together, or a finished video, drawn whole.
+        parts: The parts this render has: `pieces`, `loudness`, `final`.
+
+    Returns:
+        Seconds of work per second of picture, by part.
+    """
+    model = "preview" if preview else "final"
+    measured = {part: repo.speed_samples(computer, f"render_{part}", RENDER_DEVICE, model, limit=RECENT_SAMPLES)
+                for part in parts}
+    if all(measured.values()):
+        return {part: statistics.median(samples) for part, samples in measured.items()}
+    return {part: RENDER_COST[part] for part in parts}
+
+def record_render(repo: Repository, computer: str, preview: bool, taken: Dict[str, Tuple[float, float]]) -> None:
+    """Keep how fast each part of a finished render went, when it ran long enough to tell.
+
+    Args:
+        repo: Where it is kept.
+        computer: This computer.
+        preview: Whether it was a preview.
+        taken: By part, `(seconds it took, seconds of picture)`.
+    """
+    model = "preview" if preview else "final"
+    for part, (seconds, picture) in taken.items():
+        if picture >= MIN_RENDER_MEASURED_SECONDS and seconds > 0:
+            repo.add_speed_sample(computer, f"render_{part}", RENDER_DEVICE, model, seconds, picture, KEPT_SAMPLES)

@@ -150,3 +150,36 @@ def test_new_words_in_the_plan_come_in_beside_ones_changed_by_hand() -> None:
     apply_amendment(plan, SetSelectionTextsOp(clip_id=target, texts=[PlanText(text="李大華")]))
     again = compiled(plan, by_id, children, assets, project)
     assert [text.text for clip in again.base_video_track.clips for text in clip.shown_texts] == ["李大華"]
+
+
+def test_words_of_the_plan_are_named_as_the_ai_is_shown_them() -> None:
+    from app.models.plan import short_clip_ids
+
+    by_id, children, assets, clips = footage()
+    plan = plan_with_words(by_id, clips)
+    project = compiled(plan, by_id, children, assets)
+    [carrier] = [clip for clip in project.base_video_track.clips if clip.texts]
+    # Everything said to the AI has the timeline taken off clip IDs; a text's own ID must survive that.
+    [text] = carrier.texts
+    assert short_clip_ids(text.id) == text.id
+    by_hand(project, assets, {"action": "set_text", "track_id": "main", "clip_id": carrier.id,
+                              "text_id": short_clip_ids(text.id), "text": "王大明"})
+    assert [text.text for text in carrier.texts] == ["王大明"]
+
+
+def test_words_changed_by_hand_under_the_old_name_are_not_doubled() -> None:
+    from app.models.plan import short_clip_ids
+
+    by_id, children, assets, clips = footage()
+    plan = plan_with_words(by_id, clips)
+    project = compiled(plan, by_id, children, assets)
+    [carrier] = [clip for clip in project.base_video_track.clips if clip.texts]
+    target = plan.selections[1].clip_id
+    # Named with the whole clip ID, the way they were before.
+    carrier.texts[0].id = carrier.texts[0].id.replace("plan-" + target.split(":")[1], "plan-" + target)
+    by_hand(project, assets, {"action": "set_text", "track_id": "main", "clip_id": carrier.id,
+                              "text_id": carrier.texts[0].id, "text": "王大明"})
+    again = compiled(plan, by_id, children, assets, project)
+    [kept] = [text for clip in again.base_video_track.clips for text in clip.shown_texts]
+    # Kept, and named from now on as the AI is shown it.
+    assert kept.text == "王大明" and short_clip_ids(kept.id) == kept.id

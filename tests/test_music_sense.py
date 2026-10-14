@@ -59,3 +59,24 @@ def test_a_plan_is_told_when_its_song_loops_or_is_cut_off(monkeypatch: pytest.Mo
     kinds = [note.kind for note in notes]
     assert "music_loops" in kinds and "music_cut_off" in kinds
     assert all(note.look for note in notes)
+
+
+def test_a_song_started_where_the_plan_is_told_ends_with_the_cut_rather_than_looping(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import re
+
+    from app.engine import plan as compiler
+
+    # 58.74s of cut: rounded to 58.7 first, the start said was 191.3 and the song ran 0.04s short.
+    song = Asset(id="song", path="song.mp3", duration=250, has_video=False, has_audio=True, library="music")
+    cuts = {"song": compiler.CleanCuts(energy=tuple([1.0] * 250), beats=None)}
+    beds = [compiler.Bed(asset_id="song", start=0, end=58.74, timeline_in=0, volume=0.35, fade_in=1, fade_out=2,
+                         key=("cue:^", "pass:1"))]
+    monkeypatch.setattr(compiler, "music_beds", lambda *_: beds)
+    monkeypatch.setattr(compiler, "compiled_duration", lambda *_: 58.74)
+    plan = type("Plan", (), {"beats": []})()
+    notes = compiler.music_fit_notes(plan, [], {"song": song}, cuts)
+    [cut_off] = [note for note in notes if note.kind == "music_cut_off"]
+    start = float(re.search(r"start the cue at ([\d.]+)s", cut_off).group(1))
+    assert start + 58.74 <= 250

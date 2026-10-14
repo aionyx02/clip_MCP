@@ -70,6 +70,25 @@ def test_music_that_is_not_there_cannot_be_turned_down() -> None:
     with pytest.raises(ValueError, match="no music"):
         apply_amendment(plan, SetMusicLevelOp(scale=0.5))
 
+def test_one_cue_is_changed_and_the_rest_of_the_plan_left_as_it_was() -> None:
+    plan = two_parts()
+    reasons = [selection.rationale for selection in plan.selections]
+    [op] = amendments({"action": "set_music_cue", "beat_id": "b2", "start": 191.2, "fade_out": 3})
+    apply_amendment(plan, op)
+    second = plan.music.cues[1]
+    assert (second.start, second.fade_out, second.volume, second.asset_id) == (191.2, 3, 0.5, "other")
+    assert plan.music.cues[0].start == 0 and [selection.rationale for selection in plan.selections] == reasons
+    # Left out, the cue that starts with the video.
+    apply_amendment(plan, amendments({"action": "set_music_cue", "cut_on_beat": True})[0])
+    assert [cue.cut_on_beat for cue in plan.music.cues] == [True, False]
+
+def test_a_cue_that_is_not_there_cannot_be_changed() -> None:
+    with pytest.raises(ValueError, match="no music cue comes in on b1"):
+        apply_amendment(two_parts(), amendments({"action": "set_music_cue", "beat_id": "b1", "start": 3})[0])
+    with pytest.raises(ValueError, match="no music"):
+        apply_amendment(two_parts().model_copy(update={"music": None}),
+                        amendments({"action": "set_music_cue", "start": 3})[0])
+
 def test_a_whole_part_comes_out_with_its_reason_and_everything_hung_on_it() -> None:
     plan = two_parts()
     apply_amendment(plan, DropBeatOp(beat_id="b2", reason="結尾太拖"))

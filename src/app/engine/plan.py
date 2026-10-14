@@ -27,7 +27,9 @@ from typing import AbstractSet, Dict, Iterable, List, Mapping, Optional, Sequenc
 from app.engine.continuity import Shot, strays
 from app.engine.music import MIDDLE, energy_at, fullest
 from app.models.media import Asset
-from app.models.plan import STRUCTURES, Beat, BeatRole, EditPlan, MusicCue, Selection, Structure, TrimKind
+from app.models.plan import (
+    STRUCTURES, Beat, BeatRole, EditPlan, MusicCue, Selection, Structure, TrimKind, short_clip_ids,
+)
 from app.engine.semantic import EDGE_TOLERANCE_SECONDS, CleanCuts
 from app.models.semantic import ClipKind, SemanticClip, SemanticTimeline
 from app.models.timeline import MAX_SPEED, MIN_SPEED, Clip, Project, TitleCard, card_background
@@ -2767,8 +2769,8 @@ def music_fit_notes(
             lands = first.timeline_in + peak[0] - first.start if first.start <= peak[0] < first.end else None
             if lands is None or abs(lands - climax) > PEAK_TOLERANCE_SECONDS:
                 start = peak[0] - (climax - first.timeline_in)
-                fix = (f"start the cue at {start:.1f}s of the song to land it there" if 0 <= start < length
-                       else "a song that builds later would land it there")
+                fix = (f"start the cue at {start:.1f}s of the song (set_music_cue) to land it there"
+                       if 0 <= start < length else "a song that builds later would land it there")
                 notes.append(Note(
                     f"the fullest part of {name} ({peak[0]}–{peak[1]}s of the song) "
                     + (f"lands at {lands:.1f}s of the cut" if lands is not None else "is never heard")
@@ -2778,11 +2780,13 @@ def music_fit_notes(
         ends_with_cut = abs(last.timeline_in + last.end - last.start - total) < 0.01
         still = energy_at(energy, last.end)
         if ends_with_cut and length - last.end > CUT_OFF_SECONDS and still is not None and still >= MIDDLE:
-            start = length - heard
+            # From the part's own length, not the rounded one said above, and rounded down as it is
+            # said: a start a hundredth late leaves the song short of the part, and it loops.
+            start = math.floor((length - (last.timeline_in + last.end - last.start - first.timeline_in)) * 10) / 10
             notes.append(Note(
                 f"the cut ends {length - last.end:.0f}s before {name} does, while it is still going; it is faded "
                 f"out over {last.fade_out:g}s. For the song to end with the video, start the cue at "
-                f"{max(0.0, start):.1f}s of the song" + ("" if start >= 0 else " — it is shorter than the part, so "
+                f"{max(0.0, start):.1f}s of the song (set_music_cue)" + ("" if start >= 0 else " — it is shorter than the part, so "
                                                          "it loops first") + ", or give it a longer fade_out",
                 "music_cut_off", beat_id=beat_id, seconds=total, look=True,
             ))
@@ -2979,13 +2983,14 @@ def _text_operations(
             if text.by_plan or key in carried:
                 continue
             carried.add(key)
-            kept.add(text.id)
+            # Named with the whole clip ID before they were named as the AI is shown them.
+            kept.add(short_clip_ids(text.id))
             fields = {"text": text.text, "second": text.second, "style": text.style, "x": text.x, "y": text.y,
                       "hidden": text.hidden}
             for track_id, clip_id, asset_id, start, end, _ in made:
                 low, high = max(start, float(text.start)), min(end, float(text.end))
                 if asset_id == clip.asset_id and high > low:
-                    put(track_id, clip_id, text.id, low, high, fields)
+                    put(track_id, clip_id, short_clip_ids(text.id), low, high, fields)
 
     for selection in plan.selections:
         if not selection.texts:
@@ -2996,7 +3001,9 @@ def _text_operations(
             # Named by its words, not its place in the list: a copy changed or taken off by hand
             # stands in for exactly these words, and new words the plan is given come in beside it.
             words = hashlib.sha1(f"{text.text}\n{text.second or ''}".encode("utf-8")).hexdigest()[:8]
-            text_id = f"plan-{selection.clip_id}-{words}"
+            # The clip as the AI is shown it: everything said back has the timeline taken off clip
+            # IDs, so a text named with the whole one could never be named back.
+            text_id = f"plan-{short_clip_ids(selection.clip_id)}-{words}"
             if text_id in kept:
                 continue
             fields = {"text": text.text, "second": text.second, "style": text.style, "x": text.x, "y": text.y,

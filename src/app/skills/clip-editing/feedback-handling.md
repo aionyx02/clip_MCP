@@ -112,6 +112,7 @@ let the user steer from there.
 | 「那段講到 X 的怎麼沒放」 / why is the part about X missing | Read `rejected` for the reason; `add_selection` it back if they still want it |
 | 「音樂太大聲」「蓋過講話」 / the music is too loud | `set_music_level` with `scale: 0.6`, then `preview_sound` to check |
 | 「音樂太小聲」 / the music is too quiet | `set_music_level` with `scale: 1.5` |
+| 「歌從副歌開始」「結尾淡出長一點」, or a note saying where to start a song | `set_music_cue` on that cue (`beat_id`, left out for the one that starts with the video) with only what changes |
 | 「聽不太清楚」 / hard to hear | `preview_sound` first. Noise under the voice: `set_clip_audio` with `cleanup`. Music over it: `set_music_level`. A voice left apart from the others: its file was not transcribed |
 | 「畫面太悶」「一直同一個畫面」 / the picture is dull | `propose_broll`, then `add_broll` |
 | 「字太小」「字被擋住」 / captions too small or covered | `set_caption_style` with the platform's `preset`, or a larger `size_fraction` |

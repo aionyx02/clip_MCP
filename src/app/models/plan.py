@@ -660,6 +660,23 @@ class SetMusicLevelOp(BaseModel):
         default=None, description="Only the music cue coming in on this beat; every cue when left out",
     )
 
+class SetMusicCueOp(BaseModel):
+    """Amendment that changes one music cue, for 「歌從副歌開始」 or 「最後淡出長一點」.
+
+    Only the fields given change: the rest of the cue, the other cues and
+    every written reason in the plan stay as they are.
+    """
+
+    action: Literal["set_music_cue"] = "set_music_cue"
+    beat_id: Optional[str] = Field(
+        default=None, description="The music cue coming in on this beat; left out, the one that starts with the video",
+    )
+    start: Optional[float] = Field(default=None, ge=0, description="As on a cue: where in the song to come in")
+    volume: Optional[float] = Field(default=None, ge=0, le=4, description="As on a cue")
+    fade_in: Optional[float] = Field(default=None, ge=0, description="As on a cue")
+    fade_out: Optional[float] = Field(default=None, ge=0, description="As on a cue")
+    cut_on_beat: Optional[bool] = Field(default=None, description="As on a cue")
+
 class SetTargetOp(BaseModel):
     """Amendment that changes what the finished video has to be."""
 
@@ -722,7 +739,7 @@ class SetKnowledgeOp(BaseModel):
 PlanAmendment = Annotated[
     Union[
         SetTrimOp, SetRationaleOp, AddSelectionOp, DropSelectionOp, AddBrollOp, DropBrollOp,
-        SetPacingOp, SetMusicLevelOp, SetTargetOp, DropBeatOp, SetPlaybackOp, SetBeatJoinOp,
+        SetPacingOp, SetMusicLevelOp, SetMusicCueOp, SetTargetOp, DropBeatOp, SetPlaybackOp, SetBeatJoinOp,
         SetBeatTitleOp, SetSelectionTextsOp, SetFactsOp, SetKnowledgeOp,
     ],
     Field(discriminator="action"),
@@ -755,6 +772,10 @@ def describe_amendment(op: "PlanAmendment") -> str:
                 f"x{op.pacing.speed or 1:g}")
     if isinstance(op, SetMusicLevelOp):
         return f"music x{op.scale:g}" + (f" from {op.beat_id}" if op.beat_id else "")
+    if isinstance(op, SetMusicCueOp):
+        changed = ", ".join(f"{name} {value:g}" if isinstance(value, float) else f"{name} {value}"
+                            for name, value in op.model_dump(exclude={"action", "beat_id"}, exclude_none=True).items())
+        return f"music from {op.beat_id or 'the start'}: {changed or 'unchanged'}"
     if isinstance(op, SetPlaybackOp):
         return f"{op.clip_id} plays at x{op.speed or 1:g}, volume {1 if op.volume is None else op.volume:g}"
     if isinstance(op, SetBeatJoinOp):
@@ -865,6 +886,17 @@ def apply_amendment(plan: EditPlan, op: PlanAmendment) -> None:
             # Capped where the volume field is, rather than refused: turning something up
             # twice should stop at the ceiling, not fail the second time.
             cue.volume = round(min(4.0, cue.volume * op.scale), 3)
+        return
+
+    if isinstance(op, SetMusicCueOp):
+        if plan.music is None:
+            raise ValueError("the plan has no music to change")
+        cue = next((cue for cue in plan.music.cues if cue.beat_id == op.beat_id), None)
+        if cue is None:
+            known = ", ".join(cue.beat_id or "the start" for cue in plan.music.cues)
+            raise ValueError(f"no music cue comes in on {op.beat_id or 'the start'}; the cues come in on {known}")
+        for name, value in op.model_dump(exclude={"action", "beat_id"}, exclude_none=True).items():
+            setattr(cue, name, value)
         return
 
     if isinstance(op, SetTargetOp):
