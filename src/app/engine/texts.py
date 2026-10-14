@@ -54,6 +54,34 @@ def shown(clip: Clip, text: TextLayer) -> Optional[Tuple[float, float]]:
             float(clip.timeline_in + (end - clip.source_range.start) / speed))
 
 
+def fades(clip: Clip, start: float, end: float) -> Tuple[float, float]:
+    """How long words shown from `start` to `end` of the cut take to come and go.
+
+    Their own short fade, unless they are up while the clip fades from or to
+    black: then they come in as the picture does and go dark with it, rather
+    than staying bright over a black frame.
+
+    Args:
+        clip: The clip they are on.
+        start: When they come on, in seconds of the cut.
+        end: When they go.
+
+    Returns:
+        `(fade_in, fade_out)` in seconds, together no longer than they are up.
+    """
+    fade_in = fade_out = FADE_SECONDS
+    lit = float(clip.timeline_in + clip.video_fade_in)
+    if clip.video_fade_in and start < lit:
+        fade_in = max(fade_in, lit - start)
+    dark = float(clip.timeline_out - clip.video_fade_out)
+    if clip.video_fade_out and end > dark:
+        fade_out = max(fade_out, end - dark)
+    length = end - start
+    if fade_in + fade_out > length:
+        fade_in, fade_out = length * fade_in / (fade_in + fade_out), length * fade_out / (fade_in + fade_out)
+    return round(fade_in, 3), round(fade_out, 3)
+
+
 def _wrapped(text: str, size: int, width: int) -> List[str]:
     return wrap_caption(" ".join(text.split()), width * LINE_WIDTH / size)
 
@@ -153,9 +181,9 @@ def ass_events(project: Project, style: Optional[CaptionStyle] = None) -> List[s
     """
     style = style or CaptionStyle()
     font = style.font or DEFAULT_FONT
-    fade = round(FADE_SECONDS * 1000)
     events = []
-    for _, text, (start, end) in _layers(project):
+    for clip, text, (start, end) in _layers(project):
+        fade_in, fade_out = fades(clip, start, end)
         for row in placed(text, project.width, project.height, style):
             anchor = 4 if row["align"] == "left" else 5
             look = (f"\\bord{row['box']}" if row["box"] else
@@ -164,7 +192,7 @@ def ass_events(project: Project, style: Optional[CaptionStyle] = None) -> List[s
                 f"Dialogue: 2,{format_ass_time(start)},{format_ass_time(end)},"
                 f"{BOX_STYLE if row['box'] else 'Default'},,0,0,0,,"
                 f"{{\\an{anchor}\\pos({row['x']},{row['y']})\\fn{font}\\fs{row['size']}\\b{int(row['bold'])}"
-                f"\\c&H00FFFFFF&{look}\\fad({fade},{fade})}}{escape_ass_text(row['text'])}"
+                f"\\c&H00FFFFFF&{look}\\fad({round(fade_in * 1000)},{round(fade_out * 1000)})}}{escape_ass_text(row['text'])}"
             )
     return events
 
@@ -173,10 +201,10 @@ def drawn(project: Project, style: Optional[CaptionStyle] = None) -> dict:
     """Describe a cut's text layers for the editor's player to paint, as `placed` places them.
 
     Returns:
-        `events`, each with `start`, `end`, the clip and text IDs, its
-        `rows`, and `at`, where it is drawn as the `x` and `y` that would put
-        it there, which a drag in the editor starts from; and the `fade` and
-        the box's `opacity`.
+        `events`, each with `start`, `end`, how long it takes to come and go
+        (`fade_in`, `fade_out`), the clip and text IDs, its `rows`, and `at`,
+        where it is drawn as the `x` and `y` that would put it there, which a
+        drag in the editor starts from; and the box's `opacity`.
     """
     style = style or CaptionStyle()
     events = []
@@ -185,5 +213,7 @@ def drawn(project: Project, style: Optional[CaptionStyle] = None) -> dict:
         top = rows[0]["y"] - rows[0]["size"] * CAPTION_LINE_HEIGHT / 2
         bottom = rows[-1]["y"] + rows[-1]["size"] * CAPTION_LINE_HEIGHT / 2
         at = {"x": round(rows[0]["x"] / project.width, 4), "y": round((top + bottom) / 2 / project.height, 4)}
-        events.append({"start": start, "end": end, "clip_id": clip.id, "text_id": text.id, "rows": rows, "at": at})
-    return {"fade": FADE_SECONDS, "box_opacity": BOX_OPACITY, "events": events}
+        fade_in, fade_out = fades(clip, start, end)
+        events.append({"start": start, "end": end, "fade_in": fade_in, "fade_out": fade_out, "clip_id": clip.id,
+                       "text_id": text.id, "rows": rows, "at": at})
+    return {"box_opacity": BOX_OPACITY, "events": events}

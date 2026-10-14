@@ -379,7 +379,7 @@
       const font = this.described.captions.font;
       for (const event of style.events) {
         if (time < event.start || time >= event.end) continue;
-        const shown = clamp(Math.min((time - event.start) / style.fade, (event.end - time) / style.fade), 0, 1);
+        const shown = clamp(Math.min((time - event.start) / event.fade_in, (event.end - time) / event.fade_out), 0, 1);
         ctx.save();
         ctx.globalAlpha = shown;
         ctx.textBaseline = "middle";

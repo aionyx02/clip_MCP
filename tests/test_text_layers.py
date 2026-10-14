@@ -158,3 +158,22 @@ def test_where_words_are_drawn_puts_them_there_again() -> None:
         again = layer.model_copy(update={"x": rows[0]["x"] / 1080, "y": (top + bottom) / 2 / 1920})
         assert [(row["x"], row["y"]) for row in texts.placed(again, 1080, 1920, style)] == \
             [(row["x"], row["y"]) for row in rows], kind
+
+
+def test_words_fade_with_the_picture_they_are_on(media: Path) -> None:
+    from app.engine import playback
+
+    asset = server.import_asset(str(media / "wide.mp4"))["id"]
+    project = build_project([video_track(), insert("a", asset, 0, 4), words(style="headline"),
+                             words(text_id="m", timeline_start=0.5, timeline_end=2)],
+                            width=640, height=360, name="淡出的文字")
+    edit(project, [{"action": "set_clip_look", "track_id": "main", "clip_id": "a",
+                    "video_fade_in": 1, "video_fade_out": 1.5}])
+    stored = server.repo.get_project(project)
+    shown = playback.describe(stored, server._referenced_assets(stored), playback.Prepared({}, {}, None), None, {}, {})
+    fades = {event["text_id"]: (event["fade_in"], event["fade_out"]) for event in shown["texts"]["events"]}
+    # Words that run into the clip's fade go dark with it; words clear of it come and go on their own.
+    assert fades == {"n": (1.0, 1.5), "m": (0.5, texts.FADE_SECONDS)}
+    events = texts.ass_events(stored, stored.caption_style)
+    assert any(r"\fad(1000,1500)" in line for line in events)
+    assert any(rf"\fad(500,{round(texts.FADE_SECONDS * 1000)})" in line for line in events)
