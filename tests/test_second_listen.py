@@ -130,3 +130,30 @@ def test_a_cut_moved_far_to_the_sound_says_where_it_was_asked_for_and_where_it_w
     assert 10.56 - pieces[0].start > MOVED_FAR_SECONDS
     [far] = [note for note in notes if note.kind == "cuts_moved_far"]
     assert far.look and "not the 10.56s asked" in far
+
+
+def test_a_cut_on_a_word_edge_is_not_moved_into_the_next_word() -> None:
+    """#77: 「建模」 ends at 11.70 where 「然後」 begins, with no pause between them. The sound
+    running on is 「然後」, which the window was cut to leave out."""
+    from app.engine.plan import Piece, _on_the_sound
+    from app.engine.semantic import CleanCuts
+
+    known = CleanCuts(words=((10.9, 11.7), (11.7, 12.2)), sentences=((10.9, 12.2),), transcribed=True,
+                      pauses=((12.5, 14.0),), voiced=((10.9, 12.0),), listened=True)
+    piece = Piece(asset_id="x", start=10.9, end=11.7, from_clip_ids=("u0001",))
+    out, notes = _on_the_sound([piece], {"x": known})
+    assert out[0].end == pytest.approx(11.7)
+    assert not any(note.kind in ("cuts_moved_far", "cuts_moved_to_the_sound") for note in notes)
+
+
+def test_a_word_stretched_across_a_silence_does_not_hold_the_cut_back() -> None:
+    """The cap of #77 stops at a word where the transcript put it; 「抽」 run on across a silence
+    from 5.70 to 6.34 is not there, and the start still moves out to where it is heard."""
+    from app.engine.plan import Piece, _on_the_sound
+    from app.engine.semantic import CleanCuts
+
+    known = CleanCuts(words=((5.44, 6.74), (6.74, 9.0)), sentences=((5.44, 9.0),), transcribed=True,
+                      pauses=((5.70, 6.34), (9.0, 12.0)))
+    piece = Piece(asset_id="x", start=6.74, end=9.0, from_clip_ids=("u0001",))
+    out, _ = _on_the_sound([piece], {"x": known})
+    assert out[0].start < 6.34

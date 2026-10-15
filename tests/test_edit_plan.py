@@ -385,6 +385,20 @@ def test_a_cut_that_still_stops_mid_sentence_is_reported_not_repaired() -> None:
     assert record["clip_ids"] == [spoken.id] and record["seconds"] == 2.0
     assert f"{spoken.id} 2.0s" in record["message"]
 
+def test_a_window_turned_all_the_way_down_is_not_said_to_stop_mid_sentence() -> None:
+    """#81: a shot kept for its picture, under the music, has no sentence anybody hears stop."""
+    made = spoken_words(*SENTENCE)
+    assets = {ASSET_ID: sourced()}
+    timeline, clips = build_timeline(assets, {ASSET_ID: made})
+    spoken = next(clip for clip in clips if clip.text)
+    plan = plan_for([Selection(
+        clip_id=spoken.id, beat_id="b1", trim=Trim(kind=TrimKind.HEAD, seconds=2.5), volume=0,
+    )]).model_copy(update={"timeline_id": timeline.id, "timeline_input_hash": timeline.input_hash})
+    by_id = {clip.id: clip for clip in clips}
+    problems, notes = check_plan(plan, timeline, by_id, {}, assets, {ASSET_ID: clean_cuts(made)})
+    assert problems == []
+    assert not any("sentence ends" in note for note in notes)
+
 def test_a_note_from_outside_the_compiler_is_taken_as_worth_a_look() -> None:
     assert note_record("something") == {"kind": "note", "message": "something", "look": True}
 
@@ -2634,7 +2648,39 @@ def test_a_pause_never_opens_a_shot_onto_the_line_before() -> None:
               Piece(asset_id="a", start=5.0, end=8.0, from_clip_ids=("u2",), beat_id="b2")]
     cuts = {"a": CleanCuts(words=((3.0, 4.6), (5.0, 6.0)), transcribed=True)}
     out, notes = _joined_beats(plan, pieces, {}, cuts)
-    assert out[1].start == pytest.approx(4.6) and notes
+    # The rest is made up from the quiet after the shot going out, up to its next word.
+    assert out[1].start == pytest.approx(4.6) and out[0].end == pytest.approx(2.6) and notes == []
+
+def test_a_pause_its_shot_cannot_give_is_borrowed_from_the_shot_going_out() -> None:
+    """#76: a shot cut into mid-sentence has no quiet before it, but the one before it has
+    seconds of room after its last word."""
+    from app.engine.plan import _joined_beats
+
+    plan = plan_for([]).model_copy(update={"beats": [Beat(id="b1", name="講"), Beat(id="b2", name="走", pause_before=0.4)]})
+    pieces = [Piece(asset_id="a", start=2.2, end=9.39, from_clip_ids=("u1",), beat_id="b1"),
+              Piece(asset_id="b", start=13.0, end=20.1, from_clip_ids=("u2",), beat_id="b2")]
+    cuts = {"a": CleanCuts(words=((2.3, 9.2),), transcribed=True, duration=12.5),
+            "b": CleanCuts(words=((12.5, 13.4),), transcribed=True)}
+    out, notes = _joined_beats(plan, pieces, {}, cuts)
+    assert out[1].start == pytest.approx(13.0)
+    assert out[0].end == pytest.approx(9.79)
+    assert notes == []
+    # Where neither side has it, what both gave is what is reported.
+    cuts["a"] = CleanCuts(words=((2.3, 9.2), (9.5, 10.0)), transcribed=True)
+    out, notes = _joined_beats(plan, pieces, {}, cuts)
+    assert out[0].end == pytest.approx(9.5)
+    assert any("0.11s of quiet rather than 0.4s" in note for note in notes)
+
+def test_a_pause_given_in_full_is_not_reported_as_shortened() -> None:
+    """#76: a pause asked for at a speed that does not divide it evenly is still all there."""
+    from app.engine.plan import _joined_beats
+
+    plan = plan_for([]).model_copy(update={"beats": [Beat(id="b1", name="講"), Beat(id="b2", name="走", pause_before=0.4)]})
+    pieces = [Piece(asset_id="a", start=0.0, end=2.0, from_clip_ids=("u1",), beat_id="b1"),
+              Piece(asset_id="b", start=5.0, end=8.0, from_clip_ids=("u2",), beat_id="b2", speed=1.1)]
+    out, notes = _joined_beats(plan, pieces, {}, {"b": CleanCuts(words=((5.0, 6.0),), transcribed=True)})
+    assert out[1].start == pytest.approx(4.56)
+    assert notes == []
 
 def test_a_pause_never_opens_a_shot_onto_what_the_cut_already_played_of_its_take() -> None:
     from app.engine.plan import _joined_beats

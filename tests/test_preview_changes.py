@@ -137,3 +137,13 @@ def test_the_sound_chart_writes_chinese_part_names_in_a_font_that_has_them() -> 
     assert isinstance(font, ImageFont.FreeTypeFont)
     # A font without the character draws the same empty box for any two of them.
     assert bytes(font.getmask("開")) != bytes(font.getmask("場"))
+
+
+def test_music_that_does_not_drop_for_the_voice_is_not_said_to_drop_by_a_negative_amount() -> None:
+    """#83: "it drops -2 dB for the voice" read as nonsense."""
+    from app.engine.listen import PartSound, describe
+
+    [line] = describe([PartSound(name="開場", start=0.0, end=5.0, voice=-20.0, music_under_voice=-18.0,
+                                 music_alone=-20.0)])
+    assert "drops -" not in line and "does not make way for the voice" in line
+    assert "2 dB above the voice" in line

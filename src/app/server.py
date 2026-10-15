@@ -49,6 +49,7 @@ from app.models.timeline import (
     Track,
     TrackType,
     retimed_words,
+    mostly_over,
     apply_operation,
     validate_project,
 )
@@ -72,7 +73,8 @@ from app.engine.plan import (
 )
 from app.engine.sections import build_sections, candidate_hash, check_sections, propose_candidates
 from app.engine.semantic import (
-    build_timeline, clean_cuts, content_scores, join_voices, timeline_input_hash, voice_seconds, was_made_up,
+    build_timeline, clean_cuts, content_scores, join_voices, maybe_one_person, timeline_input_hash, voice_seconds,
+    was_made_up,
 )
 from app.engine.ffmpeg import graph_from_file, hidden_window_flags
 from app.engine.probe import picture_size, probe_file, recorded_at, rights_tags, speech_loudness, timecode_start
@@ -2343,7 +2345,12 @@ def build_semantic_timeline(asset_ids: List[str], rebuild: bool = False) -> dict
         `total_clips`, `counts` of clips by level and kind, `voices`, the
         seconds each voice talks, most first — one voice holding nearly all of
         it and the rest a few seconds each is one person heard several ways,
-        so do not tell the user there are many — and `stale`.
+        so do not tell the user there are many; `maybe_one_person`, each
+        voice talking under a tenth of the time with `like`, the main voice,
+        and `distance`, how far apart the two sound (0 alike, 1 unrelated) —
+        ask the user whether those are one person on another microphone
+        before marking speakers in captions or telling them apart; and
+        `stale`.
 
         `stale` lists assets analyzed with detection settings or a speech
         model the server no longer uses. The build goes ahead with them,
@@ -2367,25 +2374,30 @@ def build_semantic_timeline(asset_ids: List[str], rebuild: bool = False) -> dict
     stale = sorted(asset_id for asset_id, analysis in analyses.items() if _is_stale(analysis))
     existing = repo.find_semantic_timeline(timeline_input_hash(analyses))
     if existing is not None and not rebuild:
+        voices = voice_seconds(repo.query_semantic_clips(existing.id, kinds=[ClipKind.SPEECH], limit=-1))
         return {
             "timeline_id": existing.id,
             "asset_ids": existing.asset_ids,
             "reused": True,
             "total_clips": sum(repo.count_semantic_clips(existing.id).values()),
             "counts": repo.count_semantic_clips(existing.id),
-            "voices": voice_seconds(repo.query_semantic_clips(existing.id, kinds=[ClipKind.SPEECH], limit=-1)),
+            "voices": voices,
+            "maybe_one_person": maybe_one_person(analyses, voices),
             "stale": stale,
         }
 
     timeline, clips = build_timeline(assets, analyses)
     repo.save_semantic_timeline(timeline, clips)
+    voices = voice_seconds(clips)
     return {
         "timeline_id": timeline.id,
         "asset_ids": timeline.asset_ids,
         "reused": False,
         "total_clips": len(clips),
         "counts": repo.count_semantic_clips(timeline.id),
-        "voices": voice_seconds(clips),
+        "voices": voices,
+        "maybe_one_person": maybe_one_person(analyses, voices),
+        "stale": stale,
     }
 
 @mcp.tool()
@@ -2565,8 +2577,12 @@ def query_clips(
             with the ones either side of it, and a fragment of a few
             characters or a clip with neither words nor a description is left
             out. `relevance` orders one search's results and is not comparable
-            between searches. The first search downloads the model, about
-            130 MB, and embeds every clip once, about a second per thousand.
+            between searches; `spread` gives its highest, median and lowest,
+            and results bunched close together mean nothing stood out.
+            `outdated` and `stale` say when the timeline or its files'
+            analyses are behind and the ranking may hold lines since dropped.
+            The first search downloads the model, about 130 MB, and embeds
+            every clip once, about a second per thousand.
 
     Returns:
         A dictionary with the `timeline_id` searched and the matching `clips`,
@@ -2606,6 +2622,15 @@ def query_clips(
         clips = [by_id[clip_id] for clip_id, _ in ranked]
         relevance = {clip_id: round(score, 3) for clip_id, score in ranked}
         page = clips[offset:offset + limit]
+        # How the scores are spread, so a page of results all a few hundredths apart reads as
+        # nothing standing out rather than as sixty good matches (#83); and whether the
+        # timeline was built over what the footage now says.
+        scores = sorted(relevance.values(), reverse=True)
+        about_how = {
+            **({"spread": {"highest": scores[0], "median": scores[len(scores) // 2], "lowest": scores[-1]}}
+               if scores else {}),
+            **_outdated(timeline),
+        }
         if brief:
             assets = repo.get_assets({clip.asset_id for clip in page})
             return {
@@ -2616,11 +2641,13 @@ def query_clips(
                     for clip in page
                 ],
                 **_file_notes(assets.values()),
+                **about_how,
                 "truncated": offset + limit < len(clips),
             }
         return {
             "timeline_id": timeline.id,
             "clips": [{**_clip_summary(clip), "relevance": relevance[clip.id]} for clip in page],
+            **about_how,
             "truncated": offset + limit < len(clips),
         }
     if brief:
@@ -2652,6 +2679,33 @@ def query_clips(
         "clips": [_clip_summary(clip) for clip in clips],
         "truncated": truncated,
     }
+
+def _outdated(timeline: SemanticTimeline) -> dict:
+    """Say whether a timeline was built over what its files' analyses now say, and by the rules now used.
+
+    Args:
+        timeline: The timeline.
+
+    Returns:
+        `outdated`, what to do about it, when a file was analyzed again or the
+        rules changed since it was built, and `stale`, the files analyzed in
+        a way the server no longer uses; empty when neither.
+    """
+    analyses = {asset_id: repo.get_analysis(asset_id) for asset_id in timeline.asset_ids}
+    if any(analysis is None for analysis in analyses.values()):
+        return {}
+    found: dict = {}
+    # A second listen saved since the build changes the analysis and nothing the timeline was made
+    # from, so a build from before it still counts as current.
+    unheard = {asset_id: analysis.model_copy(update={"second_listen": None}) for asset_id, analysis in analyses.items()}
+    if timeline.input_hash not in (timeline_input_hash(analyses), timeline_input_hash(unheard)):
+        found["outdated"] = ("this timeline was built before its files were analyzed again or the rules changed — "
+                             "lines since found to be made up may still be in it; build_semantic_timeline over the "
+                             "same files for a fresh one")
+    stale = sorted(asset_id for asset_id, analysis in analyses.items() if _is_stale(analysis))
+    if stale:
+        found["stale"] = stale
+    return found
 
 def _meaning_text(clip: SemanticClip) -> str:
     """What a clip is about, in words: its section name and topic, what is said, and what is seen."""
@@ -2950,7 +3004,10 @@ def get_semantic_clip(clip_id: str, include_words: bool = False, timeline_id: Op
         The clip: its `clip_id`, `timeline_id`, `asset_id`, `level`, `kind`,
         `source_range`, `safe_in` / `safe_out`, full `text`, `speaker`,
         `scores`, and `tags` with where each came from. With `include_words`,
-        also `words`, each with `start`, `end`, and `text`.
+        also `words`, each with `start`, `end`, `text` and `probability`, how
+        sure the speech model was of it; `unsure`, the words it was guessing
+        at, worth `listen_again`; and `unsure_unknown` when the file was
+        transcribed before that was kept.
 
     Raises:
         ValueError: If no clip has that ID.
@@ -2961,12 +3018,18 @@ def get_semantic_clip(clip_id: str, include_words: bool = False, timeline_id: Op
     if include_words:
         analysis = repo.get_analysis(clip.asset_id)
         transcript = analysis.transcript if analysis is not None else None
-        record["words"] = [
-            word.model_dump()
+        words = [
+            word
             for segment in (transcript.segments if transcript else [])
             for word in segment.words
             if word.end > clip.source_range.start and word.start < clip.source_range.end
         ]
+        record["words"] = [word.model_dump() for word in words]
+        # What `get_analysis` marks with ⟦ ⟧, so deciding what to hear again needs only this (#83).
+        record["unsure"] = unsure_words(words)
+        if words and all(word.probability is None for word in words):
+            record["unsure_unknown"] = ("this file was transcribed before how sure the speech model was of each "
+                                        "word was kept; analyze_asset again to have it")
     return _plain(record)
 
 @mcp.tool()
@@ -4944,10 +5007,13 @@ def generate_subtitles(
         transcript, those with the most words the speech model was unsure of
         first — proofread those, the others somebody has read; `glossary`,
         the words corrected; `assets_without_transcript`, the video sources
-        that still need `analyze_asset` before they can be captioned; and
-        `overlapping`, how many captions land on top of the one before them
-        once the cut puts them on screen, which is worth a look when a
-        narration track talks over footage that speaks for itself.
+        that still need `analyze_asset` before they can be captioned;
+        `left_out_as_deleted`, the lines left out because a caption over
+        the same words was deleted with `edit_subtitle` (`add_subtitle`
+        there puts one back); and `overlapping`, how many captions land on
+        top of the one before them once the cut puts them on screen, which is
+        worth a look when a narration track talks over footage that speaks
+        for itself.
 
     Raises:
         ValueError: If the project does not exist, or nothing it plays has
@@ -5027,12 +5093,18 @@ def generate_subtitles(
     def taken(cue: SubtitleCue, over: Sequence[SubtitleCue]) -> bool:
         return any(cue.asset_id == known.asset_id and _overlaps(cue, known) for known in over)
 
+    def deleted(cue: SubtitleCue) -> bool:
+        # Deleted by hand in this project: kept out however the lines now break (#79).
+        return any(mostly_over(cue, gone) for gone in project.deleted_subtitles)
+
     kept = [
         cue for cue in proposed
         if not any(_overlaps(cue, known) for known in reviewed.get(cue.asset_id, ())) and not taken(cue, local)
     ]
     reused = [known.model_copy(update={"id": ""}) for known_list in reviewed.values() for known in known_list]
     reused = [cue for cue in reused if place_cues(project, [cue]) and not taken(cue, local)]
+    left_out = [cue for cue in [*kept, *reused] if deleted(cue)]
+    kept, reused = [cue for cue in kept if not deleted(cue)], [cue for cue in reused if not deleted(cue)]
     # Each caption's own `local` stands: the transcript's and the remembered ones are the
     # footage's, for every project, and this project's stay its own. Nothing is remembered
     # from here; only `apply_edits` writes to what every project starts from.
@@ -5068,6 +5140,7 @@ def generate_subtitles(
         "glossary": glossary,
         "assets_without_transcript": untranscribed,
         "overlapping": overlapping,
+        "left_out_as_deleted": [cue.text for cue in left_out],
     }
 
 def _project_name(project_id: Optional[str]) -> str:
@@ -5898,7 +5971,8 @@ def read_cut(project_id: str) -> dict:
             clip.asset_id, float(clip.source_range.start), float(clip.source_range.end))
         if said:
             parts.append(f"said: 「{said}」")
-        shown = [cue.text for cue in placed if float(cue.start) < end and float(cue.end) > start]
+        # More than a sliver: a caption starting where this shot ends is the next shot's (#80).
+        shown = [cue.text for cue in placed if min(float(cue.end), end) - max(float(cue.start), start) > CAPTION_SLIVER]
         if shown:
             parts.append("captions: " + " / ".join(dict.fromkeys(shown)))
         if clip.shown_texts:
@@ -5909,7 +5983,10 @@ def read_cut(project_id: str) -> dict:
     part = None
     above = [clip for track in project.video_tracks[1:] for clip in track.clips]
     for clip in sorted(base.clips, key=lambda clip: clip.timeline_in):
-        now = next((marker.name for opens, _, marker in reversed(parts) if opens <= float(clip.timeline_in)), None)
+        # By its middle, as a cut's parts are read everywhere else: a shot coming in on a
+        # transition can start a hair before its part's marker and is still that part's (#80).
+        middle = float(clip.timeline_in) + float(clip.timeline_duration) / 2
+        now = next((marker.name for opens, _, marker in reversed(parts) if opens <= middle), None)
         if now != part and now is not None:
             script.append(f"== {now}")
             part = now

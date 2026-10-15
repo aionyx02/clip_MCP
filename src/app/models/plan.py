@@ -311,7 +311,9 @@ class Beat(BaseModel):
         le=3,
         description="Open this beat's first shot this many seconds earlier in its file, before anybody speaks in "
                     "it, so a new part begins with a breath rather than straight on from the last line. Ignored on "
-                    "the first beat. Shortened, with a note, where the shot has less quiet before its first word",
+                    "the first beat. Where the shot has less quiet before its first word, the shot before it runs on "
+                    "into its own quiet after its last word to make up the rest; shortened, with a note, only "
+                    "where the two together have less",
     )
     title_card: Optional[PlanTitleCard] = Field(
         default=None,

@@ -67,6 +67,12 @@ PHRASE_NUMERALS = tuple("0123456789一二三四五六七八九十百千萬兩幾
 PHRASE_CLOSER_WEIGHT = 0.4
 PHRASE_OPENER_WEIGHT = 0.3
 PHRASE_NUMERAL_PENALTY = 0.8
+# 「的」 on its own ties what comes before it to the word after: 「改良的 / 地方」 leaves the
+# thing being described for the next line, and 「改良 / 的地方」 is no better (#79). Not inside
+# a word of its own, 「目的」 or 「的確」. Lighter than breaking inside a word, since a long
+# description can leave nowhere better. Provisional.
+PHRASE_BINDERS = tuple("的之")
+PHRASE_BINDER_PENALTY = 0.5
 # The recogniser hands Chinese back a character at a time, so its words say nothing about
 # where `營業` begins. A dictionary does, and a break inside one of its words is worse than
 # any line being uneven. Heavy rather than forbidden, because a word longer than the room
@@ -589,7 +595,13 @@ def _word_lines(
     offsets = [0]
     for word in words:
         offsets.append(offsets[-1] + len(word.text))
-    edges = word_edges("".join(word.text for word in words))
+    joined = "".join(word.text for word in words)
+    edges = word_edges(joined)
+
+    def binder(at: int) -> bool:
+        # The character at offset `at` is a 「的」 standing as a word of its own.
+        return (0 <= at < len(joined) and joined[at] in PHRASE_BINDERS
+                and (edges is None or (at in edges and at + 1 in edges)))
 
     def edge(index: int) -> float:
         before, after = words[index - 1].text.strip(), words[index].text.strip()
@@ -601,6 +613,11 @@ def _word_lines(
             score += PHRASE_OPENER_WEIGHT
         if before.endswith(PHRASE_NUMERALS):
             score -= PHRASE_NUMERAL_PENALTY
+        # Past any space the recogniser put in front of a word, and before any it left after one.
+        last = offsets[index] - 1 - (len(words[index - 1].text) - len(words[index - 1].text.rstrip()))
+        first = offsets[index] + len(words[index].text) - len(words[index].text.lstrip())
+        if binder(last) or binder(first):
+            score -= PHRASE_BINDER_PENALTY
         if edges is not None and offsets[index] not in edges:
             score -= PHRASE_INSIDE_WORD_PENALTY
         return score

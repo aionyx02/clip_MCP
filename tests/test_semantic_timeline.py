@@ -454,6 +454,36 @@ def test_word_timings_come_only_when_they_are_asked_for(analyzed: str) -> None:
     words = get_semantic_clip(clip_id, include_words=True)["words"]
     assert [word["text"] for word in words] == ["後來重寫"]
 
+def test_a_clip_s_words_say_which_the_speech_model_was_unsure_of(analyzed: str) -> None:
+    """#83: deciding what to hear again should not need `get_analysis`'s marks."""
+    built = build_semantic_timeline([analyzed])
+    clip_id = query_clips(timeline_id=built["timeline_id"], text="重寫")["clips"][0]["clip_id"]
+    record = get_semantic_clip(clip_id, include_words=True)
+    # Made without probabilities, it says so rather than leave them null with no reason.
+    assert record["unsure"] == [] and "analyze_asset again" in record["unsure_unknown"]
+    known = server_repo.get_analysis(analyzed)
+    for segment in known.transcript.segments:
+        segment.words = [word.model_copy(update={"probability": 0.2}) for word in segment.words]
+    server_repo.save_analysis(known)
+    record = get_semantic_clip(clip_id, include_words=True)
+    assert record["unsure"] == ["後來重寫"] and "unsure_unknown" not in record
+
+def test_a_search_by_meaning_says_how_its_scores_spread_and_when_the_timeline_is_behind(
+    analyzed: str, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#83: sixty results within a few hundredths, from a timeline built before made-up lines were dropped."""
+    from app.engine import meaning
+    from test_meaning_search import _stand_in
+
+    monkeypatch.setattr(meaning, "embed", _stand_in)
+    built = build_semantic_timeline([analyzed])
+    found = query_clips(timeline_id=built["timeline_id"], about="設計系統")
+    assert found["spread"]["highest"] >= found["spread"]["lowest"] and "outdated" not in found
+    known = server_repo.get_analysis(analyzed)
+    known.transcript.segments[1].text = "後來重寫了"
+    server_repo.save_analysis(known)
+    assert "build_semantic_timeline" in query_clips(timeline_id=built["timeline_id"], about="設計系統")["outdated"]
+
 def test_reading_a_clip_that_does_not_exist_says_where_to_look() -> None:
     with pytest.raises(ValueError, match="query_clips"):
         get_semantic_clip("tl_00000000:u9999")

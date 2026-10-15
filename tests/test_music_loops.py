@@ -66,3 +66,32 @@ def test_fitting_the_music_loops_it_on_the_beat(media: Path) -> None:
     assert laid[0][3:] == (0.0, end)
     assert all(row[3:] == (start, end) for row in laid[1:-1]) and laid[-1][3] == start
     assert laid[-1][2] == 30.0
+
+
+def test_the_start_the_loop_note_says_plays_the_song_through_once() -> None:
+    """#78: a start a little late makes the song turn round on its loop point, well before its
+    end; the note says the latest start that does not, on the beat the cue would move to."""
+    import re
+
+    from app.engine.plan import compiled_duration, music_fit_notes
+
+    by_id, children, assets, clips = footage()
+    assets = {**assets, "song": sourced("song", seconds=20.0).model_copy(update={"has_video": False})}
+    speech = speech_of(clips)
+    cuts = {"song": CleanCuts(beats=BEATS, energy=ENERGY, duration=20.0)}
+
+    def laid(start: float):
+        plan = plan_for([Selection(clip_id=clip.id, beat_id="b1") for clip in speech],
+                        music=MusicPlan(cues=[MusicCue(asset_id="song", start=start, cut_on_beat=True)]))
+        pieces = plan_pieces(plan, by_id, children, assets)
+        return compiled_duration(pieces), music_beds(plan, pieces, assets, cuts), music_fit_notes(plan, pieces, assets, cuts)
+
+    total, _, _ = laid(0.0)
+    assert total < 19.0
+    late = round(20.0 - total + 0.04, 2)
+    _, beds, notes = laid(late)
+    assert len(beds) > 1
+    [loops] = [note for note in notes if note.kind == "music_loops"]
+    said = float(re.search(r"start the cue at ([\d.]+)s of the song or earlier", loops).group(1))
+    _, beds, notes = laid(said)
+    assert len(beds) == 1 and not any(note.kind == "music_loops" for note in notes)
