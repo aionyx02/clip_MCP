@@ -2711,3 +2711,18 @@ def test_a_pause_never_opens_onto_talking_only_the_second_listen_heard() -> None
     cuts = {"b": CleanCuts(words=((5.0, 6.0),), voiced=((3.0, 4.5),), transcribed=True)}
     out, _ = _joined_beats(plan, pieces, {}, cuts)
     assert out[1].start == pytest.approx(4.5)
+
+
+def test_two_windows_of_one_file_played_out_of_order_stay_two() -> None:
+    """#91: 10.17–17.66 then 0–8.92 of one file, next to each other, were joined into one window
+    and the second was lost without a word."""
+    from app.engine.plan import _left_out, _merge
+
+    later = Piece(asset_id="a", start=9.98, end=18.49, from_clip_ids=("u0004",), beat_id="hook")
+    earlier = Piece(asset_id="a", start=0.0, end=9.0, from_clip_ids=("u0002",), beat_id="setup")
+    assert _merge([later, earlier]) == [later, earlier]
+    # In order, they still join.
+    assert len(_merge([earlier, replace(later, start=9.1)])) == 1
+    # And a window lost anyway is said.
+    [lost] = _left_out([later, earlier], [later], [])
+    assert lost.kind == "selections_lost" and lost.clip_ids == ("u0002",) and lost.look
