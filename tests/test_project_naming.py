@@ -55,17 +55,26 @@ def test_a_render_is_named_after_the_project() -> None:
 
 def test_a_name_a_filesystem_would_refuse_is_made_safe() -> None:
     """Whoever is editing names the project, so a render cannot assume anything about it."""
-    assert named(r'a/b\c:d*e?f"g<h>i|j') == "a b c d e f g h i j_output.mp4"
+    # Each swapped for the full-width mark that looks like it, so 「8/29」 still reads as a date (#96).
+    assert named(r'a/b\c:d*e?f"g<h>i|j') == "a／b＼c：d＊e？f＂g＜h＞i｜j_output.mp4"
     # Control characters go the same way, and the runs of spaces they leave collapse.
     assert named("EP1\n\t台北") == "EP1 台北_output.mp4"
 
 
 def test_a_project_with_no_usable_name_falls_back_to_its_id() -> None:
     """A file called `_output.mp4`, or one ending in a dot, is worse than an unreadable one."""
-    for name in (None, "", "   ", "...", "///"):
+    for name in (None, "", "   ", "...", "\n\t"):
         assert named(name) == "c91b0000-0000-0000-0000-000000000000_output.mp4", name
 
 
 def test_a_very_long_name_is_cut_to_something_a_filesystem_will_take() -> None:
     """Paths have limits, and a project name has none."""
     assert named("影" * 200) == "影" * MAX_OUTPUT_NAME + "_output.mp4"
+
+def test_a_render_named_apart_from_its_project_says_so() -> None:
+    """#96: 「8/29 暴雨」 came out as 「8 29 暴雨」 without a word."""
+    from app.server import _renamed
+
+    project = Project(id="c91b0000-0000-0000-0000-000000000000", name="8/29 暴雨", width=1080, height=1920)
+    assert "「8／29 暴雨」" in _renamed(project)["file_named"]
+    assert _renamed(project.model_copy(update={"name": "EP1 台北"})) == {}
