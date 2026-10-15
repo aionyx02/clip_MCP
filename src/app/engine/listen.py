@@ -201,14 +201,19 @@ def describe(parts: Sequence[PartSound]) -> List[str]:
             said.append("no music")
         else:
             if part.music_under_voice is not None and part.voice is not None:
+                below = round(part.voice - part.music_under_voice)
                 said.append(
                     f"music {part.music_under_voice:g} dB under the talking "
-                    f"({part.voice - part.music_under_voice:.0f} dB below the voice)"
+                    + (f"({below} dB below the voice)" if below > 0 else
+                       "(as loud as the voice)" if below == 0 else f"({-below} dB above the voice)")
                 )
             if part.music_alone is not None:
                 said.append(f"and {part.music_alone:g} dB in the gaps")
                 if part.music_under_voice is not None:
-                    said.append(f"(it drops {part.music_alone - part.music_under_voice:.0f} dB for the voice)")
+                    # Said as a drop only when there is one: "drops -2 dB" reads as nonsense (#83).
+                    drop = round(part.music_alone - part.music_under_voice)
+                    said.append(f"(it drops {drop} dB for the voice)" if drop > 0 else
+                                "(it does not make way for the voice)")
         lines.append(" ".join(said))
     return lines
 

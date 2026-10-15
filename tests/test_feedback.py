@@ -131,6 +131,16 @@ def test_pacing_that_would_undo_itself_is_refused() -> None:
     problems, _ = checked(plan, by_id, assets)
     assert any("pacing" in problem and "breath_seconds" in problem for problem in problems)
 
+def test_pacing_at_exactly_the_floor_is_allowed() -> None:
+    """Only a silence longer than `pause_seconds` is taken out, so the floor itself still
+    leaves more than the merge gap between the halves (#75)."""
+    by_id, _, assets, clips = footage()
+    plan = EditPlan(timeline_id="tl_test", timeline_input_hash="hash", beats=[Beat(id="b1", name="主體")],
+                    selections=[Selection(clip_id=speech_of(clips)[0].id, beat_id="b1")],
+                    pacing=Pacing(pause_seconds=0.5))
+    problems, _ = checked(plan, by_id, assets)
+    assert not any("pacing" in problem for problem in problems)
+
 # --- the history -------------------------------------------------------------------------
 
 def test_every_version_is_kept_with_what_it_was_for(planned: dict) -> None:  # noqa: F811

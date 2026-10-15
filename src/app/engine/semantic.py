@@ -88,6 +88,10 @@ VOICE_DISTANCE = 0.45
 # vlogger alone on a street measured 0.5 from themselves on another day, so a single
 # voice is given more room than one of several. Provisional.
 LONE_VOICE_DISTANCE = 0.6
+# A voice talking less than this share of all the talking is worth asking about: one person
+# heard on another microphone comes back as a voice of its own, a few seconds long beside
+# the hours of the one it is (#82). Provisional.
+MINOR_VOICE_SHARE = 0.1
 
 def share_covered(start: float, end: float, spans: Sequence[Span]) -> float:
     """Measure how much of a stretch is covered by a set of spans.
@@ -688,6 +692,43 @@ def join_voices(analyses: Mapping[str, MediaAnalysis]) -> Dict[Tuple[str, str], 
             joined[(asset_id, voice.speaker)] = label
     return joined
 
+def maybe_one_person(analyses: Mapping[str, MediaAnalysis], seconds: Mapping[str, float]) -> List[dict]:
+    """Point out the voices that may be the main one heard another way, for somebody to ask about.
+
+    Every voice talking less than `MINOR_VOICE_SHARE` of all the talking,
+    with how far it sits from the one who talks most. Not joined here: the
+    distance is the evidence, and whether two microphones caught one person
+    is for whoever knows the footage to say.
+
+    Args:
+        analyses: The analyses the voices were joined over, keyed by asset ID.
+        seconds: How long each joined voice talks, as `voice_seconds` gives it.
+
+    Returns:
+        One `{voice, seconds, like, distance}` per such voice, the closest
+        first; `distance` is None when either was never measured.
+    """
+    if len(seconds) < 2:
+        return []
+    whole = sum(seconds.values())
+    main = max(seconds, key=lambda label: seconds[label])
+    prints: Dict[str, List[float]] = {}
+    for (asset_id, speaker), label in join_voices(analyses).items():
+        voice = next((item for item in analyses[asset_id].voices if item.speaker == speaker), None)
+        if voice is None:
+            continue
+        held = prints.setdefault(label, [0.0] * len(voice.embedding))
+        if len(held) == len(voice.embedding):
+            prints[label] = [value + part * voice.seconds for value, part in zip(held, voice.embedding)]
+    found = []
+    for label, talked in seconds.items():
+        if label == main or talked >= MINOR_VOICE_SHARE * whole:
+            continue
+        apart = (_cosine_distance(prints[label], prints[main]) if label in prints and main in prints else None)
+        found.append({"voice": label, "seconds": talked, "like": main,
+                      "distance": None if apart is None or apart >= 2.0 else round(apart, 2)})
+    return sorted(found, key=lambda item: (item["distance"] is None, item["distance"] or 0.0))
+
 def voice_seconds(clips: Sequence[SemanticClip]) -> Dict[str, float]:
     """Add up how long each joined voice talks, so one person split in several is plain to see.
 
@@ -1100,16 +1141,19 @@ class CleanCuts:
         if not opens:
             return False
         edge = WORD_EDGE_SECONDS
-
-        def placed(start: float, end: float) -> bool:
-            # A word run on across a measured silence is misplaced: what it says is heard on one side.
-            return not any(min(end, loud) - max(start, quiet) > EDGE_TOLERANCE_SECONDS for quiet, loud in self.pauses)
-
         kept = any(abs(start - seconds) <= edge for start, _ in self.words)
-        gone = any(abs(end - seconds) <= edge and (start + end) / 2 < seconds and placed(start, end)
+        gone = any(abs(end - seconds) <= edge and (start + end) / 2 < seconds and self.placed(start, end)
                    for start, end in self.words)
         within = any(begins < seconds < ends for begins, ends in self.sentences)
         return kept and gone and within
+
+    def placed(self, start: float, end: float) -> bool:
+        """Say whether a transcribed word is where the transcript put it.
+
+        A word run on across a measured silence is misplaced: what it says is
+        heard on one side of the silence, and where is not known.
+        """
+        return not any(min(end, loud) - max(start, quiet) > EDGE_TOLERANCE_SECONDS for quiet, loud in self.pauses)
 
     def last_sound_before(self, seconds: float) -> float:
         """Find where the last thing said or heard before a moment ends: what a window may not open onto.
@@ -1120,14 +1164,38 @@ class CleanCuts:
         Returns:
             The latest end at or before it of a transcribed word, a word the
             second listen heard, or a stretch its voice detector heard — or
-            the moment itself when a voiced stretch runs through it; 0 when
+            the moment itself when any of them runs through it; 0 when
             nothing was.
         """
-        if any(start < seconds - EDGE_TOLERANCE_SECONDS and end > seconds + EDGE_TOLERANCE_SECONDS
-               for start, end in self.voiced):
+        if self._sounding(seconds):
             return seconds
         ends = [end for _, end in self.words] + [end for _, end, _ in self.heard] + [end for _, end in self.voiced]
         return max((end for end in ends if end <= seconds + EDGE_TOLERANCE_SECONDS), default=0.0)
+
+    def first_sound_after(self, seconds: float) -> float:
+        """Find where the next thing said or heard after a moment starts: what a window may not close onto.
+
+        Args:
+            seconds: The moment, in source seconds.
+
+        Returns:
+            The mirror of `last_sound_before`: the earliest start at or after
+            it, or the moment itself when anything runs through it;
+            the end of the file when nothing comes, or infinity when its
+            length is not known.
+        """
+        if self._sounding(seconds):
+            return seconds
+        starts = ([start for start, _ in self.words] + [start for start, _, _ in self.heard]
+                  + [start for start, _ in self.voiced])
+        last = self.duration if self.duration is not None else math.inf
+        return min((start for start in starts if start >= seconds - EDGE_TOLERANCE_SECONDS), default=last)
+
+    def _sounding(self, seconds: float) -> bool:
+        """Say whether a word, a heard word or a voiced stretch runs through a moment, clear of its edges."""
+        spans = [*self.words, *((start, end) for start, end, _ in self.heard), *self.voiced]
+        return any(start < seconds - EDGE_TOLERANCE_SECONDS and end > seconds + EDGE_TOLERANCE_SECONDS
+                   for start, end in spans)
 
     def room_before(self, onset: float) -> float:
         """Find how far before the start of some talking a window may open.

@@ -555,6 +555,21 @@ def test_two_voices_one_file_told_apart_are_never_joined_into_one() -> None:
         Voice(speaker="S1", embedding=[1.0, 0.0], seconds=5.0)]), "b": both})
     assert joined[("b", "S1")] != joined[("b", "S2")]
 
+def test_a_voice_heard_briefly_is_pointed_out_as_maybe_the_main_one() -> None:
+    """#82: one person on two microphones came back as V1 for 223s and V2 for 17s."""
+    from app.engine.semantic import maybe_one_person
+
+    phone = MediaAnalysis(asset_id="a", duration=10.0, voices=[Voice(speaker="S1", embedding=[1.0, 0.0], seconds=200.0)])
+    pocket = MediaAnalysis(asset_id="b", duration=10.0, voices=[
+        Voice(speaker="S1", embedding=[1.0, 0.0], seconds=20.0), Voice(speaker="S2", embedding=[0.6, 0.8], seconds=17.0)])
+    analyses = {"a": phone, "b": pocket}
+    joined = join_voices(analyses)
+    assert joined[("b", "S2")] == "V2"
+    found = maybe_one_person(analyses, {"V1": 223.1, "V2": 16.8})
+    assert found == [{"voice": "V2", "seconds": 16.8, "like": "V1", "distance": 0.4}]
+    # Two people talking about as much as each other are not asked about.
+    assert maybe_one_person(analyses, {"V1": 120.0, "V2": 100.0}) == []
+
 def test_voice_seconds_puts_the_most_talkative_first() -> None:
     def clip(speaker: str, seconds: float) -> SemanticClip:
         return SemanticClip(id=f"t:{speaker}{seconds}", timeline_id="t", asset_id="a", level=ClipLevel.UTTERANCE,

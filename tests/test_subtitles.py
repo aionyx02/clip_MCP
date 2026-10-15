@@ -356,6 +356,16 @@ def test_a_line_breaks_where_the_speaker_paused() -> None:
     lines = [line.split(",,0,0,0,,")[1] for line in dialogue_of(build_ass([said_with_a_pause("字" * 20, 8, "0")], 1080, 1920))]
     assert [len(line) for line in lines] == [10, 10]
 
+def test_a_line_does_not_break_between_a_description_and_what_it_describes() -> None:
+    """#79: 「需要改良的 / 地方」 left the thing described for the next line."""
+    from app.engine.subtitles import _word_lines
+
+    text = "我馬上找到需要改良的地方剛剛甩甩的很帥"
+    said = said_with_a_pause(text, 0, "0").words
+    fits = lambda first, past: past - first <= 14  # noqa: E731
+    lines = ["".join(word.text for word in said[first:past]) for first, past in _word_lines(said, fits)]
+    assert lines == ["我馬上找到需要改良的地方", "剛剛甩甩的很帥"]
+
 @pytest.mark.parametrize("before", range(6, 14))
 def test_a_line_never_breaks_inside_a_chinese_word(before: int) -> None:
     # The recogniser hands back one character at a time; wherever the even break falls,
@@ -451,6 +461,19 @@ def test_a_caption_can_be_retimed_and_deleted(spoken: str) -> None:
     assert float(get_subtitles(project)["cues"][0]["end"]) == 3.8
     edit(project, [{"action": "edit_subtitle", "cue_id": "c2", "delete": True}])
     assert [cue["cue_id"] for cue in get_subtitles(project)["cues"]] == ["c1", "c3"]
+
+def test_a_deleted_caption_stays_deleted_when_captioned_again(spoken: str) -> None:
+    """#79: captioning again after a change to the plan brought every deleted line back."""
+    project = build_project([video_track(), insert("a", spoken, 0, 10)])
+    caption(project)
+    edit(project, [{"action": "edit_subtitle", "cue_id": "c2", "delete": True}])
+    again = caption(project)
+    assert [cue["text"] for cue in again["cues"]] == ["第一句", "第三句"]
+    assert again["left_out_as_deleted"] == ["第二句"]
+    # Put back by hand, it is wanted after all.
+    edit(project, [{"action": "add_subtitle", "asset_id": spoken, "source_start": 4.0, "source_end": 6.0,
+                    "text": "第二句"}])
+    assert [cue["text"] for cue in caption(project)["cues"]] == ["第一句", "第二句", "第三句"]
 
 def test_a_correction_said_to_be_for_every_project_is_remembered_and_named_where_it_turns_up(spoken: str) -> None:
     first = build_project([video_track(), insert("a", spoken, 0, 10)])
@@ -914,3 +937,18 @@ def test_the_cut_read_back_says_the_words_as_the_glossary_corrects_them(spoken: 
     project = build_project([video_track(), insert("a", spoken, 0.0, 9.0)])
     caption(project, fix_words={"句": "局"})
     assert "said: 「第一局第二局第三局」" in read_cut(project)["script"][0]
+
+def test_the_cut_read_back_puts_each_shot_in_its_part_and_only_its_own_captions_beside_it(spoken: str) -> None:
+    """#80: a shot starting a hair before its part's marker was put in the part before, and a
+    caption starting where a shot ends was listed beside it."""
+    from app.server import read_cut
+
+    project = build_project([
+        video_track(), insert("a", spoken, 0.0, 4.02), insert("b", spoken, 4.02, 10.0),
+        {"action": "set_markers", "markers": [{"id": "m1", "name": "開場", "timeline_in": 0},
+                                              {"id": "m2", "name": "後段", "timeline_in": 4.05}]},
+    ])
+    caption(project)
+    script = read_cut(project)["script"]
+    assert script[0] == "== 開場" and script[2] == "== 後段" and "clip b" in script[3]
+    assert "第二句" not in script[1] and "captions: 第二句" in script[3]

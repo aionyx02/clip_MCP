@@ -824,6 +824,10 @@ class Project(BaseModel):
         default_factory=list,
         description="Captions burned into the picture when render_project is called with burn_subtitles",
     )
+    deleted_subtitles: List[SubtitleCue] = Field(
+        default_factory=list,
+        description="Captions deleted by hand, as they were, so captioning again leaves the same words out",
+    )
     caption_style: CaptionStyle = Field(
         default_factory=CaptionStyle,
         description="How those captions are drawn: where they sit, how big they are, whether they light up "
@@ -1238,6 +1242,23 @@ def _cut_span(project: "Project", cue: SubtitleCue) -> Tuple[Decimal, Decimal]:
             return (clip.timeline_in + (first - clip.source_range.start) / speed,
                     clip.timeline_in + (last - clip.source_range.start) / speed)
     raise ValueError(f"caption {cue.id} is not in the cut, so it has no time in it to change")
+
+def mostly_over(cue: SubtitleCue, gone: SubtitleCue) -> bool:
+    """Say whether a caption is mostly the words of another, in the same file.
+
+    Args:
+        cue: The caption.
+        gone: The other, such as one deleted by hand.
+
+    Returns:
+        True when more than half of `cue`'s stretch of the file is `gone`'s:
+        captioning again breaks lines differently, so the same words come
+        back cut at other places.
+    """
+    if cue.asset_id != gone.asset_id:
+        return False
+    shared = min(cue.source_end, gone.source_end) - max(cue.source_start, gone.source_start)
+    return shared > 0 and shared * 2 > cue.source_end - cue.source_start
 
 def _bare(text: str) -> str:
     """Strip a caption to the characters that are said, for matching words to it."""
@@ -2028,6 +2049,8 @@ def apply_operation(project: Project, op: EditOperation, assets: Mapping[str, As
             text=op.text, secondary=op.secondary, speaker=op.speaker, local=not op.for_all_projects,
         )
         project.subtitles = sorted([*project.subtitles, added], key=cue_order)
+        # A caption put back by hand where one was deleted is wanted there after all.
+        project.deleted_subtitles = [gone for gone in project.deleted_subtitles if not mostly_over(added, gone)]
         return
     if isinstance(op, EditSubtitleOp):
         cue = next((item for item in project.subtitles if item.id == op.cue_id), None)
@@ -2036,6 +2059,8 @@ def apply_operation(project: Project, op: EditOperation, assets: Mapping[str, As
             raise ValueError(f"caption {op.cue_id} not found; the project's captions start with {known}")
         if op.delete:
             project.subtitles = [item for item in project.subtitles if item.id != op.cue_id]
+            # Remembered, so captioning again after the cut changes does not bring it back (#79).
+            project.deleted_subtitles = [*project.deleted_subtitles, cue.model_copy(update={"id": ""})]
             return
         source_start, source_end = op.source_start, op.source_end
         if op.timeline_start is not None or op.timeline_end is not None:

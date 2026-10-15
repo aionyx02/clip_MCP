@@ -581,12 +581,19 @@ def _on_the_sound(
             out.append(piece)
             continue
         start, end = piece.start, piece.end
+        # Never out past the edge of a word the transcript has on the far side: sound running on
+        # into it is that word, which the window was cut to leave out, and moving into it would
+        # land the cut inside it (#77). Where it starts right at the cut, the cut stays. A word
+        # run on across a silence is not where it was put, and is what moving out is for.
+        placed = [(opened, closed) for opened, closed in known.words if known.placed(opened, closed)]
+        before = max((closed for _, closed in placed if closed <= start + EDGE_TOLERANCE_SECONDS), default=0.0)
+        after = min((opened for opened, _ in placed if opened >= end - EDGE_TOLERANCE_SECONDS), default=math.inf)
         onset = known.sound_before(start)
         if onset is not None:
-            start = round(max(onset - pace.breath, known.room_before(onset), 0.0), 3)
+            start = min(piece.start, round(max(onset - pace.breath, known.room_before(onset), before, 0.0), 3))
         fall = known.sound_after(end)
         if fall is not None:
-            end = round(min(fall + pace.breath, known.room_after(fall)), 3)
+            end = max(piece.end, round(min(fall + pace.breath, known.room_after(fall), after), 3))
         if (start, end) != (piece.start, piece.end):
             moved += (start != piece.start) + (end != piece.end)
             shifted.append(piece)
@@ -1313,6 +1320,49 @@ def _picture_needed(wanted, piece: Piece) -> float:
     """Seconds of the file a transition needs before the shot it brings in, at that shot's speed."""
     return wanted.seconds * _reach(wanted.kind) * piece.speed
 
+def _milliseconds(seconds: float) -> float:
+    """Floor a length to whole milliseconds, rounding first so one already whole is not floored short."""
+    return math.floor(round(seconds * 1000, 6)) / 1000
+
+def _lent_tail(
+    out: List[Piece], at: int, assets: Mapping[str, Asset], cuts: Optional[Mapping[str, CleanCuts]], short: float,
+) -> float:
+    """Let the shot before a beat run on into its own quiet, to make up a pause its next shot cannot give.
+
+    Only into quiet the file is known to have: up to the next thing said or
+    heard in it, never into what the cut plays later of the same take, never
+    past the end of the file. A card or a file nobody transcribed has nothing
+    known there, so it lends nothing.
+
+    Args:
+        out: The windows, changed in place.
+        at: Index of the beat's first window.
+        assets: The files, keyed by asset ID, for how long each runs.
+        cuts: What is known about each file, keyed by asset ID.
+        short: Seconds of the timeline still wanted.
+
+    Returns:
+        The seconds of the timeline lent.
+    """
+    if short <= 0 or at <= 0:
+        return 0.0
+    before = out[at - 1]
+    known = (cuts or {}).get(before.asset_id)
+    if before.card is not None or known is None or not known.transcribed:
+        return 0.0
+    # Anywhere else in the cut, before or after: running on into footage it plays elsewhere is
+    # hearing it twice.
+    later = [other.start for index, other in enumerate(out)
+             if index != at - 1 and other.asset_id == before.asset_id and other.start >= before.end]
+    source = assets.get(before.asset_id)
+    ends = [float(source.duration)] if source is not None and source.duration is not None else []
+    room = min([known.first_sound_after(before.end), *later, *ends]) - before.end
+    lent = _milliseconds(min(short * before.speed, max(0.0, room)))
+    if lent <= 0:
+        return 0.0
+    out[at - 1] = replace(before, end=round(before.end + lent, 3))
+    return lent / before.speed
+
 def _joined_beats(
     plan: EditPlan,
     pieces: Sequence[Piece],
@@ -1355,17 +1405,25 @@ def _joined_beats(
             said = [known.last_sound_before(piece.start)] if known is not None else []
             played = [other.end for other in out[:at] if other.asset_id == piece.asset_id and other.end <= piece.start]
             quiet = piece.start - max(said + played, default=0.0)
-            # Rounded first, so a time already in whole milliseconds is not floored a millisecond short.
-            fits = math.floor(round(min(beat.pause_before * piece.speed, max(0.0, quiet)) * 1000, 6)) / 1000
-            if fits < beat.pause_before * piece.speed:
-                notes.append(Note(
-                    f"beat {beat.id}: it opens on {fits / piece.speed:g}s of quiet rather than {beat.pause_before:g}s, "
-                    "all its first shot has before somebody speaks or the cut has already played",
-                    "join_shortened", beat_id=beat.id, clip_ids=_first_clips([piece]),
-                    seconds=round(fits / piece.speed, 3), look=True,
-                ))
+            # Rounded first, so a time already in whole milliseconds is not floored a millisecond short,
+            # and the pause asked for is held to the same milliseconds, so getting all of it is not
+            # reported as falling short of it by a rounding error (#76).
+            wanted = _milliseconds(beat.pause_before * piece.speed)
+            fits = min(wanted, _milliseconds(max(0.0, quiet)))
             if fits > 0:
                 out[at] = replace(piece, start=round(piece.start - fits, 3))
+            # Seconds of the timeline still missing, made up from the quiet at the end of the shot
+            # going out — the other side of the same join — before any of it is reported (#76).
+            lent = _lent_tail(out, at, assets, cuts, _milliseconds(beat.pause_before - fits / piece.speed))
+            given = round(fits / piece.speed + lent, 3)
+            if given < beat.pause_before:
+                notes.append(Note(
+                    f"beat {beat.id}: it opens on {given:g}s of quiet rather than {beat.pause_before:g}s, "
+                    "all its first shot has before somebody speaks or the cut has already played, and all the "
+                    "shot before it has after its last word",
+                    "join_shortened", beat_id=beat.id, clip_ids=_first_clips([piece]),
+                    seconds=given, look=True,
+                ))
         if position == 0 or (beat.transition_in is None and beat.sound_lead is None):
             continue
         if at is None or at == 0:
@@ -1871,7 +1929,10 @@ def _cut_notes(
 
     stuck: List[Piece] = []
     where: List[str] = []
-    for piece in pieces:
+    # A window turned all the way down is there for its picture: nobody hears a word or a
+    # sentence in it cut off, so neither is reported (#81).
+    heard = [piece for piece in pieces if piece.gain > 0]
+    for piece in heard:
         known = cuts.get(piece.asset_id)
         if known is None:
             continue
@@ -1891,7 +1952,7 @@ def _cut_notes(
 
     owed = [
         (known.rest_of_sentence(piece.end), piece)
-        for piece in pieces
+        for piece in heard
         if (known := cuts.get(piece.asset_id)) and known.splits_a_sentence(piece.end)
     ]
     if owed:
@@ -2334,12 +2395,15 @@ def check_plan(
         )
 
     pace = pace_of(plan)
-    if pace.pause <= 2 * pace.breath + MERGE_GAP_SECONDS:
+    # Only a silence longer than `pause` is taken out, so at exactly the floor what is left
+    # between the halves still runs past the merge gap: the floor itself is allowed (#75).
+    floor = round(2 * pace.breath + MERGE_GAP_SECONDS, 6)
+    if round(pace.pause, 6) < floor:
         problems.append(
             f"pacing: pauses over {pace.pause:g}s cannot be taken out while {pace.breath:g}s of air is left either "
             f"side of each cut — what would be left between the two halves is under {MERGE_GAP_SECONDS:g}s, "
-            "so they would be joined straight back together. Raise `pause_seconds` above "
-            f"{2 * pace.breath + MERGE_GAP_SECONDS:g}s or lower `breath_seconds`"
+            "so they would be joined straight back together. Raise `pause_seconds` to at least "
+            f"{floor:g}s or lower `breath_seconds`"
         )
 
     cues = plan.music.cues if plan.music is not None else []
@@ -2882,6 +2946,32 @@ PEAK_TOLERANCE_SECONDS = 4.0
 # A cut ending this much before its song does, while the song is still going, cuts it off. Provisional.
 CUT_OFF_SECONDS = 3.0
 
+def _latest_start(cue: Optional[MusicCue], song: Optional[CleanCuts], length: float, span: float) -> Optional[float]:
+    """Find the latest second of its song a cue can come in at and still play its stretch once through.
+
+    As it is said: to the tenth, rounded down, so a start copied from it is
+    never a hair late; and for a cue cut on the beat, at or before the beat
+    `song_entry` would move it to, since a start moved later runs out.
+
+    Args:
+        cue: The cue, when known.
+        song: What is known about the song.
+        length: How long the song is, as `_song_length` gives it.
+        span: How long the cue holds the cut.
+
+    Returns:
+        The second, or None when the song is shorter than the stretch.
+    """
+    latest = length - span
+    if latest < 0:
+        return None
+    if cue is not None and cue.cut_on_beat and song is not None and song.beats:
+        on = [beat for beat in song.beats if beat <= latest + 0.001]
+        if not on:
+            return None
+        latest = on[-1]
+    return math.floor(round(latest * 10, 6)) / 10
+
 def music_fit_notes(
     plan: EditPlan,
     pieces: Sequence[Piece],
@@ -2923,6 +3013,7 @@ def music_fit_notes(
     # cross-fade lends it a little either side, but this is the stretch it was asked to play under.
     spans = {f"cue:{cue.beat_id or '^'}": (at, until, song_entry(cue, cuts.get(cue.asset_id) if cuts else None))
              for cue, at, until in cue_stretches(plan, pieces)}
+    cues = {f"cue:{cue.beat_id or '^'}": cue for cue, _, _ in cue_stretches(plan, pieces)}
     by_cue: Dict[str, List[Bed]] = {}
     for bed in beds:
         by_cue.setdefault(bed.key[0], []).append(bed)
@@ -2933,21 +3024,26 @@ def music_fit_notes(
         beat_id = passes[0].cue_beat
         first, last = passes[0], passes[-1]
         heard = round(last.timeline_in + last.end - last.start - first.timeline_in, 1)
+        known = (cuts or {}).get(first.asset_id)
+        length = _song_length(song)
+        span = spans.get(first.key[0])
+        # The one start both notes below say, worked out the way the music is laid (#78).
+        latest = (_latest_start(cues.get(first.key[0]), known, length, span[1] - span[0])
+                  if span is not None and length is not None else None)
         if len(passes) > 1:
+            earlier = (f"start the cue at {latest:.1f}s of the song or earlier (set_music_cue) — one that runs "
+                       "out turns round on its loop point, before its ending — or " if latest is not None else "")
             notes.append(Note(
                 f"{name} runs out at {passes[1].timeline_in:.1f}s of the cut and starts again from "
                 f"{passes[1].start:g}s of the song, since the part it plays under is {heard:g}s. To have it play "
-                f"once, choose a song of at least {heard:.0f}s (find_music with min_seconds), or let another cue "
-                f"take over before {passes[1].timeline_in:.1f}s",
+                f"once, {earlier}choose a song of at least {heard:.0f}s (find_music with min_seconds), or let "
+                f"another cue take over before {passes[1].timeline_in:.1f}s",
                 "music_loops", beat_id=beat_id, seconds=passes[1].timeline_in, look=True,
             ))
-        known = (cuts or {}).get(first.asset_id)
         energy = known.energy if known is not None else None
-        length = _song_length(song)
         if not energy or length is None:
             continue
         peak = fullest(energy)
-        span = spans.get(first.key[0])
         ends_with_cut = abs(last.timeline_in + last.end - last.start - total) < 0.01
         # How much of the song the part plays, from its own length rather than the rounded one said above.
         played = last.timeline_in + last.end - last.start - first.timeline_in
@@ -2988,8 +3084,9 @@ def music_fit_notes(
                 ))
         short = cut_off_from(last.end - played)
         if short is not None:
-            # Rounded down as it is said: a start a hundredth late leaves the song short of the part, and it loops.
-            start = math.floor((length - played) * 10) / 10
+            # Rounded down as it is said: a start a hundredth late leaves the song short of the part, and it
+            # loops. The same start the loop note says, so following either one never brings the other on.
+            start = latest if latest is not None else math.floor((length - played) * 10) / 10
             cost = ""
             if aims and start >= 0:
                 moved = lands_at(start)
