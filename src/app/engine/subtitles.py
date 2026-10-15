@@ -80,6 +80,13 @@ PHRASE_BINDER_PENALTY = 0.5
 _NOT_A_COUNT = r"[^\W\d_一二三四五六七八九十百千萬兩幾半]"
 _COUNT = r"[\d一二三四五六七八九十百千萬兩幾半]+"
 PHRASE_PAIRED_COUNTS = re.compile(_NOT_A_COUNT + _COUNT + _NOT_A_COUNT + _COUNT)
+# What a word does tells more about where a line may break than its length: a preposition
+# or an adverb leans on what follows it (「被 / 我」, 「給 / Hugo」, 「再來 / 練」), and a verb
+# on the count it takes (「練 / 一杯」), while a conjunction opens a phrase (#92). Read off
+# the dictionary's part-of-speech tags; heavy like a number and what it counts. Provisional.
+PHRASE_LEANS_ON = ("p", "d")
+PHRASE_LEAN_PENALTY = 0.8
+PHRASE_CONJUNCTION_WEIGHT = 0.3
 # The recogniser hands Chinese back a character at a time, so its words say nothing about
 # where `營業` begins. A dictionary does, and a break inside one of its words is worse than
 # any line being uneven. Heavy rather than forbidden, because a word longer than the room
@@ -567,6 +574,56 @@ def chinese_words() -> Callable[[str], List[str]]:
 
     return split
 
+@lru_cache(maxsize=1)
+def chinese_tagged() -> Callable[[str], List[Tuple[str, str]]]:
+    """Load the Chinese word splitter with its part-of-speech tags, the first time it is needed.
+
+    Returns:
+        A function from text to its words, each with the dictionary's tag,
+        read in Simplified as `chinese_words` reads it.
+    """
+    import logging
+    import warnings
+
+    import opencc
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", SyntaxWarning)
+        import jieba
+        import jieba.posseg
+    jieba.setLogLevel(logging.WARNING)
+    simplify = opencc.OpenCC("t2s.json").convert
+
+    def tag(text: str) -> List[Tuple[str, str]]:
+        simple = simplify(text)
+        return [(found.word, found.flag) for found in jieba.posseg.cut(simple if len(simple) == len(text) else text)]
+
+    return tag
+
+def phrase_leans(text: str) -> Tuple[set[int], set[int]]:
+    """Find where breaking a Chinese caption splits a word from the one it leans on, and where a phrase opens.
+
+    Args:
+        text: The caption text.
+
+    Returns:
+        `(leaning, opening)`: the character offsets a break there would split
+        a preposition, an adverb or a verb from what follows it, and those
+        where a conjunction begins. Both empty for text with no Chinese in it.
+    """
+    if not _CJK.search(text):
+        return set(), set()
+    leaning, opening, offset = set(), set(), 0
+    tagged = chinese_tagged()(text)
+    for index, (word, flag) in enumerate(tagged):
+        offset += len(word)
+        after = tagged[index + 1][1] if index + 1 < len(tagged) else ""
+        if flag.startswith(PHRASE_LEANS_ON) or (flag.startswith("v") and after.startswith("m")):
+            leaning.add(offset)
+        if after.startswith("c"):
+            opening.add(offset)
+    return leaning, opening
+
 def word_edges(text: str) -> Optional[set[int]]:
     """Find where the words of a Chinese caption begin and end.
 
@@ -605,6 +662,7 @@ def _word_lines(
         offsets.append(offsets[-1] + len(word.text))
     joined = "".join(word.text for word in words)
     edges = word_edges(joined)
+    leaning, opening = phrase_leans(joined)
 
     # Offsets strictly inside a phrase of paired counts: a break there splits it.
     paired = {at for found in PHRASE_PAIRED_COUNTS.finditer(joined) for at in range(found.start() + 1, found.end())}
@@ -631,6 +689,10 @@ def _word_lines(
             score -= PHRASE_BINDER_PENALTY
         if (edges is not None and offsets[index] not in edges) or offsets[index] in paired:
             score -= PHRASE_INSIDE_WORD_PENALTY
+        if offsets[index] in leaning:
+            score -= PHRASE_LEAN_PENALTY
+        if offsets[index] in opening and not after.startswith(PHRASE_OPENERS):
+            score += PHRASE_CONJUNCTION_WEIGHT
         return score
 
     return _phrased(len(words), fits, lambda first, past: sum(widths[first:past]), edge)

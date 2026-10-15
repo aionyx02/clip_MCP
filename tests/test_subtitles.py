@@ -388,6 +388,21 @@ def test_a_caption_too_short_to_read_is_joined_to_the_line_straight_after_it(med
     # The last is short too, but nothing follows it: it is held on where it is placed.
     assert texts == ["哇!這是一整袋", "好"]
 
+@pytest.mark.parametrize("said, room, lines", [
+    (["整杯", "牛奶", "快被", "我", "打完了"], 6, ["整杯牛奶", "快被我打完了"]),
+    (["我要", "去給", "Hugo", "驗收"], 7, ["我要", "去給Hugo", "驗收"]),
+    (["所以", "明天", "晚上", "再來", "練", "一杯", "看看", "結果", "如何"], 10,
+     ["所以明天晚上", "再來練一杯看看", "結果如何"]),
+])
+def test_a_line_does_not_break_a_word_from_the_one_it_leans_on(said: list, room: int, lines: list) -> None:
+    """#92: 「快被 / 我打完了」, 「再來練 / 一杯」: a preposition, an adverb or a verb split from what follows."""
+    from app.engine.subtitles import _word_lines
+
+    timed = [CueWord(start=Decimal(index), end=Decimal(index) + Decimal("0.9"), text=text)
+             for index, text in enumerate(said)]
+    fits = lambda first, past: len("".join(word.text for word in timed[first:past])) <= room  # noqa: E731
+    assert ["".join(word.text for word in timed[first:past]) for first, past in _word_lines(timed, fits)] == lines
+
 @pytest.mark.parametrize("before", range(6, 14))
 def test_a_line_never_breaks_inside_a_chinese_word(before: int) -> None:
     # The recogniser hands back one character at a time; wherever the even break falls,

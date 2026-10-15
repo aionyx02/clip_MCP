@@ -431,6 +431,9 @@ def _merge(pieces: Sequence[Piece]) -> List[Piece]:
         last = merged[-1] if merged else None
         if (
             last is not None and last.asset_id == piece.asset_id and piece.start - last.end <= MERGE_GAP_SECONDS
+            # Only a window that plays on forward in its file: one from earlier in it, placed after,
+            # is a flashback, and joining it on kept one of the two and lost the other (#91).
+            and piece.start >= last.start
             # A window sped up or turned down on purpose is its own clip, however close it sits.
             and (last.speed, last.own_speed, last.gain, last.keep_level)
             == (piece.speed, piece.own_speed, piece.gain, piece.keep_level)
@@ -1296,6 +1299,7 @@ def compile_pieces(
         line for each cleaning stage that did something.
     """
     pieces = _selected(plan, clips, children, assets, cuts)
+    chosen = list(pieces)
     notes: List[str] = []
     pace = pace_of(plan)
     for stage in (_on_the_sound, _without_retakes, _without_pauses, _trimmed_ends, _off_bad_frames):
@@ -1312,7 +1316,37 @@ def compile_pieces(
     # Last, because the beat moves cuts, and how much a transition can reach back into
     # depends on exactly where its window starts.
     pieces, said = _joined_beats(plan, pieces, assets, cuts)
-    return pieces, notes + said
+    notes += said
+    return pieces, notes + _left_out(chosen, pieces, notes)
+
+def _left_out(chosen: Sequence[Piece], pieces: Sequence[Piece], notes: Sequence[str]) -> List[str]:
+    """Say which windows the plan chose play nowhere in the cut, when no stage said it took them out.
+
+    The plan says what is in the cut; a window lost on the way without a word
+    is the cut quietly disagreeing with it (#91).
+
+    Args:
+        chosen: The windows the selections made, before cleaning.
+        pieces: The windows after it.
+        notes: What the cleaning stages said, naming the windows they dropped.
+
+    Returns:
+        A note per window lost unsaid.
+    """
+    dropped = {clip_id for note in notes if isinstance(note, Note) and note.kind == "retakes_dropped"
+               for clip_id in note.clip_ids}
+    lost = [piece for piece in chosen
+            if not any(other.asset_id == piece.asset_id and min(other.end, piece.end) > max(other.start, piece.start)
+                       for other in pieces)
+            and not set(_first_clips([piece])) & dropped]
+    if not lost:
+        return []
+    return [Note(
+        "these windows the plan chose play nowhere in the cut: "
+        + "; ".join(f"{_edge_of(piece, 'starts', piece.start)} to {piece.end:.2f}s" for piece in lost)
+        + ". Compile again and say what was asked if it stays",
+        "selections_lost", clip_ids=_first_clips(lost), look=True,
+    )]
 
 def _reach(kind: str) -> float:
     """How much of its length a transition reaches back before the cut: a dip only half,
