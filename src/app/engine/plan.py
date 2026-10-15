@@ -1671,6 +1671,35 @@ def _splits_a_sentence(
     known = cuts.get(piece.asset_id) if cuts else None
     return known is not None and known.splits_a_sentence(piece.start + (seconds - at) * piece.speed)
 
+def _covers_bad_picture(
+    under: Tuple[Piece, float],
+    seconds: float,
+    length: float,
+    cuts: Optional[Mapping[str, CleanCuts]],
+) -> bool:
+    """Say whether covering picture laid from a moment of the timeline hides a frame nobody should see.
+
+    The one reason to cut away partway through a sentence: the shot went black
+    or froze while somebody talked, and the sound cannot be cut (#99).
+
+    Args:
+        under: The window playing there, with the second it starts at.
+        seconds: Where the covering picture cuts in on the timeline.
+        length: How long it runs.
+        cuts: What is known about each file, keyed by asset ID.
+
+    Returns:
+        True when the window's own picture under it is black or frozen
+        somewhere in that stretch.
+    """
+    piece, at = under
+    known = cuts.get(piece.asset_id) if cuts else None
+    if known is None:
+        return False
+    start = piece.start + (seconds - at) * piece.speed
+    end = min(piece.end, start + length * piece.speed)
+    return any(min(end, stop) > max(start, begin) for begin, stop in known.bad_picture)
+
 def broll_covers(
     plan: EditPlan,
     pieces: Sequence[Piece],
@@ -1753,7 +1782,13 @@ def broll_covers(
             )
             continue
 
-        opened = span[0]
+        opened = round(span[0] + shot.after_seconds, 3)
+        if opened >= span[1]:
+            problems.append(
+                f"{where}: {shot.after_seconds:g}s into {shot.over_clip_id} is past where it ends in the cut, "
+                f"{span[1] - span[0]:.2f}s in"
+            )
+            continue
         closed = round(opened + shot.seconds, 3)
         if closed > total:
             problems.append(
@@ -1780,13 +1815,15 @@ def broll_covers(
             continue
 
         beat = _under(placed, opened)
-        if beat is not None and _splits_a_sentence(beat, opened, cuts):
+        if beat is not None and _splits_a_sentence(beat, opened, cuts) and not _covers_bad_picture(
+                beat, opened, shot.seconds, cuts):
             # Cutting away mid-sentence is the half of the boundary rule that can be
             # fixed for nothing: the shot moves to another clip and the cut keeps its
             # length. The other half — cutting back — cannot, so that one is reported.
             problems.append(
                 f"{where}: cuts in partway through a sentence. Start it over a clip that opens one, "
-                "or the viewer loses the line as the picture changes"
+                "or the viewer loses the line as the picture changes — partway through one only to cover a "
+                "frame gone black or frozen"
             )
             continue
         beat_id = beat[0].beat_id if beat is not None else ""
@@ -2408,6 +2445,13 @@ def check_plan(
                 problems.append(
                     f"{where}: asks for {trim.seconds:g}s of a clip that runs {clip.duration:.3f}s"
                 )
+        if trim.kind == TrimKind.TIGHTEN and not children.get(selection.clip_id):
+            # It would play the clip whole and say nothing, as if it had tightened it (#99).
+            problems.append(
+                f"{where}: `tighten` drops the pauses and unusable picture between the clips inside a section, "
+                f"and {clip.id} is one sentence with nothing inside it; use `range` to play part of it, or cover a "
+                "frame gone black with B-roll and `after_seconds`"
+            )
         if trim.kind == TrimKind.RANGE:
             if trim.from_seconds is None or trim.to_seconds is None:
                 problems.append(f"{where}: `range` needs both `from_seconds` and `to_seconds`")

@@ -2748,3 +2748,46 @@ def test_a_beat_s_pause_leaves_its_transition_the_picture_it_runs_in_from() -> N
     assert out[1].start == pytest.approx(0.4) and out[1].transition is not None
     assert out[0].end == pytest.approx(4.3)
     assert not any(note.kind == "join_left_out" for note in notes)
+
+
+SAID_TWENTY = "今天我們來到台南的古著店看看有什麼好東西"
+
+def _talking_with_a_black_moment(black: bool) -> tuple:
+    """One sentence from 5s to 15s, with the picture black from 9s to 9.6s when asked, and a quiet shot."""
+    made = MediaAnalysis(
+        asset_id=ASSET_ID, duration=30.0,
+        silences=spans([(0.0, 5.0), (15.0, 30.0)]),
+        black_frames=spans([(9.0, 9.6)] if black else []),
+        transcript=Transcript(language="zh", model="test", segments=[
+            # Twenty different words: one word over and over is a line the recogniser made up.
+            TranscriptSegment(start=5.0, end=15.0, text=SAID_TWENTY, words=[
+                TranscriptWord(start=5.0 + step * 0.5, end=5.5 + step * 0.5, text=SAID_TWENTY[step])
+                for step in range(20)
+            ]),
+        ]),
+    )
+    quiet = analysis(duration=20.0, silences=[(0.0, 20.0)], scenes=[(0.0, 20.0)], asset_id=BROLL_ASSET)
+    assets = {ASSET_ID: sourced(seconds=30.0), BROLL_ASSET: sourced(BROLL_ASSET)}
+    _, clips = build_timeline(assets, {ASSET_ID: made, BROLL_ASSET: quiet})
+    cuts = {ASSET_ID: clean_cuts(made), BROLL_ASSET: clean_cuts(quiet)}
+    return {clip.id: clip for clip in clips}, assets, cuts, speech_of(clips)[0],         next(clip for clip in clips if clip.asset_id == BROLL_ASSET)
+
+def test_covering_picture_may_cut_in_partway_through_a_sentence_only_over_a_black_moment() -> None:
+    """#99: a hand over the lens for 0.6s in the middle of a line; the sound cannot be cut."""
+    for black in (True, False):
+        by_id, assets, cuts, spoken, cover = _talking_with_a_black_moment(black)
+        plan = plan_for([Selection(clip_id=spoken.id, beat_id="b1")],
+                        broll=[BrollShot(clip_id=cover.id, over_clip_id=spoken.id, seconds=1.0, after_seconds=3.8)])
+        pieces = plan_pieces(plan, by_id, {}, assets, cuts)
+        covers, problems, _ = broll_covers(plan, pieces, by_id, assets, cuts)
+        if black:
+            assert problems == [] and len(covers) == 1
+        else:
+            assert covers == [] and any("partway through a sentence" in problem for problem in problems)
+
+def test_tightening_one_sentence_is_refused_rather_than_doing_nothing() -> None:
+    """#99: `tighten` on an utterance compiled exactly as it was, and said nothing."""
+    by_id, _, assets, clips = footage()
+    plan = plan_for([Selection(clip_id=speech_of(clips)[0].id, beat_id="b1", trim=Trim(kind=TrimKind.TIGHTEN))])
+    problems, _ = checked(plan, by_id, assets)
+    assert any("`tighten`" in problem and "`range`" in problem for problem in problems)

@@ -182,3 +182,30 @@ def test_where_two_hearings_differ_the_times_of_the_words_they_agree_on_are_kept
     [kept] = server.repo.get_analysis(asset).heard_again
     assert [(word.text, word.start, word.end) for word in kept.words] == [
         ("四件", 2.0, 2.8), ("褲子", 2.8, 3.78), ("然後", 3.8, 4.1)]
+
+def test_one_word_heard_unsure_keeps_its_own_time_and_not_the_whole_stretch_s(
+    media: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#98: 「錯了⟦是⟧晚餐」, heard alike, was refused whole for the one word in doubt."""
+    asset = server.import_asset(str(media / "wide.mp4"))["id"]
+    server.repo.save_analysis(MediaAnalysis(asset_id=asset, duration=10.0, transcript=Transcript(
+        language="zh", model="test", segments=[TranscriptSegment(start=2.0, end=4.0, text="錯了是晚餐", words=[
+            TranscriptWord(start=2.0, end=2.8, text="錯了", probability=0.9),
+            TranscriptWord(start=2.8, end=3.1, text="是", probability=0.9),
+            TranscriptWord(start=3.1, end=4.0, text="晚餐", probability=0.9)])],
+    )))
+
+    def model(device, path, duration, language, prompt, on_progress, is_cancelled, on_measured=None,
+              model_name=None):
+        return Transcript(language="zh", model="large-v3-turbo", segments=[TranscriptSegment(
+            start=0.5, end=2.4, text="錯了是晚餐", words=[
+                TranscriptWord(start=0.5, end=1.2, text="錯了", probability=0.9),
+                TranscriptWord(start=1.2, end=1.5, text="是", probability=0.2),
+                TranscriptWord(start=1.6, end=2.4, text="晚餐", probability=0.9)])])
+
+    monkeypatch.setattr(analysis, "_run_whisper", model)
+    found = server.listen_again(asset_id=asset, start=1.5, end=4.5, keep=True)
+    assert found["agrees"] and found["kept_words"] == ["錯了", "晚餐"] and found["left_as_transcribed"] == ["是"]
+    [kept] = server.repo.get_analysis(asset).heard_again
+    assert [(word.text, word.start, word.end) for word in kept.words] == [
+        ("錯了", 2.0, 2.7), ("是", 2.8, 3.1), ("晚餐", 3.1, 3.9)]

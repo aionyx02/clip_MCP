@@ -391,8 +391,11 @@ def test_a_caption_too_short_to_read_is_joined_to_the_line_straight_after_it(med
 @pytest.mark.parametrize("said, room, lines", [
     (["整杯", "牛奶", "快被", "我", "打完了"], 6, ["整杯牛奶", "快被我打完了"]),
     (["我要", "去給", "Hugo", "驗收"], 7, ["我要", "去給Hugo", "驗收"]),
+    # #100: a compound noun and a verb with what it takes.
+    (list("新口新口豬排醬直接進"), 7, ["新口新口豬排醬", "直接進"]),
+    (list("然後這有沙拉然後要先倒芝麻再加醬"), 11, ["然後這有沙拉", "然後要先倒芝麻再加醬"]),
     (["所以", "明天", "晚上", "再來", "練", "一杯", "看看", "結果", "如何"], 10,
-     ["所以明天晚上", "再來練一杯看看", "結果如何"]),
+     ["所以明天晚上", "再來練一杯", "看看結果如何"]),
 ])
 def test_a_line_does_not_break_a_word_from_the_one_it_leans_on(said: list, room: int, lines: list) -> None:
     """#92: 「快被 / 我打完了」, 「再來練 / 一杯」: a preposition, an adverb or a verb split from what follows."""

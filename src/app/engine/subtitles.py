@@ -81,8 +81,9 @@ _NOT_A_COUNT = r"[^\W\d_一二三四五六七八九十百千萬兩幾半]"
 _COUNT = r"[\d一二三四五六七八九十百千萬兩幾半]+"
 PHRASE_PAIRED_COUNTS = re.compile(_NOT_A_COUNT + _COUNT + _NOT_A_COUNT + _COUNT)
 # What a word does tells more about where a line may break than its length: a preposition
-# or an adverb leans on what follows it (「被 / 我」, 「給 / Hugo」, 「再來 / 練」), and a verb
-# on the count it takes (「練 / 一杯」), while a conjunction opens a phrase (#92). Read off
+# or an adverb leans on what follows it (「被 / 我」, 「給 / Hugo」, 「再來 / 練」), a verb on
+# the count or the thing it takes (「練 / 一杯」, 「倒 / 芝麻」), and a noun on the noun it makes
+# a compound with (「豬排 / 醬」), while a conjunction opens a phrase (#92, #100). Read off
 # the dictionary's part-of-speech tags; heavy like a number and what it counts. Provisional.
 PHRASE_LEANS_ON = ("p", "d")
 PHRASE_LEAN_PENALTY = 0.8
@@ -618,7 +619,11 @@ def phrase_leans(text: str) -> Tuple[set[int], set[int]]:
     for index, (word, flag) in enumerate(tagged):
         offset += len(word)
         after = tagged[index + 1][1] if index + 1 < len(tagged) else ""
-        if flag.startswith(PHRASE_LEANS_ON) or (flag.startswith("v") and after.startswith("m")):
+        # A verb with the count or the thing it takes, and a noun with the noun it makes a
+        # compound of: 「倒 / 芝麻」, 「豬排 / 醬」 (#100).
+        takes = flag.startswith("v") and after.startswith(("m", "n"))
+        compound = flag.startswith("n") and after.startswith("n")
+        if flag.startswith(PHRASE_LEANS_ON) or takes or compound:
             leaning.add(offset)
         if after.startswith("c"):
             opening.add(offset)

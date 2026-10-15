@@ -267,15 +267,21 @@ def check_delivery(
         # A title card's source range is only its length, not a stretch of its file that plays.
         if analysis is None or clip.card is not None:
             continue
+        known = clean_cuts(analysis) if clip.volume != 0 and analysis.transcript is not None else None
         for span in sorted([*analysis.black_frames, *analysis.frozen_frames], key=lambda item: item.start):
             landed = _on_timeline(clip, span.start, span.end)
             if landed is None:
                 continue
             for start, end in _uncovered((max(0.0, landed[0]), min(duration, landed[1])), hidden_by):
                 if end - start >= 1 / fps:
+                    # Where somebody is talking over it, the sound has to stay: the picture is what
+                    # is replaced, with B-roll laid from partway into the clip (#99).
+                    talked = known is not None and known.splits_a_sentence((span.start + span.end) / 2)
                     findings.append(Finding("bad_picture", (
                         f"black or frozen picture from {clock(start)} to {clock(end)} "
                         f"({end - start:.1f}s, clip {clip.id})"
+                        + ("; somebody is talking over it, so cover the picture and keep the sound — B-roll "
+                           "with `after_seconds` set to where in that clip it begins" if talked else "")
                     ), ((start, end),)))
 
     # Everything heard: the sequence and the audio tracks, less anything turned all the way down.

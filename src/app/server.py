@@ -1880,8 +1880,10 @@ def listen_again(
         same words — never when the hearing has the marks of a line the
         recogniser makes up (a subtitle credit, a sign-off, words that take
         no time, one word looping), and `made_up` is then true — and, when
-        `keep` was given, `kept` or `not_kept`; for a render, `captions`, the ones on screen in the
-        stretch, `changed_since`, true when the project has been edited
+        `keep` was given, `kept` or `not_kept` — kept word by word where
+        only some of it was heard alike and for sure, with `kept_words` and
+        `left_as_transcribed`; for a render, `captions`, the ones on screen in
+        the stretch, `changed_since`, true when the project has been edited
         since it was rendered, and `unheard`, where it is loud enough to be
         talking with no word heard — hear that stretch again on its own, or
         play `audio_path`; it may be a song.
@@ -1933,7 +1935,9 @@ def listen_again(
                                     made_up))
     return result
 
-def _alike_times(stored: List[TranscriptWord], heard: List[TranscriptWord]) -> Tuple[List[TranscriptWord], List[str]]:
+def _alike_times(
+    stored: List[TranscriptWord], heard: List[TranscriptWord],
+) -> Tuple[List[TranscriptWord], List[str], List[str], List[str]]:
     """Take the heard times of the words two hearings agree on, and the transcript's for the rest.
 
     Matched character by character, so two hearings that cut a line into
@@ -1947,8 +1951,10 @@ def _alike_times(stored: List[TranscriptWord], heard: List[TranscriptWord]) -> T
         heard: The words heard again there, in order.
 
     Returns:
-        `(words, apart)`: the transcript's words, each with the heard time
-        where the two agree; and the transcript's words they disagree on.
+        `(words, apart, doubted, retimed)`: the transcript's words, each with
+        the heard time where the two agree; the transcript's words they
+        disagree on; those they agree on but the hearing was unsure of, which
+        keep the transcript's time; and those that took the heard time.
     """
     def characters(words: List[TranscriptWord]) -> Tuple[str, List[int]]:
         text, owner = [], []
@@ -1973,6 +1979,7 @@ def _alike_times(stored: List[TranscriptWord], heard: List[TranscriptWord]) -> T
     out: List[TranscriptWord] = list(stored)
     retimed: set = set()
     apart: List[str] = []
+    doubted: List[str] = []
     for index, word in enumerate(stored):
         others = paired.get(index, set())
         whole = sum(1 for at, owner in enumerate(said_by) if owner == index and at in matched) == owned[index]
@@ -1983,7 +1990,10 @@ def _alike_times(stored: List[TranscriptWord], heard: List[TranscriptWord]) -> T
             continue
         match = heard[next(iter(others))]
         alone = claimed.get(next(iter(others))) == {index} and len(_bare_words(match.text)) == owned[index]
-        if alone and not unsure_words([match]):
+        if alone and unsure_words([match]):
+            # Heard alike but not for sure: its time is no better than the transcript's (#98).
+            doubted.append(word.text.strip())
+        elif alone:
             out[index] = word.model_copy(update={"start": match.start, "end": match.end,
                                                  "probability": match.probability})
             retimed.add(index)
@@ -1998,7 +2008,7 @@ def _alike_times(stored: List[TranscriptWord], heard: List[TranscriptWord]) -> T
                     out[undo] = stored[undo]
                     retimed.discard(undo)
                 changed = True
-    return out, apart
+    return out, apart, doubted, [stored[index].text.strip() for index in sorted(retimed)]
 
 def _keep_hearing(known: MediaAnalysis, stretch: HeardAgain, agrees: bool, made_up: bool = False) -> dict:
     """Keep a stretch heard again over the transcript's word times, when it can be believed.
@@ -2027,22 +2037,28 @@ def _keep_hearing(known: MediaAnalysis, stretch: HeardAgain, agrees: bool, made_
         opens, closes = math.floor(round(opens * 1000, 6)) / 1000, math.ceil(round(closes * 1000, 6)) / 1000
         return {"not_kept": f"the transcript has {'、'.join(word.text.strip() for word in across)} running across the "
                             f"edge of the stretch; hear {opens:.3f}s to {closes:.3f}s again with keep"}
-    partly = ""
-    if not agrees:
+    partly, listed = "", {}
+    unsure = unsure_words(stretch.words)
+    if not agrees or unsure:
+        # Word by word: the ones heard alike and for sure take the heard time, and the rest
+        # keep the transcript's — a word in doubt costs only itself, not the stretch (#87, #98).
         stored = [word for segment in known.transcript.segments for word in segment.words
                   if word.start >= stretch.start and word.end <= stretch.end]
-        alike, apart = ([], []) if made_up else _alike_times(stored, stretch.words)
-        kept = sum(1 for was, now in zip(stored, alike) if (was.start, was.end) != (now.start, now.end))
-        if not kept:
+        alike, apart, doubted, retimed = ([], [], [], []) if made_up else _alike_times(stored, stretch.words)
+        if not retimed:
+            if agrees:
+                return {"not_kept": f"the hearing was unsure of {'、'.join(unsure)}; play audio_path to the user "
+                                    "and ask"}
             return {"not_kept": "the hearing and the transcript say different words here, so neither is believed; "
                                 "play audio_path to the user and ask, or hear a stretch that starts and ends in a pause"}
         stretch = stretch.model_copy(update={"words": alike})
-        partly = (f" for the {kept} word(s) the two heard alike; 「{'、'.join(apart)}」, heard differently, keep the "
-                  "transcript's words and times — play audio_path to the user and ask about those" if apart else
-                  f" for the {kept} word(s) the two heard alike")
-    unsure = [] if partly else unsure_words(stretch.words)
-    if unsure:
-        return {"not_kept": f"the hearing was unsure of {'、'.join(unsure)}; play audio_path to the user and ask"}
+        said = [f" for the {len(retimed)} word(s) the two heard alike and the hearing was sure of"]
+        if apart:
+            said.append(f"「{'、'.join(apart)}」, heard differently, keep the transcript's words and times")
+        if doubted:
+            said.append(f"「{'、'.join(doubted)}」, heard unsure, keep the transcript's times")
+        partly = "; ".join(said) + (" — play audio_path to the user and ask about those" if apart or doubted else "")
+        listed = {"kept_words": retimed, "left_as_transcribed": apart + doubted}
     # Read again before writing, so an analysis taken again meanwhile is not overwritten
     # with the one this started from.
     current = repo.get_analysis(known.asset_id)
@@ -2053,7 +2069,7 @@ def _keep_hearing(known: MediaAnalysis, stretch: HeardAgain, agrees: bool, made_
     ]
     repo.save_analysis(current)
     return {"kept": f"the word times heard from {stretch.start:g}s to {stretch.end:g}s are now what cuts in this "
-                    f"file are judged by{partly}; check the cut again"}
+                    f"file are judged by{partly}; check the cut again", **listed}
 
 # Provisional (roadmap §13): how long each level `listen_again` reports covers — fine
 # enough to see a fade or a dip under a word, coarse enough that thirty seconds is sixty numbers.
