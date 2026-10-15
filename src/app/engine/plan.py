@@ -1442,6 +1442,12 @@ def _joined_beats(
             said = [known.last_sound_before(piece.start)] if known is not None else []
             played = [other.end for other in out[:at] if other.asset_id == piece.asset_id and other.end <= piece.start]
             quiet = piece.start - max(said + played, default=0.0)
+            # The picture the beat's transition runs in from is kept for it: opening the shot onto
+            # it left the transition nothing before the shot, and it was refused (#95). Whatever
+            # of the pause that costs is made up from the shot going out, below.
+            source = assets.get(piece.asset_id)
+            if beat.transition_in is not None and not (source is not None and source.still):
+                quiet = min(quiet, piece.start - _picture_needed(beat.transition_in, piece))
             # Rounded first, so a time already in whole milliseconds is not floored a millisecond short,
             # and the pause asked for is held to the same milliseconds, so getting all of it is not
             # reported as falling short of it by a rounding error (#76).
@@ -1456,8 +1462,8 @@ def _joined_beats(
             if given < beat.pause_before - JOIN_TOLERANCE_SECONDS:
                 notes.append(Note(
                     f"beat {beat.id}: it opens on {given:g}s of quiet rather than {beat.pause_before:g}s, "
-                    "all its first shot has before somebody speaks or the cut has already played, and all the "
-                    "shot before it has after its last word",
+                    "all its first shot has before somebody speaks or the cut has already played — less any its "
+                    "transition runs in from — and all the shot before it has after its last word",
                     "join_shortened", beat_id=beat.id, clip_ids=_first_clips([piece]),
                     seconds=given, look=True,
                 ))
@@ -2012,7 +2018,9 @@ def _cut_notes(
         ))
     return said
 
-def _unfit_transitions(plan: EditPlan, pieces: Sequence[Piece]) -> List[str]:
+def _unfit_transitions(
+    plan: EditPlan, pieces: Sequence[Piece], clips: Optional[Mapping[str, SemanticClip]] = None,
+) -> Tuple[List[str], List[str]]:
     """Name each beat whose transition has no picture before its first shot to run in from.
 
     A transition ends on the cut, so the incoming shot plays under it from
@@ -2025,12 +2033,16 @@ def _unfit_transitions(plan: EditPlan, pieces: Sequence[Piece]) -> List[str]:
     Args:
         plan: The plan.
         pieces: Its windows, as compiled.
+        clips: The timeline's clips, keyed by ID, to say where the shot's own
+            clip starts when the breath before it reached back past that.
 
     Returns:
-        One problem per beat whose transition could not be made.
+        `(problems, beat_ids)`: one problem per beat whose transition could
+        not be made, and those beats.
     """
     first = _beginnings(pieces)
     problems: List[str] = []
+    refused: List[str] = []
     for position, beat in enumerate(plan.beats):
         wanted = beat.transition_in
         at = first.get(beat.id)
@@ -2044,19 +2056,25 @@ def _unfit_transitions(plan: EditPlan, pieces: Sequence[Piece]) -> List[str]:
                 f"{before.from_clip_ids[0]}, plays only {before.played:.2f}s. Give that shot more of its footage, "
                 "or take the transition off with `set_beat_join`"
             )
+            refused.append(beat.id)
             continue
         need = _picture_needed(wanted, piece)
         later = need - piece.start
+        own = (clips or {}).get(piece.from_clip_ids[0]) if piece.from_clip_ids else None
+        # Said apart, so a window opened earlier than its clip is not read as the plan's mistake (#95).
+        reached = (f" (its clip starts at {own.source_range.start:.2f}s; the breath left before it reached back "
+                   "the rest)" if own is not None and own.source_range.start - piece.start > 0.005 else "")
         other = (f"a shorter {wanted.kind}" if wanted.kind == "dip"
                  else f"a dip instead, which only needs half as much ({need / 2:.2f}s)")
         problems.append(
             f"beat {beat.id}: its {wanted.seconds:g}s {wanted.kind} has no picture to run in from — its first "
-            f"shot, {piece.from_clip_ids[0]}, starts {piece.start:.2f}s into its file and the {wanted.kind} "
+            f"shot, {piece.from_clip_ids[0]}, starts {piece.start:.2f}s into its file{reached} and the {wanted.kind} "
             f"needs {need:.2f}s before it. Start that shot at least {later:.2f}s later (`set_trim` with a "
             f"`from_seconds` that much later, which cuts that much of its opening), use {other}, or take the "
             "transition off with `set_beat_join`"
         )
-    return problems
+        refused.append(beat.id)
+    return problems, refused
 
 def _cue_problems(plan: EditPlan, pieces: Sequence[Piece]) -> List[str]:
     """Check that every music cue has somewhere to come in, in the order given.
@@ -2496,7 +2514,12 @@ def check_plan(
         ))
         notes.extend(cleaned)
         problems.extend(_cue_problems(plan, pieces))
-        problems.extend(_unfit_transitions(plan, pieces))
+        unfit, refused = _unfit_transitions(plan, pieces, clips)
+        problems.extend(unfit)
+        # Refused is said once, as the problem: the note that the compile left it out is the
+        # same thing said again, as if it had been dealt with (#95).
+        notes[:] = [note for note in notes if not (isinstance(note, Note) and note.kind == "join_left_out"
+                                                   and note.beat_id in refused)]
         problems.extend(_unplayed_evidence(plan, pieces, clips, children))
         for position, cue in enumerate(cues, start=1):
             entry = song_entry(cue, (cuts or {}).get(cue.asset_id) if cue.asset_id is not None else None)

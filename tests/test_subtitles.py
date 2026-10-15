@@ -1011,3 +1011,14 @@ def test_the_cut_read_back_puts_each_shot_in_its_part_and_only_its_own_captions_
     script = read_cut(project)["script"]
     assert script[0] == "== 開場" and script[2] == "== 後段" and "clip b" in script[3]
     assert "第二句" not in script[1] and "captions: 第二句" in script[3]
+
+def test_a_caption_with_no_timings_is_shown_a_line_at_a_time_broken_where_a_phrase_ends() -> None:
+    """#94: 「哇靠，這個雨越 / 來越大，哇靠」 cut 越來越 in two; the comma was right there."""
+    from app.engine.subtitles import caption_geometry, one_line_each
+
+    style = CAPTION_PRESETS["tiktok"]
+    geometry = caption_geometry(1080, 1920, style)
+    cue = PlacedCue(cue_id="c9", start=Decimal(0), end=Decimal(4), text="哇靠，這個雨越來越大，哇靠，越來越大了")
+    lines = [line.text for line in one_line_each(cue, geometry, style)]
+    assert len(lines) > 1 and not any(line.startswith(("來越", "越大")) for line in lines)
+    assert any(line.endswith("，") for line in lines[:-1])

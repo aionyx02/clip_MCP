@@ -2285,18 +2285,20 @@ def test_a_transition_with_no_picture_before_its_shot_is_refused_with_the_ways_t
     # in a cut whose parts each began at the top of a file.
     plan, by_id, children, assets = joined_plan(BeatTransition(kind="wipe", seconds=0.5), None, opening=0.0)
     timeline = SemanticTimeline(id="tl_test", asset_ids=[], input_hash="hash", derivation_version=6)
-    problems, _ = check_plan(plan, timeline, by_id, children, assets)
+    problems, notes = check_plan(plan, timeline, by_id, children, assets)
     refused = [problem for problem in problems if "wipe" in problem]
     assert len(refused) == 1
+    # Said once, as what stops the compile; not again as a note that it was dealt with (#95).
+    assert not any(note_record(note)["kind"] == "join_left_out" for note in notes)
     assert "from_seconds" in refused[0] and "0.5" in refused[0]
     assert "dip" in refused[0] and "set_beat_join" in refused[0]
     # When the shot before is what is too short, moving this one later would not help: say so.
     from app.engine import plan as compiler
 
-    short = [problem for problem in compiler._unfit_transitions(plan, [
+    short, _ = compiler._unfit_transitions(plan, [
         Piece(asset_id="x", start=0.0, end=0.03, from_clip_ids=("a",), beat_id="b1"),
         Piece(asset_id="y", start=5.0, end=8.0, from_clip_ids=("b",), beat_id="b2"),
-    ])]
+    ])
     assert short and "before it" in short[0] and "from_seconds" not in short[0]
     # A dip only reaches back half its length, so the same shot needs a quarter second for a 0.5s one.
     plan, by_id, children, assets = joined_plan(BeatTransition(kind="dip", seconds=0.5), None, opening=0.0)
@@ -2726,3 +2728,23 @@ def test_two_windows_of_one_file_played_out_of_order_stay_two() -> None:
     # And a window lost anyway is said.
     [lost] = _left_out([later, earlier], [later], [])
     assert lost.kind == "selections_lost" and lost.clip_ids == ("u0002",) and lost.look
+
+
+def test_a_beat_s_pause_leaves_its_transition_the_picture_it_runs_in_from() -> None:
+    """#95: the pause opened the shot onto its file's first frame, and the dissolve was then
+    refused for having no picture before it."""
+    from app.engine.plan import _joined_beats
+
+    plan = plan_for([]).model_copy(update={"beats": [
+        Beat(id="b1", name="講"),
+        Beat(id="b2", name="走", pause_before=0.4, transition_in=BeatTransition(kind="dissolve", seconds=0.4)),
+    ]})
+    pieces = [Piece(asset_id="a", start=0.0, end=4.0, from_clip_ids=("u1",), beat_id="b1"),
+              Piece(asset_id="b", start=0.5, end=8.0, from_clip_ids=("u2",), beat_id="b2")]
+    cuts = {"a": CleanCuts(words=((0.2, 3.0),), transcribed=True, duration=10.0),
+            "b": CleanCuts(words=((1.0, 2.0),), transcribed=True)}
+    out, notes = _joined_beats(plan, pieces, {}, cuts)
+    # 0.1s of pause from the shot itself, 0.4s kept for the dissolve, 0.3s from the shot going out.
+    assert out[1].start == pytest.approx(0.4) and out[1].transition is not None
+    assert out[0].end == pytest.approx(4.3)
+    assert not any(note.kind == "join_left_out" for note in notes)

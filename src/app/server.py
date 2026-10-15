@@ -126,6 +126,11 @@ MAX_TIMELINE_CLIPS = 5000
 # range. A project is named by whoever is editing, so a render cannot assume anything
 # about what is in that name.
 FORBIDDEN_IN_NAMES = frozenset('<>:"/\\|?*') | {chr(code) for code in range(32)}
+# What each of those becomes in a file name: the full-width mark that looks like it, so
+# 「8/29 暴雨」 is saved as 「8／29 暴雨」 rather than 「8 29 暴雨」 (#96); a control character
+# has no look to keep and becomes a space.
+NAME_LOOKALIKES = {"<": "＜", ">": "＞", ":": "：", '"': "＂", "/": "／", "\\": "＼", "|": "｜", "?": "？",
+                   "*": "＊"}
 MAX_OUTPUT_NAME = 60
 # A summary says enough to judge a clip by; the whole text is one call away.
 CLIP_SUMMARY_CHARACTERS = 80
@@ -5460,9 +5465,26 @@ def _output_name(project: Project, kind: str) -> str:
         missing or survives sanitising as nothing. Each render has its own
         directory, so two of the same project do not collide.
     """
-    stem = "".join(" " if character in FORBIDDEN_IN_NAMES else character for character in (project.name or ""))
+    stem = "".join(NAME_LOOKALIKES.get(character, " ") if character in FORBIDDEN_IN_NAMES else character
+                   for character in (project.name or ""))
     stem = " ".join(stem.split())[:MAX_OUTPUT_NAME].strip(" .")
     return f"{stem or project.id}_{kind}.mp4"
+
+def _renamed(project: Project) -> dict:
+    """Say when a render's file is not named exactly as its project is, and why.
+
+    Args:
+        project: The project rendered.
+
+    Returns:
+        `file_named` with the name the file takes, when a character a file
+        name cannot hold was changed; empty otherwise.
+    """
+    if not project.name or not any(character in FORBIDDEN_IN_NAMES for character in project.name):
+        return {}
+    stem = _output_name(project, "x")[: -len("_x.mp4")]
+    return {"file_named": f"「{stem}」: a file name cannot hold some of the characters in 「{project.name}」, "
+                          "so they were swapped for ones that look alike"}
 
 def _delivered(job_id: str) -> bool:
     """Whether a full render finished and its file was saved, so its working folder can go."""
@@ -5820,6 +5842,7 @@ def _start_render(
 
     result = {
         "job_id": job.job_id, "status": job.status.value, "stage": job.stage, "output_path": job.output_path,
+        **_renamed(project),
         "findings": [{"check": finding.check, "message": finding.message} for finding in findings],
     }
     if is_preview:
@@ -6060,6 +6083,10 @@ def check_render(
     project = repo.get_project(project_id)
     if not project:
         raise ValueError(f"project {project_id} not found")
+    if project.base_video_track is None or not project.base_video_track.clips:
+        # Nothing checked is not the same as nothing wrong (#96).
+        raise ValueError(f"project {project_id} has nothing on its sequence to check yet; compile a plan or "
+                         "add clips first")
     findings = _findings(_reshaped(project, frame), burn_subtitles)
     checked = {
         "ok": not findings,

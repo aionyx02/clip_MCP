@@ -753,13 +753,9 @@ def one_line_each(cue: PlacedCue, geometry: CaptionGeometry, style: CaptionStyle
     text = " ".join(part for part in escape_ass_text(cue.text).split("\\N") if part)
     if text_width(text) <= room:
         return [cue]
-    # As few lines as fit, filled evenly; with no timings there are no pauses to prefer,
-    # and `wrap_caption` already knows where the spaces are.
-    fewest = len(wrap_caption(text, room))
-    limit = text_width(text) / fewest
-    while limit < room and len(wrap_caption(text, limit)) > fewest:
-        limit += 0.5
-    wrapped = wrap_caption(text, min(limit, room))
+    # Broken where a phrase ends, by the same rules a caption is made with (#94): a caption
+    # corrected by hand has lost its timings, and its punctuation is where it breaks best.
+    wrapped = _untimed_lines(text, room)
     total = sum(text_width(line) for line in wrapped) or 1.0
     pieces: List[PlacedCue] = []
     done = 0.0
@@ -770,6 +766,27 @@ def one_line_each(cue: PlacedCue, geometry: CaptionGeometry, style: CaptionStyle
         if end > start:
             pieces.append(cue.model_copy(update={"start": start, "end": end, "text": line}))
     return pieces or [cue]
+
+# One unit a caption with no timings is broken between: a Chinese character, a run of
+# anything else with the space after it, or a space.
+_UNTIMED = re.compile(r"[㐀-䶿一-鿿豈-﫿]|[^\s㐀-䶿一-鿿豈-﫿]+\s*|\s+")
+
+def _untimed_lines(text: str, room: float) -> List[str]:
+    """Break text with no word timings into lines that fit, where a phrase ends.
+
+    Args:
+        text: The caption text, on one line.
+        room: The line width, as a multiple of the font size.
+
+    Returns:
+        The lines, none wider than `room` unless a single unit is.
+    """
+    units = [CueWord(start=Decimal(0), end=Decimal(0), text=unit) for unit in _UNTIMED.findall(text)]
+    if not units:
+        return [text]
+    widths = [text_width(unit.text) for unit in units]
+    lines = _word_lines(units, lambda first, past: sum(widths[first:past]) <= room)
+    return ["".join(unit.text for unit in units[first:past]).strip() for first, past in lines]
 
 def caption_text(cue: PlacedCue, geometry: CaptionGeometry, style: CaptionStyle) -> Tuple[str, int, int]:
     """Write one caption the way it is drawn, and count its lines.
