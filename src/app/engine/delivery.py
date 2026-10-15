@@ -24,7 +24,9 @@ from app.engine.continuity import Shot, stray_runs
 from app.engine.looks import alike
 from app.engine.plan import LENGTH_TOLERANCE
 from app.engine.library import MUSIC, library_of
-from app.engine.semantic import clean_cuts, combined_over, join_voices, share_covered, was_audible, was_made_up
+from app.engine.semantic import (
+    EDGE_TOLERANCE_SECONDS, clean_cuts, combined_over, join_voices, share_covered, was_audible, was_made_up,
+)
 from app.engine.subtitles import caption_overflow, captioned_clips
 from app.models.media import Asset, MediaAnalysis
 from app.models.timeline import CaptionStyle, Clip, Marker, PlacedCue, Project, TrackType
@@ -515,7 +517,20 @@ def _speech_cuts(clips: Sequence[Clip], analyses: Mapping[str, MediaAnalysis]) -
             known = clean_cuts(analysis)
             really = known.sound_before(at) if opens else known.sound_after(at)
             lost = known.heard_cut_off(at, opens)
-            if really is not None:
+            # The word the transcript has right against the cut on the side it keeps out, with the
+            # talking running on into it: the cut was put on its edge, and the compiler will not move
+            # a cut into a word, so a place inside it is no advice at all (#87).
+            words = [word for segment in _said(analysis) for word in segment.words]
+            far = next((word for word in words if known.placed(word.start, word.end) and (
+                (really is not None and really < word.end <= at + EDGE_TOLERANCE_SECONDS
+                 and word.end >= at - EDGE_TOLERANCE_SECONDS) if opens else
+                (really is not None and at - EDGE_TOLERANCE_SECONDS <= word.start < really
+                 and word.start <= at + EDGE_TOLERANCE_SECONDS))), None)
+            if far is not None:
+                advice = (f"; it runs straight {'out of' if opens else 'on into'} 「{far.text.strip()}」 with no pause "
+                          f"to cut in — {'start' if opens else 'end'} on another sentence's "
+                          f"{'start' if opens else 'end'}, or leave it")
+            elif really is not None:
                 # What the sound says beats the nearest pause in a transcript that got this wrong. Where
                 # that is itself inside talking, the clean point past it is offered, so that moving the
                 # cut where this says is never refused by this same check.

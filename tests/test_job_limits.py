@@ -351,3 +351,27 @@ def test_a_queued_job_says_how_many_go_before_it() -> None:
     first, second = Job(status=JobStatus.QUEUED), Job(status=JobStatus.QUEUED)
     going = Job(status=JobStatus.RUNNING)
     assert queue_positions([going, first, second]) == {first.job_id: 0, second.job_id: 1}
+
+
+def test_a_worker_leaves_the_job_object_the_server_was_started_in_where_it_may(
+    manager: JobManager, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    """#88: a client closing its server killed the transcriptions running under it."""
+    import os
+    import subprocess
+
+    if os.name != "nt":
+        pytest.skip("job objects are Windows'")
+    tried = []
+
+    def popen(*args, **kwargs):
+        tried.append(kwargs["creationflags"])
+        if kwargs["creationflags"] & subprocess.CREATE_BREAKAWAY_FROM_JOB:
+            raise PermissionError(5, "Access is denied")
+
+    monkeypatch.setattr(renderer.subprocess, "Popen", popen)
+    job = queue(manager, work_dir=str(tmp_path))
+    manager._launch_worker(job)
+    # Refused by a job that does not allow it, the worker is started in it rather than not at all.
+    assert [bool(flags & subprocess.CREATE_BREAKAWAY_FROM_JOB) for flags in tried] == [True, False]
+    assert manager.repo.get_job(job.job_id).status == JobStatus.QUEUED

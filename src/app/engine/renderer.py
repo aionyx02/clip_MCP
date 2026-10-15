@@ -23,17 +23,25 @@ SPEC_FILE_NAME = "job.json"
 FFMPEG_LOG_FILE_NAME = "ffmpeg.log"
 WORKER_LOG_FILE_NAME = "worker.log"
 
-def _detached_process_options() -> Dict[str, Any]:
+def _detached_process_options(breakaway: bool = True) -> Dict[str, Any]:
     """Build `subprocess.Popen` options that detach a child from this process.
 
     The child gets no console window on Windows and its own session or
     process group, so it keeps running if the server's console is closed.
+    On Windows it also leaves the job object the server may have been started
+    in: a client that closes its server kills everything in that job, and a
+    transcription half done went with it (#88).
+
+    Args:
+        breakaway: Whether to leave the job object, which a job that does not
+            allow it refuses.
 
     Returns:
         Keyword arguments for `subprocess.Popen`.
     """
     if os.name == "nt":
-        return {"creationflags": subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP}
+        flags = subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP
+        return {"creationflags": flags | (subprocess.CREATE_BREAKAWAY_FROM_JOB if breakaway else 0)}
     return {"start_new_session": True}
 
 ABANDONED = "worker stopped reporting; it may have been terminated"
@@ -223,14 +231,21 @@ class JobManager:
         """
         try:
             with open(os.path.join(job.work_dir, WORKER_LOG_FILE_NAME), "wb") as worker_log:
-                subprocess.Popen(
-                    [sys.executable, "-m", "app.engine.renderer", self.repo.db_path, job.job_id],
-                    stdin=subprocess.DEVNULL,
-                    stdout=subprocess.DEVNULL,
-                    stderr=worker_log,
-                    close_fds=True,
-                    **_detached_process_options(),
-                )
+                for breakaway in (True, False):
+                    try:
+                        subprocess.Popen(
+                            [sys.executable, "-m", "app.engine.renderer", self.repo.db_path, job.job_id],
+                            stdin=subprocess.DEVNULL,
+                            stdout=subprocess.DEVNULL,
+                            stderr=worker_log,
+                            close_fds=True,
+                            **_detached_process_options(breakaway),
+                        )
+                        break
+                    except PermissionError:
+                        # A job object that does not allow leaving it: the worker stays in it.
+                        if not breakaway or os.name != "nt":
+                            raise
         except OSError as exc:
             self.repo.update_job(job.job_id, _fail_if_active(f"could not start worker: {exc}"))
 

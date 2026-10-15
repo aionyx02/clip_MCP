@@ -154,3 +154,31 @@ def test_a_render_loud_where_nothing_was_heard_says_so() -> None:
     found = _loud_without_words(levels, 10.0, said)
     assert found == [(11.0, 14.0)] and found[0][1] - found[0][0] >= UNHEARD_LOUD_SECONDS
     assert _loud_without_words([-60.0] * 8, 10.0, said) == []
+
+def test_where_two_hearings_differ_the_times_of_the_words_they_agree_on_are_kept(
+    media: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#87: 「四件」 against 「十件」 refused the whole stretch, and with it where 「褲子」 really ends."""
+    asset = server.import_asset(str(media / "wide.mp4"))["id"]
+    server.repo.save_analysis(MediaAnalysis(asset_id=asset, duration=10.0, transcript=Transcript(
+        language="zh", model="test", segments=[TranscriptSegment(start=2.0, end=4.4, text="四件褲子然後", words=[
+            TranscriptWord(start=2.0, end=2.8, text="四件", probability=0.9),
+            TranscriptWord(start=2.8, end=3.6, text="褲子", probability=0.9),
+            TranscriptWord(start=3.6, end=4.0, text="然後", probability=0.9)])],
+    )))
+
+    def model(device, path, duration, language, prompt, on_progress, is_cancelled, on_measured=None,
+              model_name=None):
+        # Heard from 1.5s of the file: 「褲子」 runs on to 3.78, and 「然後」 starts after it.
+        return Transcript(language="zh", model="large-v3-turbo", segments=[TranscriptSegment(
+            start=0.5, end=2.6, text="十件褲子然後", words=[
+                TranscriptWord(start=0.5, end=1.3, text="十件", probability=0.9),
+                TranscriptWord(start=1.3, end=2.28, text="褲子", probability=0.9),
+                TranscriptWord(start=2.3, end=2.6, text="然後", probability=0.9)])])
+
+    monkeypatch.setattr(analysis, "_run_whisper", model)
+    found = server.listen_again(asset_id=asset, start=1.5, end=4.5, keep=True)
+    assert "2 word(s) the two heard alike" in found["kept"] and "四件" in found["kept"]
+    [kept] = server.repo.get_analysis(asset).heard_again
+    assert [(word.text, word.start, word.end) for word in kept.words] == [
+        ("四件", 2.0, 2.8), ("褲子", 2.8, 3.78), ("然後", 3.8, 4.1)]

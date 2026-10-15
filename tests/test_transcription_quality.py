@@ -32,6 +32,11 @@ def started(monkeypatch: pytest.MonkeyPatch) -> list:
     monkeypatch.setattr(server.job_manager, "start_job", lambda job, spec: specs.append(spec) or job)
     return specs
 
+
+def skipped(result: dict) -> list:
+    """The assets an analysis left alone because theirs is current."""
+    return [item["asset_id"] for item in result["skipped"] if "is current" in item["reason"]]
+
 def test_each_choice_names_its_model() -> None:
     assert analysis.whisper_model_for("accurate") == analysis.whisper_model_name()
     assert analysis.whisper_model_for("fast") == analysis.FAST_WHISPER_MODEL != analysis.whisper_model_name()
@@ -52,11 +57,11 @@ def test_asking_for_accurate_upgrades_a_fast_transcript_without_again(talk: Asse
 
 def test_asking_for_fast_keeps_an_accurate_transcript(talk: Asset, started: list) -> None:
     server.repo.save_analysis(analysed_with(talk.id, analysis.whisper_model_name()))
-    assert server.analyze_asset([talk.id], transcription="fast")["skipped"] == [talk.id]
+    assert skipped(server.analyze_asset([talk.id], transcription="fast")) == [talk.id]
 
 def test_asking_for_fast_again_keeps_the_fast_transcript(talk: Asset, started: list) -> None:
     server.repo.save_analysis(analysed_with(talk.id, analysis.FAST_WHISPER_MODEL))
-    assert server.analyze_asset([talk.id], transcription="fast")["skipped"] == [talk.id]
+    assert skipped(server.analyze_asset([talk.id], transcription="fast")) == [talk.id]
 
 def test_an_out_of_date_accurate_transcript_is_redone_accurately_when_fast_is_asked(
     talk: Asset, started: list, monkeypatch: pytest.MonkeyPatch,
@@ -78,7 +83,7 @@ def test_when_small_is_the_configured_model_nothing_counts_as_fast(
     server.repo.save_analysis(analysed_with(talk.id, analysis.FAST_WHISPER_MODEL))
     assert analysis.transcription_of(analysis.FAST_WHISPER_MODEL) == "accurate"
     result = server.analyze_asset([talk.id])
-    assert result["skipped"] == [talk.id] and result["upgrading"] == []
+    assert skipped(result) == [talk.id] and result["upgrading"] == []
 
 def test_a_dry_run_starts_nothing_and_gives_both_times(talk: Asset, started: list) -> None:
     found = server.analyze_asset([talk.id], again=True, dry_run=True)
@@ -123,3 +128,18 @@ def test_the_job_runs_the_model_that_was_chosen(tmp_path: Path, monkeypatch: pyt
     assert seen["speech_model"] == analysis.FAST_WHISPER_MODEL
     renderer._run_analysis(store, job, {"transcribe": True}, context)
     assert seen["speech_model"] == analysis.whisper_model_name()
+
+def test_a_file_already_being_analyzed_is_left_to_that_job_and_says_so(talk: Asset, started: list) -> None:
+    """#88: four files came back skipped with no reason, and a second job would have doubled the work."""
+    from app.models.job import Job, JobKind, JobStatus
+
+    waiting = Job(kind=JobKind.ANALYZE, asset_id=talk.id)
+    server.repo.add_job(waiting)
+    try:
+        result = server.analyze_asset([talk.id], again=True)
+    finally:
+        # Never left queued for a later test's queue to try to start.
+        server.repo.update_job(waiting.job_id, lambda job: setattr(job, "status", JobStatus.CANCELLED))
+    assert result["jobs"] == [] and started == []
+    assert result["skipped"] == [{"asset_id": talk.id,
+                                  "reason": f"already queued in job {waiting.job_id}; follow it with get_job"}]

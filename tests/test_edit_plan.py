@@ -2671,6 +2671,16 @@ def test_a_pause_its_shot_cannot_give_is_borrowed_from_the_shot_going_out() -> N
     assert out[0].end == pytest.approx(9.5)
     assert any("0.11s of quiet rather than 0.4s" in note for note in notes)
 
+def test_a_pause_a_millisecond_short_is_not_reported_as_shortened() -> None:
+    """#89: 「0.399s of quiet rather than 0.4s」 was worth a look."""
+    from app.engine.plan import _joined_beats
+
+    plan = plan_for([]).model_copy(update={"beats": [Beat(id="b1", name="講"), Beat(id="b2", name="走", pause_before=0.4)]})
+    pieces = [Piece(asset_id="a", start=0.0, end=2.0, from_clip_ids=("u1",), beat_id="b1"),
+              Piece(asset_id="b", start=5.0, end=8.0, from_clip_ids=("u2",), beat_id="b2")]
+    out, notes = _joined_beats(plan, pieces, {}, {"b": CleanCuts(words=((4.601, 4.601), (5.0, 6.0)), transcribed=True)})
+    assert out[1].start == pytest.approx(4.601) and notes == []
+
 def test_a_pause_given_in_full_is_not_reported_as_shortened() -> None:
     """#76: a pause asked for at a speed that does not divide it evenly is still all there."""
     from app.engine.plan import _joined_beats

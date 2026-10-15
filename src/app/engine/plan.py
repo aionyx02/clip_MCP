@@ -92,6 +92,9 @@ BEAT_SNAP_SECONDS = 0.3
 ON_BEAT_SECONDS = 0.005
 # How far the compiled length may sit from what the plan asked for before it is worth saying.
 LENGTH_TOLERANCE = 0.1
+# A join given this much less than it asked for is given all of it: a frame at 30 fps, less
+# than anybody sees, and more than the milliseconds rounding takes off (#89). Provisional.
+JOIN_TOLERANCE_SECONDS = 1 / 30
 # A transition shortened below this is a few frames of flicker rather than a transition,
 # so it is left out instead. Three frames at 30fps, two at 24.
 MIN_TRANSITION_SECONDS = 0.1
@@ -1416,7 +1419,7 @@ def _joined_beats(
             # going out — the other side of the same join — before any of it is reported (#76).
             lent = _lent_tail(out, at, assets, cuts, _milliseconds(beat.pause_before - fits / piece.speed))
             given = round(fits / piece.speed + lent, 3)
-            if given < beat.pause_before:
+            if given < beat.pause_before - JOIN_TOLERANCE_SECONDS:
                 notes.append(Note(
                     f"beat {beat.id}: it opens on {given:g}s of quiet rather than {beat.pause_before:g}s, "
                     "all its first shot has before somebody speaks or the cut has already played, and all the "
@@ -1453,7 +1456,7 @@ def _joined_beats(
                     "join_left_out", beat_id=beat.id, clip_ids=_first_clips([piece]), look=True,
                 ))
             else:
-                if fits < wanted.seconds:
+                if fits < wanted.seconds - JOIN_TOLERANCE_SECONDS:
                     short = _picture_needed(wanted, piece) - piece.start
                     notes.append(Note(
                         f"beat {beat.id}: its {wanted.kind} was shortened from {wanted.seconds:g}s to {fits:g}s, "
@@ -1469,7 +1472,7 @@ def _joined_beats(
                                   "join_left_out", beat_id=beat.id, clip_ids=_first_clips([piece]), look=True))
             else:
                 fits = math.floor(min(beat.sound_lead, room, before.played) * 1000) / 1000
-                if fits < beat.sound_lead:
+                if fits < beat.sound_lead - JOIN_TOLERANCE_SECONDS:
                     notes.append(Note(
                         f"beat {beat.id}: its sound comes in {fits:g}s early rather than {beat.sound_lead:g}s, "
                         "all the sound its file has before the shot",
@@ -1915,16 +1918,22 @@ def _cut_notes(
         return []
     said: List[str] = []
 
-    moved = [
-        abs(new_edge - old_edge)
+    # Each one named, with where it was asked for: a cut written into the plan and moved
+    # without a word said about it reads as the plan being ignored (#87).
+    shifted = [
+        (new, side, new_edge, old_edge)
         for new, old in zip(selected, unsnapped)
-        for new_edge, old_edge in ((new.start, old.start), (new.end, old.end))
+        for side, new_edge, old_edge in (("starts", new.start, old.start), ("ends", new.end, old.end))
         if new_edge != old_edge
     ]
-    if moved:
+    if shifted:
+        moved = [abs(new_edge - old_edge) for _, _, new_edge, old_edge in shifted]
         said.append(Note(
-            f"{len(moved)} cut(s) moved off the middle of a word, by up to {max(moved):.2f}s",
-            "cuts_moved_off_words", seconds=max(moved),
+            f"{len(shifted)} cut(s) moved off the middle of a word, by up to {max(moved):.2f}s: "
+            + "; ".join(f"{_edge_of(piece, side, new_edge)}, not the {old_edge:.2f}s asked, inside a word"
+                        for piece, side, new_edge, old_edge in shifted),
+            "cuts_moved_off_words", clip_ids=_first_clips(piece for piece, _, _, _ in shifted), seconds=max(moved),
+            look=max(moved) > MOVED_FAR_SECONDS,
         ))
 
     stuck: List[Piece] = []

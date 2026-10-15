@@ -82,7 +82,7 @@ def test_a_folder_is_analyzed_in_one_call_and_what_is_current_is_left_alone(foot
     )))
 
     result = server.analyze_asset(assets)
-    assert result["skipped"] == [assets[1]]
+    assert [item["asset_id"] for item in result["skipped"]] == [assets[1]] and "is current" in result["skipped"][0]["reason"]
     assert [job["asset_id"] for job in result["jobs"]] == started == [assets[0], *assets[2:]]
 
     started.clear()

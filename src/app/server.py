@@ -1,5 +1,6 @@
 import hashlib
 import json
+import difflib
 import math
 import os
 from datetime import datetime, timezone
@@ -26,7 +27,9 @@ from fastmcp.tools import ToolResult
 from fastmcp.utilities.types import Image
 from mcp.types import TextContent
 from pydantic import BaseModel, Field, TypeAdapter
-from app.models.media import Asset, HeardAgain, Measured, MediaAnalysis, Source, Span, SpeakerTurn, Transcript
+from app.models.media import (
+    Asset, HeardAgain, Measured, MediaAnalysis, Source, Span, SpeakerTurn, Transcript, TranscriptWord,
+)
 from app.models.plan import (
     EditPlan, MusicCue, PlanAmendment, SetMusicCueOp, Trim, TrimKind, apply_amendment, describe_amendment,
     short_clip_ids, whole_clip_id, with_whole_clip_ids,
@@ -73,8 +76,8 @@ from app.engine.plan import (
 )
 from app.engine.sections import build_sections, candidate_hash, check_sections, propose_candidates
 from app.engine.semantic import (
-    build_timeline, clean_cuts, content_scores, join_voices, maybe_one_person, timeline_input_hash, voice_seconds,
-    was_made_up,
+    EDGE_TOLERANCE_SECONDS, build_timeline, clean_cuts, content_scores, join_voices, maybe_one_person,
+    timeline_input_hash, voice_seconds, was_made_up,
 )
 from app.engine.ffmpeg import graph_from_file, hidden_window_flags
 from app.engine.probe import picture_size, probe_file, recorded_at, rights_tags, speech_loudness, timecode_start
@@ -1555,7 +1558,7 @@ TRANSCRIPTION_RANK = {"fast": 0, "balanced": 1, "accurate": 2}
 
 def _plan_analyses(
     assets: Sequence[Asset], transcribe: bool, transcription: str, again: bool,
-) -> Tuple[List[Tuple[Asset, str]], List[str], List[str]]:
+) -> Tuple[List[Tuple[Asset, str]], List[dict], List[str]]:
     """Decide which files an analysis starts, and with which transcription.
 
     A transcript is never made worse: asked for less than it has, a file is
@@ -1571,15 +1574,25 @@ def _plan_analyses(
         transcription: `accurate`, `balanced` or `fast`, as asked.
         again: Redo files whose analysis is current.
 
+    A file already queued or being analyzed is left to that job rather than
+    analyzed twice.
+
     Returns:
         `(to_start, skipped, upgrading)`: each file to start with the
-        transcription it gets, the files left alone, and the files whose
-        transcript is being made better.
+        transcription it gets, each file left alone as `{asset_id, reason}`
+        (#88), and the files whose transcript is being made better.
     """
     to_start: List[Tuple[Asset, str]] = []
-    skipped: List[str] = []
+    skipped: List[dict] = []
     upgrading: List[str] = []
+    active = {job.asset_id: job for job in repo.jobs_to_show(datetime.now(timezone.utc))[0]
+              if job.kind == JobKind.ANALYZE and job.status.is_active}
     for asset in assets:
+        if asset.id in active:
+            job = active[asset.id]
+            skipped.append({"asset_id": asset.id, "reason": f"already {job.status.value} in job {job.job_id}; "
+                                                              "follow it with get_job"})
+            continue
         existing = repo.get_analysis(asset.id)
         had = _transcription(existing)
         upgrade = (_transcribed(asset, transcribe) and had is not None
@@ -1588,7 +1601,7 @@ def _plan_analyses(
         heard_as_song = (existing is not None and existing.transcript is None and existing.rhythm is not None
                          and _transcribed(asset, transcribe))
         if not again and not upgrade and not heard_as_song and existing is not None and not _is_stale(existing):
-            skipped.append(asset.id)
+            skipped.append({"asset_id": asset.id, "reason": "its analysis is current; again=true to redo it"})
             continue
         if upgrade:
             upgrading.append(asset.id)
@@ -1703,8 +1716,9 @@ def analyze_asset(
 
     Returns:
         A dictionary with `jobs`, one `asset_id`, `job_id`, `status` and
-        `stage` per job started, and `skipped`, the assets left alone because
-        their analysis is current. Analyses run one or two at a time, so that
+        `stage` per job started, and `skipped`, each asset left alone with
+        its `reason`: its analysis is current, or a job already queued or
+        running for it, named. Analyses run one or two at a time, so that
         several of them cannot exhaust the machine's memory between them;
         `stage` says what a job that has not started yet is waiting for.
         Waiting costs nothing and needs no action: keep polling `get_job`.
@@ -1909,19 +1923,92 @@ def listen_again(
     if made_up:
         result["made_up"] = True
     if keep:
-        result.update(_keep_hearing(known, HeardAgain(start=start, end=end, words=[word for segment in fresh.segments for word in segment.words]), result["agrees"]))
+        heard_words = [word for segment in fresh.segments for word in segment.words]
+        result.update(_keep_hearing(known, HeardAgain(start=start, end=end, words=heard_words), result["agrees"],
+                                    made_up))
     return result
 
-def _keep_hearing(known: MediaAnalysis, stretch: HeardAgain, agrees: bool) -> dict:
+def _alike_times(stored: List[TranscriptWord], heard: List[TranscriptWord]) -> Tuple[List[TranscriptWord], List[str]]:
+    """Take the heard times of the words two hearings agree on, and the transcript's for the rest.
+
+    Matched character by character, so two hearings that cut a line into
+    words differently still line up. A word takes its heard time only when
+    every character of it was heard the same, all of them in one heard word
+    holding nothing else, that word was heard for sure, and the time leaves
+    the words either side in order.
+
+    Args:
+        stored: The transcript's words in the stretch, in order.
+        heard: The words heard again there, in order.
+
+    Returns:
+        `(words, apart)`: the transcript's words, each with the heard time
+        where the two agree; and the transcript's words they disagree on.
+    """
+    def characters(words: List[TranscriptWord]) -> Tuple[str, List[int]]:
+        text, owner = [], []
+        for index, word in enumerate(words):
+            for character in _bare_words(word.text):
+                text.append(character)
+                owner.append(index)
+        return "".join(text), owner
+
+    said, said_by = characters(stored)
+    again, again_by = characters(heard)
+    paired: Dict[int, set] = {}
+    claimed: Dict[int, set] = {}
+    matched = set()
+    for block in difflib.SequenceMatcher(a=said, b=again, autojunk=False).get_matching_blocks():
+        for step in range(block.size):
+            one, other = said_by[block.a + step], again_by[block.b + step]
+            matched.add(block.a + step)
+            paired.setdefault(one, set()).add(other)
+            claimed.setdefault(other, set()).add(one)
+    owned = {index: sum(1 for owner in said_by if owner == index) for index in range(len(stored))}
+    out: List[TranscriptWord] = list(stored)
+    retimed: set = set()
+    apart: List[str] = []
+    for index, word in enumerate(stored):
+        others = paired.get(index, set())
+        whole = sum(1 for at, owner in enumerate(said_by) if owner == index and at in matched) == owned[index]
+        if not owned[index]:
+            continue
+        if not (whole and len(others) == 1):
+            apart.append(word.text.strip())
+            continue
+        match = heard[next(iter(others))]
+        alone = claimed.get(next(iter(others))) == {index} and len(_bare_words(match.text)) == owned[index]
+        if alone and not unsure_words([match]):
+            out[index] = word.model_copy(update={"start": match.start, "end": match.end,
+                                                 "probability": match.probability})
+            retimed.add(index)
+    # Two neighbours whose times now overlap — one heard again, one not, or two heard apart —
+    # are put back as the transcript had them, until the words run in order again.
+    changed = True
+    while changed:
+        changed = False
+        for index in range(len(out) - 1):
+            if out[index].end > out[index + 1].start + EDGE_TOLERANCE_SECONDS and {index, index + 1} & retimed:
+                for undo in {index, index + 1} & retimed:
+                    out[undo] = stored[undo]
+                    retimed.discard(undo)
+                changed = True
+    return out, apart
+
+def _keep_hearing(known: MediaAnalysis, stretch: HeardAgain, agrees: bool, made_up: bool = False) -> dict:
     """Keep a stretch heard again over the transcript's word times, when it can be believed.
 
     Args:
         known: The file's analysis the hearing was taken against.
         stretch: What was heard, and where.
         agrees: Whether the hearing says the same words as the transcript there.
+        made_up: Whether the hearing is one the recogniser makes up, in which
+            case none of it is believed.
 
     Returns:
-        `kept` when it was kept, or `not_kept` saying why it was not.
+        `kept` when it was kept, or `not_kept` saying why it was not. Where the
+        two say different words, the times of the ones they agree on are
+        kept and the rest stay the transcript's (#87).
     """
     # A word half in the stretch would be kept twice: its outside part from the transcript,
     # and the whole of it as heard. The stretch is moved to take it in or leave it out.
@@ -1935,10 +2022,20 @@ def _keep_hearing(known: MediaAnalysis, stretch: HeardAgain, agrees: bool) -> di
         opens, closes = math.floor(round(opens * 1000, 6)) / 1000, math.ceil(round(closes * 1000, 6)) / 1000
         return {"not_kept": f"the transcript has {'、'.join(word.text.strip() for word in across)} running across the "
                             f"edge of the stretch; hear {opens:.3f}s to {closes:.3f}s again with keep"}
+    partly = ""
     if not agrees:
-        return {"not_kept": "the hearing and the transcript say different words here, so neither is believed; "
-                            "play audio_path to the user and ask, or hear a stretch that starts and ends in a pause"}
-    unsure = unsure_words(stretch.words)
+        stored = [word for segment in known.transcript.segments for word in segment.words
+                  if word.start >= stretch.start and word.end <= stretch.end]
+        alike, apart = ([], []) if made_up else _alike_times(stored, stretch.words)
+        kept = sum(1 for was, now in zip(stored, alike) if (was.start, was.end) != (now.start, now.end))
+        if not kept:
+            return {"not_kept": "the hearing and the transcript say different words here, so neither is believed; "
+                                "play audio_path to the user and ask, or hear a stretch that starts and ends in a pause"}
+        stretch = stretch.model_copy(update={"words": alike})
+        partly = (f" for the {kept} word(s) the two heard alike; 「{'、'.join(apart)}」, heard differently, keep the "
+                  "transcript's words and times — play audio_path to the user and ask about those" if apart else
+                  f" for the {kept} word(s) the two heard alike")
+    unsure = [] if partly else unsure_words(stretch.words)
     if unsure:
         return {"not_kept": f"the hearing was unsure of {'、'.join(unsure)}; play audio_path to the user and ask"}
     # Read again before writing, so an analysis taken again meanwhile is not overwritten
@@ -1951,7 +2048,7 @@ def _keep_hearing(known: MediaAnalysis, stretch: HeardAgain, agrees: bool) -> di
     ]
     repo.save_analysis(current)
     return {"kept": f"the word times heard from {stretch.start:g}s to {stretch.end:g}s are now what cuts in this "
-                    "file are judged by; check the cut again"}
+                    f"file are judged by{partly}; check the cut again"}
 
 # Provisional (roadmap §13): how long each level `listen_again` reports covers — fine
 # enough to see a fade or a dip under a word, coarse enough that thirty seconds is sixty numbers.
@@ -2070,18 +2167,19 @@ def _listen_to_render(job_id: str, start: float, end: float, language: Optional[
     edges = [start] + [at for at in cuts if start + MIN_HEARD_SECONDS <= at <= end - MIN_HEARD_SECONDS] + [end]
     language = language or (known.language if known else None)
     variant = known.chinese_variant if known else None
-    if len(edges) == 2:
-        fresh = listen_again_in_file(path, start, end, language, keep_as, chinese_variant=variant)
-    else:
-        stem, extension = os.path.splitext(keep_as)
-        pieces = []
-        for index, (opened, closed) in enumerate(zip(edges, edges[1:])):
-            # Each shot's own sound is only what the model is handed; the user plays the whole stretch.
-            piece_as = f"{stem}-{index}{extension}"
-            pieces.append(listen_again_in_file(path, opened, closed, language, piece_as, chinese_variant=variant))
-            os.remove(piece_as)
-        cut_sound(path, start, end, keep_as)
-        fresh = pieces[0].model_copy(update={"segments": [segment for piece in pieces for segment in piece.segments]})
+    # The words are heard from the cut's own sound without the music under it, which turned
+    # 「買一送四」 into 「買壽司」 sixteen decibels down (#89); the user plays the mix as rendered.
+    voice = _voice_of_render(job, project)
+    heard_from = voice or path
+    stem, extension = os.path.splitext(keep_as)
+    pieces = []
+    for index, (opened, closed) in enumerate(zip(edges, edges[1:])):
+        # Each shot's own sound is only what the model is handed; the user plays the whole stretch.
+        piece_as = f"{stem}-{index}{extension}"
+        pieces.append(listen_again_in_file(heard_from, opened, closed, language, piece_as, chinese_variant=variant))
+        os.remove(piece_as)
+    cut_sound(path, start, end, keep_as)
+    fresh = pieces[0].model_copy(update={"segments": [segment for piece in pieces for segment in piece.segments]})
     shown = [cue for cue in (place_cues(project, project.subtitles) if project and job.captioned else [])
              if float(cue.end) > start and float(cue.start) < end]
     result = {
@@ -2089,10 +2187,58 @@ def _listen_to_render(job_id: str, start: float, end: float, language: Optional[
         "captions": [f"{format_timestamp(float(cue.start))} {cue.text}" for cue in shown],
         "changed_since": _changed_since(job),
     }
-    unheard = _loud_without_words(result["levels"]["db"], start, fresh)
+    if voice is not None:
+        result["heard_without_music"] = True
+        # Loud without words is judged on the talking alone, so a song is not taken for a voice.
+        spoken = os.path.join(WORKSPACE_DIR, "temp", "listen", f"render-{job_id[:8]}-voice-{start:.2f}-{end:.2f}.wav")
+        cut_sound(voice, start, end, spoken)
+        loud = levels_every(spoken, LEVEL_EVERY_SECONDS)
+        os.remove(spoken)
+    else:
+        loud = result["levels"]["db"]
+    unheard = _loud_without_words(loud, start, fresh)
     if unheard:
         result["unheard"] = ", ".join(f"{opened:.1f}–{closed:.1f}s" for opened, closed in unheard)
     return result
+
+def _voice_of_render(job: Job, project: Optional[Project]) -> Optional[str]:
+    """Make, once, the sound of a render's own footage without its music, to hear words from.
+
+    Args:
+        job: The render.
+        project: The project it was rendered from.
+
+    Returns:
+        The path of the stem, kept beside the render's work; None when the
+        project has changed since, so the stem would not be what was
+        rendered, when nothing plays under the footage, or when it cannot be
+        made — the render itself is heard then.
+    """
+    if project is None or _changed_since(job) or not job.work_dir:
+        return None
+    voice = os.path.join(job.work_dir, "voice.wav")
+    if os.path.exists(voice):
+        return voice
+    audio = [track for track in project.tracks if track.track_type == TrackType.AUDIO and track.clips]
+    if not audio:
+        return None
+    # The stem is the footage's own sound: a narration on a track of its own, as the render
+    # decides one, is not in it.
+    voices = _voices(project)
+    if voices:
+        return None
+    os.makedirs(job.work_dir, exist_ok=True)
+    music, mix = os.path.join(job.work_dir, "music.wav"), os.path.join(job.work_dir, "sound.m4a")
+    try:
+        command = renderer.build_sound(project, _referenced_assets(project), mix, voice, music, None,
+                                       voices=voices, talking=_talking(project, voices))
+        done = subprocess.run(command, capture_output=True, creationflags=hidden_window_flags())
+    except (OSError, ValueError):
+        return None
+    for leftover in (music, mix):
+        if os.path.exists(leftover):
+            os.remove(leftover)
+    return voice if done.returncode == 0 and os.path.exists(voice) else None
 
 def _loud_without_words(levels: Sequence[float], start: float, fresh: Transcript) -> List[Tuple[float, float]]:
     """Find where a render is loud enough to be somebody talking and the hearing has no word.
@@ -5072,6 +5218,7 @@ def generate_subtitles(
             project, transcripts, max_characters=max_characters, max_seconds=max_seconds,
             silences=silences, speakers=speakers,
             max_units=caption_geometry(project.width, project.height, style).max_units if style.single_line else None,
+            min_seconds=style.min_seconds,
         )
     ]
     reviewed = {asset_id: repo.reviewed_captions(asset_id) for asset_id in {cue.asset_id for cue in proposed}}
@@ -8209,9 +8356,30 @@ def tidy_old_outputs(confirm: bool = False) -> dict:
         }
     return housekeeping.legacy_apply(WORKSPACE_DIR, planned)
 
+# How often a running server moves the job queue along. Provisional.
+TEND_JOBS_SECONDS = 15.0
+
+def tend_jobs() -> None:
+    """Keep the job queue moving while the server runs.
+
+    A worker starts the next queued job when it finishes, but one killed
+    halfway never does, and what was queued behind it waited for some later
+    call to look (#88). Run at start and then every `TEND_JOBS_SECONDS`: a
+    job whose worker is gone is failed once it has been quiet long enough,
+    and the queue behind it starts.
+    """
+    while True:
+        try:
+            job_manager.launch_ready()
+        except Exception:
+            # A failed look is tried again next time; it is never the end of the server.
+            pass
+        time.sleep(TEND_JOBS_SECONDS)
+
 def main():
     """Run the MCP server over the stdio transport."""
     threading.Thread(target=tend_library, name="tend-library", daemon=True).start()
+    threading.Thread(target=tend_jobs, name="tend-jobs", daemon=True).start()
     # The banner goes to stderr, which every client keeps as its server log; a box of
     # ASCII art in it on every start is noise, and on a console that is not UTF-8 it
     # arrives mangled.
