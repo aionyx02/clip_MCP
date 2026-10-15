@@ -462,6 +462,12 @@ class BrollShot(BaseModel):
         ..., description="Semantic clip in the cut this starts over; the shot cuts in where that clip begins",
     )
     seconds: float = Field(..., gt=0, description="How long the covering picture runs")
+    after_seconds: float = Field(
+        default=0, ge=0,
+        description="How far into `over_clip_id` in the cut it cuts in, for covering a moment partway through: a "
+                    "frame gone black or frozen while somebody talks. Partway through a sentence only over such "
+                    "a frame; 0 cuts in where that clip begins",
+    )
     rationale: str = Field(default="", description="What this picture is doing here")
 
 class MusicCue(BaseModel):
