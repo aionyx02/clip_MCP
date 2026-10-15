@@ -157,3 +157,17 @@ def test_a_word_stretched_across_a_silence_does_not_hold_the_cut_back() -> None:
     piece = Piece(asset_id="x", start=6.74, end=9.0, from_clip_ids=("u0001",))
     out, _ = _on_the_sound([piece], {"x": known})
     assert out[0].start < 6.34
+
+
+def test_a_cut_on_a_word_running_straight_on_is_not_told_to_move_inside_the_next_word() -> None:
+    """#87: 「褲子」 ends at 6.80 where 「然後」 begins, with no pause; the check said to end at
+    6.98, inside 「然後」, where the compiler will not cut."""
+    from app.models.media import TranscriptWord
+
+    made = analysis(duration=12.0, segments=[(5.6, 7.2, "褲子然後")])
+    made.transcript.segments[0].words = [TranscriptWord(start=5.6, end=6.8, text="褲子"),
+                                         TranscriptWord(start=6.8, end=7.2, text="然後")]
+    made.second_listen = listened(voiced=[(5.6, 6.98)])
+    found = checks(project_of(clip("a", "x", 5.6, 6.8, 0)), {"x": made})
+    assert [check for check, _ in found] == ["mid_speech"]
+    assert "「然後」 with no pause to cut in" in found[0][1] and "6.98" not in found[0][1]

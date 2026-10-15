@@ -366,6 +366,28 @@ def test_a_line_does_not_break_between_a_description_and_what_it_describes() -> 
     lines = ["".join(word.text for word in said[first:past]) for first, past in _word_lines(said, fits)]
     assert lines == ["我馬上找到需要改良的地方", "剛剛甩甩的很帥"]
 
+def test_a_line_does_not_break_inside_two_paired_counts() -> None:
+    """#86: 「活動買 / 一送四」 split a phrase the dictionary does not know."""
+    from app.engine.subtitles import _word_lines
+
+    said = said_with_a_pause("現在因為它活動買一送四買一送四", 0, "0").words
+    fits = lambda first, past: past - first <= 10  # noqa: E731
+    lines = ["".join(word.text for word in said[first:past]) for first, past in _word_lines(said, fits)]
+    assert lines == ["現在因為它活動", "買一送四買一送四"]
+
+def test_a_caption_too_short_to_read_is_joined_to_the_line_straight_after_it(media: Path) -> None:
+    """#86: 「哇!」 for 0.37s with the next line straight after it came back from the check."""
+    asset = import_asset(str(media / "wide.mp4"))["id"]
+    transcribe(asset, [
+        TranscriptSegment(start=1.0, end=1.37, text="哇!", words=words(("哇!", 1.0, 1.37))),
+        TranscriptSegment(start=1.4, end=3.0, text="這是一整袋", words=words(("這是一整袋", 1.4, 3.0))),
+        TranscriptSegment(start=6.0, end=6.3, text="好", words=words(("好", 6.0, 6.3))),
+    ])
+    project = build_project([video_track(), insert("a", asset, 0, 9)])
+    texts = [cue["text"] for cue in caption(project)["cues"]]
+    # The last is short too, but nothing follows it: it is held on where it is placed.
+    assert texts == ["哇!這是一整袋", "好"]
+
 @pytest.mark.parametrize("before", range(6, 14))
 def test_a_line_never_breaks_inside_a_chinese_word(before: int) -> None:
     # The recogniser hands back one character at a time; wherever the even break falls,
@@ -700,6 +722,28 @@ def test_a_caption_lights_up_word_by_word_when_it_has_the_timings() -> None:
     # happens and nothing looks any different.
     fields = style_of(build_ass([], 1080, 1920, CaptionStyle(karaoke=True)))
     assert fields[2] != fields[3]
+
+def test_a_corrected_caption_lights_up_word_by_word_as_corrected(media: Path) -> None:
+    """#85: karaoke drew the transcript's words, turning a correction back on screen."""
+    from app.engine.subtitles import place_cues
+
+    asset = import_asset(str(media / "wide.mp4"))["id"]
+    transcribe(asset, [TranscriptSegment(start=1.0, end=3.0, text="我買了四件衣服",
+                                         words=words(("我買了", 1.0, 1.6), ("四件", 1.6, 2.2), ("衣服", 2.2, 3.0)))])
+    project = build_project([video_track(), insert("a", asset, 0, 4)])
+    caption(project)
+    pick = lambda: [cue for cue in place_cues(repo.get_project(project), repo.get_project(project).subtitles)  # noqa: E731
+                    if cue.cue_id == "c1"][0]
+    edit(project, [{"action": "edit_subtitle", "cue_id": "c1", "text": "我買了十件衣服！"}])
+    placed = pick()
+    assert [word.text for word in placed.words] == ["我買了", "十件", "衣服！"]
+    line = dialogue_of(build_ass([placed], 1080, 1920, CaptionStyle(karaoke=True)))[0]
+    assert "十件" in line and "四件" not in line
+    # 「然後」 is two characters more than were timed: it lights up whole, as written.
+    edit(project, [{"action": "edit_subtitle", "cue_id": "c1", "text": "我買了十件衣服，然後"}])
+    placed = pick()
+    assert placed.words == []
+    assert "然後" in dialogue_of(build_ass([placed], 1080, 1920, CaptionStyle(karaoke=True)))[0]
 
 def test_a_caption_with_no_timings_lights_up_whole() -> None:
     cue = PlacedCue(cue_id="c1", start=0, end=2, text="沒有逐字時間")

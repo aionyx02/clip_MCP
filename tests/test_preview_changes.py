@@ -147,3 +147,29 @@ def test_music_that_does_not_drop_for_the_voice_is_not_said_to_drop_by_a_negativ
                                  music_alone=-20.0)])
     assert "drops -" not in line and "does not make way for the voice" in line
     assert "2 dB above the voice" in line
+
+
+def test_a_render_with_music_under_the_talking_is_heard_without_it(
+    talk_over_music: str, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#89: 「買一送四」 sixteen decibels over the music was heard as 「買壽司」."""
+    from app import server
+    from app.engine import analysis
+    from app.models.media import Transcript
+    from helpers import finished
+
+    job = finished(server.render_project(talk_over_music))
+    handed = []
+
+    def model(device, path, duration, language, prompt, on_progress, is_cancelled, on_measured=None,
+              model_name=None):
+        handed.append(path)
+        return Transcript(language="zh", model="large-v3-turbo", segments=[])
+
+    monkeypatch.setattr(analysis, "_run_whisper", model)
+    found = server.listen_again(job_id=job["job_id"], start=2.0, end=5.0)
+    assert found["heard_without_music"] is True
+    voice = Path(server.repo.get_job(job["job_id"]).work_dir) / "voice.wav"
+    assert voice.exists()
+    # What the user plays is the stretch as rendered, music and all.
+    assert Path(found["audio_path"]).exists()

@@ -143,7 +143,8 @@ def setup(
             print(f"  {found.client:<15} not installed")
             continue
         if found.status == "unchanged":
-            print(f"  {found.client:<15} connected")
+            # Said apart from one this run connects: run by the installer, it only looked (#89).
+            print(f"  {found.client:<15} already connected; left as it was")
             continue
         if found.status == "confirm":
             print(f"  {found.client:<15} only takes a server through a link it asks you about; open it to add clip-mcp:")

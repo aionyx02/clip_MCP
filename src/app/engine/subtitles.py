@@ -22,6 +22,7 @@ from app.models.timeline import (
     TrackType,
     cue_order,
     number_cues,
+    words_as_written,
 )
 
 # Where captions sit when the style names no platform to keep clear of. Phones cover
@@ -73,6 +74,12 @@ PHRASE_NUMERAL_PENALTY = 0.8
 # description can leave nowhere better. Provisional.
 PHRASE_BINDERS = tuple("的之")
 PHRASE_BINDER_PENALTY = 0.5
+# Two counts paired by one word each — 「買一送四」, 「下午三點五十」, 「第一第二」 — are one
+# phrase however the dictionary splits them (#86), and broken into as a word would be.
+# A word character that is not a count, so a comma between two counts still breaks them apart.
+_NOT_A_COUNT = r"[^\W\d_一二三四五六七八九十百千萬兩幾半]"
+_COUNT = r"[\d一二三四五六七八九十百千萬兩幾半]+"
+PHRASE_PAIRED_COUNTS = re.compile(_NOT_A_COUNT + _COUNT + _NOT_A_COUNT + _COUNT)
 # The recogniser hands Chinese back a character at a time, so its words say nothing about
 # where `營業` begins. A dictionary does, and a break inside one of its words is worse than
 # any line being uneven. Heavy rather than forbidden, because a word longer than the room
@@ -240,6 +247,7 @@ def place_cues(project: Project, cues: Sequence[SubtitleCue]) -> List[PlacedCue]
         for cue in by_asset.get(clip.asset_id, ()):
             if clip.volume == 0 and cue.words:
                 continue
+            written = words_as_written(cue.words, cue.text)
             first = max(cue.source_start, window_start)
             last = min(cue.source_end, window_end)
             if last - first <= MINIMUM_CUE:
@@ -260,7 +268,7 @@ def place_cues(project: Project, cues: Sequence[SubtitleCue]) -> List[PlacedCue]
                         end=_at(clip.timeline_in, min(word.end, last) - window_start, speed),
                         text=word.text,
                     )
-                    for word in cue.words
+                    for word in written
                     if word.end > first and word.start < last
                 ],
             ))
@@ -598,6 +606,9 @@ def _word_lines(
     joined = "".join(word.text for word in words)
     edges = word_edges(joined)
 
+    # Offsets strictly inside a phrase of paired counts: a break there splits it.
+    paired = {at for found in PHRASE_PAIRED_COUNTS.finditer(joined) for at in range(found.start() + 1, found.end())}
+
     def binder(at: int) -> bool:
         # The character at offset `at` is a 「的」 standing as a word of its own.
         return (0 <= at < len(joined) and joined[at] in PHRASE_BINDERS
@@ -618,7 +629,7 @@ def _word_lines(
         first = offsets[index] + len(words[index].text) - len(words[index].text.lstrip())
         if binder(last) or binder(first):
             score -= PHRASE_BINDER_PENALTY
-        if edges is not None and offsets[index] not in edges:
+        if (edges is not None and offsets[index] not in edges) or offsets[index] in paired:
             score -= PHRASE_INSIDE_WORD_PENALTY
         return score
 
@@ -958,6 +969,64 @@ def _pieces(
             ]
             yield piece_start, piece_end, text, timed
 
+def _joined_short(
+    pieces: List[Tuple[float, float, str, List[CueWord]]],
+    shortest: float,
+    max_characters: int,
+    max_seconds: float,
+    max_units: Optional[float],
+    turns: Sequence[SpeakerTurn],
+) -> List[Tuple[float, float, str, List[CueWord]]]:
+    """Join each caption too short to read onto the one straight after it, where the two still fit.
+
+    Only where the next one starts too soon for it to be held on: a short
+    line with room after it is held on when placed, and needs nothing here.
+    Never across two people, nor past the limits a line is broken at.
+
+    Args:
+        pieces: One clip's captions as `(start, end, text, words)`, in order, in
+            seconds of its file.
+        shortest: How long a caption has to last to be read, in seconds of the file.
+        max_characters: Longest a caption may be.
+        max_seconds: Longest it may last.
+        max_units: Widest it may be, or no limit.
+        turns: The file's speaker turns.
+
+    Returns:
+        The captions, short ones joined where they could be.
+    """
+    def fits(first: Tuple[float, float, str, List[CueWord]],
+             second: Tuple[float, float, str, List[CueWord]]) -> Optional[Tuple[float, float, str, List[CueWord]]]:
+        gap = " " if first[2][-1:].isascii() and first[2][-1:].isalnum() and second[2][:1].isascii() else ""
+        joined = f"{first[2]}{gap}{second[2]}"
+        if (len(joined) <= max_characters and second[1] - first[0] <= max_seconds
+                and (max_units is None or text_width(joined) <= max_units)
+                and speaker_at(turns, first[0], first[1]) == speaker_at(turns, second[0], second[1])):
+            return first[0], second[1], joined, [*first[3], *second[3]]
+        return None
+
+    def crowded(index: int, run: List[Tuple[float, float, str, List[CueWord]]]) -> bool:
+        # Too short, with the next line starting before it could be held on for long enough.
+        start, end = run[index][0], run[index][1]
+        return end - start < shortest and index + 1 < len(run) and run[index + 1][0] < start + shortest
+
+    run = list(pieces)
+    index = 0
+    while index < len(run):
+        if crowded(index, run):
+            # Onto the line after it, or failing that onto the one before.
+            ahead = fits(run[index], run[index + 1])
+            if ahead is not None:
+                run[index:index + 2] = [ahead]
+                continue
+            behind = fits(run[index - 1], run[index]) if index else None
+            if behind is not None:
+                run[index - 1:index + 1] = [behind]
+                index -= 1
+                continue
+        index += 1
+    return run
+
 def timeline_cues(
     project: Project,
     transcripts: Mapping[str, Transcript],
@@ -966,6 +1035,7 @@ def timeline_cues(
     silences: Optional[Mapping[str, Sequence[Span]]] = None,
     speakers: Optional[Mapping[str, Sequence[SpeakerTurn]]] = None,
     max_units: Optional[float] = None,
+    min_seconds: Optional[float] = None,
 ) -> List[SubtitleCue]:
     """Propose captions for the speech that survived the edit.
 
@@ -1000,6 +1070,10 @@ def timeline_cues(
         max_units: Widest caption before it is broken up, as a multiple of
             the font size: one line of the frame the captions are for, so each
             caption proofread is one line seen. No limit when not given.
+        min_seconds: Shortest a caption can be on screen and be read. One
+            shorter, with the next line starting before it could be held on
+            that long, is joined to that line where the two still fit on one
+            (#86): the check before a render would only hand it back.
 
     Returns:
         The captions, ordered by the footage they come from.
@@ -1014,6 +1088,7 @@ def timeline_cues(
             continue
         start, end = float(clip.source_range.start), float(clip.source_range.end)
         quiet = measured.get(clip.asset_id, ())
+        pieces: List[Tuple[float, float, str, List[CueWord]]] = []
         for segment in transcript.segments:
             if segment.end <= start or segment.start >= end:
                 continue
@@ -1022,24 +1097,27 @@ def timeline_cues(
                 continue
             if was_made_up(segment):
                 continue
-            for piece_start, piece_end, text, timed in _pieces(
-                segment, start, end, max_characters, max_seconds, max_units,
-            ):
-                cue = SubtitleCue(
-                    asset_id=clip.asset_id,
-                    source_start=Decimal(str(round(piece_start, 3))),
-                    source_end=Decimal(str(round(piece_end, 3))),
-                    text=text,
-                    speaker=speaker_at(turns.get(clip.asset_id, ()), piece_start, piece_end),
-                    words=timed,
-                )
-                # The same words can survive in two places — a clip split in two, or used
-                # twice — and that is one caption placed twice, not two to proofread. The
-                # key is the one the store orders by, so the two cannot disagree.
-                if cue_order(cue) in seen:
-                    continue
-                seen.add(cue_order(cue))
-                cues.append(cue)
+            pieces.extend(_pieces(segment, start, end, max_characters, max_seconds, max_units))
+        whose = turns.get(clip.asset_id, ())
+        if min_seconds:
+            pieces = _joined_short(sorted(pieces, key=lambda piece: piece[0]), min_seconds * float(clip.speed),
+                                   max_characters, max_seconds, max_units, whose)
+        for piece_start, piece_end, text, timed in pieces:
+            cue = SubtitleCue(
+                asset_id=clip.asset_id,
+                source_start=Decimal(str(round(piece_start, 3))),
+                source_end=Decimal(str(round(piece_end, 3))),
+                text=text,
+                speaker=speaker_at(whose, piece_start, piece_end),
+                words=timed,
+            )
+            # The same words can survive in two places — a clip split in two, or used
+            # twice — and that is one caption placed twice, not two to proofread. The
+            # key is the one the store orders by, so the two cannot disagree.
+            if cue_order(cue) in seen:
+                continue
+            seen.add(cue_order(cue))
+            cues.append(cue)
     # Numbered here, so a single line can be corrected later without resending the rest,
     # and by the same helper `set_subtitles` uses, so the IDs survive being stored.
     return number_cues(sorted(cues, key=cue_order))

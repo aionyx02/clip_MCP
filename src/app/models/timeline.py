@@ -1286,6 +1286,41 @@ def retimed_words(words: List[CueWord], text: str) -> List[CueWord]:
         at += length
     return retimed
 
+def words_as_written(words: List[CueWord], text: str) -> List[CueWord]:
+    """Put a caption's text, as written, onto its timed words, for lighting up word by word.
+
+    The words carry what the transcript heard; the text is what somebody may
+    since have corrected, punctuation and all. Drawn from the words, a
+    correction would quietly turn back into the transcript on screen (#85).
+
+    Args:
+        words: The caption's timed words.
+        text: Its text.
+
+    Returns:
+        The same timings carrying the text's own characters — each word its
+        said characters and the punctuation after them — when the text says
+        the same number of characters; otherwise none, so it lights up whole.
+    """
+    if not words or sum(len(_bare(word.text)) for word in words) != len(_bare(text)):
+        return []
+    written, at = [], 0
+    for index, word in enumerate(words):
+        wanted, taken = len(_bare(word.text)), 0
+        if not wanted and index < len(words) - 1:
+            # A word with nothing said in it keeps its time and shows nothing; the text goes to the rest.
+            written.append(word.model_copy(update={"text": ""}))
+            continue
+        start = at
+        while at < len(text) and taken < wanted:
+            taken += text[at].isalnum()
+            at += 1
+        # What follows up to the next said character goes with this word; the last takes the rest.
+        while at < len(text) and (not text[at].isalnum() or index == len(words) - 1):
+            at += 1
+        written.append(word.model_copy(update={"text": text[start:at]}))
+    return written
+
 class SetSubtitlesOp(BaseModel):
     """Edit operation that replaces the project's captions."""
 

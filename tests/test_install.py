@@ -368,6 +368,22 @@ def test_setup_with_nobody_to_ask_connects_nothing_it_was_not_told_to(home: Path
     assert not (home / "home" / ".gemini" / "settings.json").exists()
     assert (home / "home" / ".lmstudio" / "mcp.json").exists()
 
+def test_setup_says_a_client_it_found_connected_was_left_as_it_was(
+    home: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture,
+) -> None:
+    """#89: the installer's log said every client was `connected`, as if it had connected them."""
+    from app import cli
+
+    not_on_path(monkeypatch)
+    monkeypatch.setattr(cli, "_ask", lambda question: False)
+    monkeypatch.setattr(clients, "server_command", lambda: COMMAND)
+    (home / "home" / ".lmstudio").mkdir(parents=True)
+    clients.register_lm_studio(COMMAND, dry_run=False)
+    capsys.readouterr()
+    cli.setup(None, None, dry_run=False, connect_all=False, shortcuts=False)
+    said = capsys.readouterr().out
+    assert "already connected; left as it was" in said
+
 def test_uninstall_takes_it_out_of_every_client_and_keeps_the_workspace_unless_asked(
     home: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
 ) -> None:
