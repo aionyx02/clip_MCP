@@ -503,3 +503,48 @@ def test_a_pause_the_word_before_was_stretched_over_does_not_also_begin_the_word
         Selection(clip_id=spoken[2].id, beat_id="b1"),
     ], voiced=[(0.1, 0.4), (1.0, 1.2), (1.8, 6.0), (12.0, 14.0)])
     assert any("partway" in problem and "starts" in problem for problem in problems)
+
+# Real transcripts split far finer than a line a word: most words are one character, and a
+# comma stays on the word before it.
+
+def test_a_filler_the_transcriber_gave_its_own_comma_does_not_hide_the_word_that_leans() -> None:
+    problems, _ = checked([[("啊,", 1.0, 1.3), ("所以", 1.3, 1.8), ("我們決定去爬山。", 1.8, 3.0)],
+                           (8.0, 10.0, "真的很值得。")], lambda spoken: [
+        Selection(clip_id=spoken[0].id, beat_id="b1"),
+        Selection(clip_id=spoken[1].id, beat_id="b1"),
+    ])
+    assert any("所以" in problem and "opens" in problem for problem in problems)
+
+def test_the_earlier_start_offered_is_never_a_filler_on_its_own() -> None:
+    # Opening on 「啊,」 would still open on 「所以」, so the start offered is the line before it.
+    stretch = [("出門前", 1.0, 1.5), ("先檢查。", 1.5, 2.0), ("啊,", 2.5, 2.8), ("所以", 2.8, 3.3), ("我們出發。", 3.3, 4.0)]
+    problems, _ = checked([(0.1, 0.4, "出發。"), stretch, (12.0, 14.0, "真的很值得。")], lambda spoken: [
+        Selection(clip_id=spoken[0].id, beat_id="b1"),
+        Selection(clip_id=spoken[1].id, beat_id="b1", trim=Trim(kind=TrimKind.TAIL, seconds=1.2)),
+        Selection(clip_id=spoken[2].id, beat_id="b1"),
+    ])
+    assert any("所以" in problem and "starts at 1.00s" in problem for problem in problems)
+
+def test_a_join_into_a_word_split_in_two_is_partway_through_it() -> None:
+    for first, second in (("的", "確很值得去一次。"), ("了", "解之後我們出發。")):
+        stretch = [(first, 1.0, 1.2), (second[0], 1.2, 1.4), (second[1:], 1.4, 3.0)]
+        problems, _ = checked([(0.1, 0.4, "出發。"), stretch, (12.0, 14.0, "真的很值得。")], lambda spoken: [
+            Selection(clip_id=spoken[0].id, beat_id="b1"),
+            Selection(clip_id=spoken[1].id, beat_id="b1", trim=Trim(kind=TrimKind.TAIL, seconds=1.8)),
+            Selection(clip_id=spoken[2].id, beat_id="b1"),
+        ])
+        assert any("partway" in problem for problem in problems), first
+
+def test_then_or_also_partway_through_a_finished_line_ends_it_well() -> None:
+    for last_line in ([("先把它關機，", 8.0, 9.0), ("再來把電池拔掉。", 9.0, 10.0)],
+                      [("這家很好吃，", 8.0, 9.0), ("另外價格也便宜。", 9.0, 10.0)]):
+        problems, _ = checked([*NEXT_SUBJECT[:2], last_line], lambda spoken: [
+            Selection(clip_id=spoken[0].id, beat_id="b1"),
+            Selection(clip_id=spoken[2].id, beat_id="b1"),
+        ])
+        assert problems == [], last_line[0][0]
+
+def test_a_silence_nearer_the_end_of_the_earlier_word_is_after_it() -> None:
+    # The transcriber started 「走得很累」 late and ran it on to 4.0s; the quiet from 3.3s is after it.
+    assert joined_at([[("今天我們一路走", 1.0, 3.0), ("走得很累", 3.0, 4.0), ("後來我們到了山頂。", 4.0, 6.0)]],
+                     quiet=[(3.3, 3.95)]) == []
