@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from app import runtime, server
+from app.tools import rendering
 from app.engine import fetch
 
 
@@ -50,6 +51,7 @@ def test_a_song_is_taken_only_by_the_plan_the_user_heard(media: Path, monkeypatc
         return shutil.copy(media / "song.mp3", Path(folder) / f"{title}.mp3")
 
     monkeypatch.setattr(server, "output_dir", lambda: tmp_path)
+    monkeypatch.setattr(rendering, "output_dir", lambda: tmp_path)
     monkeypatch.setattr(server.fetch, "download", fake_download)
     url, page = "https://incompetech.com/music/royalty-free/mp3-royaltyfree/Tone.mp3", "https://incompetech.com/x"
     shown = server.add_music_from_url(url, page, "Tone")

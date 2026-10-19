@@ -1,7 +1,5 @@
 import hashlib
 import json
-import difflib
-import math
 import os
 from datetime import datetime, timezone
 import re
@@ -23,9 +21,7 @@ from fastmcp.tools import ToolResult
 from fastmcp.utilities.types import Image
 from mcp.types import TextContent
 from pydantic import BaseModel, Field, TypeAdapter
-from app.models.media import (
-    Asset, HeardAgain, MediaAnalysis, Source, Span, SpeakerTurn, Transcript, TranscriptWord,
-)
+from app.models.media import Asset, MediaAnalysis, Source, Span, SpeakerTurn
 from app.models.plan import (
     EditPlan, MusicCue, PlanAmendment, SetMusicCueOp, Trim, TrimKind, apply_amendment, describe_amendment,
     short_clip_ids, whole_clip_id, with_whole_clip_ids,
@@ -56,15 +52,8 @@ from app.models.comment import Comment, Preference, Question, Reply
 from app.models.offer import TRIAL_VOLUME, OfferedSong, SongOffer
 from app.models.trial import Trial, Verdict
 from app.models.job import Job, JobKind, JobStatus
-from app.engine import cards, texts, looks, loudness, machine, meaning, resources, speed, stills
-from app.engine.analysis import listen_again as listen_again_in_file
-from app.engine.analysis import (
-    BALANCED_JOIN, current_recipe, doubtful_spots, marked_text, marked_words, second_listen, sound_note,
-    transcription_of, unsure_words, whisper_model_for, whisper_model_name, with_words_heard_again,
-)
-from app.engine.diarize import speaker_model_name
-from app.engine.rhythm import rhythm_model_name
-from app.engine.faces import framing_note
+from app.engine import cards, loudness, meaning, stills
+from app.engine.analysis import marked_words, unsure_words
 from app.engine.plan import (
     BROLL_TRACK_ID, COMPILED_TRACKS, MUSIC_TRACK_ID, VIDEO_TRACK_ID, as_left, broll_covers, broll_slots, check_plan,
     check_recompile, compile_operations, compiled_duration, diff_plans, music_beds, Note, note_record, piece_changes,
@@ -72,39 +61,29 @@ from app.engine.plan import (
 )
 from app.engine.sections import build_sections, candidate_hash, check_sections, propose_candidates
 from app.engine.semantic import (
-    EDGE_TOLERANCE_SECONDS, build_timeline, clean_cuts, content_scores, join_voices, maybe_one_person,
-    timeline_input_hash, voice_seconds, was_made_up,
+    build_timeline, clean_cuts, content_scores, join_voices, maybe_one_person, timeline_input_hash, voice_seconds,
+    was_made_up,
 )
 from app.engine.ffmpeg import graph_from_file, hidden_window_flags
-from app.engine.probe import picture_size, probe_file, recorded_at, rights_tags, speech_loudness, timecode_start
-from app.engine.reframe import Framing, frame_project, placement_at
-from app.engine import playback
-from app.engine.library import FOLDER_KINDS, FOOTAGE, LIBRARIES, MUSIC, SPEECH_SHARE, classify, library_of, speech_share
+from app.engine.probe import picture_size, probe_file, recorded_at, rights_tags, timecode_start
+from app.engine.reframe import placement_at
+from app.engine.library import FOLDER_KINDS, FOOTAGE, LIBRARIES, MUSIC, classify, library_of
 from app.engine import clap
 from app.engine import fetch
-from app.engine import music as music_energy
-from app.engine.builder import DEFAULT_LOUDNESS_TARGET, Talking, voice_keys
-from app.engine.levels import song_level, talking_in
+from app.engine.builder import DEFAULT_LOUDNESS_TARGET, voice_keys
 from app.engine.comments import anchor_at, where_now
 from app.engine.compare import compare
 from app.engine.compare import parts_of as cut_parts
 from app.engine.merge import WHOLE_PICKS, merge, merge_plans
 from app.engine.delivery import (
-    CHECKS, Finding, chapter_metadata, chapters, check_delivery, clock, cover_candidates, frames_around, light_steps,
-    look_candidates, marked_parts, on_screen, rights_facts,
+    Finding, chapters, clock, cover_candidates, frames_around, marked_parts, on_screen, rights_facts,
 )
 from app.engine.joins import HeardWord, Join, joins_in, pause_across, words_heard
 from app.engine.frames import feed_preview, format_timestamp, still, storyboard_sheet
 from app.engine.interchange import write_edl, write_fcpxml, write_otio, write_srt
 from app.engine.listen import WINDOW_SECONDS, chart, cut_sound, describe, levels, levels_every, parts_of
 from app.engine.subtitles import (
-    DEFAULT_MAX_CHARACTERS,
-    DEFAULT_MAX_SECONDS,
-    build_ass,
-    caption_geometry,
-    captioned_clips,
-    place_cues,
-    timeline_cues,
+    DEFAULT_MAX_CHARACTERS, DEFAULT_MAX_SECONDS, caption_geometry, captioned_clips, place_cues, timeline_cues,
 )
 from app.storage import housekeeping
 from app.storage.history import Version
@@ -112,19 +91,10 @@ from app.workspace import output_dir
 from app import runtime
 # By name, unlike everything else from runtime: every tool is registered with it, and it is never swapped out.
 from app.runtime import mcp
-from app.tools import shared
+# Importing a tool module is what registers its tools, so every one is imported here.
+from app.tools import examining, rendering, shared  # noqa: F401
 
 MAX_CLIP_RESULTS = 200
-# Characters a Windows or POSIX filesystem will not take in a name, plus the control
-# range. A project is named by whoever is editing, so a render cannot assume anything
-# about what is in that name.
-FORBIDDEN_IN_NAMES = frozenset('<>:"/\\|?*') | {chr(code) for code in range(32)}
-# What each of those becomes in a file name: the full-width mark that looks like it, so
-# 「8/29 暴雨」 is saved as 「8／29 暴雨」 rather than 「8 29 暴雨」 (#96); a control character
-# has no look to keep and becomes a space.
-NAME_LOOKALIKES = {"<": "＜", ">": "＞", ":": "：", '"': "＂", "/": "／", "\\": "＼", "|": "｜", "?": "？",
-                   "*": "＊"}
-MAX_OUTPUT_NAME = 60
 # A summary says enough to judge a clip by; the whole text is one call away.
 CLIP_SUMMARY_CHARACTERS = 80
 # Which scores a search result carries: the ones describing what is in a clip, which is
@@ -474,10 +444,10 @@ def _queue_music(assets: Iterable[Asset]) -> List[str]:
             continue
         existing = runtime.repo.get_analysis(asset.id)
         if existing is not None and existing.rhythm is not None and existing.music is not None \
-                and not _is_stale(existing):
+                and not examining.is_stale(existing):
             continue
         # Behind the footage somebody asked about: a song can wait until it is wanted.
-        started.append(_start_analysis(asset, False, "accurate", priority=1).job_id)
+        started.append(examining.start_analysis(asset, False, "accurate", priority=1).job_id)
     return started
 
 def tend_library() -> None:
@@ -587,8 +557,8 @@ def list_assets(
         and (folder_id is None or filed.get(asset.id) == folder_id)
         and (not text or text.lower() in os.path.basename(asset.path).lower())
     ]
-    analyzing = analyzing_assets()
-    heard = song_tags() if kind == MUSIC or any(library_of(asset) == MUSIC for asset in matching) else {}
+    analyzing = examining.analyzing_assets()
+    heard = examining.song_tags() if kind == MUSIC or any(library_of(asset) == MUSIC for asset in matching) else {}
     matching.sort(key=lambda asset: _natural_key(os.path.basename(asset.path)))
     assets = []
     for asset in matching[offset:offset + limit]:
@@ -602,68 +572,16 @@ def list_assets(
             "has_audio": asset.has_audio,
             **({"photo": True} if asset.still else {}),
             "analyzed": analysis is not None,
-            "transcription": _transcription(analysis),
-            "stale": analysis is not None and _is_stale(analysis),
+            "transcription": examining.transcription_kind(analysis),
+            "stale": analysis is not None and examining.is_stale(analysis),
             "library": library_of(asset),
             "folder_id": filed.get(asset.id),
             **({"notes": asset.notes} if asset.notes else {}),
-            **(song_details(asset, analysis, heard, analyzing) if library_of(asset) == MUSIC
+            **(examining.song_details(asset, analysis, heard, analyzing) if library_of(asset) == MUSIC
                else {"analyzing": True} if asset.id in analyzing else {}),
         })
     return {"assets": assets, "total": len(matching), "offset": offset,
             "folders": runtime.repo.list_folders(_folder_kind(kind or FOOTAGE))}
-
-def song_tags() -> Dict[str, Dict[str, List[str]]]:
-    """The moods and styles that set each analyzed song apart from the rest of the library.
-
-    Returns:
-        `moods` and `styles` by song.
-    """
-    sensed = {}
-    for asset in runtime.repo.list_assets():
-        if library_of(asset) != MUSIC:
-            continue
-        analysis = runtime.repo.get_analysis(asset.id)
-        if analysis is not None and analysis.music is not None:
-            sensed[asset.id] = analysis.music
-    moods = clap.ranked({song: sense.moods for song, sense in sensed.items()})
-    styles = clap.ranked({song: sense.styles for song, sense in sensed.items()})
-    return {song: {"moods": moods.get(song, []), "styles": styles.get(song, [])} for song in sensed}
-
-def _sounds_like(asset_id: str, analysis: MediaAnalysis, heard: Mapping[str, Mapping[str, List[str]]]) -> dict:
-    """A song in a line: its moods and styles, how it ends and where it is fullest."""
-    summary = music_energy.summary(analysis.music.energy)
-    return {**heard.get(asset_id, {}), "ends": summary["ends"], "fullest": summary["fullest"],
-            # The speech detector put it with music; the model hears talking. Asked about, not moved.
-            **({"sounds_like_speech": True} if analysis.music.sounds_like_speech else {})}
-
-def analyzing_assets() -> set:
-    """The files an analysis is queued or running for."""
-    return {job.asset_id for job in runtime.repo.jobs_to_show(datetime.now(timezone.utc))[0] if job.kind == JobKind.ANALYZE}
-
-def song_details(asset: Asset, analysis: Optional[MediaAnalysis], heard: Mapping[str, Mapping[str, List[str]]],
-                 analyzing: set) -> dict:
-    """What is known about a song, for the AI's list and the editor's page alike.
-
-    Args:
-        asset: The song.
-        analysis: Its analysis, if any.
-        heard: From `song_tags`.
-        analyzing: From `analyzing_assets`.
-
-    Returns:
-        Its `tempo`, its moods, styles, ending and fullest part once heard,
-        and `analyzing` until then — queued or running, since every song
-        added is analyzed by itself.
-    """
-    found: dict = {}
-    if analysis is not None and analysis.rhythm is not None:
-        found["tempo"] = analysis.rhythm.tempo
-    if analysis is not None and analysis.music is not None:
-        found.update(_sounds_like(asset.id, analysis, heard))
-    if asset.id in analyzing or analysis is None or analysis.music is None:
-        found["analyzing"] = True
-    return found
 
 @mcp.tool()
 def find_music(description: str, min_seconds: Annotated[float, Field(ge=0)] = 0,
@@ -690,7 +608,7 @@ def find_music(description: str, min_seconds: Annotated[float, Field(ge=0)] = 0,
         (higher is closer), `moods`, `styles`, how it `ends` and where it is
         `fullest`; and `analyzing`, songs not analyzed yet.
     """
-    heard = song_tags()
+    heard = examining.song_tags()
     vectors, found, waiting = {}, {}, 0
     for asset in runtime.repo.list_assets():
         if library_of(asset) != MUSIC or not os.path.exists(asset.path):
@@ -709,7 +627,7 @@ def find_music(description: str, min_seconds: Annotated[float, Field(ge=0)] = 0,
         songs.append({
             "id": asset_id, "name": os.path.basename(asset.path), "duration": float(asset.duration or 0),
             "tempo": analysis.rhythm.tempo if analysis.rhythm is not None else None, "match": match,
-            **_sounds_like(asset_id, analysis, heard),
+            **examining.sounds_like(asset_id, analysis, heard),
         })
     return {"songs": songs, "analyzing": waiting}
 
@@ -891,7 +809,7 @@ def export_notices(
             tags[asset_id] = rights_tags(probe_file(asset.path))
         except (OSError, RuntimeError, ValueError):
             tags[asset_id] = {}
-    facts = rights_facts(project, _analyses(project), assets, tags)
+    facts = rights_facts(project, rendering.analyses_of(project), assets, tags)
     listed = [
         " | ".join([fact.kind, fact.subject, ", ".join(f"{clock(start)}–{clock(end)}" for start, end in fact.spans),
                     *fact.detail])
@@ -908,7 +826,7 @@ def export_notices(
         stem, _ = os.path.splitext(next_to)
         path = housekeeping.unique_path(os.path.dirname(os.path.abspath(next_to)), f"{os.path.basename(stem)}_notices.txt")
     else:
-        path = housekeeping.unique_path(str(output_dir()), _delivery_name(project, "notices", ".txt"))
+        path = housekeeping.unique_path(str(output_dir()), rendering.delivery_name(project, "notices", ".txt"))
     os.makedirs(os.path.dirname(path), exist_ok=True)
     # With a byte-order mark and Windows line ends, so Notepad opens it right.
     with open(path, "w", encoding="utf-8-sig", newline="\r\n") as out:
@@ -955,7 +873,7 @@ def set_asset_library(asset_ids: List[str], library: Literal["footage", "music"]
         for asset in moved:
             existing = runtime.repo.get_analysis(asset.id)
             if existing is not None and existing.transcript is None and asset.has_audio:
-                _start_analysis(asset, True, "accurate", priority=1)
+                examining.start_analysis(asset, True, "accurate", priority=1)
     return {"moved": [os.path.basename(asset.path) for asset in moved]}
 
 @mcp.tool()
@@ -1264,919 +1182,8 @@ def import_folder(folderpath: str, recursive: bool = False) -> dict:
     total = sum((asset.duration for asset in assets if asset.duration is not None and not asset.still), Decimal(0))
     return shared.plain({"assets": [_asset_record(asset) for asset in assets], "total_duration": total, "skipped": skipped})
 
-def _is_stale(analysis: MediaAnalysis) -> bool:
-    """Say whether an analysis was taken in a way the server no longer uses.
-
-    Args:
-        analysis: Analysis to check.
-
-    Returns:
-        True when the detection thresholds, the measurements taken, or the
-        speech model have changed since it was made. Nothing in it is wrong;
-        it just answers a slightly different question from a fresh one, which
-        matters most when two assets are being compared with each other.
-    """
-    # A fast or balanced transcript is one the user chose, not one made with a model since replaced.
-    speech_model = analysis.recipe.speech_model
-    current = speech_model if transcription_of(speech_model) in ("fast", "balanced") else whisper_model_name()
-    return analysis.recipe.differs_from(current_recipe(
-        current, speaker_model=speaker_model_name(), rhythm_model=rhythm_model_name(), clap_model=clap.MODEL_ID,
-    ))
-
-def _transcription(analysis: Optional[MediaAnalysis]) -> Optional[str]:
-    """Say how an asset's speech was transcribed: `fast`, `balanced`, `accurate`, or None when it was not."""
-    return transcription_of(None if analysis is None or analysis.transcript is None else analysis.transcript.model)
-
-def _transcribed(asset: Asset, transcribe: bool) -> bool:
-    """Whether an analysis of this file transcribes it: never a song, whatever was asked."""
-    return transcribe and asset.has_audio and library_of(asset) != MUSIC
-
-def _start_analysis(asset: Asset, transcribe: bool, transcription: str, language: Optional[str] = None,
-                    prompt: Optional[str] = None, chinese_variant: Optional[str] = None, diarize: bool = True,
-                    speakers: Optional[int] = None, priority: int = 0) -> Job:
-    """Queue one file's analysis.
-
-    Args:
-        asset: The file.
-        transcribe: Whether speech is transcribed; never for a song.
-        transcription: `accurate`, `balanced` or `fast`.
-        language: Spoken language code, or None to detect it.
-        prompt: Text that guides transcription.
-        chinese_variant: Script and regional variant for a Chinese transcript.
-        diarize: Whether to tell the voices apart.
-        speakers: How many people are talking, when known.
-        priority: Lower goes first; a song added by itself waits behind footage.
-
-    Returns:
-        The job.
-    """
-    job = Job(kind=JobKind.ANALYZE, asset_id=asset.id, priority=priority)
-    job.work_dir = os.path.join(runtime.WORKSPACE_DIR, "jobs", job.job_id)
-    with_speech = _transcribed(asset, transcribe)
-    job.memory_estimate = resources.analysis_memory_bytes(
-        with_speech,
-        # The larger model is what has to fit; a balanced transcription loads one after the other.
-        whisper_model_for(transcription).split(BALANCED_JOIN)[-1],
-        duration=float(asset.duration),
-        diarize=with_speech and diarize,
-        detect_faces=asset.has_video,
-    )
-    return runtime.job_manager.start_job(job, {
-        "transcribe": transcribe,
-        "transcription": transcription,
-        "language": language,
-        "prompt": prompt,
-        "chinese_variant": chinese_variant,
-        "diarize": diarize,
-        "speakers": speakers,
-    })
-
-# How good each kind of transcription is, so a file is never analyzed into a worse one.
-TRANSCRIPTION_RANK = {"fast": 0, "balanced": 1, "accurate": 2}
-
-def _plan_analyses(
-    assets: Sequence[Asset], transcribe: bool, transcription: str, again: bool,
-) -> Tuple[List[Tuple[Asset, str]], List[dict], List[str]]:
-    """Decide which files an analysis starts, and with which transcription.
-
-    A transcript is never made worse: asked for less than it has, a file is
-    skipped while current, and analyzed again as well as it was when it is
-    out of date or `again` is given. A transcript asked to be better —
-    fast to balanced or accurate, balanced to accurate — is redone without
-    `again`; fast to balanced keeps the fast transcript and hears only its
-    unsure lines again.
-
-    Args:
-        assets: The files asked for.
-        transcribe: Whether speech is transcribed.
-        transcription: `accurate`, `balanced` or `fast`, as asked.
-        again: Redo files whose analysis is current.
-
-    A file already queued or being analyzed is left to that job rather than
-    analyzed twice.
-
-    Returns:
-        `(to_start, skipped, upgrading)`: each file to start with the
-        transcription it gets, each file left alone as `{asset_id, reason}`
-        (#88), and the files whose transcript is being made better.
-    """
-    to_start: List[Tuple[Asset, str]] = []
-    skipped: List[dict] = []
-    upgrading: List[str] = []
-    active = {job.asset_id: job for job in runtime.repo.jobs_to_show(datetime.now(timezone.utc))[0]
-              if job.kind == JobKind.ANALYZE and job.status.is_active}
-    for asset in assets:
-        if asset.id in active:
-            job = active[asset.id]
-            skipped.append({"asset_id": asset.id, "reason": f"already {job.status.value} in job {job.job_id}; "
-                                                              "follow it with get_job"})
-            continue
-        existing = runtime.repo.get_analysis(asset.id)
-        had = _transcription(existing)
-        upgrade = (_transcribed(asset, transcribe) and had is not None
-                   and TRANSCRIPTION_RANK[transcription] > TRANSCRIPTION_RANK[had])
-        # Heard as a song, never transcribed; footage now, so it is listened to again for what is said.
-        heard_as_song = (existing is not None and existing.transcript is None and existing.rhythm is not None
-                         and _transcribed(asset, transcribe))
-        if not again and not upgrade and not heard_as_song and existing is not None and not _is_stale(existing):
-            skipped.append({"asset_id": asset.id, "reason": "its analysis is current; again=true to redo it"})
-            continue
-        if upgrade:
-            upgrading.append(asset.id)
-        better = had if had is not None and TRANSCRIPTION_RANK[had] > TRANSCRIPTION_RANK[transcription] else None
-        to_start.append((asset, better or transcription))
-    return to_start, skipped, upgrading
-
-def _estimate(to_start: Sequence[Tuple[Asset, str]], transcribe: bool, diarize: bool,
-              upgrading: Sequence[str]) -> Optional[dict]:
-    """How long the files about to be analyzed take here, or None when nothing in them is transcribed."""
-    footage: Dict[str, float] = {"accurate": 0.0, "balanced": 0.0, "fast": 0.0}
-    for asset, transcription in to_start:
-        if _transcribed(asset, transcribe):
-            footage[transcription] += float(asset.duration)
-    if not any(footage.values()):
-        return None
-    here = machine.profile()
-    found = {"tier": here.tier, "footage_minutes": round(sum(footage.values()) / 60, 1),
-             **speed.estimate(runtime.repo, here, footage, diarize)}
-    if upgrading:
-        chosen = {transcription for asset, transcription in to_start if asset.id in upgrading}
-        found["note"] = (
-            "files whose transcript is being made better keep their picture and sound measurements; "
-            + ("made accurate, the whole transcript is heard again" if "accurate" in chosen else "")
-            + ("; " if chosen == {"accurate", "balanced"} else "")
-            + ("a fast one made balanced has only its unsure lines heard again, so it takes less than this says"
-               if "balanced" in chosen else "")
-        )
-    return found
-
-@mcp.tool()
-def analyze_asset(
-    asset_ids: List[str],
-    transcribe: bool = True,
-    language: Optional[str] = None,
-    prompt: Optional[str] = None,
-    chinese_variant: Optional[Literal["zh-TW", "zh-HK", "zh-Hant", "zh-Hans"]] = None,
-    diarize: bool = True,
-    speakers: Annotated[Optional[int], Field(ge=1, le=20)] = None,
-    again: bool = False,
-    transcription: Literal["accurate", "balanced", "fast"] = "accurate",
-    dry_run: bool = False,
-) -> dict:
-    """Start analyzing what assets contain, in the background.
-
-    Takes every file to analyze in one call — a whole imported folder at
-    once — and starts one job per file. A file that already has a current
-    analysis is left alone unless `again` is true, so the same call can be
-    repeated over a folder after a few files are added.
-
-    One decoding pass detects scene changes, black and frozen picture, and
-    silences, and alongside them measures each shot — exposure, contrast,
-    blur, motion, camera shake — each second of sound (level, peak, noise
-    floor, and how squared off the waveform is where it peaks), and each
-    second of picture for faces: how many, how big the largest is, and where
-    it sits in frame. If `transcribe` is true and the asset has audio, speech
-    is then transcribed locally with word-level timestamps that stay accurate
-    on long recordings, which is the slow part by far, and the voices are told
-    apart so that each clip knows who was speaking.
-
-    Returns immediately: poll `get_job` with all the job IDs at once until
-    they are done, then read the results with `get_analysis`, or search them
-    through `query_clips` once a semantic timeline is built.
-
-    Everything runs on this machine. The models are downloaded the first time
-    they are needed — the speech model is the large one, the rest are tens of
-    megabytes — and they are kept inside the workspace, so deleting the
-    workspace deletes them too. `stage` says when a download is what a job is
-    waiting on.
-
-    Args:
-        asset_ids: IDs of the assets to analyze. The same settings apply to
-            all of them; analyze files that need different ones in separate
-            calls.
-        transcribe: Whether to transcribe speech.
-        language: Spoken language code, such as "zh" or "en"; omit to detect it.
-        prompt: Text that guides transcription, such as names and terms that
-            appear in the recording.
-        diarize: Whether to tell the voices apart. Only done alongside a
-            transcript, since a speaker label with nothing said under it has
-            nowhere to go. Turn it off for footage with one person in it if
-            the extra minute matters.
-        speakers: How many people are talking, when that is known. Worth
-            giving for an interview or a two-hander: told the number, the
-            server has to find exactly that many, and cannot split one person
-            who leaned closer to the microphone into two. Omit it to let the
-            number be worked out.
-        chinese_variant: Convert a Chinese transcript to this script and
-            regional variant: "zh-TW" (Traditional, Taiwan characters and
-            vocabulary, e.g. 視頻 becomes 影片), "zh-HK" (Traditional, Hong
-            Kong), "zh-Hant" (Traditional, no vocabulary changes), or "zh-Hans"
-            (Simplified). Omit to keep the speech model's output, which may mix
-            scripts.
-        again: Analyze files that already have a current analysis too,
-            replacing it — for example with a `prompt` or `speakers` the first
-            run did not have. Only what would come out different is redone:
-            the transcript, the voices when `speakers` is given; the scan and
-            the faces are kept.
-        transcription: "accurate", the default; "fast": about twice as
-            quick without an NVIDIA card, with more misheard words and looser
-            word timings; or "balanced": fast, then only the lines it was
-            unsure of heard again by the accurate model — most of the quality
-            for a little more than fast. The user's trade to make: on a
-            low-tier computer, or a mid-tier one with more than about an hour
-            of footage, call with `dry_run` first and ask them with the
-            times. A transcript asked to be better is redone without `again`
-            (fast to balanced hears only the unsure lines again); one is
-            never made worse.
-        dry_run: Start nothing; say what would start and how long it would
-            take, as `estimates` for "accurate", "balanced" and "fast", so
-            the user can choose before waiting on any.
-
-    Returns:
-        A dictionary with `jobs`, one `asset_id`, `job_id`, `status` and
-        `stage` per job started, and `skipped`, each asset left alone with
-        its `reason`: its analysis is current, or a job already queued or
-        running for it, named. Analyses run one or two at a time, so that
-        several of them cannot exhaust the machine's memory between them;
-        `stage` says what a job that has not started yet is waiting for.
-        Waiting costs nothing and needs no action: keep polling `get_job`.
-        `upgrading` lists the files whose fast transcript is being replaced
-        with an accurate one. With `dry_run`, `would_start` lists the files
-        in place of `jobs`.
-
-        Files in the music library are beat-tracked and never transcribed.
-        `music` lists the ones started, or with `dry_run` the ones that
-        would be, each with how much of what was listened to is speech; one
-        that is mostly speech, or named like a narration, may have been filed
-        there by mistake — ask the user, and move it with `set_asset_library`
-        before analyzing it. A file never sorted into a library is sorted
-        first; `unsorted` lists any that could not be, with why — one with no
-        picture is then analyzed as music.
-
-        When anything started is transcribed, `estimate` says how long that
-        takes here for all of it together: `footage_minutes`,
-        `transcription_minutes` and `speakers_minutes` as `[low, high]` (high
-        null when there is no telling; `speakers_minutes` null when voices are
-        not told apart), the computer's `tier`, and `basis` — this computer's
-        own past runs, or a rough figure from its hardware — and a `note`
-        when upgraded files are analyzed whole. Tell the user in a sentence
-        when it runs past a few minutes.
-
-    Raises:
-        ValueError: If an asset does not exist or has no known duration;
-            nothing is started then.
-    """
-    assets = [shared.get_asset(asset_id) for asset_id in dict.fromkeys(asset_ids)]
-    for asset in assets:
-        if asset.duration is None:
-            raise ValueError(f"asset {asset.id} has no known duration and cannot be analyzed")
-
-    if dry_run:
-        choices = {}
-        for choice in ("accurate", "balanced", "fast"):
-            to_start, skipped, upgrading = _plan_analyses(assets, transcribe, choice, again)
-            choices[choice] = _estimate(to_start, transcribe, diarize, upgrading)
-        to_start, skipped, upgrading = _plan_analyses(assets, transcribe, transcription, again)
-        result = {"would_start": [asset.id for asset, _ in to_start], "skipped": skipped, "upgrading": upgrading,
-                  "estimates": choices}
-        music = _music_heard(asset for asset, _ in to_start)
-        if music:
-            result["music"] = music
-        return result
-
-    unsorted = []
-    for asset in assets:
-        if asset.library is None:
-            # Sorted when it was added, or when the server started; listened to now if neither managed.
-            try:
-                asset.library = classify(asset)
-            except (OSError, RuntimeError, ValueError) as error:
-                unsorted.append({"asset_id": asset.id, "reason": str(error)})
-                continue
-            runtime.repo.save_asset(asset)
-
-    started: List[dict] = []
-    to_start, skipped, upgrading = _plan_analyses(assets, transcribe, transcription, again)
-    for asset, chosen in to_start:
-        job = _start_analysis(asset, transcribe, chosen, language, prompt, chinese_variant, diarize, speakers)
-        started.append({"asset_id": asset.id, "job_id": job.job_id, "status": job.status.value, "stage": job.stage})
-    result: dict = {"jobs": started, "skipped": skipped, "upgrading": upgrading}
-    if unsorted:
-        result["unsorted"] = unsorted
-    music = _music_heard(asset for asset, _ in to_start)
-    if music:
-        result["music"] = music
-    found = _estimate(to_start, transcribe, diarize, upgrading)
-    if found is not None:
-        result["estimate"] = found
-    return result
-
-def _music_heard(assets: Iterable[Asset]) -> List[dict]:
-    """Say, for each file in the music library, how much of it is somebody talking.
-
-    Args:
-        assets: The files about to be analyzed.
-
-    Returns:
-        One entry per music file: its `asset_id`, `name`, `speech_share`
-        (null when its sound could not be read), and `sounds_like_speech`
-        when that share is what would have filed it as footage.
-    """
-    heard = []
-    for asset in assets:
-        if not asset.has_audio or library_of(asset) != MUSIC:
-            continue
-        share = speech_share(asset.path, float(asset.duration or 0))
-        entry = {"asset_id": asset.id, "name": os.path.basename(asset.path),
-                 "speech_share": None if share is None else round(share, 2)}
-        if share is not None and share >= SPEECH_SHARE:
-            entry["sounds_like_speech"] = True
-        heard.append(entry)
-    return heard
-
-# Provisional (roadmap §13): the longest stretch heard again at once, short enough to come back
-# inside the time most AI clients allow a tool call.
-LISTEN_AGAIN_SECONDS = 30.0
 # Provisional (roadmap §13): the longest `get_job` waits, under the same allowance.
 MAX_JOB_WAIT_SECONDS = 50.0
-
-def _bare_words(text: str) -> str:
-    """Text reduced to what is said, for comparing two hearings: no spaces or punctuation."""
-    return re.sub(r"[\s\W_]+", "", text)
-
-@mcp.tool()
-def listen_again(
-    start: float,
-    end: float,
-    asset_id: Optional[str] = None,
-    language: Optional[str] = None,
-    job_id: Optional[str] = None,
-    keep: bool = False,
-) -> dict:
-    """Hear one stretch of a file or of a finished render again, to check a word, a line or the mix.
-
-    The transcript is one long pass, and a word it misheard — 「沒那麼順」
-    written as 「怎麼那麼順」 — is misheard for everything that reads it. This
-    transcribes only that stretch of sound, from scratch: no prompt, no text
-    before it. Where the two disagree, or the words come back unsure, believe
-    neither — give the user `audio_path` to listen to and ask.
-
-    When a cut is refused for landing in a word the transcript placed wrong,
-    hear that stretch with `keep`: its word times are then what cuts in this
-    file are judged and moved by, in place of the transcript's. Only what was
-    heard is kept, never a time you write; the plans stay valid. A hearing
-    that does not say the same words as the transcript, or is unsure of any,
-    is not kept — `not_kept` says why; play `audio_path` to the user and ask.
-    Start and end the stretch in a pause, so it holds whole words.
-
-    Given a render's `job_id` instead of a file, it hears what the viewer
-    will, a shot at a time so the words after a cut are not lost to the ones
-    before it: whether a word was cut into at an edit, and, from `levels`, whether
-    the music dips under speech and two songs really cross-fade where the
-    plan says.
-
-    Args:
-        start: Where the stretch starts, in seconds of the file or the render.
-        end: Where it ends; at most 30 seconds after `start`.
-        asset_id: The file to hear. Give this or `job_id`.
-        language: Spoken language code; omit to detect it.
-        job_id: A finished render to hear, preview or full.
-        keep: For a file: keep these word times over the transcript's.
-
-    Returns:
-        A dictionary with `heard`, the new hearing with unsure words in ⟦ ⟧;
-        `words`, each with `start`, `end` and its `probability`; `levels`,
-        the sound's level in dBFS every `every_seconds` from `start` — speech
-        sits well above a ducked bed, a gap is near -60; `audio_path`, a WAV of
-        the stretch for the user to play; for a file, `stored`, what the
-        transcript says there, or null, `agrees`, whether the two say the
-        same words — never when the hearing has the marks of a line the
-        recogniser makes up (a subtitle credit, a sign-off, words that take
-        no time, one word looping), and `made_up` is then true — and, when
-        `keep` was given, `kept` or `not_kept` — kept word by word where
-        only some of it was heard alike and for sure, with `kept_words` and
-        `left_as_transcribed`; for a render, `captions`, the ones on screen in
-        the stretch, `changed_since`, true when the project has been edited
-        since it was rendered, and `unheard`, where it is loud enough to be
-        talking with no word heard — hear that stretch again on its own, or
-        play `audio_path`; it may be a song.
-
-    Raises:
-        ValueError: If neither or both of a file and a render are given, it
-            has no sound, or the stretch is empty, too long or outside it.
-    """
-    if (asset_id is None) == (job_id is None):
-        raise ValueError("give either asset_id, to hear a file, or job_id, to hear a render")
-    if keep and job_id is not None:
-        raise ValueError("only what a file says is kept; a render is the cut, and is heard to check it")
-    if job_id is not None:
-        return _listen_to_render(job_id, start, end, language)
-    asset = shared.get_asset(asset_id)
-    if not asset.has_audio:
-        raise ValueError(f"asset {asset_id} has no sound to hear again")
-    _hearable(start, end)
-    if asset.duration is not None and start >= float(asset.duration):
-        raise ValueError(f"the file is only {float(asset.duration):g}s long")
-    known = runtime.repo.get_analysis(asset_id)
-    transcript = known.transcript if known is not None else None
-    if keep and transcript is None:
-        raise ValueError(f"asset {asset_id} has no transcript to correct; analyze it first")
-    keep_as = os.path.join(runtime.WORKSPACE_DIR, "temp", "listen", f"{asset_id[:8]}-{start:.2f}-{end:.2f}.wav")
-    fresh = listen_again_in_file(
-        asset.path, start, end, language or (transcript.language if transcript else None), keep_as,
-        chinese_variant=transcript.chinese_variant if transcript else None,
-    )
-    stored = None
-    if transcript is not None:
-        said = [word.text for segment in transcript.segments for word in segment.words
-                if word.end > start and word.start < end]
-        stored = "".join(said).strip() or None
-    plain_heard = "".join(segment.text for segment in fresh.segments)
-    # The same recogniser makes the same lines up over the same café hum, so two hearings
-    # of a made-up line agreeing says nothing about whether anyone said it.
-    made_up = any(was_made_up(segment) for segment in fresh.segments)
-    result = {
-        **_heard(fresh, keep_as, start),
-        "stored": stored,
-        "agrees": not made_up and stored is not None and _bare_words(plain_heard) == _bare_words(stored),
-    }
-    if made_up:
-        result["made_up"] = True
-    if keep:
-        heard_words = [word for segment in fresh.segments for word in segment.words]
-        result.update(_keep_hearing(known, HeardAgain(start=start, end=end, words=heard_words), result["agrees"],
-                                    made_up))
-    return result
-
-def _alike_times(
-    stored: List[TranscriptWord], heard: List[TranscriptWord],
-) -> Tuple[List[TranscriptWord], List[str], List[str], List[str]]:
-    """Take the heard times of the words two hearings agree on, and the transcript's for the rest.
-
-    Matched character by character, so two hearings that cut a line into
-    words differently still line up. A word takes its heard time only when
-    every character of it was heard the same, all of them in one heard word
-    holding nothing else, that word was heard for sure, and the time leaves
-    the words either side in order.
-
-    Args:
-        stored: The transcript's words in the stretch, in order.
-        heard: The words heard again there, in order.
-
-    Returns:
-        `(words, apart, doubted, retimed)`: the transcript's words, each with
-        the heard time where the two agree; the transcript's words they
-        disagree on; those they agree on but the hearing was unsure of, which
-        keep the transcript's time; and those that took the heard time.
-    """
-    def characters(words: List[TranscriptWord]) -> Tuple[str, List[int]]:
-        text, owner = [], []
-        for index, word in enumerate(words):
-            for character in _bare_words(word.text):
-                text.append(character)
-                owner.append(index)
-        return "".join(text), owner
-
-    said, said_by = characters(stored)
-    again, again_by = characters(heard)
-    paired: Dict[int, set] = {}
-    claimed: Dict[int, set] = {}
-    matched = set()
-    for block in difflib.SequenceMatcher(a=said, b=again, autojunk=False).get_matching_blocks():
-        for step in range(block.size):
-            one, other = said_by[block.a + step], again_by[block.b + step]
-            matched.add(block.a + step)
-            paired.setdefault(one, set()).add(other)
-            claimed.setdefault(other, set()).add(one)
-    owned = {index: sum(1 for owner in said_by if owner == index) for index in range(len(stored))}
-    out: List[TranscriptWord] = list(stored)
-    retimed: set = set()
-    apart: List[str] = []
-    doubted: List[str] = []
-    for index, word in enumerate(stored):
-        others = paired.get(index, set())
-        whole = sum(1 for at, owner in enumerate(said_by) if owner == index and at in matched) == owned[index]
-        if not owned[index]:
-            continue
-        if not (whole and len(others) == 1):
-            apart.append(word.text.strip())
-            continue
-        match = heard[next(iter(others))]
-        alone = claimed.get(next(iter(others))) == {index} and len(_bare_words(match.text)) == owned[index]
-        if alone and unsure_words([match]):
-            # Heard alike but not for sure: its time is no better than the transcript's (#98).
-            doubted.append(word.text.strip())
-        elif alone:
-            out[index] = word.model_copy(update={"start": match.start, "end": match.end,
-                                                 "probability": match.probability})
-            retimed.add(index)
-    # Two neighbours whose times now overlap — one heard again, one not, or two heard apart —
-    # are put back as the transcript had them, until the words run in order again.
-    changed = True
-    while changed:
-        changed = False
-        for index in range(len(out) - 1):
-            if out[index].end > out[index + 1].start + EDGE_TOLERANCE_SECONDS and {index, index + 1} & retimed:
-                for undo in {index, index + 1} & retimed:
-                    out[undo] = stored[undo]
-                    retimed.discard(undo)
-                changed = True
-    return out, apart, doubted, [stored[index].text.strip() for index in sorted(retimed)]
-
-def _keep_hearing(known: MediaAnalysis, stretch: HeardAgain, agrees: bool, made_up: bool = False) -> dict:
-    """Keep a stretch heard again over the transcript's word times, when it can be believed.
-
-    Args:
-        known: The file's analysis the hearing was taken against.
-        stretch: What was heard, and where.
-        agrees: Whether the hearing says the same words as the transcript there.
-        made_up: Whether the hearing is one the recogniser makes up, in which
-            case none of it is believed.
-
-    Returns:
-        `kept` when it was kept, or `not_kept` saying why it was not. Where the
-        two say different words, the times of the ones they agree on are
-        kept and the rest stay the transcript's (#87).
-    """
-    # A word half in the stretch would be kept twice: its outside part from the transcript,
-    # and the whole of it as heard. The stretch is moved to take it in or leave it out.
-    across = [word for segment in known.transcript.segments for word in segment.words
-              if word.start < stretch.start < word.end or word.start < stretch.end < word.end]
-    if across:
-        opens = min([stretch.start, *(word.start for word in across if word.start < stretch.start < word.end)])
-        closes = max([stretch.end, *(word.end for word in across if word.start < stretch.end < word.end)])
-        # Rounded outward, so the stretch said takes the word in however long the file is; snapped
-        # first, so a time already in whole milliseconds is not pushed into the next word.
-        opens, closes = math.floor(round(opens * 1000, 6)) / 1000, math.ceil(round(closes * 1000, 6)) / 1000
-        return {"not_kept": f"the transcript has {'、'.join(word.text.strip() for word in across)} running across the "
-                            f"edge of the stretch; hear {opens:.3f}s to {closes:.3f}s again with keep"}
-    partly, listed = "", {}
-    unsure = unsure_words(stretch.words)
-    if not agrees or unsure:
-        # Word by word: the ones heard alike and for sure take the heard time, and the rest
-        # keep the transcript's — a word in doubt costs only itself, not the stretch (#87, #98).
-        stored = [word for segment in known.transcript.segments for word in segment.words
-                  if word.start >= stretch.start and word.end <= stretch.end]
-        alike, apart, doubted, retimed = ([], [], [], []) if made_up else _alike_times(stored, stretch.words)
-        if not retimed:
-            if agrees:
-                return {"not_kept": f"the hearing was unsure of {'、'.join(unsure)}; play audio_path to the user "
-                                    "and ask"}
-            return {"not_kept": "the hearing and the transcript say different words here, so neither is believed; "
-                                "play audio_path to the user and ask, or hear a stretch that starts and ends in a pause"}
-        stretch = stretch.model_copy(update={"words": alike})
-        said = [f" for the {len(retimed)} word(s) the two heard alike and the hearing was sure of"]
-        if apart:
-            said.append(f"「{'、'.join(apart)}」, heard differently, keep the transcript's words and times")
-        if doubted:
-            said.append(f"「{'、'.join(doubted)}」, heard unsure, keep the transcript's times")
-        partly = "; ".join(said) + (" — play audio_path to the user and ask about those" if apart or doubted else "")
-        listed = {"kept_words": retimed, "left_as_transcribed": apart + doubted}
-    # Read again before writing, so an analysis taken again meanwhile is not overwritten
-    # with the one this started from.
-    current = runtime.repo.get_analysis(known.asset_id)
-    if current is None or current.analyzed_at != known.analyzed_at:
-        return {"not_kept": "the file was analyzed again while this was heard; hear the stretch again"}
-    current.heard_again = [
-        *(item for item in current.heard_again if item.end <= stretch.start or item.start >= stretch.end), stretch,
-    ]
-    runtime.repo.save_analysis(current)
-    return {"kept": f"the word times heard from {stretch.start:g}s to {stretch.end:g}s are now what cuts in this "
-                    f"file are judged by{partly}; check the cut again", **listed}
-
-# Provisional (roadmap §13): how long each level `listen_again` reports covers — fine
-# enough to see a fade or a dip under a word, coarse enough that thirty seconds is sixty numbers.
-LEVEL_EVERY_SECONDS = 0.5
-
-def _heard(fresh: Transcript, keep_as: str, start: float) -> dict:
-    """What `listen_again` says about any stretch it heard.
-
-    Args:
-        fresh: The new hearing, in seconds of the file or render.
-        keep_as: The stretch's sound, kept for the user to play.
-        start: Where the stretch starts, which the levels count from.
-
-    Returns:
-        `heard`, `words`, `levels` and `audio_path`.
-    """
-    return {
-        "heard": "".join(marked_text(segment) for segment in fresh.segments),
-        "words": [
-            {"text": word.text.strip(), "start": word.start, "end": word.end, "probability": word.probability}
-            for segment in fresh.segments for word in segment.words
-        ],
-        "levels": {"start": start, "every_seconds": LEVEL_EVERY_SECONDS,
-                   "db": levels_every(keep_as, LEVEL_EVERY_SECONDS)},
-        "audio_path": keep_as,
-    }
-
-def _finished_render(job_id: str) -> Tuple[Job, str]:
-    """Find a render that has finished, and the file it made.
-
-    Args:
-        job_id: The render's job.
-
-    Returns:
-        `(job, path)`.
-
-    Raises:
-        ValueError: If it is not a render, has not finished, or its file is gone.
-    """
-    job = runtime.job_manager.get_job(job_id)
-    if job is None or job.kind != JobKind.RENDER:
-        raise ValueError(f"render {job_id} not found; `render_project` gives the job ID of one")
-    if job.status != JobStatus.COMPLETED:
-        raise ValueError(f"render {job_id} is {job.status.value}; wait for it with `get_job` first")
-    if not job.output_path or not os.path.exists(job.output_path):
-        raise ValueError(f"the file render {job_id} made is no longer there; render again")
-    return job, job.output_path
-
-def _rendered_from(job: Job) -> Optional[Project]:
-    """The project a render was made from, as it is now; None when it is gone."""
-    return runtime.repo.get_project(job.project_id) if job.project_id else None
-
-def _changed_since(job: Job) -> bool:
-    """Whether the project a render was made from has been edited since.
-
-    Args:
-        job: The render.
-
-    Returns:
-        True when its project's version has moved on from the one rendered.
-    """
-    project = _rendered_from(job)
-    return project is not None and job.project_version is not None and project.version != job.project_version
-
-def _hearable(start: float, end: float) -> None:
-    """Refuse a stretch `listen_again` cannot take: empty, or longer than it hears at once.
-
-    Raises:
-        ValueError: Saying which.
-    """
-    if end <= start:
-        raise ValueError(f"the stretch has to end after it starts ({start}s to {end}s)")
-    if end - start > LISTEN_AGAIN_SECONDS:
-        raise ValueError(f"hear a stretch of at most {LISTEN_AGAIN_SECONDS:g} seconds at a time; this one is "
-                         f"{end - start:g}s")
-
-# A stretch of a render this loud for this long with no word heard in it is very likely
-# somebody talking that the speech model missed — or a song, which only listening tells
-# apart. Speech in a finished render sits near -20 dBFS and a ducked bed well under -30.
-# Provisional, both.
-UNHEARD_LOUD_DB = -28.0
-UNHEARD_LOUD_SECONDS = 1.0
-# A piece of a render shorter than this either side of a cut is heard with the shot it
-# belongs to rather than on its own: too short to hold a word. Provisional.
-MIN_HEARD_SECONDS = 0.3
-
-def _listen_to_render(job_id: str, start: float, end: float, language: Optional[str]) -> dict:
-    """`listen_again` over a finished render rather than a file.
-
-    Args:
-        job_id: The render.
-        start: Where the stretch starts, in seconds of the render.
-        end: Where it ends.
-        language: Spoken language code, or None for the footage's own.
-
-    Returns:
-        What `_heard` says, with the `captions` on screen in the stretch and
-        `changed_since`.
-    """
-    job, path = _finished_render(job_id)
-    _hearable(start, end)
-    project = _rendered_from(job)
-    if project is not None and not _changed_since(job) and start >= float(project.duration):
-        raise ValueError(f"the render is only {float(project.duration):g}s long")
-    keep_as = os.path.join(runtime.WORKSPACE_DIR, "temp", "listen", f"render-{job_id[:8]}-{start:.2f}-{end:.2f}.wav")
-    known = None
-    for clip in (project.base_video_track.clips if project and project.base_video_track else []):
-        analysis = runtime.repo.get_analysis(clip.asset_id)
-        if analysis is not None and analysis.transcript is not None:
-            known = analysis.transcript
-            break
-    # Heard a shot at a time: the speech model, given a stretch across a cut, wrote down the
-    # words before it and nothing after, though the voice there was loud and clear.
-    cuts = sorted({float(clip.timeline_in) for clip in project.base_video_track.clips} if (
-        project is not None and project.base_video_track is not None and not _changed_since(job)) else set())
-    edges = [start] + [at for at in cuts if start + MIN_HEARD_SECONDS <= at <= end - MIN_HEARD_SECONDS] + [end]
-    language = language or (known.language if known else None)
-    variant = known.chinese_variant if known else None
-    # The words are heard from the cut's own sound without the music under it, which turned
-    # 「買一送四」 into 「買壽司」 sixteen decibels down (#89); the user plays the mix as rendered.
-    voice = _voice_of_render(job, project)
-    heard_from = voice or path
-    stem, extension = os.path.splitext(keep_as)
-    pieces = []
-    for index, (opened, closed) in enumerate(zip(edges, edges[1:])):
-        # Each shot's own sound is only what the model is handed; the user plays the whole stretch.
-        piece_as = f"{stem}-{index}{extension}"
-        pieces.append(listen_again_in_file(heard_from, opened, closed, language, piece_as, chinese_variant=variant))
-        os.remove(piece_as)
-    cut_sound(path, start, end, keep_as)
-    fresh = pieces[0].model_copy(update={"segments": [segment for piece in pieces for segment in piece.segments]})
-    shown = [cue for cue in (place_cues(project, project.subtitles) if project and job.captioned else [])
-             if float(cue.end) > start and float(cue.start) < end]
-    result = {
-        **_heard(fresh, keep_as, start),
-        "captions": [f"{format_timestamp(float(cue.start))} {cue.text}" for cue in shown],
-        "changed_since": _changed_since(job),
-    }
-    if voice is not None:
-        result["heard_without_music"] = True
-        # Loud without words is judged on the talking alone, so a song is not taken for a voice.
-        spoken = os.path.join(runtime.WORKSPACE_DIR, "temp", "listen", f"render-{job_id[:8]}-voice-{start:.2f}-{end:.2f}.wav")
-        cut_sound(voice, start, end, spoken)
-        loud = levels_every(spoken, LEVEL_EVERY_SECONDS)
-        os.remove(spoken)
-    else:
-        loud = result["levels"]["db"]
-    unheard = _loud_without_words(loud, start, fresh)
-    if unheard:
-        result["unheard"] = ", ".join(f"{opened:.1f}–{closed:.1f}s" for opened, closed in unheard)
-    return result
-
-def _voice_of_render(job: Job, project: Optional[Project]) -> Optional[str]:
-    """Make, once, the sound of a render's own footage without its music, to hear words from.
-
-    Args:
-        job: The render.
-        project: The project it was rendered from.
-
-    Returns:
-        The path of the stem, kept beside the render's work; None when the
-        project has changed since, so the stem would not be what was
-        rendered, when nothing plays under the footage, or when it cannot be
-        made — the render itself is heard then.
-    """
-    if project is None or _changed_since(job) or not job.work_dir:
-        return None
-    voice = os.path.join(job.work_dir, "voice.wav")
-    if os.path.exists(voice):
-        return voice
-    audio = [track for track in project.tracks if track.track_type == TrackType.AUDIO and track.clips]
-    if not audio:
-        return None
-    # The stem is the footage's own sound: a narration on a track of its own, as the render
-    # decides one, is not in it.
-    voices = _voices(project)
-    if voices:
-        return None
-    os.makedirs(job.work_dir, exist_ok=True)
-    music, mix = os.path.join(job.work_dir, "music.wav"), os.path.join(job.work_dir, "sound.m4a")
-    try:
-        command = runtime.renderer.build_sound(project, shared.referenced_assets(project), mix, voice, music, None,
-                                               voices=voices, talking=_talking(project, voices))
-        done = subprocess.run(command, capture_output=True, creationflags=hidden_window_flags())
-    except (OSError, ValueError):
-        return None
-    for leftover in (music, mix):
-        if os.path.exists(leftover):
-            os.remove(leftover)
-    return voice if done.returncode == 0 and os.path.exists(voice) else None
-
-def _loud_without_words(levels: Sequence[float], start: float, fresh: Transcript) -> List[Tuple[float, float]]:
-    """Find where a render is loud enough to be somebody talking and the hearing has no word.
-
-    Args:
-        levels: The sound's level every `LEVEL_EVERY_SECONDS`, in dBFS.
-        start: Where the levels start, in seconds of the render.
-        fresh: The hearing.
-
-    Returns:
-        Each such stretch as `(start, end)` in seconds of the render, at
-        least `UNHEARD_LOUD_SECONDS` long.
-    """
-    said = [(word.start, word.end) for segment in fresh.segments for word in segment.words]
-    found: List[Tuple[float, float]] = []
-    opened = None
-    for index, level in enumerate([*levels, None]):
-        at = start + index * LEVEL_EVERY_SECONDS
-        loud = level is not None and level >= UNHEARD_LOUD_DB and not any(
-            begins < at + LEVEL_EVERY_SECONDS and ends > at for begins, ends in said)
-        if loud and opened is None:
-            opened = at
-        elif not loud and opened is not None:
-            if at - opened >= UNHEARD_LOUD_SECONDS:
-                found.append((opened, at))
-            opened = None
-    return found
-
-@mcp.tool()
-def get_analysis(
-    asset_id: str,
-    start: Annotated[float, Field(ge=0)] = 0,
-    end: Optional[float] = None,
-    include_words: bool = False,
-) -> dict:
-    """Return the analysis of an asset for a time range.
-
-    Only items overlapping the range are returned. Transcripts of long
-    recordings are large, so read them in windows of about 10 minutes. Times
-    are seconds in the source file and can be used directly as a clip's
-    `source_range`.
-
-    Args:
-        asset_id: ID of the analyzed asset.
-        start: Range start in seconds.
-        end: Range end in seconds; omit for the end of the asset.
-        include_words: Whether to include word-level timings in transcript
-            segments. Use them to cut exactly at a word; leave them out to
-            save space.
-
-    Returns:
-        A dictionary with the asset's `notes` where it has them — how it may
-        be used, which every cut from it has to respect — its `duration`, `analyzed_at`,
-        `transcription` (`fast` — expect misheard words, check them before
-        trusting a cut to a word — `balanced`, `accurate`, or null), `doubtful_spots`
-        (how many stretches in the whole file the speech model was unsure
-        of; null for a transcript made before that was kept), and the
-        overlapping `scenes`, `black_frames`, `frozen_frames`, `silences`,
-        `shots`, and `transcript` (`language`, `model`, `chinese_variant`, and
-        `segments` with `start`, `end`, and `text`), or null for `transcript`
-        if speech was not transcribed.
-
-        In `text`, words the speech model was unsure of are wrapped in ⟦ ⟧.
-        The marks are only here: captions and the video never carry them, so
-        never copy them into anything the user will see. Read the marked
-        stretches with what the footage is about in mind — names and terms
-        are what it mishears — and fix what is wrong through
-        `generate_subtitles`' `fix_words` or by correcting the caption; check
-        by listening before trusting a cut to a marked word.
-
-        `shots` carries one record per shot in the range — `exposure`,
-        `contrast`, `blur`, `motion` and `shake` — while `sound` and `faces`
-        summarise the range's per-second records rather than listing them,
-        since an hour of those is thousands of rows. `faces` says how much of
-        the range had anybody on screen, how many there usually were, and
-        where the largest face sat across the frame and how far it moved,
-        which is what a vertical reframe needs. `speakers` lists the stretches
-        each voice held; the labels are this file's own and mean nothing
-        outside it. `rhythm` is for a file in the music library, and gives
-        the `tempo` in beats per minute and the `beats` in the range; its `tempo` is null when the music has no steady pulse, and
-        the whole of it is null for footage, or for music analyzed before
-        beats were measured. `music`, for a song, has the `moods` and
-        `styles` that set it apart in the library (how it sounds to a model,
-        right about half the time on mood), its `sections` of quiet, middle
-        and full energy, where it is `fullest`, and how it `ends`.
-
-        All of these are measurements and none of them is a verdict: whether a
-        shot is too dark or too wobbly depends on what it is for.
-
-        `recipe` says what measured it, and `stale` is true when the server
-        has since changed how it measures. To pick material out of this, use
-        `query_clips`: every measurement here is also averaged onto the
-        semantic clips, where it can be filtered on.
-
-    Raises:
-        ValueError: If the asset has not been analyzed yet.
-    """
-    analysis = runtime.repo.get_analysis(asset_id)
-    if analysis is None:
-        raise ValueError(f"asset {asset_id} has not been analyzed; call analyze_asset first")
-    end = analysis.duration if end is None else end
-
-    transcript = None
-    if analysis.transcript is not None:
-        exclude = None if include_words else {"words"}
-        transcript = {
-            "language": analysis.transcript.language,
-            "model": analysis.transcript.model,
-            "chinese_variant": analysis.transcript.chinese_variant,
-            "segments": [
-                {**segment.model_dump(exclude=exclude), "text": marked_text(segment)}
-                for segment in analysis.transcript.segments
-                if segment.end > start and segment.start < end
-            ],
-        }
-    notes = shared.get_asset(asset_id).notes
-    return {
-        "asset_id": asset_id,
-        **({"notes": notes} if notes else {}),
-        "duration": analysis.duration,
-        "analyzed_at": analysis.analyzed_at.isoformat(),
-        "recipe": analysis.recipe.model_dump(),
-        "stale": _is_stale(analysis),
-        "transcription": _transcription(analysis),
-        "doubtful_spots": None if analysis.transcript is None else doubtful_spots(analysis.transcript.segments),
-        "range": {"start": start, "end": end},
-        "scenes": shared.overlapping(analysis.scenes, start, end),
-        "black_frames": shared.overlapping(analysis.black_frames, start, end),
-        "frozen_frames": shared.overlapping(analysis.frozen_frames, start, end),
-        "silences": shared.overlapping(analysis.silences, start, end),
-        "shots": shared.overlapping(analysis.shots, start, end),
-        "sound": sound_note(shared.covering(analysis.sound, start, end)),
-        "faces": framing_note(shared.covering(analysis.faces, start, end)),
-        "speakers": shared.overlapping(analysis.speakers, start, end),
-        "rhythm": None if analysis.rhythm is None else {
-            "tempo": analysis.rhythm.tempo,
-            "beats": [beat for beat in analysis.rhythm.beats if start <= beat < end],
-        },
-        "music": None if analysis.music is None or library_of(shared.get_asset(asset_id)) != MUSIC else {
-            **song_tags().get(asset_id, {}),
-            **music_energy.summary(analysis.music.energy),
-        },
-        "transcript": transcript,
-    }
 
 def _clip_summary(clip: SemanticClip) -> dict:
     """Describe a semantic clip in one short record.
@@ -2311,7 +1318,7 @@ def build_semantic_timeline(asset_ids: List[str], rebuild: bool = False) -> dict
     if missing:
         raise ValueError(f"these assets have not been analyzed yet, call analyze_asset on them first: {', '.join(missing)}")
 
-    stale = sorted(asset_id for asset_id, analysis in analyses.items() if _is_stale(analysis))
+    stale = sorted(asset_id for asset_id, analysis in analyses.items() if examining.is_stale(analysis))
     existing = runtime.repo.find_semantic_timeline(timeline_input_hash(analyses))
     if existing is not None and not rebuild:
         voices = voice_seconds(runtime.repo.query_semantic_clips(existing.id, kinds=[ClipKind.SPEECH], limit=-1))
@@ -2642,7 +1649,7 @@ def _outdated(timeline: SemanticTimeline) -> dict:
         found["outdated"] = ("this timeline was built before its files were analyzed again or the rules changed — "
                              "lines since found to be made up may still be in it; build_semantic_timeline over the "
                              "same files for a fresh one")
-    stale = sorted(asset_id for asset_id, analysis in analyses.items() if _is_stale(analysis))
+    stale = sorted(asset_id for asset_id, analysis in analyses.items() if examining.is_stale(analysis))
     if stale:
         found["stale"] = stale
     return found
@@ -3204,8 +2211,8 @@ def view_render(
     Raises:
         ValueError: If the job is not a finished render or its file is gone.
     """
-    job, path = _finished_render(job_id)
-    project = _rendered_from(job)
+    job, path = rendering.finished_render(job_id)
+    project = rendering.rendered_from(job)
     length = float(project.duration) if project is not None else None
     last = length if end is None else (end if length is None else min(end, length))
     said: List[str] = []
@@ -3240,7 +2247,7 @@ def view_render(
         said.append(f"{len(wanted)} frames wanted, the first {shared.MAX_STORYBOARD_TILES} shown; look at the rest with "
                     "a later `start`")
         wanted = wanted[:shared.MAX_STORYBOARD_TILES]
-    if _changed_since(job):
+    if rendering.changed_since(job):
         said.append("the project has been edited since this render, so it may no longer show what the cut is now")
     if length is not None:
         wanted = [(min(seconds, length - 0.05), what) for seconds, what in wanted]
@@ -3274,8 +2281,8 @@ def _project_as_rendered(job: Job) -> Tuple[Optional[Project], bool]:
         when that version is no longer in its history, the project as it is
         now and False. `(None, False)` when the project is gone.
     """
-    project = _rendered_from(job)
-    if project is None or not _changed_since(job):
+    project = rendering.rendered_from(job)
+    if project is None or not rendering.changed_since(job):
         return project, project is not None
     for version in runtime.history.versions_of("projects/", f"{project.id}.json", 50):
         data = _project_json_at(project.id, version.commit)
@@ -3370,7 +2377,7 @@ def inspect_join(
         ValueError: If the job is not a finished render, a number is not in
             the list, or one join is more frames than a sheet holds.
     """
-    job, path = _finished_render(job_id)
+    job, path = rendering.finished_render(job_id)
     project, exact = _project_as_rendered(job)
     if project is None:
         raise ValueError(f"the project render {job_id} was made from is gone, so its joins are not known")
@@ -3378,13 +2385,13 @@ def inspect_join(
     if not exact:
         said.append("the project has been edited since this render and the version rendered is no longer kept, "
                     "so these are the joins of the cut as it is now; render again to be sure")
-    elif _changed_since(job):
+    elif rendering.changed_since(job):
         said.append("the project has been edited since this render; these are the joins of the version rendered")
     listed = joins_in(project, {asset_id: os.path.basename(asset.path)
                                 for asset_id, asset in shared.referenced_assets(project).items()})
     if not listed:
         return ToolResult(content=["\n".join([*said, f"render {job_id} has no joins: it is one shot"])])
-    findings = [finding for finding in _findings(project, job.captioned) if finding.spans]
+    findings = [finding for finding in rendering.check_findings(project, job.captioned) if finding.spans]
     if not joins and not at:
         return ToolResult(content=["\n".join([
             *said, f"Joins of render {job_id}; look at any with `joins` or `at`:",
@@ -3412,7 +2419,7 @@ def inspect_join(
 
     length = float(project.duration)
     frame = project.fps_den / project.fps_num
-    analyses = _analyses(project)
+    analyses = rendering.analyses_of(project)
     placed = place_cues(project, project.subtitles) if project.subtitles else []
     shots: list = []
     borders: list = []
@@ -3640,7 +2647,7 @@ def apply_edits(project_id: str, expected_version: int, operations: list[EditOpe
     """
     before = runtime.repo.get_project(project_id)
     saved = _apply(project_id, expected_version, operations)
-    prepare_playback(saved)
+    rendering.prepare_playback(saved)
     result = {"status": "success", "new_version": saved.version}
     gap = _music_ends_early(saved)
     if gap:
@@ -3813,11 +2820,11 @@ def _plan_context(plan: EditPlan) -> tuple:
     # sound they come from: reading those is interpretation, and the compiler has to stay
     # a pure function of what it is given.
     cuts = {}
-    budget = [BACKFILL_SECONDS]
+    budget = [rendering.BACKFILL_SECONDS]
     for asset_id in sorted(footage | songs):
         analysis = runtime.repo.get_analysis(asset_id)
         if analysis is not None:
-            cuts[asset_id] = clean_cuts(_listened_to(analysis, budget) if asset_id in footage else analysis)
+            cuts[asset_id] = clean_cuts(rendering.listened_to(analysis, budget) if asset_id in footage else analysis)
     return timeline, {clip.id: clip for clip in clips}, children, shared.dated(runtime.repo.get_assets(footage | songs)), cuts
 
 def _require_plan(plan_id: Optional[str]) -> EditPlan:
@@ -4391,7 +3398,7 @@ def compile_plan(project_id: str, expected_version: int, plan_id: Optional[str] 
                     clip.pinned = origin["pinned"]
 
     saved = _apply(project_id, expected_version, operations, stamp=record)
-    prepare_playback(saved)
+    rendering.prepare_playback(saved)
     return {
         "plan_id": plan.id,
         "project_id": project_id,
@@ -4405,7 +3412,7 @@ def compile_plan(project_id: str, expected_version: int, plan_id: Optional[str] 
 
 def _songs_in(plan: EditPlan) -> List[dict]:
     """The songs a plan plays, each with how it sounds, to say when the plan is read back."""
-    heard = song_tags()
+    heard = examining.song_tags()
     found = []
     for cue in plan.music.cues if plan.music is not None else []:
         if cue.asset_id is None or any(song["id"] == cue.asset_id for song in found):
@@ -4504,10 +3511,10 @@ def preview_sound(
     os.makedirs(folder, exist_ok=True)
     # A sound check is looked at once; only the newest of a project's is kept.
     housekeeping.prune(checks, {os.path.basename(folder)})
-    mix = os.path.join(folder, _output_name(project, "sound").replace(".mp4", ".m4a"))
+    mix = os.path.join(folder, rendering.output_name(project, "sound").replace(".mp4", ".m4a"))
     voice, music = os.path.join(folder, "voice.wav"), os.path.join(folder, "music.wav")
-    assets, voices = shared.referenced_assets(project), _voices(project)
-    talking = _talking(project, voices)
+    assets, voices = shared.referenced_assets(project), rendering.voices_of(project)
+    talking = rendering.talking_of(project, voices)
     command = runtime.renderer.build_sound(
         project, assets, mix, voice, music, loudness_target, voices=voices, talking=talking,
     )
@@ -4612,7 +3619,7 @@ def preview_plan_diff(
             lines.append(f"#{number}: {change.status} | {where} | {length} | {', '.join(piece.from_clip_ids)}")
     if len(shots) > shared.MAX_STORYBOARD_TILES:
         lines.append(f"the sheet shows the first {shared.MAX_STORYBOARD_TILES} of {len(shots)} shots")
-    shape = FRAME_SHAPES.get(aspect) if aspect else None
+    shape = rendering.FRAME_SHAPES.get(aspect) if aspect else None
     image = storyboard_sheet(
         shots[:shared.MAX_STORYBOARD_TILES], aspect=shape[0] / shape[1] if shape else None,
         borders=borders[:shared.MAX_STORYBOARD_TILES],
@@ -4660,202 +3667,6 @@ def propose_broll(plan_id: Optional[str] = None) -> dict:
     _, clips, children, assets, cuts = _plan_context(plan)
     pieces = plan_pieces(plan, clips, children, assets, cuts)
     return {"plan_id": plan.id, "slots": broll_slots(plan, pieces, clips, cuts)}
-
-@mcp.tool()
-def preview_project(
-    project_id: str,
-    count: Annotated[int, Field(ge=1, le=shared.MAX_STORYBOARD_TILES)] = 12,
-    frame: Optional[Literal["landscape", "portrait", "square"]] = None,
-    follow_faces: bool = True,
-) -> ToolResult:
-    """Look at the edited sequence as one labeled storyboard image.
-
-    A storyboard takes seconds, while `render_project` takes minutes, so use
-    it to check an edit before rendering: the order of the clips, what each
-    one opens on, and whether a cut lands somewhere wrong. Every clip gets at
-    least one tile and longer clips get more, so a short clip is never missed;
-    only a project with more clips than the sheet holds is thinned out, and
-    the text says how many were skipped.
-    Tiles are labeled with their time in the edited result and the clip they
-    come from, and cropped the way the render crops, so a vertical project
-    shows vertical tiles. Tiles come from the base video track, which is the
-    sequence itself. Black gaps and audio tracks are listed in the text, since
-    they cannot be seen in the frames, and so is anything on a higher video
-    track — an inset, or covering picture over the whole frame, in which case
-    the tiles for that stretch show the sequence underneath rather than what
-    the viewer will see.
-
-    Args:
-        project_id: ID of the project to look at.
-        count: Number of frames to sample. Raised to one per clip when the
-            project has more clips than this.
-        frame: Show the cut in another shape, the way `render_project` with
-            the same `frame` would render it; omit for the project's own.
-        follow_faces: Crop around the face the way the render does; the
-            same setting as `render_project`'s.
-
-    Returns:
-        A text block describing the output format, every tile, the black gaps,
-        and the audio tracks, followed by the storyboard as a JPEG image.
-
-    Raises:
-        ValueError: If the project does not exist, has no clips on a video
-            track, or a video clip uses an asset without video.
-        RuntimeError: If frames cannot be decoded.
-    """
-    project = runtime.repo.get_project(project_id)
-    if not project:
-        raise ValueError(f"project {project_id} not found")
-    project = _reshaped(project, frame)
-
-    # Tiles come from the base track, which is the sequence; tracks above it are insets, noted in the text.
-    base = project.base_video_track
-    clips = sorted(base.clips, key=lambda clip: clip.timeline_in) if base else []
-    if not clips:
-        raise ValueError(f"project {project_id} has no clips on a video track to preview")
-
-    assets = shared.referenced_assets(project)
-    for clip in clips:
-        asset = assets.get(clip.asset_id)
-        if asset is None:
-            raise ValueError(f"clip {clip.id}: asset {clip.asset_id} not found")
-        if not asset.has_video:
-            raise ValueError(
-                f"clip {clip.id}: asset {asset.id} has no video stream; "
-                "put audio-only assets on an audio track"
-            )
-
-    framing = _framing(project, assets, follow_faces)
-    fps = Fraction(project.fps_num, project.fps_den)
-
-    # Where the picture really goes black, found over the whole sequence rather than over
-    # the tiles chosen below. A clip left out of the storyboard is not a hole in the edit,
-    # and reading the gaps off the sampled list turned every skipped clip into one.
-    total_clips = len(clips)
-    gaps: List[List[tuple[Decimal, Decimal]]] = [[] for _ in clips]
-    running_out = Decimal(0)
-    for index, clip in enumerate(clips):
-        if clip.timeline_in > running_out:
-            gaps[index].append((running_out, clip.timeline_in))
-        running_out = clip.timeline_out
-
-    def gap_line(opened: Decimal, closed: Decimal) -> str:
-        """Describe one stretch of black picture for the listing."""
-        return (
-            f"-- black gap {format_timestamp(float(opened))} to "
-            f"{format_timestamp(float(closed))} ({float(closed - opened):.3f}s)"
-        )
-
-    # One tile per clip is the floor, so a one-second clip in a long edit is still shown.
-    omitted = max(0, total_clips - shared.MAX_STORYBOARD_TILES)
-    if omitted:
-        stride = total_clips / shared.MAX_STORYBOARD_TILES
-        chosen = sorted({min(int(stride * index), total_clips - 1) for index in range(shared.MAX_STORYBOARD_TILES)})
-    else:
-        chosen = list(range(total_clips))
-    # Every tile carries what fell between the tile before it and itself, so a clip that is
-    # not drawn is still counted and a real gap behind it is still reported.
-    spans = list(zip([-1, *chosen], chosen))
-    skipped = [later - earlier - 1 for earlier, later in spans]
-    carried = [
-        [gap for index in range(earlier + 1, later + 1) for gap in gaps[index]]
-        for earlier, later in spans
-    ]
-    clips = [clips[index] for index in chosen]
-    per_clip = [1] * len(clips)
-    for _ in range(max(count, len(clips)) - len(clips)):
-        # Give the next frame to whichever clip currently covers the most seconds per frame.
-        longest = max(range(len(clips)), key=lambda index: float(clips[index].timeline_duration) / per_clip[index])
-        per_clip[longest] += 1
-
-    shots: List[tuple] = []
-    listing: List[str] = []
-    for position, (clip, frames) in enumerate(zip(clips, per_clip)):
-        if skipped[position]:
-            listing.append(f"-- {skipped[position]} clip(s) not shown")
-        listing.extend(gap_line(opened, closed) for opened, closed in carried[position])
-        asset = assets[clip.asset_id]
-        start, end = float(clip.source_range.start), float(clip.source_range.end)
-        step = (end - start) / frames
-        if clip.card is not None:
-            # One tile: the card's background. Its words are in the listing, not on the tile.
-            number = len(shots) + 1
-            at = float(clip.timeline_in)
-            shots.append((asset.path, float(clip.card.at), f"#{number}  {format_timestamp(at)}  title card",
-                          placement_at(framing.get(clip.id), clip, float(clip.card.at), fps), clip.card))
-            words = clip.card.title + (f" / {clip.card.subtitle}" if clip.card.subtitle else "")
-            listing.append(f"#{number}: clip {clip.id} | edit {format_timestamp(at)} | title card 「{words}」 "
-                           f"for {end - start:g}s on {clip.card.background} (words not drawn on the tile)")
-            continue
-        for offset in range(frames):
-            # Sample the middle of each interval, and stay clear of the very last frame, which may not decode.
-            seconds = start + step * (offset + 0.5)
-            if asset.duration is not None:
-                seconds = min(seconds, float(asset.duration) - 0.05)
-            seconds = round(max(seconds, 0.0), 3)
-            at = float(clip.timeline_in) + (seconds - start) / clip.speed
-            number = len(shots) + 1
-            label = clip.id if len(clip.id) <= 10 else f"{clip.id[:9]}~"
-            framed = framing.get(clip.id)
-            shots.append((
-                asset.path, seconds, f"#{number}  {format_timestamp(at)}  {label}",
-                placement_at(framed, clip, seconds, fps),
-            ))
-            # Drawn over the render, not over this tile: said instead.
-            over = [text.text for text in clip.shown_texts if text.start <= seconds < text.end]
-            listing.append(
-                f"#{number}: clip {clip.id} | edit {format_timestamp(at)} | "
-                f"source {seconds:.3f}s ({format_timestamp(seconds)})"
-                + (f" | text on screen: {' / '.join(f'「{words}」' for words in over)}" if over else "")
-            )
-
-    # Sampling can stop short of the last clip, so say what runs on past the final tile.
-    trailing = total_clips - 1 - chosen[-1]
-    if trailing:
-        listing.append(f"-- {trailing} clip(s) not shown")
-        for index in range(chosen[-1] + 1, total_clips):
-            listing.extend(gap_line(opened, closed) for opened, closed in gaps[index])
-
-    for track in project.video_tracks[1:]:
-        for clip in sorted(track.clips, key=lambda item: item.timeline_in):
-            box = clip.layout
-            # A clip with no layout fills the frame, which means it replaces what the
-            # tiles show rather than sitting in a corner of it. Said plainly, because a
-            # storyboard of a B-roll pass otherwise looks like the pass never happened.
-            what = (
-                "covering picture, over the whole frame — the tiles in this stretch show "
-                "the sequence underneath, not this" if box is None
-                else f"inset at {box.x:.0%} across and {box.y:.0%} down, "
-                     f"{box.width:.0%} x {box.height:.0%} of the frame"
-            )
-            listing.append(
-                f"-- track {track.id}: clip {clip.id}, "
-                f"{format_timestamp(float(clip.timeline_in))} to {format_timestamp(float(clip.timeline_out))}, {what}"
-            )
-
-    for track in project.tracks:
-        if track.track_type != TrackType.AUDIO or not track.clips:
-            continue
-        covered_from = min(clip.timeline_in for clip in track.clips)
-        covered_to = max(clip.timeline_out for clip in track.clips)
-        volumes = sorted({clip.volume for clip in track.clips})
-        level = f"volume {volumes[0]}" if len(volumes) == 1 else f"volumes {', '.join(str(v) for v in volumes)}"
-        listing.append(
-            f"-- audio track {track.id}: {len(track.clips)} clip(s), "
-            f"{format_timestamp(float(covered_from))} to {format_timestamp(float(covered_to))}, {level}"
-        )
-
-    header = (
-        f"Storyboard of project {project_id} in timeline order: {project.width}x{project.height}, "
-        f"{project.fps_num}/{project.fps_den} fps, {format_timestamp(float(project.duration))} long, "
-        f"{len(shots)} frames from {total_clips} clip(s)."
-    )
-    if omitted:
-        header += f" {omitted} clip(s) were skipped: the project has more clips than tiles."
-    return ToolResult(content=[
-        "\n".join([header, *listing]),
-        Image(data=storyboard_sheet(shots, aspect=project.width / project.height), format="jpeg"),
-    ])
 
 def _joined_people(project: Project, heard: Mapping[str, Sequence[SpeakerTurn]]) -> Dict[Tuple[str, str], str]:
     """Work out which person each file's speaker label is, across the files of a project.
@@ -5136,7 +3947,7 @@ def _caption_sources(project: Project) -> Dict[str, dict]:
         doubted = unsure_words(words)
         if doubted:
             found["unsure"] = doubted
-            if _bare_words("".join(word.text for word in words)) == _bare_words(cue.text):
+            if examining.bare_words("".join(word.text for word in words)) == examining.bare_words(cue.text):
                 found["marked"] = marked_words(words)
         sources[cue.id] = found
     return sources
@@ -5234,657 +4045,6 @@ def get_subtitles(
         "stored": len(project.subtitles),
         "window": {"start": start, "end": limit},
     }
-
-def _output_name(project: Project, kind: str) -> str:
-    """Name a rendered file after the project it came from.
-
-    A render used to be `<job uuid>/<project uuid>_output.mp4`, which is two
-    identifiers and nothing a person can pick out of a folder. That is why
-    finished cuts end up copied somewhere else under a name somebody made up
-    — and next to the footage is the worst of the places they end up, because
-    a cut sitting among its own sources is indistinguishable from source.
-
-    Args:
-        project: The project being rendered.
-        kind: `output` or `preview`.
-
-    Returns:
-        A file name. The project's name where it has one, with anything a
-        filesystem would refuse taken out, and its ID where the name is
-        missing or survives sanitising as nothing. Each render has its own
-        directory, so two of the same project do not collide.
-    """
-    stem = "".join(NAME_LOOKALIKES.get(character, " ") if character in FORBIDDEN_IN_NAMES else character
-                   for character in (project.name or ""))
-    stem = " ".join(stem.split())[:MAX_OUTPUT_NAME].strip(" .")
-    return f"{stem or project.id}_{kind}.mp4"
-
-def _renamed(project: Project) -> dict:
-    """Say when a render's file is not named exactly as its project is, and why.
-
-    Args:
-        project: The project rendered.
-
-    Returns:
-        `file_named` with the name the file takes, when a character a file
-        name cannot hold was changed; empty otherwise.
-    """
-    if not project.name or not any(character in FORBIDDEN_IN_NAMES for character in project.name):
-        return {}
-    stem = _output_name(project, "x")[: -len("_x.mp4")]
-    return {"file_named": f"「{stem}」: a file name cannot hold some of the characters in 「{project.name}」, "
-                          "so they were swapped for ones that look alike"}
-
-def _delivered(job_id: str) -> bool:
-    """Whether a full render finished and its file was saved, so its working folder can go."""
-    job = runtime.repo.get_job(job_id)
-    return job is not None and job.status == JobStatus.COMPLETED
-
-def _delivery_name(project: Project, kind: str, extension: str, captioned: bool = False) -> str:
-    """Name a file saved for the user after the project: `EP1 台北.mp4`, `EP1 台北 封面.jpg`.
-
-    Args:
-        project: The project it came from.
-        kind: `output`, `cover` or `timeline`, with `-portrait` and the like
-            for another shape.
-        extension: With its dot.
-        captioned: Whether its captions are burned in.
-
-    Returns:
-        A file name; the caller makes it unique in its folder.
-    """
-    stem = _output_name(project, "x")[: -len("_x.mp4")]
-    return housekeeping.delivery_name(stem, kind, extension, captioned)
-
-# A preview is rendered with its short side this long, from pictures cached at that size.
-PREVIEW_SHORT_SIDE = 480
-# Cached preview pictures nobody has used for this long are thrown away. Housekeeping,
-# not a judgement: a picture is re-rendered in seconds if it is wanted again.
-PICTURE_CACHE_DAYS = 14
-
-def _preview_sized(project: Project, side: int = PREVIEW_SHORT_SIDE) -> Project:
-    """Shrink a project to the size its preview is rendered at.
-
-    Args:
-        project: The project.
-        side: The preview's short side.
-
-    Returns:
-        A copy with its short side `side` long, or the project itself when it
-        is already that small.
-    """
-    short = min(project.width, project.height)
-    if short <= side:
-        return project
-    scale = side / short
-    even = lambda value: max(2, int(round(value * scale / 2)) * 2)
-    return project.model_copy(update={"width": even(project.width), "height": even(project.height)})
-
-def _picture_cache() -> str:
-    """Find the cache of preview pictures, clearing out what has not been used lately.
-
-    Returns:
-        The cache directory.
-    """
-    folder = os.path.join(runtime.WORKSPACE_DIR, "cache", "pictures")
-    os.makedirs(folder, exist_ok=True)
-    stale = time.time() - PICTURE_CACHE_DAYS * 86400
-    for entry in os.scandir(folder):
-        try:
-            # A part file is a picture some render never finished; a day is long enough
-            # for any render still writing one to be done with it.
-            limit = time.time() - 86400 if entry.name.endswith(".part.mp4") else stale
-            if entry.stat().st_mtime < limit:
-                os.remove(entry.path)
-        except OSError:
-            pass
-    return folder
-
-# The shapes a cut is delivered in, as width to height.
-FRAME_SHAPES = {"landscape": (16, 9), "portrait": (9, 16), "square": (1, 1)}
-
-def _reshaped(project: Project, frame: Optional[str]) -> Project:
-    """Give a project another shape for one render, leaving the stored one alone.
-
-    The short side is kept, because that is the side a platform's resolution
-    is quoted by: 1080p is 1080 across the short side whichever way up it is.
-
-    Args:
-        project: The project.
-        frame: `landscape`, `portrait`, `square`, or None for as it is.
-
-    Returns:
-        A copy at the new size, or the project itself when no shape was asked for.
-    """
-    if frame is None:
-        return project
-    across, down = FRAME_SHAPES[frame]
-    short = min(project.width, project.height)
-    even = lambda value: max(2, int(round(value / 2)) * 2)
-    if across >= down:
-        width, height = even(short * across / down), short
-    else:
-        width, height = short, even(short * down / across)
-    return project.model_copy(update={"width": width, "height": height})
-
-def _framing(project: Project, assets: Mapping[str, Asset], follow_faces: bool = True) -> Dict[str, Framing]:
-    """Work out how each clip sits in the frame: where its crop goes, or whether it is shown whole.
-
-    Args:
-        project: The project, at the size it is being rendered at.
-        assets: Its files.
-        follow_faces: Whether a crop may follow the face in a shot.
-
-    Returns:
-        A framing per clip that is not simply cropped from the middle, keyed
-        by clip ID.
-    """
-    faces = {}
-    for asset_id in assets:
-        analysis = runtime.repo.get_analysis(asset_id)
-        if analysis is not None and analysis.faces:
-            faces[asset_id] = analysis.faces
-    return frame_project(project, shared.sized(assets), faces, follow_faces)
-
-@mcp.tool()
-def render_project(
-    project_id: str,
-    is_preview: bool = True,
-    loudness_target: Annotated[Optional[float], Field(ge=-40, le=-5)] = DEFAULT_LOUDNESS_TARGET,
-    burn_subtitles: bool = False,
-    frame: Optional[Literal["landscape", "portrait", "square"]] = None,
-    follow_faces: bool = True,
-    # Every kind of finding the check makes, from the check's own list, so a new one can always be allowed.
-    allow: Optional[List[Literal[CHECKS]]] = None,
-) -> dict:
-    """Start rendering a project to an MP4 file in the background.
-
-    Before a final render, read skill://clip-editing/platform-conventions.md;
-    after any render, look at it with `view_render` and `inspect_join`. A
-    final render is refused until a preview of the cut as it is now, in the
-    same shape, has finished: that preview is what was looked at.
-
-    Before anything is rendered the cut is checked the way `check_render`
-    checks it, and a full render is refused while it finds anything: black
-    or frozen picture on screen, a voice recorded clipping, a caption too
-    tall for the frame, or a length far from what the plan asked for. Fix
-    the cut, or name the kinds of finding the user has decided to live with
-    in `allow`. Previews are never refused — they are how you look — but
-    say what they found.
-
-    Returns immediately. Poll `get_job` with the returned `job_id` until the
-    job reaches a terminal status, or stop it with `cancel_job`. Rendering
-    runs in a separate worker process and continues even if this server
-    restarts.
-
-    Args:
-        project_id: ID of the project to render.
-        is_preview: True, the default, renders a fast preview, 480 pixels on
-            its short side; false renders the full-quality output. A preview renders each
-            clip's picture once and keeps it: after a change, only the clips
-            the change touched are rendered again, so a second preview of a
-            long cut takes a fraction of the first.
-        loudness_target: Loudness of the finished file in LUFS. The default,
-            -14, is what streaming platforms normalize to, so clips recorded
-            on different devices come out at one consistent level instead of
-            jumping. Pass null to leave the mix exactly as the clip volumes
-            set it.
-        burn_subtitles: If true, burn the project's stored captions into the
-            picture. Store them first with a `set_subtitles` operation;
-            `generate_subtitles` proposes them from the transcripts.
-        frame: Render the same cut in another shape — `landscape` (16:9),
-            `portrait` (9:16) or `square` — without touching the project.
-            The short side stays the project's, so a 1920x1080 project comes
-            out at 1080x1920 portrait and 1080x1080 square. Call once per
-            shape to deliver one cut to several platforms. Omit it for the
-            project's own size.
-        follow_faces: Where a shot is wider (or taller) than the frame it is
-            shown in, crop it around the face the analysis found rather than
-            from the middle. The crop holds still while the face stays inside
-            it and cuts to a new framing once the face has sat near the edge
-            for a couple of seconds — it never pans. Shots with no face seen
-            are cropped from the middle either way.
-        allow: Kinds of finding to render in spite of, after the user has
-            heard about them and said so. Never fill this in on your own.
-
-    Returns:
-        A dictionary with the `job_id`, the initial `status`, `stage`, and the
-        absolute `output_path` the file will be written to. A full render is
-        saved in the user's videos folder under the project's name, such as
-        `Videos\\clip-mcp\\EP1 台北.mp4`, with what sets it apart from the
-        project's other videos in brackets — `EP1 台北（直式、字幕）.mp4` — and
-        `(2)` is added rather than overwrite one already there; `get_job` gives the final path once it is
-        done. A preview is a working file in the workspace, and only the
-        newest preview of each project is kept.
-        Renders and analyses run one or two at a time, so that several of them
-        cannot exhaust the machine's memory between them; `stage` says what a
-        job that has not started yet is waiting for, and is null when it
-        started immediately. `findings` lists what the check found that this
-        render went ahead in spite of. The parts of the video, where it has
-        markers, are carried in the file as chapters. A preview also says how
-        many clip `pictures` it `rendered` and how many it `reused`.
-
-    Raises:
-        ValueError: If the project does not exist, contains no clips, uses an
-            unsupported feature, has no finished preview of this version in
-            this shape for a final render, or the check found something not
-            allowed.
-    """
-    if not is_preview and not _previewed(project_id, frame):
-        raise ValueError(
-            "no preview of the cut as it is now" + (f", {frame}," if frame else "") + " has finished: render one "
-            "with is_preview: true, look at it with view_render and inspect_join, then render the final cut"
-        )
-    return _start_render(
-        project_id, is_preview, loudness_target, burn_subtitles, frame, follow_faces, allow, PREVIEW_SHORT_SIDE,
-    )
-
-def _previewed(project_id: str, frame: Optional[str]) -> bool:
-    """Whether a preview of a project as it is now, in one shape, has finished.
-
-    Args:
-        project_id: The project.
-        frame: The shape, or None for the project's own.
-
-    Returns:
-        True when there is one; False too when the project does not exist,
-        which rendering says in its own words.
-    """
-    project = runtime.repo.get_project(project_id)
-    return project is not None and any(
-        job.preview and job.project_version == project.version and job.frame == frame
-        for job in runtime.repo.renders_of(project_id)
-    )
-
-def _start_render(
-    project_id: str,
-    is_preview: bool,
-    loudness_target: Optional[float],
-    burn_subtitles: bool,
-    frame: Optional[str],
-    follow_faces: bool,
-    allow: Optional[List[str]],
-    preview_side: int,
-) -> dict:
-    """Start a render; what `render_project` does, with the preview's size open.
-
-    The editor app previews at 720 pixels so captions and mouths can be read;
-    a client previews at 480, which is quicker and plenty to judge a cut by.
-    The size is not on the tool, so a client is never asked to choose it.
-
-    Args:
-        project_id: As for `render_project`, and the rest likewise.
-        preview_side: The short side of a preview, in pixels.
-
-    Returns:
-        As `render_project`.
-    """
-    project = runtime.repo.get_project(project_id)
-    if not project:
-        raise ValueError(f"project {project_id} not found")
-
-    project = _reshaped(project, frame)
-    findings = _findings(project, burn_subtitles)
-    # The words on screen are laid out at the size the video is delivered at, and libass shrinks
-    # them with a preview's frame: laid out again at the preview's size, pixels rounded otherwise
-    # break a caption into lines elsewhere than the finished video does.
-    drawn_at = project
-    if is_preview:
-        project = _preview_sized(project, preview_side)
-    blocking = [finding for finding in findings if finding.check not in (allow or [])]
-    if blocking and not is_preview:
-        raise ValueError(
-            "the cut is not ready to render:\n- " + "\n- ".join(finding.message for finding in blocking)
-            + "\nFix these, or once the user has said to go ahead anyway, render again with allow="
-            + str(sorted({finding.check for finding in blocking}))
-        )
-    kind = ("preview" if is_preview else "output") + (f"-{frame}" if frame else "")
-    if is_preview:
-        _make_room()
-    housekeeping.sweep_renders(runtime.WORKSPACE_DIR, _delivered)
-    job = Job(kind=JobKind.RENDER, project_id=project_id, project_version=project.version, captioned=burn_subtitles,
-              preview=is_preview, frame=frame)
-    delivered: Optional[str] = None
-    if is_preview:
-        job.work_dir = os.path.join(housekeeping.preview_dir(runtime.WORKSPACE_DIR, project_id), job.job_id)
-        job.output_path = os.path.join(job.work_dir, _output_name(project, kind))
-    else:
-        # Rendered in the workspace and moved out whole once finished, so the videos
-        # folder never holds half a file.
-        job.work_dir = os.path.join(housekeeping.render_dir(runtime.WORKSPACE_DIR), job.job_id)
-        delivered = housekeeping.unique_path(str(output_dir()), _delivery_name(project, kind, ".mp4", burn_subtitles))
-    render_path = os.path.join(job.work_dir, _output_name(project, kind))
-
-    subtitle_path = None
-    placed: list = []
-    if burn_subtitles:
-        if not project.subtitles:
-            raise ValueError(
-                f"project {project_id} has no captions to burn; "
-                "propose them with generate_subtitles and store them with a set_subtitles operation"
-            )
-        placed = place_cues(project, project.subtitles)
-        if not placed:
-            raise ValueError(
-                f"project {project_id} has captions, but none of the footage they transcribe is in the cut; "
-                "run generate_subtitles again against the sequence as it stands"
-            )
-    # Title cards' words and the words over the footage go through the same file as the
-    # captions, burned or not.
-    titles = cards.ass_events(drawn_at, drawn_at.caption_style) + texts.ass_events(drawn_at, drawn_at.caption_style)
-    if placed or titles:
-        os.makedirs(job.work_dir, exist_ok=True)
-        subtitle_path = os.path.join(job.work_dir, "subtitles.ass")
-        with open(subtitle_path, "w", encoding="utf-8") as handle:
-            handle.write(build_ass(placed, drawn_at.width, drawn_at.height, drawn_at.caption_style, titles,
-                                   texts.ass_styles(drawn_at, drawn_at.caption_style)))
-
-    chapters_path = None
-    listed, _ = chapters(project)
-    if listed:
-        os.makedirs(job.work_dir, exist_ok=True)
-        chapters_path = os.path.join(job.work_dir, "chapters.txt")
-        with open(chapters_path, "w", encoding="utf-8") as handle:
-            handle.write(chapter_metadata(listed))
-
-    assets = shared.referenced_assets(project)
-    framing = _framing(project, assets, follow_faces)
-    voices = _voices(project)
-    talking = _talking(project, voices)
-    pieces: list = []
-    if is_preview:
-        cache = _picture_cache()
-        command, pieces = runtime.renderer.build_incremental(
-            project, assets, render_path, cache,
-            loudness_target=loudness_target, subtitle_path=subtitle_path, framing=framing,
-            chapters_path=chapters_path, voices=voices, talking=talking,
-        )
-        # What this preview reads from the cache counts as used, so it is kept.
-        for argument in command:
-            if argument.startswith(cache) and os.path.exists(argument):
-                os.utime(argument)
-    else:
-        command = runtime.renderer.build_command(
-            project, assets, render_path, loudness_target=loudness_target, subtitle_path=subtitle_path,
-            framing=framing, chapters_path=chapters_path, voices=voices, talking=talking,
-        )
-    # One input per clip, all opened at once, is what a render's memory use is made of.
-    job.memory_estimate = resources.render_memory_bytes(command.count("-i"))
-    spec = {
-        "command": command, "duration_seconds": float(runtime.renderer.output_duration(project)), "pieces": pieces,
-        "render_path": render_path,
-    }
-    if delivered:
-        job.output_path = delivered
-        spec["deliver"] = delivered
-    else:
-        spec["prune"] = os.path.dirname(job.work_dir)
-    if loudness_target is not None:
-        mix_path = os.path.join(job.work_dir, "mix.wav")
-        spec["loudness"] = {
-            "mix_command": runtime.renderer.build_mix(project, assets, mix_path, voices=voices, talking=talking),
-            "mix_path": mix_path, "target": loudness_target,
-        }
-    job = runtime.job_manager.start_job(job, spec)
-    # Every clip on a picture track is one picture, the sequence's and the ones drawn over it.
-    pictures = sum(len(track.clips) for track in project.video_tracks)
-
-    result = {
-        "job_id": job.job_id, "status": job.status.value, "stage": job.stage, "output_path": job.output_path,
-        **_renamed(project),
-        "findings": [{"check": finding.check, "message": finding.message} for finding in findings],
-    }
-    if is_preview:
-        result["pictures"] = {"rendered": len(pieces), "reused": pictures - len(pieces)}
-    return result
-
-def _talking(project: Project, voices: Mapping[str, float]) -> Optional[Talking]:
-    """Work out from the transcripts where a cut has somebody talking, and how loud.
-
-    Args:
-        project: The project about to be rendered.
-        voices: Its narration tracks, from `_voices`, with the gain each is
-            heard at.
-
-    Returns:
-        Where somebody is heard talking, and the gain that brings each music
-        track's songs to that talking, as `levels.talking` works them out.
-        None when any clip whose words are heard was never transcribed: then
-        nobody knows where all the talking is, and the music ducks by level.
-    """
-    assets = shared.referenced_assets(project)
-    return talking_in(
-        project, assets, _analyses(project), voices, lambda clip: song_level(assets[clip.asset_id].path, clip),
-    )
-
-def _voices(project: Project) -> Dict[str, float]:
-    """Find the tracks a render treats as a voice recorded apart from the picture.
-
-    Args:
-        project: The project about to be rendered.
-
-    Returns:
-        As `voice_keys`, with each voice clip's talking measured from its file.
-    """
-    assets = shared.referenced_assets(project)
-
-    def loudness(clip: Clip) -> Optional[float]:
-        asset = assets.get(clip.asset_id)
-        if asset is None:
-            return None
-        start, end = float(clip.source_range.start), float(clip.source_range.end)
-        return speech_loudness(asset.path, start, end - start)
-
-    return voice_keys(project, _analyses(project), loudness)
-
-def _analyses(project: Project, listened: bool = False) -> Dict[str, MediaAnalysis]:
-    """Read the analysis of every file a project plays.
-
-    Args:
-        project: The project.
-        listened: Whether each transcribed file has to have had its second
-            listen, which is taken now for one analyzed before there was one.
-
-    Returns:
-        The analyses that exist, keyed by asset ID.
-    """
-    found: Dict[str, MediaAnalysis] = {}
-    budget = [BACKFILL_SECONDS]
-    for asset_id in sorted({clip.asset_id for track in project.tracks for clip in track.clips}):
-        analysis = runtime.repo.get_analysis(asset_id)
-        if analysis is not None:
-            found[asset_id] = _listened_to(analysis, budget) if listened else analysis
-    return found
-
-# Provisional (roadmap §13): how much footage one tool call may give its second listen while
-# the caller waits — a compile or a check is a tool call, not a background job, and on a
-# processor a minute of footage takes most of a minute to hear again.
-BACKFILL_SECONDS = 600.0
-
-def _listened_to(analysis: MediaAnalysis, budget: List[float]) -> MediaAnalysis:
-    """A file's analysis as cuts are judged by: its second listen taken, its kept hearings put in.
-
-    Args:
-        analysis: The file's analysis.
-        budget: As for `_second_listened`.
-
-    Returns:
-        The analysis, with the word times of every stretch heard again and kept.
-    """
-    return with_words_heard_again(_second_listened(analysis, budget))
-
-def _second_listened(analysis: MediaAnalysis, budget: List[float]) -> MediaAnalysis:
-    """Give a transcribed file its second listen, if it was analyzed before there was one.
-
-    Once per file, and kept: it takes a few seconds for a short clip and
-    about the length of a long recording divided by twenty on a GPU. Only
-    as much footage as is left of `budget`, so a call is never held up for
-    long: a file that does not fit is judged by its transcript alone this
-    time and heard on a later call, and one longer than the whole budget
-    gets its second listen when it is analyzed again. Where the file has
-    gone or the listen fails, the analysis is handed back without it too —
-    a check that cannot run is no reason to stop an edit.
-
-    Args:
-        analysis: The file's analysis.
-        budget: Seconds of footage this call may still hear again, as a
-            one-item list each file's listen is taken off.
-
-    Returns:
-        The analysis, with its second listen when it could be taken.
-    """
-    if analysis.transcript is None or analysis.second_listen is not None:
-        return analysis
-    if analysis.duration > budget[0]:
-        return analysis
-    asset = runtime.repo.get_assets([analysis.asset_id]).get(analysis.asset_id)
-    if asset is None or not os.path.exists(asset.path):
-        return analysis
-    budget[0] -= analysis.duration
-    try:
-        listened = second_listen(asset.path, analysis.transcript, lambda fraction: None, lambda: False)
-    except (RuntimeError, OSError, ValueError):
-        return analysis
-    # Read again before writing, so an analysis taken again meanwhile is not overwritten
-    # with the one this started from.
-    current = runtime.repo.get_analysis(analysis.asset_id)
-    if current is None or current.analyzed_at != analysis.analyzed_at:
-        return analysis.model_copy(update={"second_listen": listened})
-    current.second_listen = listened
-    runtime.repo.save_analysis(current)
-    return current
-
-def _plan_target(project: Project) -> Optional[float]:
-    """Find how long the plan a project was compiled from asked it to run.
-
-    Args:
-        project: The project.
-
-    Returns:
-        The plan's target length, or None when the sequence did not all come
-        from one plan or that plan named no length.
-    """
-    plan = _compiled_plan(project)
-    return plan.target.seconds if plan is not None else None
-
-def _compiled_plan(project: Project) -> Optional[EditPlan]:
-    """The plan a project's whole sequence was compiled from; None when it did not all come from one."""
-    base = project.base_video_track
-    compiled_from = {clip.from_plan_id for clip in base.clips} if base else set()
-    if len(compiled_from) != 1 or None in compiled_from:
-        return None
-    return runtime.repo.get_plan(next(iter(compiled_from)))
-
-def _findings(project: Project, burn_subtitles: bool) -> list:
-    """Check a cut before it is rendered.
-
-    Args:
-        project: The project, at the size it will be rendered at.
-        burn_subtitles: Whether its captions will be burned in.
-
-    Returns:
-        What `delivery.check_delivery` finds.
-    """
-    placed = place_cues(project, project.subtitles) if burn_subtitles and project.subtitles else None
-    assets = shared.referenced_assets(project)
-    dated = shared.dated(assets)
-    analyses = _analyses(project, listened=True)
-    return check_delivery(
-        project, analyses, _plan_target(project), placed, project.caption_style,
-        _talking(project, _voices(project)), {asset_id: asset.recorded_at for asset_id, asset in dated.items()},
-        _looks(look_candidates(project, analyses), assets),
-    )
-
-def _looks(clips: Sequence[Clip], assets: Mapping[str, Asset]) -> Dict[str, Tuple[int, ...]]:
-    """Fingerprint clips at `looks.SAMPLES`, reading only the frames not fingerprinted before.
-
-    Args:
-        clips: The clips.
-        assets: Their files, keyed by asset ID.
-
-    Returns:
-        The fingerprints by clip ID, for the clips whose file has a picture to read.
-    """
-    found: Dict[str, Tuple[int, ...]] = {}
-    for asset_id in {clip.asset_id for clip in clips}:
-        asset = assets.get(asset_id)
-        if asset is None or not asset.has_video or not os.path.exists(asset.path):
-            continue
-        kept = runtime.repo.looks(asset_id)
-        new: Dict[float, int] = {}
-        for clip in (clip for clip in clips if clip.asset_id == asset_id):
-            start, length = float(clip.source_range.start), float(clip.source_range.end - clip.source_range.start)
-            moments = [round(start + length * share, 1) for share in looks.SAMPLES]
-            try:
-                for at in moments:
-                    if at not in kept and at not in new:
-                        new[at] = looks.look_of(asset.path, at)
-            except RuntimeError:
-                continue
-            found[clip.id] = tuple(kept.get(at, new.get(at)) for at in moments)
-        if new:
-            runtime.repo.save_looks(asset_id, new)
-    return found
-
-@mcp.tool()
-def check_render(
-    project_id: str,
-    frame: Optional[Literal["landscape", "portrait", "square"]] = None,
-    burn_subtitles: bool = False,
-) -> dict:
-    """Check a cut for what would be noticed in the finished file, without rendering it.
-
-    The same check `render_project` runs first and refuses a render over. It
-    looks for ten things: `bad_picture`, black or frozen source picture that
-    reaches the screen; `clipping`, a recording squared off at the ceiling,
-    which no amount of turning down undoes; `music`, music heard too close
-    under somebody talking; `mid_speech`, a cut that lands
-    inside a word or between two words of one phrase, or takes the start or
-    the end off a sound the microphone measured, with where to move it; `repeated`, the same stretch of a file shown twice;
-    `look_alike`, two clips from different files that look so alike, with
-    nothing said or written over them, that a viewer could not tell which is
-    which; `continuity`, a clip put on by hand between two shot at another
-    moment; `unplanned`, a sequence of three or more clips put together by hand
-    rather than compiled from a plan, so nothing says how it opens, turns
-    and ends; `captions`, a caption too tall for
-    the frame — most likely when a landscape cut is rendered portrait — or on
-    screen too briefly to read, with no room left in its shot to hold it; and
-    `length`, a cut far from the length its plan asked for. Each is a fact
-    about the cut, not a verdict on it: black may be meant, and the user may
-    prefer the longer cut. Tell them, and let them decide.
-
-    Args:
-        project_id: ID of the project to check.
-        frame: Check it in another shape, as `render_project` would render it.
-        burn_subtitles: Check the captions as they would be burned in.
-
-    Returns:
-        A dictionary with `ok` and `findings`, each with its `check` and a
-        `message` saying what and where; and `light`, where the picture jumps
-        in brightness or colour from one shot to the next within a part, with
-        the adjustment that would even it out. `light` never stops a render:
-        a jump may be the point. Offer the adjustment, and check again once
-        it is set.
-
-    Raises:
-        ValueError: If the project does not exist.
-    """
-    project = runtime.repo.get_project(project_id)
-    if not project:
-        raise ValueError(f"project {project_id} not found")
-    if project.base_video_track is None or not project.base_video_track.clips:
-        # Nothing checked is not the same as nothing wrong (#96).
-        raise ValueError(f"project {project_id} has nothing on its sequence to check yet; compile a plan or "
-                         "add clips first")
-    findings = _findings(_reshaped(project, frame), burn_subtitles)
-    checked = {
-        "ok": not findings,
-        "findings": [{"check": finding.check, "message": finding.message} for finding in findings],
-    }
-    light = light_steps(project, _analyses(project))
-    if light:
-        checked["light"] = light
-    return checked
 
 @mcp.tool()
 def read_cut(project_id: str) -> dict:
@@ -6040,8 +4200,8 @@ def propose_covers(
     project = runtime.repo.get_project(project_id)
     if not project:
         raise ValueError(f"project {project_id} not found")
-    project = _reshaped(project, frame)
-    analyses = _analyses(project)
+    project = rendering.reshaped(project, frame)
+    analyses = rendering.analyses_of(project)
     if around is None:
         offered = [
             (clip, seconds, float(clip.timeline_in) + (seconds - float(clip.source_range.start)) / clip.speed)
@@ -6063,7 +4223,7 @@ def propose_covers(
     left_out = max(0, len(offered) - shared.MAX_STORYBOARD_TILES)
     offered = offered[:shared.MAX_STORYBOARD_TILES]
     assets = shared.referenced_assets(project)
-    framing = _framing(project, assets, follow_faces)
+    framing = rendering.framing_of(project, assets, follow_faces)
     fps = Fraction(project.fps_num, project.fps_den)
     said = place_cues(project, project.subtitles) if project.subtitles else []
     shots, listing = [], []
@@ -6075,7 +4235,7 @@ def propose_covers(
                        + (f" | 「{words}」" if words else ""))
     header = [f"{len(offered)} cover candidate(s) for project {project_id}, {project.width}x{project.height}"
               + (f", around {around:g}s" if around is not None else "") + ":"]
-    plan = _compiled_plan(project)
+    plan = rendering.compiled_plan(project)
     if plan is not None and (plan.goal or plan.beats):
         parts = " → ".join(beat.name or beat.id for beat in plan.beats)
         header.insert(0, "What the video is for: " + (plan.goal or "(no goal written)")
@@ -6125,7 +4285,7 @@ def export_cover(
     project = runtime.repo.get_project(project_id)
     if not project:
         raise ValueError(f"project {project_id} not found")
-    project = _reshaped(project, frame)
+    project = rendering.reshaped(project, frame)
     clip = on_screen(project, seconds)
     if clip is None:
         raise ValueError(f"nothing is on screen at {seconds:g}s of project {project_id}")
@@ -6133,13 +4293,13 @@ def export_cover(
         raise ValueError(f"{seconds:g}s of project {project_id} is a title card; take the cover from a shot")
     assets = shared.referenced_assets(project)
     source = float(clip.source_range.start) + (seconds - float(clip.timeline_in)) * clip.speed
-    framed = _framing(project, assets, follow_faces).get(clip.id)
+    framed = rendering.framing_of(project, assets, follow_faces).get(clip.id)
     fps = Fraction(project.fps_num, project.fps_den)
     picture = still(assets[clip.asset_id].path, source, project.width, project.height,
                     placement_at(framed, clip, source, fps))
     folder = str(output_dir())
     os.makedirs(folder, exist_ok=True)
-    path = housekeeping.unique_path(folder, _delivery_name(project, "cover" + (f"-{frame}" if frame else ""), ".jpg"))
+    path = housekeeping.unique_path(folder, rendering.delivery_name(project, "cover" + (f"-{frame}" if frame else ""), ".jpg"))
     picture.save(path, "JPEG", quality=92)
     saved = {"output_path": path, "width": project.width, "height": project.height, "reason": reason}
     grid = ", and the 3:4 middle a profile grid crops a vertical video to" if project.height > project.width else ""
@@ -6236,153 +4396,16 @@ def export_timeline(
                           + ", ".join(clip.card.title for clip in titled[:6]) + (" …" if len(titled) > 6 else ""))
         # Decided at render time from the recordings, so the writers, which never see an
         # analysis, cannot say it. Only which tracks, not how loud: nothing is measured.
-        if voice_keys(project, _analyses(project), lambda clip: None):
+        if voice_keys(project, rendering.analyses_of(project), lambda clip: None):
             behind.append("the footage's sound ducking under a narration, and the narration brought up to level")
     folder = str(output_dir())
     os.makedirs(folder, exist_ok=True)
-    path = housekeeping.unique_path(folder, _delivery_name(project, "timeline", f".{format}"))
+    path = housekeeping.unique_path(folder, rendering.delivery_name(project, "timeline", f".{format}"))
     # UTF-8 with a byte-order mark only for the EDL: the programs that read EDLs guess the
     # encoding, and a Chinese file name in a FROM CLIP NAME comes out garbled without it.
     with open(path, "w", encoding="utf-8-sig" if format == "edl" else "utf-8", newline="\n") as handle:
         handle.write(text)
     return {"output_path": path, "left_behind": behind}
-
-# Whether edits start making what the browser needs to play them. Off where nobody will
-# watch, such as a test run.
-PREPARE_PLAYBACK = True
-# What a preparation job is expected to hold in memory: one FFmpeg encoding a small picture.
-# Provisional: an estimate, not measured.
-PREPARE_MEMORY_BYTES = 300 * 1024 * 1024
-# Giving cache room back looks at the disk at most this often, in seconds. Provisional.
-ROOM_CHECK_SECONDS = 60
-
-def _being_prepared() -> set:
-    """The files preparation jobs still waiting or running will write, so none is asked for twice."""
-    paths = set()
-    for job in runtime.repo.jobs_to_show(datetime.now(timezone.utc))[0]:
-        if job.kind != JobKind.PREPARE or not job.work_dir:
-            continue
-        try:
-            with open(os.path.join(job.work_dir, "job.json"), encoding="utf-8") as spec:
-                paths.update(step["path"] for step in json.load(spec).get("steps", []))
-        except (OSError, ValueError):
-            continue
-    return paths
-
-def _frame_rate(asset: Asset) -> float:
-    """A file's frame rate as its first picture stream says, or 0 when it does not."""
-    try:
-        streams = probe_file(asset.path).get("streams", [])
-    except (OSError, RuntimeError):
-        return 0.0
-    for stream in streams:
-        if stream.get("codec_type") == "video":
-            try:
-                return float(Fraction(stream.get("avg_frame_rate") or stream.get("r_frame_rate") or "0"))
-            except (ValueError, ZeroDivisionError):
-                return 0.0
-    return 0.0
-
-def _start_preparing(steps: List[dict], urgent: bool, asset_id: Optional[str] = None,
-                     project_id: Optional[str] = None) -> Optional[str]:
-    """Queue one preparation job over its steps; returns its ID, or None when there was nothing to do."""
-    if not steps:
-        return None
-    job = Job(kind=JobKind.PREPARE, asset_id=asset_id, project_id=project_id, priority=-1 if urgent else 1,
-              memory_estimate=PREPARE_MEMORY_BYTES)
-    job.work_dir = os.path.join(runtime.WORKSPACE_DIR, "jobs", job.job_id)
-    return runtime.job_manager.start_job(job, {"steps": steps}).job_id
-
-def prepare_playback(project: Project, urgent: bool = False) -> List[str]:
-    """Start making what the browser still needs to play a cut: proxies, repaired sound, its loudness.
-
-    Each is made once and kept by what went into it, so this costs nothing
-    for what is already there or already being made.
-
-    Args:
-        project: The cut.
-        urgent: Somebody is waiting to watch it, so it goes ahead of the
-            other work waiting; otherwise it waits behind it.
-
-    Returns:
-        The IDs of the jobs started.
-    """
-    if not PREPARE_PLAYBACK:
-        return []
-    _make_room()
-    assets = shared.referenced_assets(project)
-    busy = _being_prepared()
-    proxies = playback.proxy_dir(runtime.WORKSPACE_DIR)
-    started = []
-    for asset_id in playback.missing(project, assets, os.listdir(proxies)):
-        asset = assets[asset_id]
-        path = os.path.join(proxies, playback.proxy_name(asset))
-        if path in busy:
-            continue
-        step = {"command": playback.proxy_command(asset, path + ".part", _frame_rate(asset)), "part": path + ".part",
-                "path": path, "seconds": float(asset.duration or 1), "stage": "making a copy to play from"}
-        started.append(_start_preparing([step], urgent, asset_id=asset_id))
-    sound = playback.sound_dir(runtime.WORKSPACE_DIR)
-    steps = []
-    for track in project.tracks:
-        for clip in track.clips:
-            asset = assets.get(clip.asset_id)
-            name = playback.repair_name(clip, asset) if asset is not None and playback.needs_repair(clip) else None
-            path = os.path.join(sound, name) if name else None
-            if path and not os.path.exists(path) and path not in busy:
-                steps.append({"command": playback.repair_command(clip, asset, path + ".part"), "part": path + ".part",
-                              "path": path, "seconds": float(clip.source_range.end - clip.source_range.start),
-                              "stage": "repairing a voice"})
-    gain = os.path.join(sound, playback.mix_key(project) + ".json")
-    if project.tracks and float(project.duration) > 0 and not os.path.exists(gain) and gain not in busy:
-        voices = _voices(project)
-        mix = gain + ".wav"
-        steps.append({"command": runtime.renderer.build_mix(project, assets, mix, voices, _talking(project, voices)),
-                      "part": mix, "path": gain, "seconds": float(project.duration), "measure": True,
-                      "target": playback.LOUDNESS_TARGET, "stage": "measuring loudness"})
-    started.append(_start_preparing(steps, urgent, project_id=project.id))
-    return [job_id for job_id in started if job_id]
-
-def playback_of(project: Project, urgent: bool = True) -> dict:
-    """Describe a cut for the browser to play, and start making whatever it still lacks.
-
-    Args:
-        project: The cut, as it is now or as it was at a version.
-        urgent: Whether somebody is waiting to watch it.
-
-    Returns:
-        What `playback.describe` returns.
-    """
-    assets = shared.referenced_assets(project)
-    proxies = playback.proxy_dir(runtime.WORKSPACE_DIR)
-    sound = playback.sound_dir(runtime.WORKSPACE_DIR)
-    have = {}
-    for asset_id, asset in assets.items():
-        name = playback.proxy_name(asset)
-        if name and os.path.exists(os.path.join(proxies, name)):
-            have[asset_id] = f"/proxy/{name}"
-    repaired = {}
-    for track in project.tracks:
-        for clip in track.clips:
-            asset = assets.get(clip.asset_id)
-            if asset is None or not playback.needs_repair(clip):
-                continue
-            name = playback.repair_name(clip, asset)
-            if name and os.path.exists(os.path.join(sound, name)):
-                repaired[clip.id] = f"/sound/{name}"
-    gain = None
-    measured = os.path.join(sound, playback.mix_key(project) + ".json")
-    if os.path.exists(measured):
-        with open(measured, encoding="utf-8") as kept:
-            gain = json.load(kept).get("gain_db")
-    voices = _voices(project)
-    described = playback.describe(
-        project, assets, playback.Prepared(have, repaired, gain), _talking(project, voices), voices,
-        _framing(project, assets),
-    )
-    if described["waiting"] or gain is None:
-        prepare_playback(project, urgent=urgent)
-    return described
 
 # What the user can mark a version as. `exported` is a third mark, never set by hand: a
 # version that was rendered out, not as a preview, wears it by itself.
@@ -6634,16 +4657,6 @@ def restore_from_trash(key: str) -> dict:
     back = housekeeping.take_out_of_trash(outputs, key)
     return {"kind": what.kind, "name": what.name, "project_id": project_id, "files": back}
 
-_room_checked = 0.0
-
-def _make_room() -> None:
-    """Give cache room back if the disk is running low, at most once a minute."""
-    global _room_checked
-    if time.monotonic() - _room_checked < ROOM_CHECK_SECONDS:
-        return
-    _room_checked = time.monotonic()
-    housekeeping.give_cache_back(runtime.WORKSPACE_DIR, runtime.repo.active_job_ids())
-
 def _base_clips(data: Optional[dict]) -> List[dict]:
     """A project's sequence, as its file holds it, in the order it plays."""
     base = next((track for track in (data or {}).get("tracks", []) if track.get("track_type") == "video"), None)
@@ -6875,7 +4888,7 @@ def restore_version(project_id: str, commit: str, expected_version: int, note: s
         "id": project_id, "version": current.version + 1, "branched_from": current.branched_from,
     })
     runtime.repo.update_project(restored, current.version)
-    prepare_playback(runtime.repo.get_project(project_id))
+    rendering.prepare_playback(runtime.repo.get_project(project_id))
     return {
         "new_version": restored.version,
         "restored": {"commit": chosen.commit[:10], "what": chosen.subject} if chosen else {"commit": commit},
@@ -6923,7 +4936,7 @@ def branch_project(project_id: str, name: str, commit: Optional[str] = None, not
     })
     shared.say_in_history(f"從「{current.name or project_id}」開分支「{branch.name}」")
     runtime.repo.add_project(branch)
-    prepare_playback(branch)
+    rendering.prepare_playback(branch)
     folder = runtime.repo.folder_of("projects").get(project_id)
     if folder:
         runtime.repo.file_items("projects", [branch.id], folder)
@@ -7119,7 +5132,7 @@ def merge_versions(project_id: str, commit_a: str, commit_b: Optional[str], pick
                                        "name": current.name, "branched_from": current.branched_from})
     validate_project(result, runtime.repo.get_assets({clip.asset_id for track in result.tracks for clip in track.clips}))
     runtime.repo.update_project(result, current.version)
-    prepare_playback(runtime.repo.get_project(project_id))
+    rendering.prepare_playback(runtime.repo.get_project(project_id))
     said = {"new_version": result.version, "seconds": round(float(result.duration), 3), "from_a": taken}
     if plan_said:
         said["plan"] = plan_said
@@ -7285,7 +5298,7 @@ def start_trial(
         ValueError: If the render is not a finished one of this project, or
             the stretch is outside it.
     """
-    job, path = _finished_render(before_job)
+    job, path = rendering.finished_render(before_job)
     if job.project_id != project_id:
         raise ValueError(f"render {before_job} is not of project {project_id}")
     length = _render_length(path)
@@ -7328,7 +5341,7 @@ def trial_candidate(
         raise ValueError(f"there is no trial {trial_id}")
     if trial.verdict is not None:
         raise ValueError(f"trial {trial_id} has been judged; start another")
-    job, path = _finished_render(after_job)
+    job, path = rendering.finished_render(after_job)
     if (job.project_id != trial.project_id or after_job == trial.before_job
             or (job.project_version or 0) <= (trial.before_version or 0)):
         raise ValueError(f"render {after_job} is not a render of project {trial.project_id} made after the change; "
@@ -7682,7 +5695,7 @@ def song_trial(project: Project, offer: SongOffer, number: int) -> Project:
 
 def _offered_cue(project: Project, offer: SongOffer) -> Optional[Tuple[EditPlan, MusicCue]]:
     """The music cue of the plan the cut was compiled from that the offered stretch is, if it is one."""
-    plan = _compiled_plan(project)
+    plan = rendering.compiled_plan(project)
     if plan is None or plan.music is None or (offer.beat_id is None and offer.start > 0):
         return None
     cue = next((cue for cue in plan.music.cues if cue.beat_id == offer.beat_id), None)

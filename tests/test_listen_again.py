@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from app import runtime, server
+from app.tools import examining, rendering
 from app.engine import analysis
 from app.models.media import MediaAnalysis, Transcript, TranscriptSegment, TranscriptWord
 
@@ -30,7 +31,7 @@ def heard(media: Path, monkeypatch: pytest.MonkeyPatch) -> dict:
     return {"asset": asset, "asked": asked}
 
 def test_a_stretch_is_heard_again_without_the_transcript_and_kept_to_listen_to(heard: dict) -> None:
-    found = server.listen_again(asset_id=heard["asset"], start=1.5, end=4.5)
+    found = examining.listen_again(asset_id=heard["asset"], start=1.5, end=4.5)
     # Nothing of the first pass is handed to the model: no prompt, only this stretch of sound.
     assert heard["asked"]["prompt"] is None and heard["asked"]["duration"] == pytest.approx(3.0)
     assert found["heard"] == "沒那麼順" and found["stored"] == "怎麼那麼順"
@@ -42,9 +43,9 @@ def test_a_stretch_is_heard_again_without_the_transcript_and_kept_to_listen_to(h
 
 def test_only_a_short_stretch_is_heard_again(heard: dict) -> None:
     with pytest.raises(ValueError, match="30"):
-        server.listen_again(asset_id=heard["asset"], start=0, end=45)
+        examining.listen_again(asset_id=heard["asset"], start=0, end=45)
     with pytest.raises(ValueError, match="after"):
-        server.listen_again(asset_id=heard["asset"], start=4, end=3)
+        examining.listen_again(asset_id=heard["asset"], start=4, end=3)
 
 def hears(said: str, probability: float = 0.93):
     """A speech model that hears `said` from 0.5s to 1.5s into whatever it is given."""
@@ -56,14 +57,14 @@ def hears(said: str, probability: float = 0.93):
     return model
 
 def test_a_hearing_that_disagrees_with_the_transcript_is_not_kept(heard: dict) -> None:
-    found = server.listen_again(asset_id=heard["asset"], start=1.5, end=4.5, keep=True)
+    found = examining.listen_again(asset_id=heard["asset"], start=1.5, end=4.5, keep=True)
     # 「沒那麼順」 against 「怎麼那麼順」: neither is believed, so the user is asked.
     assert "different words" in found["not_kept"] and "kept" not in found
     assert runtime.repo.get_analysis(heard["asset"]).heard_again == []
 
 def test_an_unsure_hearing_is_not_kept(heard: dict, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(analysis, "_run_whisper", hears("怎麼那麼順", probability=0.2))
-    found = server.listen_again(asset_id=heard["asset"], start=1.5, end=4.5, keep=True)
+    found = examining.listen_again(asset_id=heard["asset"], start=1.5, end=4.5, keep=True)
     assert "unsure" in found["not_kept"]
 
 def test_a_stretch_heard_again_and_kept_is_what_cuts_are_judged_by(heard: dict,
@@ -72,7 +73,7 @@ def test_a_stretch_heard_again_and_kept_is_what_cuts_are_judged_by(heard: dict,
 
     monkeypatch.setattr(analysis, "_run_whisper", hears("怎麼那麼順"))
     before = runtime.repo.get_analysis(heard["asset"])
-    found = server.listen_again(asset_id=heard["asset"], start=1.5, end=4.5, keep=True)
+    found = examining.listen_again(asset_id=heard["asset"], start=1.5, end=4.5, keep=True)
     assert "check the cut again" in found["kept"]
     after = runtime.repo.get_analysis(heard["asset"])
     assert [(item.start, item.end) for item in after.heard_again] == [(1.5, 4.5)]
@@ -83,7 +84,7 @@ def test_a_stretch_heard_again_and_kept_is_what_cuts_are_judged_by(heard: dict,
              for word in segment.words]
     assert words == [(pytest.approx(2.0), pytest.approx(3.0), "怎麼那麼順")]
     with pytest.raises(ValueError, match="only what a file says is kept"):
-        server.listen_again(job_id="any", start=0, end=1, keep=True)
+        examining.listen_again(job_id="any", start=0, end=1, keep=True)
 
 def test_a_stretch_where_nobody_was_heard_again_keeps_no_words() -> None:
     made = MediaAnalysis(asset_id="x", duration=10.0, transcript=Transcript(language="zh", model="t", segments=[
@@ -96,7 +97,7 @@ def test_a_stretch_where_nobody_was_heard_again_keeps_no_words() -> None:
 
 def test_a_stretch_with_a_word_across_its_edge_is_not_kept(heard: dict, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(analysis, "_run_whisper", hears("怎麼那麼順"))
-    found = server.listen_again(asset_id=heard["asset"], start=3.0, end=4.5, keep=True)
+    found = examining.listen_again(asset_id=heard["asset"], start=3.0, end=4.5, keep=True)
     # 「怎麼那麼順」 runs 2.0–4.0s: kept, it would be there twice, cut back to 3.0s and as heard.
     assert found["not_kept"].endswith("hear 2.000s to 4.500s again with keep")
     assert runtime.repo.get_analysis(heard["asset"]).heard_again == []
@@ -120,7 +121,7 @@ def test_a_render_is_heard_a_shot_at_a_time_across_its_cuts(heard: dict, monkeyp
     # Two shots meeting at 2s of the render; each is heard on its own, and both are said.
     project = build_project([video_track(), insert("a", heard["asset"], 0, 2), insert("b", heard["asset"], 4, 6)],
                             width=640, height=360)
-    job = finished(server.render_project(project))
+    job = finished(rendering.render_project(project))
     lengths = []
 
     def model(device, path, duration, language, prompt, on_progress, is_cancelled, on_measured=None,
@@ -130,7 +131,7 @@ def test_a_render_is_heard_a_shot_at_a_time_across_its_cuts(heard: dict, monkeyp
             start=0.2, end=0.6, text="對", words=[TranscriptWord(start=0.2, end=0.6, text="對", probability=0.9)])])
 
     monkeypatch.setattr(analysis, "_run_whisper", model)
-    found = server.listen_again(job_id=job["job_id"], start=1.0, end=3.5)
+    found = examining.listen_again(job_id=job["job_id"], start=1.0, end=3.5)
     assert lengths == [1.0, 1.5]
     assert [word["start"] for word in found["words"]] == pytest.approx([1.2, 2.2])
     with wave.open(found["audio_path"]) as sound:
@@ -141,19 +142,19 @@ def test_two_hearings_of_a_made_up_line_do_not_agree(heard: dict, monkeypatch: p
         language="zh", model="test", segments=[TranscriptSegment(start=2.0, end=3.0, text="謝謝觀看", words=[
             TranscriptWord(start=2.0, end=3.0, text="謝謝觀看", probability=0.9)])])}))
     monkeypatch.setattr(analysis, "_run_whisper", hears("謝謝觀看"))
-    found = server.listen_again(asset_id=heard["asset"], start=1.5, end=3.5)
+    found = examining.listen_again(asset_id=heard["asset"], start=1.5, end=3.5)
     assert found["made_up"] is True and found["agrees"] is False
 
 def test_a_render_loud_where_nothing_was_heard_says_so() -> None:
-    from app.server import UNHEARD_LOUD_SECONDS, _loud_without_words
+    from app.tools.examining import UNHEARD_LOUD_SECONDS, loud_without_words
 
     said = Transcript(language="zh", model="t", segments=[TranscriptSegment(start=10.0, end=11.0, text="對", words=[
         TranscriptWord(start=10.0, end=11.0, text="對", probability=0.9)])])
     # Loud from 10s to 14s, a word only in the first second of it; quiet after.
     levels = [-20.0] * 8 + [-60.0] * 4
-    found = _loud_without_words(levels, 10.0, said)
+    found = loud_without_words(levels, 10.0, said)
     assert found == [(11.0, 14.0)] and found[0][1] - found[0][0] >= UNHEARD_LOUD_SECONDS
-    assert _loud_without_words([-60.0] * 8, 10.0, said) == []
+    assert loud_without_words([-60.0] * 8, 10.0, said) == []
 
 def test_where_two_hearings_differ_the_times_of_the_words_they_agree_on_are_kept(
     media: Path, monkeypatch: pytest.MonkeyPatch,
@@ -177,7 +178,7 @@ def test_where_two_hearings_differ_the_times_of_the_words_they_agree_on_are_kept
                 TranscriptWord(start=2.3, end=2.6, text="然後", probability=0.9)])])
 
     monkeypatch.setattr(analysis, "_run_whisper", model)
-    found = server.listen_again(asset_id=asset, start=1.5, end=4.5, keep=True)
+    found = examining.listen_again(asset_id=asset, start=1.5, end=4.5, keep=True)
     assert "2 word(s) the two heard alike" in found["kept"] and "四件" in found["kept"]
     [kept] = runtime.repo.get_analysis(asset).heard_again
     assert [(word.text, word.start, word.end) for word in kept.words] == [
@@ -204,7 +205,7 @@ def test_one_word_heard_unsure_keeps_its_own_time_and_not_the_whole_stretch_s(
                 TranscriptWord(start=1.6, end=2.4, text="晚餐", probability=0.9)])])
 
     monkeypatch.setattr(analysis, "_run_whisper", model)
-    found = server.listen_again(asset_id=asset, start=1.5, end=4.5, keep=True)
+    found = examining.listen_again(asset_id=asset, start=1.5, end=4.5, keep=True)
     assert found["agrees"] and found["kept_words"] == ["錯了", "晚餐"] and found["left_as_transcribed"] == ["是"]
     [kept] = runtime.repo.get_analysis(asset).heard_again
     assert [(word.text, word.start, word.end) for word in kept.words] == [

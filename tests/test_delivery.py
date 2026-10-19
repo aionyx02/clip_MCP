@@ -32,9 +32,8 @@ from app.models.timeline import (
     CaptionStyle, Clip, ClipLayout, Dissolve, Marker, PlacedCue, Project, SpeakerMark, TimeRange, Track, TrackType,
 )
 from app.runtime import repo
-from app.server import (
-    check_render, export_cover, export_timeline, get_chapters, import_asset, render_project,
-)
+from app.tools.rendering import check_render, render_project
+from app.server import export_cover, export_timeline, get_chapters, import_asset
 from helpers import build_project, edit, finished, insert, video_track
 
 def clip(clip_id: str, asset_id: str, start: float, end: float, at: float, **fields) -> Clip:
@@ -728,7 +727,8 @@ def test_a_shot_darker_than_the_ones_either_side_is_offered_the_brightness_that_
 
 def test_checking_a_project_with_nothing_on_it_is_not_an_all_clear() -> None:
     """#96: a project whose compile was refused checked out `ok` with nothing in it."""
-    from app.server import check_render, create_project
+    from app.tools.rendering import check_render
+    from app.server import create_project
 
     project = create_project(name="空的", width=640, height=360)["id"]
     with pytest.raises(ValueError, match="nothing on its sequence to check"):

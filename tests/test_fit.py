@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from app import runtime, server
-from app.tools import shared
+from app.tools import rendering, shared
 from app.engine.frames import _crop_to_aspect
 from app.engine.reframe import Placement, crop_filter, place_clip
 from app.models.media import FaceMeasurement
@@ -71,7 +71,7 @@ def test_a_landscape_shot_in_a_vertical_video_renders_whole_over_its_blur(media:
     asset = server.import_asset(str(media / "wide.mp4"))["id"]
     project = build_project([video_track(), insert("a", asset, 0, 2)], width=360, height=640, name="直式")
     stored = runtime.repo.get_project(project)
-    framing = server._framing(stored, shared.referenced_assets(stored))
+    framing = rendering.framing_of(stored, shared.referenced_assets(stored))
     assert framing["a"].whole
     render(project, tmp_path / "out.mp4", loudness_target=None, framing=framing)
     picture = extract_frame(str(tmp_path / "out.mp4"), 1.0, max_size=640).convert("L")

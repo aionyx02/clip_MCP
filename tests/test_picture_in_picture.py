@@ -5,7 +5,8 @@ from pathlib import Path
 import pytest
 
 from app.engine.frames import extract_frame
-from app.server import import_asset, preview_project
+from app.tools.rendering import preview_project
+from app.server import import_asset
 from helpers import build_project, clips_of, edit, insert, layout, level, render, video_track
 
 def brightness(path: Path, seconds: float, box: tuple) -> float:

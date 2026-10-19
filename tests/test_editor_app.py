@@ -9,6 +9,7 @@ import pytest
 from starlette.testclient import TestClient
 
 from app import runtime, server
+from app.tools import examining, rendering
 from app.models.offer import OfferedSong
 from app.ui import app as editor
 from app.ui import dialogs
@@ -189,7 +190,7 @@ def test_captioning_asks_before_transcribing_and_says_if_the_model_must_download
     assert asked["replaces"] == 1
     assert isinstance(asked["model_missing"], bool)
     started = []
-    monkeypatch.setattr(server, "analyze_asset", lambda ids, *rest: started.append((ids, rest)) or {"jobs": [{"job_id": "j1"}]})
+    monkeypatch.setattr(examining, "analyze_asset", lambda ids, *rest: started.append((ids, rest)) or {"jobs": [{"job_id": "j1"}]})
     assert client.post(f"/api/projects/{project}/captions/make", json={"transcribe": True}).json() == {"jobs": ["j1"]}
     assert started[0][1][3] == "zh-TW"
 
@@ -208,7 +209,7 @@ def test_a_chosen_song_comes_back_as_an_asset(client: TestClient, media: Path, m
 def test_the_check_before_export_is_the_servers_own(client: TestClient, media: Path, monkeypatch) -> None:
     project, _ = captioned_project(client, media)
     asked = []
-    monkeypatch.setattr(server, "check_render", lambda *args: asked.append(args) or {"ok": True, "findings": []})
+    monkeypatch.setattr(rendering, "check_render", lambda *args: asked.append(args) or {"ok": True, "findings": []})
     assert client.get(f"/api/projects/{project}/check?frame=portrait&captions=1").json()["ok"] is True
     assert asked == [(project, "portrait", True)]
 
@@ -218,7 +219,7 @@ def test_an_export_goes_ahead_only_over_what_the_user_was_shown(client: TestClie
     def fake_render(*args):
         asked.append(args)
         return {"job_id": "missing-job"}
-    monkeypatch.setattr(server, "_start_render", fake_render)
+    monkeypatch.setattr(rendering, "start_render", fake_render)
     answer = client.post(f"/api/projects/{project}/export", json={"frame": "", "captions": False, "allow": ["mid_speech"]})
     assert answer.status_code == 200
     project_id, preview, _, captions, frame, _, allow, _ = asked[0]
@@ -446,9 +447,9 @@ def test_a_project_being_rendered_is_not_deleted(client: TestClient, ended_after
     from app.models.job import Job, JobKind, JobStatus
 
     project = server.create_project(name="輸出中")
-    rendering = Job(kind=JobKind.RENDER, status=JobStatus.RUNNING, project_id=project["id"])
-    runtime.repo.add_job(rendering)
-    ended_after.append(rendering.job_id)
+    render_job = Job(kind=JobKind.RENDER, status=JobStatus.RUNNING, project_id=project["id"])
+    runtime.repo.add_job(render_job)
+    ended_after.append(render_job.job_id)
     answer = client.post("/api/projects/delete", json={"ids": [project["id"]]})
     assert answer.status_code == 409 and answer.json()["busy"] == ["輸出中"]
     assert runtime.repo.get_project(project["id"]) is not None
@@ -471,13 +472,13 @@ def test_the_editor_sees_jobs_the_ai_started_with_what_they_are_for(
     runtime.repo.save_asset(asset)
     project = server.create_project(name="抽杯架 v3")
     analysing = Job(kind=JobKind.ANALYZE, status=JobStatus.RUNNING, asset_id=asset.id, progress=0.4)
-    rendering = Job(kind=JobKind.RENDER, project_id=project["id"])
-    for job in (analysing, rendering):
+    render_job = Job(kind=JobKind.RENDER, project_id=project["id"])
+    for job in (analysing, render_job):
         runtime.repo.add_job(job)
         ended_after.append(job.job_id)
     listed = {job["job_id"]: job for job in client.get("/api/jobs/active").json()["jobs"]}
     assert listed[analysing.job_id]["name"] == "訪談.mp4" and listed[analysing.job_id]["progress"] == 0.4
-    assert listed[rendering.job_id]["name"] == "抽杯架 v3" and listed[rendering.job_id]["status"] == "queued"
+    assert listed[render_job.job_id]["name"] == "抽杯架 v3" and listed[render_job.job_id]["status"] == "queued"
 
 def test_a_job_can_be_stopped_from_the_editor(client: TestClient, ended_after: list) -> None:
     from app.models.job import Job, JobKind

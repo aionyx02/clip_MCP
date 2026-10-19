@@ -5,15 +5,8 @@ import time
 from pathlib import Path
 
 from app.runtime import WORKSPACE_DIR
-from app.server import (
-    _OPERATIONS,
-    apply_edits,
-    create_project,
-    import_asset,
-    render_project,
-    storage_usage,
-    tidy_old_outputs,
-)
+from app.tools.rendering import render_project
+from app.server import _OPERATIONS, apply_edits, create_project, import_asset, storage_usage, tidy_old_outputs
 from app.storage import housekeeping
 from app.workspace import output_dir
 from helpers import finished

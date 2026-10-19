@@ -25,7 +25,8 @@ from app.engine.reframe import (
 from app.models.media import FaceMeasurement, MediaAnalysis
 from app.models.timeline import Clip, TimeRange
 from app.runtime import repo
-from app.server import _framing, _reshaped, import_asset
+from app.tools.rendering import framing_of, reshaped
+from app.server import import_asset
 from app.tools.shared import referenced_assets
 from helpers import build_project, insert, video_track
 
@@ -148,11 +149,11 @@ def portrait(project_id: str, path: Path, follow_faces: bool = True) -> None:
         path: File to write.
         follow_faces: Whether the crop follows the face.
     """
-    project = _reshaped(repo.get_project(project_id), "portrait")
+    project = reshaped(repo.get_project(project_id), "portrait")
     assets = referenced_assets(project)
     command = FFmpegRenderer().build_command(
         project, assets, str(path), loudness_target=None,
-        framing=_framing(project, assets) if follow_faces else None,
+        framing=framing_of(project, assets) if follow_faces else None,
     )
     result = subprocess.run(command, capture_output=True)
     assert result.returncode == 0, result.stderr.decode("utf-8", errors="replace")[-800:]
@@ -200,9 +201,9 @@ def test_the_shapes_keep_the_short_side() -> None:
     from app.models.timeline import Project
 
     wide = Project(id="p", width=1920, height=1080)
-    assert (_reshaped(wide, "portrait").width, _reshaped(wide, "portrait").height) == (1080, 1920)
-    assert (_reshaped(wide, "square").width, _reshaped(wide, "square").height) == (1080, 1080)
-    assert _reshaped(wide, None) is wide
+    assert (reshaped(wide, "portrait").width, reshaped(wide, "portrait").height) == (1080, 1920)
+    assert (reshaped(wide, "square").width, reshaped(wide, "square").height) == (1080, 1080)
+    assert reshaped(wide, None) is wide
 
 def test_the_storyboard_shows_the_framing_the_render_will_have(tmp_path: Path) -> None:
     """Checking a portrait cut before rendering is only worth anything if it is cropped the same way."""
@@ -211,7 +212,7 @@ def test_the_storyboard_shows_the_framing_the_render_will_have(tmp_path: Path) -
 
     from PIL import Image
 
-    from app.server import preview_project
+    from app.tools.rendering import preview_project
 
     asset = square_video(tmp_path, "board.mp4", "drawbox=x=480:y=140:w=80:h=80:color=white:t=fill")
     repo.save_analysis(MediaAnalysis(asset_id=asset, duration=8.0, faces=seconds_at(*[0.8125] * 8)))

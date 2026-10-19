@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from app import runtime, server
+from app.tools import examining
 from app.engine.analysis import current_recipe, whisper_model_name
 from app.engine.diarize import speaker_model_name
 from app.engine.rhythm import rhythm_model_name
@@ -81,12 +82,12 @@ def test_a_folder_is_analyzed_in_one_call_and_what_is_current_is_left_alone(foot
         whisper_model_name(), speaker_model=speaker_model_name(), rhythm_model=rhythm_model_name(),
     )))
 
-    result = server.analyze_asset(assets)
+    result = examining.analyze_asset(assets)
     assert [item["asset_id"] for item in result["skipped"]] == [assets[1]] and "is current" in result["skipped"][0]["reason"]
     assert [job["asset_id"] for job in result["jobs"]] == started == [assets[0], *assets[2:]]
 
     started.clear()
-    assert [job["asset_id"] for job in server.analyze_asset(assets, again=True)["jobs"]] == assets
+    assert [job["asset_id"] for job in examining.analyze_asset(assets, again=True)["jobs"]] == assets
 
 def test_a_batch_of_jobs_is_read_back_with_one_summary() -> None:
     done = Job(kind=JobKind.ANALYZE, status=JobStatus.COMPLETED, progress=1.0)

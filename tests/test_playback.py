@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from app import runtime, server
+from app.tools import rendering
 from app.engine import playback, renderer
 from app.models.job import Job, JobKind, JobStatus
 from helpers import build_project, edit, insert, video_track
@@ -29,9 +30,9 @@ def wait_for(job_ids) -> None:
 @pytest.fixture
 def preparing():
     """Make what the browser needs after every edit, as the server does outside tests."""
-    server.PREPARE_PLAYBACK = True
+    rendering.PREPARE_PLAYBACK = True
     yield
-    server.PREPARE_PLAYBACK = False
+    rendering.PREPARE_PLAYBACK = False
 
 
 def stream(path: str) -> dict:
@@ -47,7 +48,7 @@ def test_a_cut_is_described_for_the_browser_and_its_copies_are_made(preparing, m
     edit(project, [{"action": "set_clip_look", "track_id": "main", "clip_id": "b",
                     "transition_in": {"kind": "dissolve", "seconds": 0.5}},
                    {"action": "set_clip_audio", "track_id": "main", "clip_id": "a", "cleanup": {"hiss": True}}])
-    first = server.playback_of(runtime.repo.get_project(project))
+    first = rendering.playback_of(runtime.repo.get_project(project))
     assert first["width"] == 1920 and first["duration"] == pytest.approx(6.0)
     clips = first["tracks"][0]["clips"]
     assert [clip["id"] for clip in clips] == ["a", "b"]
@@ -57,7 +58,7 @@ def test_a_cut_is_described_for_the_browser_and_its_copies_are_made(preparing, m
     jobs = [job.job_id for job in runtime.repo.jobs_to_show(datetime.now(timezone.utc) - timedelta(minutes=5))[0]
             if job.kind == JobKind.PREPARE]
     wait_for(jobs)
-    ready = server.playback_of(runtime.repo.get_project(project))
+    ready = rendering.playback_of(runtime.repo.get_project(project))
     assert ready["waiting"] == []
     proxy = runtime.WORKSPACE_DIR + "/cache/proxies/" + ready["tracks"][0]["clips"][0]["proxy"].split("/")[-1]
     # Never bigger than the file: this one is 640x360, so it is copied at its own size.
@@ -132,7 +133,7 @@ def test_going_back_to_a_version_gets_it_ready_to_play(media: Path, monkeypatch:
                             name="準備好")
     first = server.project_history(project)["versions"][0]["commit"]
     edit(project, [{"action": "delete_clip", "track_id": "main", "clip_id": "a"}])
-    monkeypatch.setattr(server, "prepare_playback", lambda cut, urgent=False: asked.append((cut.id, urgent)))
+    monkeypatch.setattr(rendering, "prepare_playback", lambda cut, urgent=False: asked.append((cut.id, urgent)))
     server.restore_version(project, first, runtime.repo.get_project(project).version)
     assert asked == [(project, False)]
 

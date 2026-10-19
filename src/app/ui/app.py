@@ -31,10 +31,12 @@ from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 
 from app import clients, runtime, server
+from app.tools import examining, rendering
 from app.models.comment import USER
 from app.engine.ffmpeg import hidden_window_flags
 from app.engine import models
 from app.engine import playback as playback_module
+from app.engine.analysis import transcription_of
 from app.engine.frames import extract_frame
 from app.engine.subtitles import captioned_clips, place_cues
 from app.models.timeline import Project
@@ -84,7 +86,7 @@ def _asset_summary(asset) -> dict:
         "width": asset.width,
         "height": asset.height,
         # Shown on the file, so the user checking captions later knows to expect misheard words.
-        "fast_transcript": server.transcription_of(runtime.repo.transcript_model(asset.id)) == "fast",
+        "fast_transcript": transcription_of(runtime.repo.transcript_model(asset.id)) == "fast",
         "notes": asset.notes,
         "library": library_of(asset),
         "source": asset.source.model_dump() if asset.source is not None else None,
@@ -187,7 +189,7 @@ async def undo(request: Request) -> Response:
         _, before = stack.pop()
         restored = before.model_copy(update={"version": current.version + 1})
         runtime.repo.update_project(restored, current.version)
-        server.prepare_playback(restored)
+        rendering.prepare_playback(restored)
         # The states further back now follow this version, not the one they were saved after.
         if stack:
             stack[-1] = (restored.version, stack[-1][1])
@@ -231,7 +233,7 @@ def _start_preview(project_id: str) -> dict:
             _previews[project_id] = {"version": project.version, "empty": True}
         return _preview_state(project_id)
     def start(captions: bool) -> dict:
-        return server._start_render(
+        return rendering.start_render(
             project_id, True, server.DEFAULT_LOUDNESS_TARGET, captions, None, True, None, PREVIEW_SIDE,
         )
     try:
@@ -327,7 +329,7 @@ async def make_captions(request: Request) -> Response:
     if missing:
         # Captions here are read in Traditional Chinese, like the rest of the editor.
         started = await run_in_threadpool(
-            server.analyze_asset, [asset["id"] for asset in missing], True, None, None, "zh-TW",
+            examining.analyze_asset, [asset["id"] for asset in missing], True, None, None, "zh-TW",
         )
         return JSONResponse({"jobs": [job["job_id"] for job in started["jobs"]]})
     try:
@@ -402,8 +404,8 @@ async def assets(request: Request) -> Response:
     library = request.query_params.get("library")
     filed = {**runtime.repo.folder_of("assets"), **runtime.repo.folder_of("music")}
     listed = []
-    heard = server.song_tags() if library == MUSIC else {}
-    analyzing = server.analyzing_assets()
+    heard = examining.song_tags() if library == MUSIC else {}
+    analyzing = examining.analyzing_assets()
     for asset in runtime.repo.list_assets():
         if library in LIBRARIES and library_of(asset) != library:
             continue
@@ -412,7 +414,7 @@ async def assets(request: Request) -> Response:
             entry = {**_asset_summary(asset), "folder_id": filed.get(asset.id), "missing": not present}
             if entry["library"] == MUSIC:
                 analysis = runtime.repo.get_analysis(asset.id)
-                entry.update(server.song_details(asset, analysis, heard, analyzing))
+                entry.update(examining.song_details(asset, analysis, heard, analyzing))
                 if analysis is not None and analysis.music is not None:
                     energy = analysis.music.energy
                     # Enough points for the bar on a card, not one a second.
@@ -541,7 +543,7 @@ async def song(request: Request) -> Response:
     if project is None or offer is None or not 1 <= number <= len(offer.songs):
         return _error("no such song is offered", 404)
     trial = await run_in_threadpool(server.song_trial, project, offer, number)
-    return JSONResponse(await run_in_threadpool(server.playback_of, trial))
+    return JSONResponse(await run_in_threadpool(rendering.playback_of, trial))
 
 async def comment(request: Request) -> Response:
     """Add to a comment, close it or open it again; or delete it, which only the user can do, here."""
@@ -576,7 +578,7 @@ async def playback(request: Request) -> Response:
         return _error(str(error), 404)
     if project is None:
         return _error(f"project {project_id} not found", 404)
-    return JSONResponse(await run_in_threadpool(server.playback_of, project))
+    return JSONResponse(await run_in_threadpool(rendering.playback_of, project))
 
 # What a cached file may be called: what the server names them, and nothing that leaves the folder.
 _CACHED_NAME = re.compile(r"^[0-9a-f-]{8,80}\.(mp4|m4a)$")
@@ -825,7 +827,7 @@ async def check(request: Request) -> Response:
     """What the finished file would show that the user should hear about before it is made."""
     frame, captions = _export_settings(request.query_params)
     try:
-        return JSONResponse(await run_in_threadpool(server.check_render, request.path_params["project_id"], frame, captions))
+        return JSONResponse(await run_in_threadpool(rendering.check_render, request.path_params["project_id"], frame, captions))
     except ValueError as error:
         return _error(str(error), 404)
 
@@ -855,8 +857,8 @@ async def export(request: Request) -> Response:
     try:
         started = await run_in_threadpool(
             # The user exporting by hand has watched the cut here; only the AI is held to a preview first.
-            server._start_render, project_id, False, server.DEFAULT_LOUDNESS_TARGET, captions, frame, True,
-            body.get("allow") or None, server.PREVIEW_SHORT_SIDE,
+            rendering.start_render, project_id, False, server.DEFAULT_LOUDNESS_TARGET, captions, frame, True,
+            body.get("allow") or None, rendering.PREVIEW_SHORT_SIDE,
         )
     except ValueError as error:
         return _error(str(error))

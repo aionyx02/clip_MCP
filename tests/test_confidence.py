@@ -4,7 +4,8 @@ from pathlib import Path
 
 import pytest
 
-from app import runtime, server
+from app import runtime
+from app.tools import examining
 from app.engine import analysis
 from app.engine.diarize import speaker_model_name
 from app.engine.rhythm import rhythm_model_name
@@ -54,19 +55,19 @@ def analysed(tmp_path: Path) -> str:
     return asset.id
 
 def test_the_ai_reads_the_marks_and_how_many_there_are(analysed: str) -> None:
-    found = server.get_analysis(analysed)
+    found = examining.get_analysis(analysed)
     assert [line["text"] for line in found["transcript"]["segments"]] == ["大家好", "我是⟦阿尼克斯⟧"]
     assert found["doubtful_spots"] == 1
 
 def test_the_count_covers_the_whole_file_whatever_range_is_read(analysed: str) -> None:
-    found = server.get_analysis(analysed, start=0, end=2)
+    found = examining.get_analysis(analysed, start=0, end=2)
     assert [line["text"] for line in found["transcript"]["segments"]] == ["大家好"]
     assert found["doubtful_spots"] == 1
 
 def test_words_carry_their_probability_when_asked_for(analysed: str) -> None:
-    words = server.get_analysis(analysed, include_words=True)["transcript"]["segments"][1]["words"]
+    words = examining.get_analysis(analysed, include_words=True)["transcript"]["segments"][1]["words"]
     assert words[1]["probability"] == UNSURE
 
 def test_the_stored_transcript_never_holds_the_marks(analysed: str) -> None:
-    server.get_analysis(analysed)
+    examining.get_analysis(analysed)
     assert "⟦" not in runtime.repo.get_analysis(analysed).transcript.segments[1].text

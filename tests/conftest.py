@@ -224,11 +224,11 @@ def kept_history(history_off):
 @pytest.fixture(autouse=True)
 def playback_unprepared() -> Iterator[None]:
     """Make no proxies after edits unless a test turns it on: they would take the job slots other tests use."""
-    from app import server
+    from app.tools import rendering
 
-    kept, server.PREPARE_PLAYBACK = server.PREPARE_PLAYBACK, False
+    kept, rendering.PREPARE_PLAYBACK = rendering.PREPARE_PLAYBACK, False
     yield
-    server.PREPARE_PLAYBACK = kept
+    rendering.PREPARE_PLAYBACK = kept
 
 @pytest.fixture(autouse=True)
 def music_unanalyzed() -> Iterator[None]:

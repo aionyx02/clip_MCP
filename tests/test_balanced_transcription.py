@@ -5,6 +5,7 @@ from pathlib import Path
 import pytest
 
 from app import runtime, server
+from app.tools import examining
 from app.engine import analysis as analysis_module
 from app.engine import speed
 from app.engine.analysis import (
@@ -73,9 +74,9 @@ def test_a_transcript_is_never_made_worse(media: Path) -> None:
             asset_id=asset.id, duration=4.0,
             transcript=Transcript(language="zh", model=whisper_model_for(had), segments=[]),
         ))
-        to_start, _, upgrading = server._plan_analyses([asset], True, asked, again=True)
+        to_start, _, upgrading = examining.plan_analyses([asset], True, asked, again=True)
         assert [chosen for _, chosen in to_start] == [wanted], (had, asked)
-        assert bool(upgrading) == (server.TRANSCRIPTION_RANK[asked] > server.TRANSCRIPTION_RANK[had])
+        assert bool(upgrading) == (examining.TRANSCRIPTION_RANK[asked] > examining.TRANSCRIPTION_RANK[had])
 
 
 def test_balanced_costs_more_than_fast_and_less_than_accurate(repo) -> None:  # noqa: F811

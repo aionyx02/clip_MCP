@@ -9,6 +9,7 @@ import pytest
 from starlette.testclient import TestClient
 
 from app import runtime, server
+from app.tools import rendering
 from app.models.job import Job, JobKind, JobStatus
 from app.storage import housekeeping
 from helpers import build_project, edit, insert, video_track
@@ -153,7 +154,7 @@ def test_files_move_on_disk_only_once_agreed_and_never_over_another(media: Path,
     assert not source.exists() and (target / "要搬的.mp4").read_bytes() == b"already here"
     assert runtime.repo.get_assets([asset])[asset].path == moved["to"] == str(target / "要搬的 (2).mp4")
     # The project still plays it, from where it went.
-    assert server.playback_of(runtime.repo.get_project(project))["tracks"][0]["clips"][0]["asset_id"] == asset
+    assert rendering.playback_of(runtime.repo.get_project(project))["tracks"][0]["clips"][0]["asset_id"] == asset
 
 
 def test_a_folder_next_to_clip_mcp_s_own_is_not_taken_for_it(tmp_path: Path) -> None:
@@ -163,6 +164,7 @@ def test_a_folder_next_to_clip_mcp_s_own_is_not_taken_for_it(tmp_path: Path) -> 
 
 def test_the_ai_reading_the_trash_deletes_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(server, "output_dir", lambda: tmp_path)
+    monkeypatch.setattr(rendering, "output_dir", lambda: tmp_path)
     old = housekeeping.put_in_trash(str(tmp_path), "project", "b" * 36, "過期了", {"project.json": b"{}"}, [])
     meta = tmp_path / housekeeping.TRASH / old.key / "trashed.json"
     import json
@@ -176,6 +178,7 @@ def test_the_ai_reading_the_trash_deletes_nothing(tmp_path: Path, monkeypatch: p
 
 def test_a_broken_project_in_the_trash_stays_there(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(server, "output_dir", lambda: tmp_path)
+    monkeypatch.setattr(rendering, "output_dir", lambda: tmp_path)
     kept = housekeeping.put_in_trash(str(tmp_path), "project", "c" * 36, "壞掉的", {"project.json": b"not json"}, [])
     with pytest.raises(ValueError):
         server.restore_from_trash(kept.key)

@@ -6,13 +6,14 @@ from pathlib import Path
 import pytest
 
 from app import runtime, server
+from app.tools import rendering
 from helpers import build_project, edit, finished, insert, video_track
 
 
 def test_a_change_is_judged_blind_and_kept_only_when_it_helped(media: Path) -> None:
     wide = server.import_asset(str(media / "wide.mp4"))["id"]
     project = build_project([video_track(), insert("a", wide, 0, 4), insert("b", wide, 5, 9)], width=640, height=360)
-    before = finished(server.render_project(project))
+    before = finished(rendering.render_project(project))
     started = server.start_trial(project, before["job_id"], "第二個鏡頭進得太突然", "把 b 的開頭往前多留半秒",
                                  "接點不再那麼跳", at=3.0, end=5.0, evidence="inspect_join #1")
     trial = started["trial_id"]
@@ -21,7 +22,7 @@ def test_a_change_is_judged_blind_and_kept_only_when_it_helped(media: Path) -> N
 
     edit(project, [{"action": "trim_clip", "track_id": "main", "clip_id": "b",
                     "new_source_range": {"start": 4.5, "end": 9}}])
-    after = finished(server.render_project(project))
+    after = finished(rendering.render_project(project))
     server.trial_candidate(trial, after["job_id"])
 
     pack = server.trial_pack(trial)

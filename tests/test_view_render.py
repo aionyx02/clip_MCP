@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 
 from app import runtime, server
+from app.tools import examining, rendering
 from app.engine import analysis
 from app.models.media import MediaAnalysis, Transcript, TranscriptSegment, TranscriptWord
 from helpers import build_project, caption, edit, insert, video_track
@@ -37,7 +38,7 @@ def rendered(tmp_path_factory: pytest.TempPathFactory, media: Path) -> dict:
     edit(project, [{"action": "set_clip_look", "track_id": "main", "clip_id": "b",
                     "transition_in": {"kind": "dissolve", "seconds": 1.0}}])
     caption(project)
-    job = server.render_project(project, is_preview=True, burn_subtitles=True)
+    job = rendering.render_project(project, is_preview=True, burn_subtitles=True)
     return {"project": project, "job_id": finished(job)}
 
 
@@ -98,13 +99,13 @@ def test_a_render_is_heard_with_its_levels(rendered: dict, monkeypatch: pytest.M
         return Transcript(language="zh", model="test", segments=[])
 
     monkeypatch.setattr(analysis, "_run_whisper", model)
-    heard = server.listen_again(start=0.0, end=3.0, job_id=rendered["job_id"])
+    heard = examining.listen_again(start=0.0, end=3.0, job_id=rendered["job_id"])
     assert heard["levels"]["every_seconds"] == 0.5 and len(heard["levels"]["db"]) == 6
     # The footage's tone is there: well above a gap.
     assert min(heard["levels"]["db"]) > -40
     assert heard["captions"] and heard["captions"][0].endswith("第一句")
     with pytest.raises(ValueError, match="either"):
-        server.listen_again(start=0.0, end=3.0)
+        examining.listen_again(start=0.0, end=3.0)
 
 
 def test_a_preview_breaks_its_captions_where_the_finished_video_does(rendered: dict) -> None:
@@ -114,7 +115,7 @@ def test_a_preview_breaks_its_captions_where_the_finished_video_does(rendered: d
     job = runtime.repo.get_job(rendered["job_id"])
     script = (Path(job.work_dir) / "subtitles.ass").read_text(encoding="utf-8")
     assert f"PlayResX: {project.width}" in script and f"PlayResY: {project.height}" in script
-    assert min(project.width, project.height) > server.PREVIEW_SHORT_SIDE
+    assert min(project.width, project.height) > rendering.PREVIEW_SHORT_SIDE
 
 
 def test_a_cut_is_read_back_as_a_script(rendered: dict) -> None:

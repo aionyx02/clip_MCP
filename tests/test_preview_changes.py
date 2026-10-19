@@ -154,12 +154,13 @@ def test_a_render_with_music_under_the_talking_is_heard_without_it(
     talk_over_music: str, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """#89: 「買一送四」 sixteen decibels over the music was heard as 「買壽司」."""
-    from app import runtime, server
+    from app import runtime
+    from app.tools import examining, rendering
     from app.engine import analysis
     from app.models.media import Transcript
     from helpers import finished
 
-    job = finished(server.render_project(talk_over_music))
+    job = finished(rendering.render_project(talk_over_music))
     handed = []
 
     def model(device, path, duration, language, prompt, on_progress, is_cancelled, on_measured=None,
@@ -168,7 +169,7 @@ def test_a_render_with_music_under_the_talking_is_heard_without_it(
         return Transcript(language="zh", model="large-v3-turbo", segments=[])
 
     monkeypatch.setattr(analysis, "_run_whisper", model)
-    found = server.listen_again(job_id=job["job_id"], start=2.0, end=5.0)
+    found = examining.listen_again(job_id=job["job_id"], start=2.0, end=5.0)
     assert found["heard_without_music"] is True
     voice = Path(runtime.repo.get_job(job["job_id"]).work_dir) / "voice.wav"
     assert voice.exists()
