@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from app import server
+from app import runtime, server
 from app.engine.merge import merge, merge_plans
 from app.models.plan import Beat, EditPlan, Selection
 from helpers import build_project, edit, insert, video_track
@@ -21,12 +21,12 @@ def three_shots(media: Path) -> str:
 
 def test_each_part_comes_whole_from_the_side_picked(media: Path) -> None:
     project = three_shots(media)
-    before = server.repo.get_project(project)
+    before = runtime.repo.get_project(project)
     edit(project, [
         {"action": "trim_clip", "track_id": "main", "clip_id": "a", "new_source_range": {"start": 1, "end": 4}},
         {"action": "delete_clip", "track_id": "main", "clip_id": "c"},
     ])
-    after = server.repo.get_project(project)
+    after = runtime.repo.get_project(project)
     # The new opening, the old body.
     merged = merge(before, after, {"主體": "a"})
     clips = merged.base_video_track.clips
@@ -41,7 +41,7 @@ def test_a_merge_is_a_new_version_and_both_it_came_from_stay(media: Path, kept_h
     project = three_shots(media)
     whole = server.project_history(project)["versions"][0]["commit"]
     edit(project, [{"action": "delete_clip", "track_id": "main", "clip_id": "c"}])
-    version = server.repo.get_project(project).version
+    version = runtime.repo.get_project(project).version
     before = len(server.project_history(project)["versions"])
     from test_comments import call
 
@@ -57,7 +57,7 @@ def test_a_part_nobody_has_cannot_be_picked(media: Path) -> None:
 
     project = three_shots(media)
     with pytest.raises(ValueError, match="nothing called 結尾"):
-        server.merge_versions(project, "", None, {"結尾": "a"}, server.repo.get_project(project).version)
+        server.merge_versions(project, "", None, {"結尾": "a"}, runtime.repo.get_project(project).version)
 
 
 def test_the_plans_are_merged_beat_by_beat_with_their_reasons() -> None:

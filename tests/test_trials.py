@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from app import server
+from app import runtime, server
 from helpers import build_project, edit, finished, insert, video_track
 
 
@@ -32,7 +32,7 @@ def test_a_change_is_judged_blind_and_kept_only_when_it_helped(media: Path) -> N
     assert os.path.exists(text.split("X sound: ")[1].splitlines()[0])
     assert pack.content[1].type == "image"
 
-    change = server.repo.trial(trial).candidate_is
+    change = runtime.repo.trial(trial).candidate_is
     original = "Y" if change == "X" else "X"
     # The original breaking what is around the problem does not count against the change.
     judged = server.judge_trial(trial, change, original, "新的接點比較順，舊的後面那句被切掉", "subagent")
@@ -50,6 +50,6 @@ def test_a_change_that_broke_what_is_around_it_is_not_kept() -> None:
     trial = Trial(id="tbroke1", project_id="p", problem="p", hypothesis="h", expected="e", at=0, end=1,
                   before_job="j1", before_version=3, after_job="j2", after_version=4, candidate_at=0,
                   candidate_end=1, candidate_is="Y")
-    server.repo.save_trial(trial)
+    runtime.repo.save_trial(trial)
     judged = server.judge_trial("tbroke1", "Y", "Y", "Y 比較好，但後面那句被切掉", "same_ai")
     assert judged["keep"] == "original" and judged["blind"] is False and "version 3" in judged["next"]

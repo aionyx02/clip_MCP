@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 from starlette.testclient import TestClient
 
-from app import server
+from app import runtime, server
 from app.models.job import Job, JobKind, JobStatus
 from app.storage import housekeeping
 from helpers import build_project, edit, insert, video_track
@@ -26,8 +26,8 @@ def finished(project_id: str, version: int, name: str) -> Path:
     path = Path(server.output_dir()) / name
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(b"finished " + name.encode("utf-8"))
-    server.repo.add_job(Job(kind=JobKind.RENDER, project_id=project_id, project_version=version,
-                            status=JobStatus.COMPLETED, output_path=str(path)))
+    runtime.repo.add_job(Job(kind=JobKind.RENDER, project_id=project_id, project_version=version,
+                             status=JobStatus.COMPLETED, output_path=str(path)))
     return path
 
 
@@ -37,14 +37,14 @@ def test_a_deleted_project_waits_in_the_trash_and_comes_back_where_it_was(client
     client.post("/api/file", json={"kind": "projects", "ids": [project], "folder_id": folder["id"]})
 
     assert client.post("/api/projects/delete", json={"ids": [project]}).status_code == 200
-    assert server.repo.get_project(project) is None
+    assert runtime.repo.get_project(project) is None
     listed = client.get("/api/trash").json()
     waiting = next(item for item in listed["items"] if item["project_id"] == project)
     assert waiting["kind"] == "project" and waiting["days_left"] == listed["keep_days"] == 30
 
     back = client.post("/api/trash", json={"key": waiting["key"]}).json()
-    assert back["project_id"] == project and server.repo.get_project(project).name == "垃圾桶裡的"
-    assert server.repo.folder_of("projects")[project] == folder["id"]
+    assert back["project_id"] == project and runtime.repo.get_project(project).name == "垃圾桶裡的"
+    assert runtime.repo.folder_of("projects")[project] == folder["id"]
     assert not any(item["key"] == waiting["key"] for item in client.get("/api/trash").json()["items"])
 
 
@@ -59,10 +59,10 @@ def test_the_trash_lets_go_after_thirty_days(tmp_path: Path) -> None:
 def test_other_versions_go_but_the_current_and_the_starred_stay(client: TestClient, media: Path) -> None:
     asset = server.import_asset(str(media / "wide.mp4"))["id"]
     project = build_project([video_track(), insert("a", asset, 0, 3)], name="留下哪些")
-    first = server.repo.get_project(project).version
+    first = runtime.repo.get_project(project).version
     old = finished(project, first, "留下哪些 舊版.mp4")
     edit(project, [{"action": "rename_project", "name": "留下哪些"}, insert("b", asset, 4, 6)])
-    current = finished(project, server.repo.get_project(project).version, "留下哪些 現在.mp4")
+    current = finished(project, runtime.repo.get_project(project).version, "留下哪些 現在.mp4")
 
     found = client.get(f"/api/projects/{project}/storage").json()
     assert found["exported"] == 2 and [item["path"] for item in found["other_outputs"]] == [str(old)]
@@ -86,7 +86,7 @@ def test_a_starred_version_keeps_its_finished_video(kept_history, client: TestCl
     asset = server.import_asset(str(media / "wide.mp4"))["id"]
     project = build_project([video_track(), insert("a", asset, 0, 3)], name="標星號的")
     starred = server.project_history(project)["versions"][0]["commit"]
-    finished(project, server.repo.get_project(project).version, "標星號的 星號.mp4")
+    finished(project, runtime.repo.get_project(project).version, "標星號的 星號.mp4")
     edit(project, [insert("b", asset, 4, 6)])
     server.mark_version(project, starred, "starred")
     assert client.get(f"/api/projects/{project}/storage").json()["other_outputs"] == []
@@ -114,13 +114,13 @@ def test_the_ai_files_footage_in_folders_and_deletes_nothing(media: Path) -> Non
     asset = server.import_asset(str(media / "tall.mp4"))["id"]
 
     async def call(arguments):
-        async with Client(server.mcp) as client:
+        async with Client(runtime.mcp) as client:
             return (await client.call_tool("organize_library", arguments)).structured_content
 
     # By file name, the way the AI reads the library.
     done = asyncio.run(call({"steps": [{"action": "create_folder", "name": "整理測試直式", "asset_ids": ["tall.mp4"]}]}))
     folder = next(item for item in done["folders"] if item["name"] == "整理測試直式")
-    assert server.repo.folder_of("assets")[asset] == folder["id"]
+    assert runtime.repo.folder_of("assets")[asset] == folder["id"]
     assert "整理測試直式" in done["done"][0]
     # There is no way for it to delete a folder or a file.
     assert not any(step for step in ("delete_folder", "delete") if step in str(server.LibraryStep))
@@ -151,9 +151,9 @@ def test_files_move_on_disk_only_once_agreed_and_never_over_another(media: Path,
     assert source.exists()
     moved = server.move_files(moves, confirm_plan=shown["plan"])["moved"][0]
     assert not source.exists() and (target / "要搬的.mp4").read_bytes() == b"already here"
-    assert server.repo.get_assets([asset])[asset].path == moved["to"] == str(target / "要搬的 (2).mp4")
+    assert runtime.repo.get_assets([asset])[asset].path == moved["to"] == str(target / "要搬的 (2).mp4")
     # The project still plays it, from where it went.
-    assert server.playback_of(server.repo.get_project(project))["tracks"][0]["clips"][0]["asset_id"] == asset
+    assert server.playback_of(runtime.repo.get_project(project))["tracks"][0]["clips"][0]["asset_id"] == asset
 
 
 def test_a_folder_next_to_clip_mcp_s_own_is_not_taken_for_it(tmp_path: Path) -> None:
@@ -185,8 +185,8 @@ def test_a_broken_project_in_the_trash_stays_there(tmp_path: Path, monkeypatch: 
 def test_other_versions_of_a_video_with_no_name_are_not_let_go(media: Path) -> None:
     import uuid
 
-    named = server.repo.get_project(server.create_project(name="有名字")["id"])
+    named = runtime.repo.get_project(server.create_project(name="有名字")["id"])
     nameless = named.model_copy(update={"id": str(uuid.uuid4()), "name": ""})
-    server.repo.add_project(nameless)
+    runtime.repo.add_project(nameless)
     with pytest.raises(ValueError, match="name the video first"):
         server.trim_project(nameless.id, "")

@@ -21,7 +21,8 @@ from app.models.timeline import (
     CAPTION_PRESETS, AddSubtitleOp, CaptionStyle, CueWord, EditSubtitleOp, PlacedCue, Project, SetCaptionStyleOp,
     SpeakerMark, SubtitleCue, apply_operation, retimed_words,
 )
-from app.server import apply_edits, generate_subtitles, get_project, get_subtitles, import_asset, render_project, repo
+from app.runtime import repo
+from app.server import apply_edits, generate_subtitles, get_project, get_subtitles, import_asset, render_project
 from helpers import caption, build_project, edit, insert, render, video_track
 
 def words(*pairs) -> list:

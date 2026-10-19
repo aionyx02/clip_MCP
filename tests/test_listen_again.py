@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from app import server
+from app import runtime, server
 from app.engine import analysis
 from app.models.media import MediaAnalysis, Transcript, TranscriptSegment, TranscriptWord
 
@@ -13,7 +13,7 @@ from app.models.media import MediaAnalysis, Transcript, TranscriptSegment, Trans
 def heard(media: Path, monkeypatch: pytest.MonkeyPatch) -> dict:
     """A file with a transcript of its own, and a speech model that hears what the test says."""
     asset = server.import_asset(str(media / "wide.mp4"))["id"]
-    server.repo.save_analysis(MediaAnalysis(asset_id=asset, duration=10.0, transcript=Transcript(
+    runtime.repo.save_analysis(MediaAnalysis(asset_id=asset, duration=10.0, transcript=Transcript(
         language="zh", model="test", segments=[TranscriptSegment(start=2.0, end=4.0, text="怎麼那麼順", words=[
             TranscriptWord(start=2.0, end=4.0, text="怎麼那麼順", probability=0.4)])],
     )))
@@ -59,7 +59,7 @@ def test_a_hearing_that_disagrees_with_the_transcript_is_not_kept(heard: dict) -
     found = server.listen_again(asset_id=heard["asset"], start=1.5, end=4.5, keep=True)
     # 「沒那麼順」 against 「怎麼那麼順」: neither is believed, so the user is asked.
     assert "different words" in found["not_kept"] and "kept" not in found
-    assert server.repo.get_analysis(heard["asset"]).heard_again == []
+    assert runtime.repo.get_analysis(heard["asset"]).heard_again == []
 
 def test_an_unsure_hearing_is_not_kept(heard: dict, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(analysis, "_run_whisper", hears("怎麼那麼順", probability=0.2))
@@ -71,10 +71,10 @@ def test_a_stretch_heard_again_and_kept_is_what_cuts_are_judged_by(heard: dict,
     from app.engine.semantic import timeline_input_hash
 
     monkeypatch.setattr(analysis, "_run_whisper", hears("怎麼那麼順"))
-    before = server.repo.get_analysis(heard["asset"])
+    before = runtime.repo.get_analysis(heard["asset"])
     found = server.listen_again(asset_id=heard["asset"], start=1.5, end=4.5, keep=True)
     assert "check the cut again" in found["kept"]
-    after = server.repo.get_analysis(heard["asset"])
+    after = runtime.repo.get_analysis(heard["asset"])
     assert [(item.start, item.end) for item in after.heard_again] == [(1.5, 4.5)]
     # The plans written against the footage still stand.
     assert timeline_input_hash({heard["asset"]: after}) == timeline_input_hash({heard["asset"]: before})
@@ -99,7 +99,7 @@ def test_a_stretch_with_a_word_across_its_edge_is_not_kept(heard: dict, monkeypa
     found = server.listen_again(asset_id=heard["asset"], start=3.0, end=4.5, keep=True)
     # 「怎麼那麼順」 runs 2.0–4.0s: kept, it would be there twice, cut back to 3.0s and as heard.
     assert found["not_kept"].endswith("hear 2.000s to 4.500s again with keep")
-    assert server.repo.get_analysis(heard["asset"]).heard_again == []
+    assert runtime.repo.get_analysis(heard["asset"]).heard_again == []
 
 def test_a_sentence_that_ends_inside_a_kept_stretch_still_ends_there() -> None:
     made = MediaAnalysis(asset_id="x", duration=10.0, transcript=Transcript(language="zh", model="t", segments=[
@@ -137,7 +137,7 @@ def test_a_render_is_heard_a_shot_at_a_time_across_its_cuts(heard: dict, monkeyp
         assert sound.getnframes() / sound.getframerate() == pytest.approx(2.5, abs=0.05)
 
 def test_two_hearings_of_a_made_up_line_do_not_agree(heard: dict, monkeypatch: pytest.MonkeyPatch) -> None:
-    server.repo.save_analysis(server.repo.get_analysis(heard["asset"]).model_copy(update={"transcript": Transcript(
+    runtime.repo.save_analysis(runtime.repo.get_analysis(heard["asset"]).model_copy(update={"transcript": Transcript(
         language="zh", model="test", segments=[TranscriptSegment(start=2.0, end=3.0, text="謝謝觀看", words=[
             TranscriptWord(start=2.0, end=3.0, text="謝謝觀看", probability=0.9)])])}))
     monkeypatch.setattr(analysis, "_run_whisper", hears("謝謝觀看"))
@@ -160,7 +160,7 @@ def test_where_two_hearings_differ_the_times_of_the_words_they_agree_on_are_kept
 ) -> None:
     """#87: 「四件」 against 「十件」 refused the whole stretch, and with it where 「褲子」 really ends."""
     asset = server.import_asset(str(media / "wide.mp4"))["id"]
-    server.repo.save_analysis(MediaAnalysis(asset_id=asset, duration=10.0, transcript=Transcript(
+    runtime.repo.save_analysis(MediaAnalysis(asset_id=asset, duration=10.0, transcript=Transcript(
         language="zh", model="test", segments=[TranscriptSegment(start=2.0, end=4.4, text="四件褲子然後", words=[
             TranscriptWord(start=2.0, end=2.8, text="四件", probability=0.9),
             TranscriptWord(start=2.8, end=3.6, text="褲子", probability=0.9),
@@ -179,7 +179,7 @@ def test_where_two_hearings_differ_the_times_of_the_words_they_agree_on_are_kept
     monkeypatch.setattr(analysis, "_run_whisper", model)
     found = server.listen_again(asset_id=asset, start=1.5, end=4.5, keep=True)
     assert "2 word(s) the two heard alike" in found["kept"] and "四件" in found["kept"]
-    [kept] = server.repo.get_analysis(asset).heard_again
+    [kept] = runtime.repo.get_analysis(asset).heard_again
     assert [(word.text, word.start, word.end) for word in kept.words] == [
         ("四件", 2.0, 2.8), ("褲子", 2.8, 3.78), ("然後", 3.8, 4.1)]
 
@@ -188,7 +188,7 @@ def test_one_word_heard_unsure_keeps_its_own_time_and_not_the_whole_stretch_s(
 ) -> None:
     """#98: 「錯了⟦是⟧晚餐」, heard alike, was refused whole for the one word in doubt."""
     asset = server.import_asset(str(media / "wide.mp4"))["id"]
-    server.repo.save_analysis(MediaAnalysis(asset_id=asset, duration=10.0, transcript=Transcript(
+    runtime.repo.save_analysis(MediaAnalysis(asset_id=asset, duration=10.0, transcript=Transcript(
         language="zh", model="test", segments=[TranscriptSegment(start=2.0, end=4.0, text="錯了是晚餐", words=[
             TranscriptWord(start=2.0, end=2.8, text="錯了", probability=0.9),
             TranscriptWord(start=2.8, end=3.1, text="是", probability=0.9),
@@ -206,6 +206,6 @@ def test_one_word_heard_unsure_keeps_its_own_time_and_not_the_whole_stretch_s(
     monkeypatch.setattr(analysis, "_run_whisper", model)
     found = server.listen_again(asset_id=asset, start=1.5, end=4.5, keep=True)
     assert found["agrees"] and found["kept_words"] == ["錯了", "晚餐"] and found["left_as_transcribed"] == ["是"]
-    [kept] = server.repo.get_analysis(asset).heard_again
+    [kept] = runtime.repo.get_analysis(asset).heard_again
     assert [(word.text, word.start, word.end) for word in kept.words] == [
         ("錯了", 2.0, 2.7), ("是", 2.8, 3.1), ("晚餐", 3.1, 3.9)]

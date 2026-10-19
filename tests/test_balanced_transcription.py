@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from app import server
+from app import runtime, server
 from app.engine import analysis as analysis_module
 from app.engine import speed
 from app.engine.analysis import (
@@ -65,11 +65,11 @@ def test_the_accurate_model_s_words_take_the_place_of_the_unsure_ones(monkeypatc
 
 
 def test_a_transcript_is_never_made_worse(media: Path) -> None:
-    asset = server.repo.get_assets([server.import_asset(str(media / "silent.mp4"))["id"]])
+    asset = runtime.repo.get_assets([server.import_asset(str(media / "silent.mp4"))["id"]])
     asset = next(iter(asset.values())).model_copy(update={"has_audio": True})
     for had, asked, wanted in [("balanced", "fast", "balanced"), ("fast", "balanced", "balanced"),
                                ("balanced", "accurate", "accurate"), ("accurate", "balanced", "accurate")]:
-        server.repo.save_analysis(MediaAnalysis(
+        runtime.repo.save_analysis(MediaAnalysis(
             asset_id=asset.id, duration=4.0,
             transcript=Transcript(language="zh", model=whisper_model_for(had), segments=[]),
         ))

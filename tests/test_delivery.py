@@ -31,8 +31,9 @@ from app.models.media import Asset, FaceMeasurement, MediaAnalysis, ShotMeasurem
 from app.models.timeline import (
     CaptionStyle, Clip, ClipLayout, Dissolve, Marker, PlacedCue, Project, SpeakerMark, TimeRange, Track, TrackType,
 )
+from app.runtime import repo
 from app.server import (
-    check_render, export_cover, export_timeline, get_chapters, import_asset, render_project, repo,
+    check_render, export_cover, export_timeline, get_chapters, import_asset, render_project,
 )
 from helpers import build_project, edit, finished, insert, video_track
 
@@ -221,7 +222,7 @@ def test_a_final_render_waits_for_a_preview_of_the_cut_as_it_is_now(media: Path)
 
 def test_the_chapters_are_carried_inside_the_rendered_file(media: Path, tmp_path: Path) -> None:
     from app.engine.builder import FFmpegRenderer
-    from app.server import _referenced_assets
+    from app.tools.shared import referenced_assets
 
     asset = import_asset(str(media / "wide.mp4"))["id"]
     project_id = build_project([video_track(), insert("a", asset, 0, 6)], width=320, height=180)
@@ -232,7 +233,7 @@ def test_the_chapters_are_carried_inside_the_rendered_file(media: Path, tmp_path
     listing = tmp_path / "chapters.txt"
     listing.write_text(chapter_metadata(chapters(project)[0]), encoding="utf-8")
     out = tmp_path / "out.mp4"
-    command = FFmpegRenderer().build_command(project, _referenced_assets(project), str(out), chapters_path=str(listing),
+    command = FFmpegRenderer().build_command(project, referenced_assets(project), str(out), chapters_path=str(listing),
                                             loudness_target=None)
     result = subprocess.run(command, capture_output=True)
     assert result.returncode == 0, result.stderr.decode("utf-8", errors="replace")[-600:]

@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 from starlette.testclient import TestClient
 
-from app import server
+from app import runtime, server
 from app.models.offer import OfferedSong
 from app.ui import app as editor
 from app.ui import dialogs
@@ -21,23 +21,23 @@ def client() -> TestClient:
 def test_it_says_it_is_the_editor_and_for_which_workspace(client: TestClient) -> None:
     answer = client.get("/api/ping").json()
     assert answer["app"] == "clip-mcp-editor"
-    assert answer["workspace"] == os.path.normcase(os.path.abspath(server.WORKSPACE_DIR))
+    assert answer["workspace"] == os.path.normcase(os.path.abspath(runtime.WORKSPACE_DIR))
 
 def test_a_new_project_comes_ready_for_footage_and_music(client: TestClient) -> None:
     made = client.post("/api/projects", json={"name": "新的", "width": 1080, "height": 1920}).json()
-    project = server.repo.get_project(made["id"])
+    project = runtime.repo.get_project(made["id"])
     assert (project.width, project.height) == (1080, 1920)
     assert [(track.id, track.track_type.value) for track in project.tracks] == [("video", "video"), ("music", "audio")]
 
 def test_chosen_files_are_used_where_they_are_never_copied(client: TestClient, media: Path, monkeypatch) -> None:
     original = media / "tall.mp4"
     monkeypatch.setattr(dialogs, "pick", lambda kind: [str(original)])
-    before = set(os.listdir(server.WORKSPACE_DIR))
+    before = set(os.listdir(runtime.WORKSPACE_DIR))
     result = client.post("/api/pick", json={"kind": "files"}).json()
     assert (result["chosen"], result["imported"], result["failed"], len(result["assets"])) == (1, 1, [], 1)
     listed = {asset["path"] for asset in client.get("/api/assets").json()["assets"]}
     assert str(original.resolve()) in {str(Path(path).resolve()) for path in listed}
-    assert set(os.listdir(server.WORKSPACE_DIR)) - before <= {"cache"}
+    assert set(os.listdir(runtime.WORKSPACE_DIR)) - before <= {"cache"}
 
 def test_a_cancelled_window_imports_nothing(client: TestClient, monkeypatch) -> None:
     monkeypatch.setattr(dialogs, "pick", lambda kind: [])
@@ -49,7 +49,7 @@ def test_a_project_whose_footage_is_gone_says_so(client: TestClient, media: Path
     moved.write_bytes((media / "wide.mp4").read_bytes())
     asset = server.import_asset(str(moved))["id"]
     made = client.post("/api/projects", json={"name": "會不見的"}).json()
-    project = server.repo.get_project(made["id"])
+    project = runtime.repo.get_project(made["id"])
     client.post(f"/api/projects/{made['id']}/edits", json={"expected_version": project.version, "operations": [
         {"action": "insert_clip", "track_id": "video", "clip_id": "c1", "asset_id": asset,
          "source_range": {"start": 0, "end": 2}},
@@ -75,16 +75,16 @@ def test_clearing_ignores_anything_but_what_can_be_made_again(client: TestClient
 def test_undo_puts_back_the_last_edit_and_refuses_once_something_else_has_edited(client: TestClient, media: Path) -> None:
     asset = server.import_asset(str(media / "wide.mp4"))["id"]
     made = client.post("/api/projects", json={"name": "復原"}).json()
-    version = server.repo.get_project(made["id"]).version
+    version = runtime.repo.get_project(made["id"]).version
     edited = client.post(f"/api/projects/{made['id']}/edits", json={"expected_version": version, "operations": [
         {"action": "insert_clip", "track_id": "video", "clip_id": "c1", "asset_id": asset,
          "source_range": {"start": 0, "end": 2}},
     ]}).json()
     assert client.get(f"/api/projects/{made['id']}").json()["can_undo"] is True
     assert client.post(f"/api/projects/{made['id']}/undo").status_code == 200
-    assert not server.repo.get_project(made["id"]).base_video_track.clips
+    assert not runtime.repo.get_project(made["id"]).base_video_track.clips
 
-    current = server.repo.get_project(made["id"]).version
+    current = runtime.repo.get_project(made["id"]).version
     client.post(f"/api/projects/{made['id']}/edits", json={"expected_version": current, "operations": [
         {"action": "insert_clip", "track_id": "video", "clip_id": "c2", "asset_id": asset,
          "source_range": {"start": 0, "end": 2}},
@@ -98,7 +98,7 @@ def test_undo_puts_back_the_last_edit_and_refuses_once_something_else_has_edited
 
 def test_the_version_can_be_asked_alone_to_notice_the_ai(client: TestClient) -> None:
     made = client.post("/api/projects", json={"name": "版本"}).json()
-    assert client.get(f"/api/projects/{made['id']}/version").json() == {"version": server.repo.get_project(made["id"]).version}
+    assert client.get(f"/api/projects/{made['id']}/version").json() == {"version": runtime.repo.get_project(made["id"]).version}
 
 def test_words_say_when_nothing_was_transcribed(client: TestClient, media: Path, tmp_path: Path) -> None:
     # A file of its own: the shared one is the same asset in every test, and others transcribe it.
@@ -117,7 +117,7 @@ def test_the_editor_watches_a_720_preview_of_the_version_it_shows(client: TestCl
 
     asset = server.import_asset(str(media / "wide.mp4"))["id"]
     made = client.post("/api/projects", json={"name": "預覽", "width": 1920, "height": 1080}).json()
-    version = server.repo.get_project(made["id"]).version
+    version = runtime.repo.get_project(made["id"]).version
     client.post(f"/api/projects/{made['id']}/edits", json={"expected_version": version, "operations": [
         {"action": "insert_clip", "track_id": "video", "clip_id": "c1", "asset_id": asset,
          "source_range": {"start": 0, "end": 2}},
@@ -132,7 +132,7 @@ def test_the_editor_watches_a_720_preview_of_the_version_it_shows(client: TestCl
         time.sleep(0.3)
         state = client.get(f"/api/projects/{made['id']}/preview").json()
     assert state["status"] == "completed", state
-    path = server.job_manager.get_job(state["job_id"]).output_path
+    path = runtime.job_manager.get_job(state["job_id"]).output_path
     size = subprocess.run(
         ["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=width,height", "-of", "csv=p=0", path],
         capture_output=True, text=True,
@@ -153,7 +153,7 @@ def captioned_project(client: TestClient, media: Path, footage: Path = None) -> 
     """
     asset = server.import_asset(str(footage or media / "wide.mp4"))["id"]
     made = client.post("/api/projects", json={"name": "字幕"}).json()
-    version = server.repo.get_project(made["id"]).version
+    version = runtime.repo.get_project(made["id"]).version
     client.post(f"/api/projects/{made['id']}/edits", json={"expected_version": version, "operations": [
         {"action": "insert_clip", "track_id": "video", "clip_id": "c1", "asset_id": asset,
          "source_range": {"start": 2, "end": 6}},
@@ -170,7 +170,7 @@ def test_captions_come_back_where_they_fall_in_the_cut(client: TestClient, media
 
 def test_a_caption_corrected_in_the_editor_is_corrected_in_the_project(client: TestClient, media: Path) -> None:
     project, cue = captioned_project(client, media)
-    version = server.repo.get_project(project).version
+    version = runtime.repo.get_project(project).version
     answer = client.post(f"/api/projects/{project}/edits", json={"expected_version": version, "operations": [
         {"action": "edit_subtitle", "cue_id": cue, "text": "我們出發囉"},
     ]})
@@ -229,7 +229,7 @@ def test_a_finished_export_is_saved_where_the_user_keeps_videos(client: TestClie
     import time
 
     project, _ = captioned_project(client, media)
-    client.post(f"/api/projects/{project}/edits", json={"expected_version": server.repo.get_project(project).version,
+    client.post(f"/api/projects/{project}/edits", json={"expected_version": runtime.repo.get_project(project).version,
                                                         "operations": [{"action": "rename_project", "name": "交付"}]})
     findings = client.get(f"/api/projects/{project}/check").json()["findings"]
     kinds = sorted({finding["check"] for finding in findings})
@@ -281,7 +281,7 @@ def _copy(media: Path, tmp_path: Path, name: str) -> str:
 
 def _project_using(client: TestClient, asset_id: str, name: str) -> str:
     made = client.post("/api/projects", json={"name": name}).json()
-    project = server.repo.get_project(made["id"])
+    project = runtime.repo.get_project(made["id"])
     client.post(f"/api/projects/{made['id']}/edits", json={"expected_version": project.version, "operations": [
         {"action": "insert_clip", "track_id": "video", "clip_id": "c1", "asset_id": asset_id,
          "source_range": {"start": 0, "end": 2}},
@@ -318,7 +318,7 @@ def test_removing_a_folder_moves_what_was_in_it_up_and_deletes_nothing(client: T
     assert next(item for item in client.get("/api/projects").json()["projects"] if item["id"] == made)["folder_id"] == outer
     client.post("/api/folders", json={"action": "delete", "id": outer})
     assert next(item for item in client.get("/api/projects").json()["projects"] if item["id"] == made)["folder_id"] is None
-    assert server.repo.get_project(made) is not None
+    assert runtime.repo.get_project(made) is not None
 
 def test_filing_refuses_a_folder_of_the_other_kind_or_something_unknown(client: TestClient, media: Path, tmp_path: Path) -> None:
     asset = _copy(media, tmp_path, "收.mp4")
@@ -336,7 +336,7 @@ def test_files_chosen_with_a_folder_open_are_filed_in_it(client: TestClient, med
     folder = _folder(client, "assets", "選進來")
     monkeypatch.setattr(dialogs, "pick", lambda kind: [str(copy)])
     result = client.post("/api/pick", json={"kind": "files", "folder_id": folder}).json()
-    assert server.repo.folder_of("assets")[result["assets"][0]] == folder
+    assert runtime.repo.folder_of("assets")[result["assets"][0]] == folder
 
 def test_a_file_a_project_uses_cannot_be_taken_out_and_the_project_is_named(client: TestClient, media: Path, tmp_path: Path) -> None:
     asset = _copy(media, tmp_path, "還在用.mp4")
@@ -344,17 +344,17 @@ def test_a_file_a_project_uses_cannot_be_taken_out_and_the_project_is_named(clie
     answer = client.post("/api/assets/delete", json={"ids": [asset], "recycle": True})
     assert answer.status_code == 409
     assert answer.json()["in_use"] == [{"name": "還在用.mp4", "projects": ["用著它的專案"], "plans": []}]
-    assert server.repo.get_assets([asset]) and (tmp_path / "還在用.mp4").exists()
+    assert runtime.repo.get_assets([asset]) and (tmp_path / "還在用.mp4").exists()
 
 def test_taking_a_file_out_keeps_the_original_unless_asked(client: TestClient, media: Path, tmp_path: Path, monkeypatch) -> None:
     recycled = []
     monkeypatch.setattr(editor.housekeeping, "to_recycle_bin", lambda paths: recycled.extend(paths) or True)
     kept = _copy(media, tmp_path, "留著原檔.mp4")
     folder = _folder(client, "assets", "要清掉的")
-    server.repo.file_items("assets", [kept], folder)
+    runtime.repo.file_items("assets", [kept], folder)
     answer = client.post("/api/assets/delete", json={"ids": [kept], "recycle": False})
     assert answer.status_code == 200 and answer.json()["removed"] == [kept]
-    assert not server.repo.get_assets([kept]) and kept not in server.repo.folder_of("assets")
+    assert not runtime.repo.get_assets([kept]) and kept not in runtime.repo.folder_of("assets")
     assert (tmp_path / "留著原檔.mp4").exists() and recycled == []
     gone = _copy(media, tmp_path, "丟回收筒.mp4")
     assert client.post("/api/assets/delete", json={"ids": [gone], "recycle": True}).status_code == 200
@@ -427,8 +427,8 @@ def test_deleting_projects_takes_them_and_their_previews_and_keeps_what_was_deli
 
     first, second = (server.create_project(name=f"要刪掉的{n}") for n in (1, 2))
     folder = _folder(client, "projects", "舊專案")
-    server.repo.file_items("projects", [first["id"]], folder)
-    previews = Path(housekeeping.preview_dir(server.WORKSPACE_DIR, first["id"])) / "old"
+    runtime.repo.file_items("projects", [first["id"]], folder)
+    previews = Path(housekeeping.preview_dir(runtime.WORKSPACE_DIR, first["id"])) / "old"
     previews.mkdir(parents=True)
     (previews / "preview.mp4").write_bytes(b"x")
     delivered = Path(server.output_dir()) / "要刪掉的1.mp4"
@@ -437,8 +437,8 @@ def test_deleting_projects_takes_them_and_their_previews_and_keeps_what_was_deli
 
     answer = client.post("/api/projects/delete", json={"ids": [first["id"], second["id"]]})
     assert answer.status_code == 200 and sorted(answer.json()["deleted"]) == sorted([first["id"], second["id"]])
-    assert server.repo.get_project(first["id"]) is None and server.repo.get_project(second["id"]) is None
-    assert first["id"] not in server.repo.folder_of("projects")
+    assert runtime.repo.get_project(first["id"]) is None and runtime.repo.get_project(second["id"]) is None
+    assert first["id"] not in runtime.repo.folder_of("projects")
     assert not previews.parent.exists()
     assert delivered.exists()
 
@@ -447,16 +447,16 @@ def test_a_project_being_rendered_is_not_deleted(client: TestClient, ended_after
 
     project = server.create_project(name="輸出中")
     rendering = Job(kind=JobKind.RENDER, status=JobStatus.RUNNING, project_id=project["id"])
-    server.repo.add_job(rendering)
+    runtime.repo.add_job(rendering)
     ended_after.append(rendering.job_id)
     answer = client.post("/api/projects/delete", json={"ids": [project["id"]]})
     assert answer.status_code == 409 and answer.json()["busy"] == ["輸出中"]
-    assert server.repo.get_project(project["id"]) is not None
+    assert runtime.repo.get_project(project["id"]) is not None
 
 def test_the_ai_has_no_way_to_delete_a_project() -> None:
     import asyncio
 
-    names = {tool.name for tool in asyncio.run(server.mcp.list_tools())}
+    names = {tool.name for tool in asyncio.run(runtime.mcp.list_tools())}
     assert not any("delete" in name and "project" in name for name in names)
 
 # --- every job, whoever started it -------------------------------------------------------
@@ -468,12 +468,12 @@ def test_the_editor_sees_jobs_the_ai_started_with_what_they_are_for(
     from app.models.media import Asset
 
     asset = Asset(id="job-asset", path=str(tmp_path / "訪談.mp4"), has_video=True, has_audio=True)
-    server.repo.save_asset(asset)
+    runtime.repo.save_asset(asset)
     project = server.create_project(name="抽杯架 v3")
     analysing = Job(kind=JobKind.ANALYZE, status=JobStatus.RUNNING, asset_id=asset.id, progress=0.4)
     rendering = Job(kind=JobKind.RENDER, project_id=project["id"])
     for job in (analysing, rendering):
-        server.repo.add_job(job)
+        runtime.repo.add_job(job)
         ended_after.append(job.job_id)
     listed = {job["job_id"]: job for job in client.get("/api/jobs/active").json()["jobs"]}
     assert listed[analysing.job_id]["name"] == "訪談.mp4" and listed[analysing.job_id]["progress"] == 0.4
@@ -483,10 +483,10 @@ def test_a_job_can_be_stopped_from_the_editor(client: TestClient, ended_after: l
     from app.models.job import Job, JobKind
 
     waiting = Job(kind=JobKind.RENDER, project_id=server.create_project(name="不要了")["id"])
-    server.repo.add_job(waiting)
+    runtime.repo.add_job(waiting)
     ended_after.append(waiting.job_id)
     assert client.post("/api/jobs/cancel", json={"job_id": waiting.job_id}).status_code == 200
-    assert server.repo.get_job(waiting.job_id).status.value == "cancelled"
+    assert runtime.repo.get_job(waiting.job_id).status.value == "cancelled"
     ended = {job["job_id"]: job for job in client.get("/api/jobs/active").json()["ended"]}
     assert ended[waiting.job_id]["status"] == "cancelled"
 
@@ -498,7 +498,7 @@ def test_offered_songs_are_heard_in_place_of_the_music_and_the_pick_comes_back_a
     wide = server.import_asset(str(media / "wide.mp4"))["id"]
     song = server.import_asset(str(media / "song.mp3"))["id"]
     jingle = server.import_asset(str(media / "jingle.wav"))["id"]
-    server.apply_edits(made["id"], server.repo.get_project(made["id"]).version, server._OPERATIONS.validate_python([
+    server.apply_edits(made["id"], runtime.repo.get_project(made["id"]).version, server._OPERATIONS.validate_python([
         {"action": "insert_clip", "track_id": "video", "clip_id": "a", "asset_id": wide,
          "source_range": {"start": 0, "end": 6}},
         {"action": "insert_clip", "track_id": "music", "clip_id": "m", "asset_id": jingle,
@@ -516,4 +516,4 @@ def test_offered_songs_are_heard_in_place_of_the_music_and_the_pick_comes_back_a
     assert "song.mp3" in picked["text"] and "2 秒" in picked["text"]
     assert client.get(f"/api/projects/{made['id']}/songs").json() == {"offer": None}
     # The project itself was never changed by hearing it.
-    assert [clip.asset_id for clip in server.repo.get_project(made["id"]).tracks[1].clips] == [jingle]
+    assert [clip.asset_id for clip in runtime.repo.get_project(made["id"]).tracks[1].clips] == [jingle]

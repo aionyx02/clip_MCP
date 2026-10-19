@@ -11,24 +11,20 @@ import subprocess
 import threading
 import time
 import uuid
-from contextvars import ContextVar
 from decimal import Decimal
 from fractions import Fraction
 from pathlib import Path
 from typing import Annotated, Callable, Dict, Iterable, List, Literal, Mapping, Optional, Sequence, Tuple, Union
 
 import numpy as np
-from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
 from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
-from fastmcp.server.providers.skills import SkillsDirectoryProvider
-from fastmcp.server.transforms import ResourcesAsTools
 from fastmcp.tools import ToolResult
 from fastmcp.utilities.types import Image
 from mcp.types import TextContent
 from pydantic import BaseModel, Field, TypeAdapter
 from app.models.media import (
-    Asset, HeardAgain, Measured, MediaAnalysis, Source, Span, SpeakerTurn, Transcript, TranscriptWord,
+    Asset, HeardAgain, MediaAnalysis, Source, Span, SpeakerTurn, Transcript, TranscriptWord,
 )
 from app.models.plan import (
     EditPlan, MusicCue, PlanAmendment, SetMusicCueOp, Trim, TrimKind, apply_amendment, describe_amendment,
@@ -87,7 +83,7 @@ from app.engine.library import FOLDER_KINDS, FOOTAGE, LIBRARIES, MUSIC, SPEECH_S
 from app.engine import clap
 from app.engine import fetch
 from app.engine import music as music_energy
-from app.engine.builder import DEFAULT_LOUDNESS_TARGET, FFmpegRenderer, Talking, voice_keys
+from app.engine.builder import DEFAULT_LOUDNESS_TARGET, Talking, voice_keys
 from app.engine.levels import song_level, talking_in
 from app.engine.comments import anchor_at, where_now
 from app.engine.compare import compare
@@ -110,18 +106,15 @@ from app.engine.subtitles import (
     place_cues,
     timeline_cues,
 )
-from app.engine.renderer import JobManager
 from app.storage import housekeeping
-from app.storage.history import Version, current_batch
-from app.storage.repo import Repository
-from app.workspace import output_dir, workspace_dir
+from app.storage.history import Version
+from app.workspace import output_dir
+from app import runtime
+# By name, unlike everything else from runtime: every tool is registered with it, and it is never swapped out.
+from app.runtime import mcp
+from app.tools import shared
 
-WORKSPACE_DIR = workspace_dir()
-SKILLS_DIR = Path(__file__).parent / "skills"
-MAX_STORYBOARD_TILES = 36
 MAX_CLIP_RESULTS = 200
-# Reading a whole timeline at once: an hour of talk is a few hundred utterances.
-MAX_TIMELINE_CLIPS = 5000
 # Characters a Windows or POSIX filesystem will not take in a name, plus the control
 # range. A project is named by whoever is editing, so a render cannot assume anything
 # about what is in that name.
@@ -146,63 +139,6 @@ MEDIA_EXTENSIONS = frozenset({
     ".mp4", ".mov", ".m4v", ".mkv", ".avi", ".webm", ".mpg", ".mpeg", ".mts", ".m2ts", ".wmv", ".flv", ".3gp",
     ".mp3", ".m4a", ".wav", ".aac", ".flac", ".ogg", ".opus", ".wma", ".aiff",
 }) | stills.IMAGE_EXTENSIONS
-
-# Opened before the server is described: what it says about this computer's speed comes from runs kept here.
-repo = Repository(os.path.join(WORKSPACE_DIR, "clip_mcp.db"))
-history = repo.keep_history(os.path.join(WORKSPACE_DIR, "history"))
-
-# The tools an ordinary edit goes through, in the order they come up. Named in the opening
-# instructions because a client that loads tools on demand has to guess which ones it will
-# need before it has read anything; a test keeps every name here a real tool.
-CORE_TOOLS = (
-    "list_assets", "analyze_asset", "get_job", "build_semantic_timeline", "query_clips", "view_frames",
-    "save_plan", "amend_plan", "create_project", "compile_plan", "preview_project", "render_project",
-    "view_render", "inspect_join", "listen_again", "check_render", "apply_edits", "generate_subtitles",
-)
-
-mcp = FastMCP(
-    "VideoEditingCore",
-    instructions=(
-        "Timeline-based video editing backed by FFmpeg. Before planning edits, "
-        "read the clip-editing skill at skill://clip-editing/SKILL.md (clients "
-        "without resource support can call read_resource with that URI). It "
-        "explains how to turn editing requests into tool calls, how to read "
-        "footage with analyze_asset, get_analysis, and view_frames, how to "
-        "check an edit with preview_project before rendering, how to work "
-        "through a folder of unedited footage when the user has no plan, "
-        "what to ask when a request is incomplete, how music ducks under "
-        "speech and how every render is normalized to one consistent "
-        "loudness, how to caption an edit with generate_subtitles and "
-        "burn_subtitles, how a render is checked first and refused until the "
-        "user has heard what the check found, how one cut is delivered in "
-        "several shapes and handed to other editing programs, "
-        "and the current limits: no overlapping picture on a "
-        "track, and no graphics beyond words: captions, title cards and text "
-        "over the footage. Photos go in like videos and are shown for as long "
-        "as their clip runs. "
-        "Transitions end on the cut rather than straddling it, so adding one "
-        "never changes how long the video runs. The person using this server is "
-        "editing their own video, not writing code: reply in plain language "
-        "with no tool names, IDs, or JSON, and read the plan back in one "
-        "sentence for confirmation before the first render — unless they asked "
-        "you to finish on your own, and then the skill says what still has to "
-        "happen. Only files in the "
-        "library can go into a project: a file the user names is added to it "
-        "with import_asset or import_folder first, and you tell them it was "
-        "added, since they see the library in the editor app and can take "
-        "files out of it there; a file taken out is no longer usable until it "
-        "is added again. Projects, assets, "
-        "analyses, and jobs are saved on disk and survive server restarts. "
-        f"The tools most edits go through, in order: {', '.join(CORE_TOOLS)}. "
-        "Wherever a tool takes an asset ID, the file's exact name works too. "
-        # Looked at once, at start: the AI has to know before it sends footage off how long that will take here.
-        + machine.describe(machine.profile(), speed.estimate(repo, machine.profile(), {"accurate": 3600}, False))
-    ),
-)
-# "resources" lists the supporting files alongside SKILL.md, so a client sees them
-# without having to read the manifest first.
-mcp.add_provider(SkillsDirectoryProvider(roots=SKILLS_DIR, supporting_files="resources"))
-mcp.add_transform(ResourcesAsTools(mcp))
 
 def _shortened(value: object) -> object:
     """Take the timeline off every clip ID in a result, however deep it sits.
@@ -263,33 +199,6 @@ class ShortClipIds(Middleware):
 
 mcp.add_middleware(ShortClipIds())
 
-def asset_id_for(name: str) -> str:
-    """Find the asset a file name means, for a tool given a name where it wants an ID.
-
-    Only an exact name: guessing which of `0828.mp4` and `0828(1).mp4` was
-    meant is worse than one more look at the list.
-
-    Args:
-        name: An asset ID, or a file's name as `list_assets` shows it.
-
-    Returns:
-        The asset's ID, or `name` as it was when it is an ID or no file has
-        that name, so the tool says what it says about an asset it cannot find.
-
-    Raises:
-        ValueError: If more than one file has that name.
-    """
-    if not isinstance(name, str) or repo.get_assets([name]):
-        return name
-    named = [asset for asset in repo.list_assets() if os.path.basename(asset.path) == name]
-    if len(named) > 1:
-        raise ValueError(
-            f"{len(named)} files are called {name}: "
-            + "; ".join(f"{asset.id} ({asset.path})" for asset in named)
-            + ". Give the ID of the one meant"
-        )
-    return named[0].id if named else name
-
 def _with_asset_ids(value: object) -> object:
     """Put an ID in place of every file name given as an asset, however deep it sits.
 
@@ -310,9 +219,9 @@ def _with_asset_ids(value: object) -> object:
     named = {}
     for key, item in value.items():
         if key == "asset_id":
-            named[key] = asset_id_for(item)
+            named[key] = shared.asset_id_for(item)
         elif key == "asset_ids" and isinstance(item, list):
-            named[key] = [asset_id_for(name) for name in item]
+            named[key] = [shared.asset_id_for(name) for name in item]
         else:
             named[key] = _with_asset_ids(item)
     return named
@@ -374,9 +283,6 @@ def _client_name(context: MiddlewareContext) -> str:
         name = ""
     return CLIENT_NAMES.get(name.lower(), name) or "AI 程式"
 
-# The AI program making the current call, for what it says under its own name.
-_calling_client: ContextVar[str] = ContextVar("calling_client", default="AI 程式")
-
 class HistorySteps(Middleware):
     """Keep what one tool call changed as one version, said in words, under the AI's name."""
 
@@ -395,12 +301,12 @@ class HistorySteps(Middleware):
         note = arguments.get("note") if isinstance(arguments.get("note"), str) else ""
         name = context.message.name
         client = _client_name(context)
-        token = _calling_client.set(client)
+        token = runtime.calling_client.set(client)
         try:
-            with history.step(f"AI（{client}）", note=note, doing=DOING.get(name, name)):
+            with runtime.history.step(f"AI（{client}）", note=note, doing=DOING.get(name, name)):
                 return await call_next(context)
         finally:
-            _calling_client.reset(token)
+            runtime.calling_client.reset(token)
 
 mcp.add_middleware(HistorySteps())
 
@@ -451,64 +357,6 @@ mcp.add_middleware(OpenComments())
 # Compiled operations are validated the same way a client's are, so a plan cannot reach
 # the timeline through a door the tool surface does not have.
 _OPERATIONS = TypeAdapter(List[EditOperation])
-
-job_manager = JobManager(repo)
-renderer = FFmpegRenderer()
-
-def _referenced_assets(project: Project) -> dict[str, Asset]:
-    """Fetch the assets referenced by a project's clips.
-
-    Args:
-        project: Project whose clips are inspected.
-
-    Returns:
-        The registered assets used by the project, keyed by asset ID. IDs that
-        are not registered are omitted.
-    """
-    return repo.get_assets(clip.asset_id for track in project.tracks for clip in track.clips)
-
-def _get_asset(asset_id: str) -> Asset:
-    """Fetch a registered asset.
-
-    Args:
-        asset_id: ID of the asset.
-
-    Returns:
-        The asset.
-
-    Raises:
-        ValueError: If no asset with `asset_id` exists.
-    """
-    asset = repo.get_assets([asset_id]).get(asset_id)
-    if asset is None:
-        raise ValueError(f"asset {asset_id} not found")
-    return asset
-
-def _covering(records: Sequence[Measured], start: float, end: float) -> list:
-    """Select the records that reach into a time range.
-
-    Args:
-        records: Records to filter; anything with `start` and `end`.
-        start: Range start in seconds.
-        end: Range end in seconds.
-
-    Returns:
-        The overlapping records themselves, for a caller that has to read them.
-    """
-    return [record for record in records if record.end > start and record.start < end]
-
-def _overlapping(spans: Sequence[Measured], start: float, end: float) -> List[dict]:
-    """Select the spans that overlap a time range.
-
-    Args:
-        spans: Spans to filter; anything with `start` and `end` attributes.
-        start: Range start in seconds.
-        end: Range end in seconds.
-
-    Returns:
-        The overlapping spans, serialized as dictionaries.
-    """
-    return [span.model_dump() for span in _covering(spans, start, end)]
 
 @mcp.tool()
 def inspect_media(filepath: str) -> dict:
@@ -568,7 +416,7 @@ def register_asset(filepath: str, library: Optional[str] = None) -> Asset:
     path = os.path.abspath(filepath)
     info = probe_file(path)
 
-    existing = repo.find_asset_by_path(path)
+    existing = runtime.repo.find_asset_by_path(path)
     streams = info.get("streams", [])
     duration = info.get("format", {}).get("duration")
     photo = stills.is_image(path)
@@ -599,7 +447,7 @@ def register_asset(filepath: str, library: Optional[str] = None) -> Asset:
         asset.library = library
     elif asset.library is None:
         asset.library = classify(asset)
-    repo.save_asset(asset)
+    runtime.repo.save_asset(asset)
     _queue_music([asset])
     return asset
 
@@ -619,12 +467,12 @@ def _queue_music(assets: Iterable[Asset]) -> List[str]:
     """
     if not ANALYZE_MUSIC_ON_ADD:
         return []
-    busy = {job.asset_id for job in repo.jobs_to_show(datetime.now(timezone.utc))[0] if job.kind == JobKind.ANALYZE}
+    busy = {job.asset_id for job in runtime.repo.jobs_to_show(datetime.now(timezone.utc))[0] if job.kind == JobKind.ANALYZE}
     started = []
     for asset in assets:
         if library_of(asset) != MUSIC or asset.duration is None or asset.id in busy:
             continue
-        existing = repo.get_analysis(asset.id)
+        existing = runtime.repo.get_analysis(asset.id)
         if existing is not None and existing.rhythm is not None and existing.music is not None \
                 and not _is_stale(existing):
             continue
@@ -642,72 +490,18 @@ def tend_library() -> None:
     from filelock import FileLock, Timeout
 
     try:
-        with FileLock(os.path.join(WORKSPACE_DIR, "library.lock"), timeout=0):
-            for asset in repo.list_assets():
+        with FileLock(os.path.join(runtime.WORKSPACE_DIR, "library.lock"), timeout=0):
+            for asset in runtime.repo.list_assets():
                 if asset.library is None and os.path.exists(asset.path):
                     try:
                         asset.library = classify(asset)
                     except (OSError, RuntimeError, ValueError):
                         # Left where its picture says until it can be listened to; the next start tries again.
                         continue
-                    repo.save_asset(asset)
-            _queue_music(repo.list_assets())
+                    runtime.repo.save_asset(asset)
+            _queue_music(runtime.repo.list_assets())
     except Timeout:
         return
-
-def _dated(assets: Mapping[str, Asset]) -> Dict[str, Asset]:
-    """Make sure every asset knows when it was recorded, where anything says.
-
-    Assets imported before the time was kept do not, so it is read off the
-    file the first time it is asked for and saved, the same way `_sized` does
-    the picture size.
-
-    Args:
-        assets: The assets, keyed by ID.
-
-    Returns:
-        The same assets, each with `recorded_at` filled in where it can be.
-    """
-    dated = {}
-    for asset_id, asset in assets.items():
-        if asset.recorded_at is None and os.path.isfile(asset.path):
-            try:
-                moment = recorded_at(probe_file(asset.path), asset.path)
-            except (OSError, RuntimeError):
-                moment = None
-            if moment is not None:
-                asset = asset.model_copy(update={"recorded_at": moment})
-                repo.save_asset(asset)
-        dated[asset_id] = asset
-    return dated
-
-def _sized(assets: Mapping[str, Asset]) -> Dict[str, Asset]:
-    """Make sure every asset with a picture knows how big it is.
-
-    Assets imported before the size was kept do not. Reframing needs it, so it
-    is read off the file the first time it is asked for and saved, rather than
-    making anybody import everything again.
-
-    Args:
-        assets: The assets, keyed by ID.
-
-    Returns:
-        The same assets, sized where the file could still be read. One whose
-        file has gone is returned as it was; the render reports the missing
-        file in its own words.
-    """
-    sized: Dict[str, Asset] = {}
-    for asset_id, asset in assets.items():
-        if asset.has_video and asset.width is None:
-            try:
-                size = picture_size(probe_file(asset.path))
-            except (FileNotFoundError, RuntimeError):
-                size = None
-            if size is not None:
-                asset = asset.model_copy(update={"width": size[0], "height": size[1]})
-                repo.save_asset(asset)
-        sized[asset_id] = asset
-    return sized
 
 @mcp.tool()
 def import_asset(filepath: str) -> dict:
@@ -735,7 +529,7 @@ def import_asset(filepath: str) -> dict:
         FileNotFoundError: If the file does not exist.
         RuntimeError: If ffprobe cannot read the file.
     """
-    return _plain(_asset_record(register_asset(filepath)))
+    return shared.plain(_asset_record(register_asset(filepath)))
 
 def _asset_record(asset: Asset) -> dict:
     """An asset as a tool hands it back: a photo with no length, since it has none of its own."""
@@ -743,27 +537,6 @@ def _asset_record(asset: Asset) -> dict:
     if asset.still:
         record["duration"] = None
     return record
-
-def _plain(value):
-    """Turn the Decimals a model keeps its seconds in into plain numbers, all the way down.
-
-    Times are kept as Decimal so the timeline adds up to the millisecond, but a
-    client reading them gets strings — `"12.5"` — and compares or adds them
-    wrongly. What leaves the server is numbers; what is stored stays exact.
-
-    Args:
-        value: What a tool is about to return.
-
-    Returns:
-        The same, with every Decimal a float.
-    """
-    if isinstance(value, Decimal):
-        return float(value)
-    if isinstance(value, dict):
-        return {key: _plain(item) for key, item in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_plain(item) for item in value]
-    return value
 
 @mcp.tool()
 def list_assets(
@@ -807,9 +580,9 @@ def list_assets(
         comparing them with each other. `inspect_media` has a file's full path,
         size and frame rate.
     """
-    filed = {**repo.folder_of("assets"), **repo.folder_of("music")}
+    filed = {**runtime.repo.folder_of("assets"), **runtime.repo.folder_of("music")}
     matching = [
-        asset for asset in repo.list_assets()
+        asset for asset in runtime.repo.list_assets()
         if (kind is None or library_of(asset) == kind)
         and (folder_id is None or filed.get(asset.id) == folder_id)
         and (not text or text.lower() in os.path.basename(asset.path).lower())
@@ -819,7 +592,7 @@ def list_assets(
     matching.sort(key=lambda asset: _natural_key(os.path.basename(asset.path)))
     assets = []
     for asset in matching[offset:offset + limit]:
-        analysis = repo.get_analysis(asset.id)
+        analysis = runtime.repo.get_analysis(asset.id)
         assets.append({
             "id": asset.id,
             "name": os.path.basename(asset.path),
@@ -838,7 +611,7 @@ def list_assets(
                else {"analyzing": True} if asset.id in analyzing else {}),
         })
     return {"assets": assets, "total": len(matching), "offset": offset,
-            "folders": repo.list_folders(_folder_kind(kind or FOOTAGE))}
+            "folders": runtime.repo.list_folders(_folder_kind(kind or FOOTAGE))}
 
 def song_tags() -> Dict[str, Dict[str, List[str]]]:
     """The moods and styles that set each analyzed song apart from the rest of the library.
@@ -847,10 +620,10 @@ def song_tags() -> Dict[str, Dict[str, List[str]]]:
         `moods` and `styles` by song.
     """
     sensed = {}
-    for asset in repo.list_assets():
+    for asset in runtime.repo.list_assets():
         if library_of(asset) != MUSIC:
             continue
-        analysis = repo.get_analysis(asset.id)
+        analysis = runtime.repo.get_analysis(asset.id)
         if analysis is not None and analysis.music is not None:
             sensed[asset.id] = analysis.music
     moods = clap.ranked({song: sense.moods for song, sense in sensed.items()})
@@ -866,7 +639,7 @@ def _sounds_like(asset_id: str, analysis: MediaAnalysis, heard: Mapping[str, Map
 
 def analyzing_assets() -> set:
     """The files an analysis is queued or running for."""
-    return {job.asset_id for job in repo.jobs_to_show(datetime.now(timezone.utc))[0] if job.kind == JobKind.ANALYZE}
+    return {job.asset_id for job in runtime.repo.jobs_to_show(datetime.now(timezone.utc))[0] if job.kind == JobKind.ANALYZE}
 
 def song_details(asset: Asset, analysis: Optional[MediaAnalysis], heard: Mapping[str, Mapping[str, List[str]]],
                  analyzing: set) -> dict:
@@ -919,10 +692,10 @@ def find_music(description: str, min_seconds: Annotated[float, Field(ge=0)] = 0,
     """
     heard = song_tags()
     vectors, found, waiting = {}, {}, 0
-    for asset in repo.list_assets():
+    for asset in runtime.repo.list_assets():
         if library_of(asset) != MUSIC or not os.path.exists(asset.path):
             continue
-        analysis = repo.get_analysis(asset.id)
+        analysis = runtime.repo.get_analysis(asset.id)
         if analysis is None or analysis.music is None or not analysis.music.vector:
             waiting += 1
             continue
@@ -1015,12 +788,12 @@ def add_music_from_url(url: str, page: str, title: str, artist: str = "", licenc
         # Ours, just downloaded, and not what was agreed to: it does not stay.
         os.remove(path)
         raise ValueError("what was downloaded is not a song: it has no sound, or it has a picture")
-    _say_in_history(f"從 {planned['site']} 加入「{title}」")
+    shared.say_in_history(f"從 {planned['site']} 加入「{title}」")
     asset = register_asset(path, MUSIC).model_copy(update={"source": Source(
         site=planned["site"], page=page, url=url, title=title, artist=artist, licence=planned["licence"],
         credit=planned["credit"], personal_only=personal_use,
     )})
-    repo.save_asset(asset)
+    runtime.repo.save_asset(asset)
     return {"id": asset.id, "name": os.path.basename(path), "path": path, "credit": planned["credit"]}
 
 @mcp.tool()
@@ -1039,11 +812,11 @@ def music_credits(project_id: str) -> dict:
     Raises:
         ValueError: If there is no such project.
     """
-    project = repo.get_project(project_id)
+    project = runtime.repo.get_project(project_id)
     if project is None:
         raise ValueError(f"project {project_id} not found")
-    used = repo.get_assets({clip.asset_id for track in project.tracks if track.track_type == TrackType.AUDIO
-                            for clip in track.clips})
+    used = runtime.repo.get_assets({clip.asset_id for track in project.tracks if track.track_type == TrackType.AUDIO
+                                    for clip in track.clips})
     # A voice-over is on an audio track too, but owes nobody a credit.
     used = {asset_id: asset for asset_id, asset in used.items() if library_of(asset) == MUSIC}
     credits, personal, unknown = [], [], []
@@ -1099,18 +872,18 @@ def export_notices(
     Raises:
         ValueError: If the project, or a file named in `licences`, does not exist.
     """
-    project = repo.get_project(project_id)
+    project = runtime.repo.get_project(project_id)
     if not project:
         raise ValueError(f"project {project_id} not found")
-    assets = _referenced_assets(project)
+    assets = shared.referenced_assets(project)
     # Every file looked up before any is written, so a refusal changes nothing.
-    named = {asset_id: assets.get(asset_id) or repo.get_assets([asset_id]).get(asset_id) for asset_id in licences or {}}
+    named = {asset_id: assets.get(asset_id) or runtime.repo.get_assets([asset_id]).get(asset_id) for asset_id in licences or {}}
     unknown = [asset_id for asset_id, asset in named.items() if asset is None]
     if unknown:
         raise ValueError(f"asset {', '.join(unknown)} not found; no licence was kept")
     for asset_id, licence in (licences or {}).items():
         asset = named[asset_id].model_copy(update={"licence": licence.strip() or None})
-        repo.save_asset(asset)
+        runtime.repo.save_asset(asset)
         assets[asset_id] = asset
     tags: Dict[str, Dict[str, str]] = {}
     for asset_id, asset in assets.items():
@@ -1171,16 +944,16 @@ def set_asset_library(asset_ids: List[str], library: Literal["footage", "music"]
         ValueError: If a file is not in the library, or a file with a
             picture is moved to music.
     """
-    assets = [_get_asset(asset_id) for asset_id in asset_ids]
+    assets = [shared.get_asset(asset_id) for asset_id in asset_ids]
     pictured = [os.path.basename(asset.path) for asset in assets if asset.has_video]
     if library == MUSIC and pictured:
         raise ValueError(f"{', '.join(pictured)} has a picture, so it is footage: music is sound alone")
-    moved = repo.move_to_library([asset.id for asset in assets], library)
+    moved = runtime.repo.move_to_library([asset.id for asset in assets], library)
     _queue_music(moved)
     if library == FOOTAGE and ANALYZE_MUSIC_ON_ADD:
         # Heard as a song, it was never transcribed: now it is listened to for what is said.
         for asset in moved:
-            existing = repo.get_analysis(asset.id)
+            existing = runtime.repo.get_analysis(asset.id)
             if existing is not None and existing.transcript is None and asset.has_audio:
                 _start_analysis(asset, True, "accurate", priority=1)
     return {"moved": [os.path.basename(asset.path) for asset in moved]}
@@ -1205,8 +978,8 @@ def edit_asset(asset_id: str, notes: str, note: str = "") -> dict:
     Raises:
         ValueError: If the file is not in the library.
     """
-    asset = _get_asset(asset_id).model_copy(update={"notes": notes.strip()})
-    repo.save_asset(asset)
+    asset = shared.get_asset(asset_id).model_copy(update={"notes": notes.strip()})
+    runtime.repo.save_asset(asset)
     return {"id": asset.id, "name": os.path.basename(asset.path), "notes": asset.notes}
 
 class CreateFolder(BaseModel):
@@ -1264,23 +1037,23 @@ def organize_library(steps: List[LibraryStep], note: str = "") -> dict:
     Raises:
         ValueError: If a folder or file is unknown, or a name is taken.
     """
-    names = {folder["id"]: folder["name"] for kind in ("assets", "music") for folder in repo.list_folders(kind)}
+    names = {folder["id"]: folder["name"] for kind in ("assets", "music") for folder in runtime.repo.list_folders(kind)}
     done = []
     for step in steps:
         try:
             if isinstance(step, CreateFolder):
-                made = repo.create_folder(uuid.uuid4().hex, _folder_kind(step.library), step.name, step.parent_id)
+                made = runtime.repo.create_folder(uuid.uuid4().hex, _folder_kind(step.library), step.name, step.parent_id)
                 names[made["id"]] = made["name"]
                 if step.asset_ids:
                     _file_in(step.asset_ids, made["id"], step.library)
                 done.append(f"新增資料夾「{made['name']}」" + (f"，放進 {len(step.asset_ids)} 個檔案" if step.asset_ids else ""))
             elif isinstance(step, RenameFolder):
                 old = names.get(step.folder_id, step.folder_id)
-                repo.rename_folder(step.folder_id, step.name)
+                runtime.repo.rename_folder(step.folder_id, step.name)
                 names[step.folder_id] = step.name
                 done.append(f"資料夾「{old}」改名為「{step.name}」")
             elif isinstance(step, MoveFolder):
-                repo.move_folder(step.folder_id, step.parent_id)
+                runtime.repo.move_folder(step.folder_id, step.parent_id)
                 done.append(f"把資料夾「{names.get(step.folder_id, step.folder_id)}」移到"
                             + (f"「{names.get(step.parent_id, step.parent_id)}」裡" if step.parent_id else "最上層"))
             else:
@@ -1289,8 +1062,8 @@ def organize_library(steps: List[LibraryStep], note: str = "") -> dict:
                             + (f"「{names.get(step.folder_id, step.folder_id)}」" if step.folder_id else "最上層"))
         except LookupError as exc:
             raise ValueError(str(exc).strip("'\"")) from exc
-    _say_in_history("；".join(done))
-    return {"done": done, "folders": repo.list_folders("assets"), "music_folders": repo.list_folders("music")}
+    shared.say_in_history("；".join(done))
+    return {"done": done, "folders": runtime.repo.list_folders("assets"), "music_folders": runtime.repo.list_folders("music")}
 
 def _file_in(asset_ids: List[str], folder_id: Optional[str], library: Optional[str] = None) -> None:
     """File footage or songs in a folder of their own library, or at its top.
@@ -1304,12 +1077,12 @@ def _file_in(asset_ids: List[str], folder_id: Optional[str], library: Optional[s
     Raises:
         ValueError: If the files are of both libraries, or the folder is of the other one.
     """
-    assets = [_get_asset(asset_id) for asset_id in asset_ids]
+    assets = [shared.get_asset(asset_id) for asset_id in asset_ids]
     kinds = {library_of(asset) for asset in assets} | ({library} if library else set())
     if len(kinds) > 1:
         raise ValueError("footage and music are filed in folders of their own: file them in separate steps, or "
                          "move a file to the other library first with set_asset_library")
-    repo.file_items(_folder_kind(kinds.pop() if kinds else FOOTAGE), [asset.id for asset in assets], folder_id)
+    runtime.repo.file_items(_folder_kind(kinds.pop() if kinds else FOOTAGE), [asset.id for asset in assets], folder_id)
 
 class FileMove(BaseModel):
     """One file to move on disk."""
@@ -1337,20 +1110,20 @@ def _planned_moves(moves: List[FileMove]) -> List[dict]:
     """Where each file would go, and what that touches."""
     users: Dict[str, set] = {}
     using: Dict[str, set] = {}
-    for project in repo.list_projects():
+    for project in runtime.repo.list_projects():
         for track in project.tracks:
             for clip in track.clips:
                 users.setdefault(clip.asset_id, set()).add(project.name or project.id)
                 using.setdefault(clip.asset_id, set()).add(project.id)
-    working = repo.jobs_to_show(datetime.now(timezone.utc))[0]
+    working = runtime.repo.jobs_to_show(datetime.now(timezone.utc))[0]
     taken: set = set()
     planned = []
     for move in moves:
-        asset = _get_asset(move.asset_id)
+        asset = shared.get_asset(move.asset_id)
         if not os.path.isabs(move.to_folder):
             raise ValueError(f"{move.to_folder} is not a full folder path")
         folder = os.path.abspath(move.to_folder)
-        if any(_inside(folder, own) for own in (WORKSPACE_DIR, str(output_dir()))):
+        if any(_inside(folder, own) for own in (runtime.WORKSPACE_DIR, str(output_dir()))):
             raise ValueError("footage is not moved into clip-mcp's own folders")
         name = (move.name or os.path.basename(asset.path)).strip()
         if not name or os.path.basename(name) != name:
@@ -1413,7 +1186,7 @@ def move_files(moves: List[FileMove], confirm_plan: Optional[str] = None, note: 
     if confirm_plan.strip() != _plan_key(planned):
         raise ValueError("this is not the plan the user was shown: things have changed since, so show them the new "
                          "plan and ask again")
-    _say_in_history(note or f"搬動了 {len(planned)} 個檔案")
+    shared.say_in_history(note or f"搬動了 {len(planned)} 個檔案")
     moved, not_moved = [], []
     for plan in planned:
         why = ("already there" if plan["already_there"] else "file not found" if plan["missing"]
@@ -1435,8 +1208,8 @@ def move_files(moves: List[FileMove], confirm_plan: Optional[str] = None, note: 
                     pass
             not_moved.append({"from": plan["from"], "why": str(exc)})
             continue
-        asset = _get_asset(plan["asset_id"])
-        repo.save_asset(asset.model_copy(update={"path": target}))
+        asset = shared.get_asset(plan["asset_id"])
+        runtime.repo.save_asset(asset.model_copy(update={"path": target}))
         moved.append({"from": plan["from"], "to": target})
     return {"moved": moved, "not_moved": not_moved}
 
@@ -1489,7 +1262,7 @@ def import_folder(folderpath: str, recursive: bool = False) -> dict:
 
     # Photos have no length of their own: counted, an album would read as days of footage.
     total = sum((asset.duration for asset in assets if asset.duration is not None and not asset.still), Decimal(0))
-    return _plain({"assets": [_asset_record(asset) for asset in assets], "total_duration": total, "skipped": skipped})
+    return shared.plain({"assets": [_asset_record(asset) for asset in assets], "total_duration": total, "skipped": skipped})
 
 def _is_stale(analysis: MediaAnalysis) -> bool:
     """Say whether an analysis was taken in a way the server no longer uses.
@@ -1538,7 +1311,7 @@ def _start_analysis(asset: Asset, transcribe: bool, transcription: str, language
         The job.
     """
     job = Job(kind=JobKind.ANALYZE, asset_id=asset.id, priority=priority)
-    job.work_dir = os.path.join(WORKSPACE_DIR, "jobs", job.job_id)
+    job.work_dir = os.path.join(runtime.WORKSPACE_DIR, "jobs", job.job_id)
     with_speech = _transcribed(asset, transcribe)
     job.memory_estimate = resources.analysis_memory_bytes(
         with_speech,
@@ -1548,7 +1321,7 @@ def _start_analysis(asset: Asset, transcribe: bool, transcription: str, language
         diarize=with_speech and diarize,
         detect_faces=asset.has_video,
     )
-    return job_manager.start_job(job, {
+    return runtime.job_manager.start_job(job, {
         "transcribe": transcribe,
         "transcription": transcription,
         "language": language,
@@ -1590,7 +1363,7 @@ def _plan_analyses(
     to_start: List[Tuple[Asset, str]] = []
     skipped: List[dict] = []
     upgrading: List[str] = []
-    active = {job.asset_id: job for job in repo.jobs_to_show(datetime.now(timezone.utc))[0]
+    active = {job.asset_id: job for job in runtime.repo.jobs_to_show(datetime.now(timezone.utc))[0]
               if job.kind == JobKind.ANALYZE and job.status.is_active}
     for asset in assets:
         if asset.id in active:
@@ -1598,7 +1371,7 @@ def _plan_analyses(
             skipped.append({"asset_id": asset.id, "reason": f"already {job.status.value} in job {job.job_id}; "
                                                               "follow it with get_job"})
             continue
-        existing = repo.get_analysis(asset.id)
+        existing = runtime.repo.get_analysis(asset.id)
         had = _transcription(existing)
         upgrade = (_transcribed(asset, transcribe) and had is not None
                    and TRANSCRIPTION_RANK[transcription] > TRANSCRIPTION_RANK[had])
@@ -1625,7 +1398,7 @@ def _estimate(to_start: Sequence[Tuple[Asset, str]], transcribe: bool, diarize: 
         return None
     here = machine.profile()
     found = {"tier": here.tier, "footage_minutes": round(sum(footage.values()) / 60, 1),
-             **speed.estimate(repo, here, footage, diarize)}
+             **speed.estimate(runtime.repo, here, footage, diarize)}
     if upgrading:
         chosen = {transcription for asset, transcription in to_start if asset.id in upgrading}
         found["note"] = (
@@ -1753,7 +1526,7 @@ def analyze_asset(
         ValueError: If an asset does not exist or has no known duration;
             nothing is started then.
     """
-    assets = [_get_asset(asset_id) for asset_id in dict.fromkeys(asset_ids)]
+    assets = [shared.get_asset(asset_id) for asset_id in dict.fromkeys(asset_ids)]
     for asset in assets:
         if asset.duration is None:
             raise ValueError(f"asset {asset.id} has no known duration and cannot be analyzed")
@@ -1780,7 +1553,7 @@ def analyze_asset(
             except (OSError, RuntimeError, ValueError) as error:
                 unsorted.append({"asset_id": asset.id, "reason": str(error)})
                 continue
-            repo.save_asset(asset)
+            runtime.repo.save_asset(asset)
 
     started: List[dict] = []
     to_start, skipped, upgrading = _plan_analyses(assets, transcribe, transcription, again)
@@ -1898,17 +1671,17 @@ def listen_again(
         raise ValueError("only what a file says is kept; a render is the cut, and is heard to check it")
     if job_id is not None:
         return _listen_to_render(job_id, start, end, language)
-    asset = _get_asset(asset_id)
+    asset = shared.get_asset(asset_id)
     if not asset.has_audio:
         raise ValueError(f"asset {asset_id} has no sound to hear again")
     _hearable(start, end)
     if asset.duration is not None and start >= float(asset.duration):
         raise ValueError(f"the file is only {float(asset.duration):g}s long")
-    known = repo.get_analysis(asset_id)
+    known = runtime.repo.get_analysis(asset_id)
     transcript = known.transcript if known is not None else None
     if keep and transcript is None:
         raise ValueError(f"asset {asset_id} has no transcript to correct; analyze it first")
-    keep_as = os.path.join(WORKSPACE_DIR, "temp", "listen", f"{asset_id[:8]}-{start:.2f}-{end:.2f}.wav")
+    keep_as = os.path.join(runtime.WORKSPACE_DIR, "temp", "listen", f"{asset_id[:8]}-{start:.2f}-{end:.2f}.wav")
     fresh = listen_again_in_file(
         asset.path, start, end, language or (transcript.language if transcript else None), keep_as,
         chinese_variant=transcript.chinese_variant if transcript else None,
@@ -2061,13 +1834,13 @@ def _keep_hearing(known: MediaAnalysis, stretch: HeardAgain, agrees: bool, made_
         listed = {"kept_words": retimed, "left_as_transcribed": apart + doubted}
     # Read again before writing, so an analysis taken again meanwhile is not overwritten
     # with the one this started from.
-    current = repo.get_analysis(known.asset_id)
+    current = runtime.repo.get_analysis(known.asset_id)
     if current is None or current.analyzed_at != known.analyzed_at:
         return {"not_kept": "the file was analyzed again while this was heard; hear the stretch again"}
     current.heard_again = [
         *(item for item in current.heard_again if item.end <= stretch.start or item.start >= stretch.end), stretch,
     ]
-    repo.save_analysis(current)
+    runtime.repo.save_analysis(current)
     return {"kept": f"the word times heard from {stretch.start:g}s to {stretch.end:g}s are now what cuts in this "
                     f"file are judged by{partly}; check the cut again", **listed}
 
@@ -2109,7 +1882,7 @@ def _finished_render(job_id: str) -> Tuple[Job, str]:
     Raises:
         ValueError: If it is not a render, has not finished, or its file is gone.
     """
-    job = job_manager.get_job(job_id)
+    job = runtime.job_manager.get_job(job_id)
     if job is None or job.kind != JobKind.RENDER:
         raise ValueError(f"render {job_id} not found; `render_project` gives the job ID of one")
     if job.status != JobStatus.COMPLETED:
@@ -2120,7 +1893,7 @@ def _finished_render(job_id: str) -> Tuple[Job, str]:
 
 def _rendered_from(job: Job) -> Optional[Project]:
     """The project a render was made from, as it is now; None when it is gone."""
-    return repo.get_project(job.project_id) if job.project_id else None
+    return runtime.repo.get_project(job.project_id) if job.project_id else None
 
 def _changed_since(job: Job) -> bool:
     """Whether the project a render was made from has been edited since.
@@ -2174,10 +1947,10 @@ def _listen_to_render(job_id: str, start: float, end: float, language: Optional[
     project = _rendered_from(job)
     if project is not None and not _changed_since(job) and start >= float(project.duration):
         raise ValueError(f"the render is only {float(project.duration):g}s long")
-    keep_as = os.path.join(WORKSPACE_DIR, "temp", "listen", f"render-{job_id[:8]}-{start:.2f}-{end:.2f}.wav")
+    keep_as = os.path.join(runtime.WORKSPACE_DIR, "temp", "listen", f"render-{job_id[:8]}-{start:.2f}-{end:.2f}.wav")
     known = None
     for clip in (project.base_video_track.clips if project and project.base_video_track else []):
-        analysis = repo.get_analysis(clip.asset_id)
+        analysis = runtime.repo.get_analysis(clip.asset_id)
         if analysis is not None and analysis.transcript is not None:
             known = analysis.transcript
             break
@@ -2211,7 +1984,7 @@ def _listen_to_render(job_id: str, start: float, end: float, language: Optional[
     if voice is not None:
         result["heard_without_music"] = True
         # Loud without words is judged on the talking alone, so a song is not taken for a voice.
-        spoken = os.path.join(WORKSPACE_DIR, "temp", "listen", f"render-{job_id[:8]}-voice-{start:.2f}-{end:.2f}.wav")
+        spoken = os.path.join(runtime.WORKSPACE_DIR, "temp", "listen", f"render-{job_id[:8]}-voice-{start:.2f}-{end:.2f}.wav")
         cut_sound(voice, start, end, spoken)
         loud = levels_every(spoken, LEVEL_EVERY_SECONDS)
         os.remove(spoken)
@@ -2251,8 +2024,8 @@ def _voice_of_render(job: Job, project: Optional[Project]) -> Optional[str]:
     os.makedirs(job.work_dir, exist_ok=True)
     music, mix = os.path.join(job.work_dir, "music.wav"), os.path.join(job.work_dir, "sound.m4a")
     try:
-        command = renderer.build_sound(project, _referenced_assets(project), mix, voice, music, None,
-                                       voices=voices, talking=_talking(project, voices))
+        command = runtime.renderer.build_sound(project, shared.referenced_assets(project), mix, voice, music, None,
+                                               voices=voices, talking=_talking(project, voices))
         done = subprocess.run(command, capture_output=True, creationflags=hidden_window_flags())
     except (OSError, ValueError):
         return None
@@ -2357,7 +2130,7 @@ def get_analysis(
     Raises:
         ValueError: If the asset has not been analyzed yet.
     """
-    analysis = repo.get_analysis(asset_id)
+    analysis = runtime.repo.get_analysis(asset_id)
     if analysis is None:
         raise ValueError(f"asset {asset_id} has not been analyzed; call analyze_asset first")
     end = analysis.duration if end is None else end
@@ -2375,7 +2148,7 @@ def get_analysis(
                 if segment.end > start and segment.start < end
             ],
         }
-    notes = _get_asset(asset_id).notes
+    notes = shared.get_asset(asset_id).notes
     return {
         "asset_id": asset_id,
         **({"notes": notes} if notes else {}),
@@ -2386,19 +2159,19 @@ def get_analysis(
         "transcription": _transcription(analysis),
         "doubtful_spots": None if analysis.transcript is None else doubtful_spots(analysis.transcript.segments),
         "range": {"start": start, "end": end},
-        "scenes": _overlapping(analysis.scenes, start, end),
-        "black_frames": _overlapping(analysis.black_frames, start, end),
-        "frozen_frames": _overlapping(analysis.frozen_frames, start, end),
-        "silences": _overlapping(analysis.silences, start, end),
-        "shots": _overlapping(analysis.shots, start, end),
-        "sound": sound_note(_covering(analysis.sound, start, end)),
-        "faces": framing_note(_covering(analysis.faces, start, end)),
-        "speakers": _overlapping(analysis.speakers, start, end),
+        "scenes": shared.overlapping(analysis.scenes, start, end),
+        "black_frames": shared.overlapping(analysis.black_frames, start, end),
+        "frozen_frames": shared.overlapping(analysis.frozen_frames, start, end),
+        "silences": shared.overlapping(analysis.silences, start, end),
+        "shots": shared.overlapping(analysis.shots, start, end),
+        "sound": sound_note(shared.covering(analysis.sound, start, end)),
+        "faces": framing_note(shared.covering(analysis.faces, start, end)),
+        "speakers": shared.overlapping(analysis.speakers, start, end),
         "rhythm": None if analysis.rhythm is None else {
             "tempo": analysis.rhythm.tempo,
             "beats": [beat for beat in analysis.rhythm.beats if start <= beat < end],
         },
-        "music": None if analysis.music is None or library_of(_get_asset(asset_id)) != MUSIC else {
+        "music": None if analysis.music is None or library_of(shared.get_asset(asset_id)) != MUSIC else {
             **song_tags().get(asset_id, {}),
             **music_energy.summary(analysis.music.energy),
         },
@@ -2455,9 +2228,9 @@ def _semantic_clip(clip_id: str, timeline_id: Optional[str]) -> SemanticClip:
     elif timeline_id is not None:
         whole = whole_clip_id(clip_id, _require_timeline(timeline_id).id)
     else:
-        holding = repo.timelines_holding(clip_id)
+        holding = runtime.repo.timelines_holding(clip_id)
         whole = whole_clip_id(clip_id, holding[-1]) if holding else clip_id
-    clip = repo.get_semantic_clip(whole)
+    clip = runtime.repo.get_semantic_clip(whole)
     if clip is None:
         raise ValueError(f"semantic clip {clip_id} not found; query_clips lists the ones that exist")
     return clip
@@ -2474,7 +2247,7 @@ def _require_timeline(timeline_id: Optional[str]) -> SemanticTimeline:
     Raises:
         ValueError: If it does not exist, or if nothing has been built yet.
     """
-    timeline = repo.get_semantic_timeline(timeline_id)
+    timeline = runtime.repo.get_semantic_timeline(timeline_id)
     if timeline is None:
         raise ValueError(
             f"semantic timeline {timeline_id} not found" if timeline_id
@@ -2532,36 +2305,36 @@ def build_semantic_timeline(asset_ids: List[str], rebuild: bool = False) -> dict
     """
     if not asset_ids:
         raise ValueError("give at least one asset to build a semantic timeline from")
-    assets = {asset_id: _get_asset(asset_id) for asset_id in dict.fromkeys(asset_ids)}
-    analyses = {asset_id: repo.get_analysis(asset_id) for asset_id in assets}
+    assets = {asset_id: shared.get_asset(asset_id) for asset_id in dict.fromkeys(asset_ids)}
+    analyses = {asset_id: runtime.repo.get_analysis(asset_id) for asset_id in assets}
     missing = sorted(asset_id for asset_id, analysis in analyses.items() if analysis is None)
     if missing:
         raise ValueError(f"these assets have not been analyzed yet, call analyze_asset on them first: {', '.join(missing)}")
 
     stale = sorted(asset_id for asset_id, analysis in analyses.items() if _is_stale(analysis))
-    existing = repo.find_semantic_timeline(timeline_input_hash(analyses))
+    existing = runtime.repo.find_semantic_timeline(timeline_input_hash(analyses))
     if existing is not None and not rebuild:
-        voices = voice_seconds(repo.query_semantic_clips(existing.id, kinds=[ClipKind.SPEECH], limit=-1))
+        voices = voice_seconds(runtime.repo.query_semantic_clips(existing.id, kinds=[ClipKind.SPEECH], limit=-1))
         return {
             "timeline_id": existing.id,
             "asset_ids": existing.asset_ids,
             "reused": True,
-            "total_clips": sum(repo.count_semantic_clips(existing.id).values()),
-            "counts": repo.count_semantic_clips(existing.id),
+            "total_clips": sum(runtime.repo.count_semantic_clips(existing.id).values()),
+            "counts": runtime.repo.count_semantic_clips(existing.id),
             "voices": voices,
             "maybe_one_person": maybe_one_person(analyses, voices),
             "stale": stale,
         }
 
     timeline, clips = build_timeline(assets, analyses)
-    repo.save_semantic_timeline(timeline, clips)
+    runtime.repo.save_semantic_timeline(timeline, clips)
     voices = voice_seconds(clips)
     return {
         "timeline_id": timeline.id,
         "asset_ids": timeline.asset_ids,
         "reused": False,
         "total_clips": len(clips),
-        "counts": repo.count_semantic_clips(timeline.id),
+        "counts": runtime.repo.count_semantic_clips(timeline.id),
         "voices": voices,
         "maybe_one_person": maybe_one_person(analyses, voices),
         "stale": stale,
@@ -2580,7 +2353,7 @@ def list_timelines() -> dict:
         clips it has, `plans` built on it now and `past`, older versions of
         plans that were. One with neither can go with `delete_timelines`.
     """
-    names = {asset.id: os.path.basename(asset.path) for asset in repo.list_assets()}
+    names = {asset.id: os.path.basename(asset.path) for asset in runtime.repo.list_assets()}
     return {"timelines": [
         {
             "timeline_id": timeline.id,
@@ -2590,7 +2363,7 @@ def list_timelines() -> dict:
             "plans": plans,
             "past": [f"{plan_id} v{version}" for plan_id, version in past],
         }
-        for timeline, clips, plans, past in repo.list_semantic_timelines()
+        for timeline, clips, plans, past in runtime.repo.list_semantic_timelines()
     ]}
 
 @mcp.tool()
@@ -2615,7 +2388,7 @@ def delete_timelines(timeline_ids: List[str], with_past_versions: bool = False) 
             or older versions of one were and `with_past_versions` is off.
             Nothing is deleted then.
     """
-    known = {timeline.id: (plans, past) for timeline, _, plans, past in repo.list_semantic_timelines()}
+    known = {timeline.id: (plans, past) for timeline, _, plans, past in runtime.repo.list_semantic_timelines()}
     problems = []
     for timeline_id in timeline_ids:
         if timeline_id not in known:
@@ -2632,7 +2405,7 @@ def delete_timelines(timeline_ids: List[str], with_past_versions: bool = False) 
     if problems:
         raise ValueError("nothing deleted: " + "; ".join(problems))
     for timeline_id in dict.fromkeys(timeline_ids):
-        repo.delete_semantic_timeline(timeline_id)
+        runtime.repo.delete_semantic_timeline(timeline_id)
     return {"deleted": list(dict.fromkeys(timeline_ids))}
 
 @mcp.tool()
@@ -2765,7 +2538,7 @@ def query_clips(
             plain identifier.
     """
     timeline = _require_timeline(timeline_id)
-    clips = repo.query_semantic_clips(
+    clips = runtime.repo.query_semantic_clips(
         timeline.id,
         level=level,
         kinds=kinds,
@@ -2780,7 +2553,7 @@ def query_clips(
         min_scores=min_scores,
         max_scores=max_scores,
         # Read through in the order it was shot, or ranked by meaning: either needs every match to sort.
-        limit=MAX_TIMELINE_CLIPS if brief or about else offset + limit,
+        limit=shared.MAX_TIMELINE_CLIPS if brief or about else offset + limit,
     )
     relevance: Dict[str, float] = {}
     if about and about.strip():
@@ -2799,7 +2572,7 @@ def query_clips(
             **_outdated(timeline),
         }
         if brief:
-            assets = repo.get_assets({clip.asset_id for clip in page})
+            assets = runtime.repo.get_assets({clip.asset_id for clip in page})
             return {
                 "timeline_id": timeline.id,
                 "lines": [
@@ -2818,7 +2591,7 @@ def query_clips(
             "truncated": offset + limit < len(clips),
         }
     if brief:
-        assets = _dated(repo.get_assets({clip.asset_id for clip in clips}))
+        assets = shared.dated(runtime.repo.get_assets({clip.asset_id for clip in clips}))
         never = datetime.max.replace(tzinfo=timezone.utc)
 
         def shot(clip: SemanticClip) -> tuple:
@@ -2858,7 +2631,7 @@ def _outdated(timeline: SemanticTimeline) -> dict:
         rules changed since it was built, and `stale`, the files analyzed in
         a way the server no longer uses; empty when neither.
     """
-    analyses = {asset_id: repo.get_analysis(asset_id) for asset_id in timeline.asset_ids}
+    analyses = {asset_id: runtime.repo.get_analysis(asset_id) for asset_id in timeline.asset_ids}
     if any(analysis is None for analysis in analyses.values()):
         return {}
     found: dict = {}
@@ -2900,7 +2673,7 @@ def _meaning_context(clips: List[SemanticClip]) -> Dict[str, str]:
     """
     found: Dict[str, str] = {}
     for timeline_id, level in {(clip.timeline_id, clip.level) for clip in clips}:
-        everything = [clip for clip in repo.query_semantic_clips(timeline_id, level=level, limit=MAX_TIMELINE_CLIPS)
+        everything = [clip for clip in runtime.repo.query_semantic_clips(timeline_id, level=level, limit=shared.MAX_TIMELINE_CLIPS)
                       if _meaning_text(clip)]
         everything.sort(key=lambda clip: (clip.asset_id, clip.source_range.start))
         for index, clip in enumerate(everything):
@@ -2926,7 +2699,7 @@ def _rank_by_meaning(clips: List[SemanticClip], question: str) -> List[Tuple[str
     """
     context = _meaning_context(clips)
     wanted = {clip.id: (clip, context[clip.id]) for clip in clips if clip.id in context}
-    stored = repo.clip_vectors(wanted)
+    stored = runtime.repo.clip_vectors(wanted)
     vectors: Dict[str, np.ndarray] = {}
     missing = []
     for clip_id, (clip, words) in wanted.items():
@@ -2946,7 +2719,7 @@ def _rank_by_meaning(clips: List[SemanticClip], question: str) -> List[Tuple[str
                 f"search by meaning needs its model ({needed // meaning.models.MEGABYTE} MB to download once), "
                 f"which could not be fetched: {error}. Search with `text` meanwhile, and try `about` again later."
             ) from error
-        repo.save_clip_vectors(
+        runtime.repo.save_clip_vectors(
             (clip.id, clip.timeline_id, made_from, vector.tobytes())
             for (clip, _, made_from), vector in zip(missing, made)
         )
@@ -2996,7 +2769,7 @@ def _timeline_utterances(timeline: SemanticTimeline) -> List[SemanticClip]:
     Returns:
         The clips, ordered by asset and then by time.
     """
-    return repo.query_semantic_clips(timeline.id, level=ClipLevel.UTTERANCE, limit=MAX_TIMELINE_CLIPS)
+    return runtime.repo.query_semantic_clips(timeline.id, level=ClipLevel.UTTERANCE, limit=shared.MAX_TIMELINE_CLIPS)
 
 def _timeline_analyses(timeline: SemanticTimeline) -> dict:
     """Read the analyses a timeline was built from.
@@ -3010,7 +2783,7 @@ def _timeline_analyses(timeline: SemanticTimeline) -> dict:
     Raises:
         ValueError: If an asset's analysis has gone missing.
     """
-    analyses = {asset_id: repo.get_analysis(asset_id) for asset_id in timeline.asset_ids}
+    analyses = {asset_id: runtime.repo.get_analysis(asset_id) for asset_id in timeline.asset_ids}
     missing = sorted(asset_id for asset_id, found in analyses.items() if found is None)
     if missing:
         raise ValueError(f"the analysis of {', '.join(missing)} is gone; analyze those assets and build the timeline again")
@@ -3137,7 +2910,7 @@ def set_sections(
         "sections_by": chosen_by,
         "candidate_hash": candidate_hash(candidates),
     })
-    repo.save_semantic_timeline(timeline, [*utterances, *built])
+    runtime.repo.save_semantic_timeline(timeline, [*utterances, *built])
 
     topics: dict[str, dict] = {}
     for section in built:
@@ -3183,7 +2956,7 @@ def get_semantic_clip(clip_id: str, include_words: bool = False, timeline_id: Op
     record = clip.model_dump(exclude={"id"})
     record["clip_id"] = clip.id
     if include_words:
-        analysis = repo.get_analysis(clip.asset_id)
+        analysis = runtime.repo.get_analysis(clip.asset_id)
         transcript = analysis.transcript if analysis is not None else None
         words = [
             word
@@ -3197,7 +2970,7 @@ def get_semantic_clip(clip_id: str, include_words: bool = False, timeline_id: Op
         if words and all(word.probability is None for word in words):
             record["unsure_unknown"] = ("this file was transcribed before how sure the speech model was of each "
                                         "word was kept; analyze_asset again to have it")
-    return _plain(record)
+    return shared.plain(record)
 
 @mcp.tool()
 def frames_for_clips(
@@ -3234,14 +3007,14 @@ def frames_for_clips(
     """
     if not clip_ids:
         raise ValueError("give at least one clip to look at")
-    if len(clip_ids) > MAX_STORYBOARD_TILES:
-        raise ValueError(f"{len(clip_ids)} clips is more than one sheet holds; ask for at most {MAX_STORYBOARD_TILES}")
+    if len(clip_ids) > shared.MAX_STORYBOARD_TILES:
+        raise ValueError(f"{len(clip_ids)} clips is more than one sheet holds; ask for at most {shared.MAX_STORYBOARD_TILES}")
 
     shots: List[tuple[str, float, str]] = []
     listing: List[str] = []
     for position, clip_id in enumerate(clip_ids):
         clip = _semantic_clip(clip_id, timeline_id)
-        asset = _get_asset(clip.asset_id)
+        asset = shared.get_asset(clip.asset_id)
         if not asset.has_video:
             raise ValueError(f"clip {clip_id} comes from {asset.id}, which has no picture to show")
         middle = (clip.source_range.start + clip.source_range.end) / 2
@@ -3315,7 +3088,7 @@ def set_clip_tags(
             "tags": [*kept, *(Tag(value=value, source=source, model_version=written_by) for value in entry.tags)],
         }))
 
-    repo.update_semantic_clips(written)
+    runtime.repo.update_semantic_clips(written)
     return {"updated": len(written), "tags": sum(len(clip.tags) for clip in written)}
 
 @mcp.tool()
@@ -3323,7 +3096,7 @@ def view_frames(
     asset_ids: list[str],
     start: Annotated[float, Field(ge=0)] = 0,
     end: Optional[float] = None,
-    count: Annotated[int, Field(ge=1, le=MAX_STORYBOARD_TILES)] = 12,
+    count: Annotated[int, Field(ge=1, le=shared.MAX_STORYBOARD_TILES)] = 12,
 ) -> ToolResult:
     """Look at frames from one or more assets as one labeled contact sheet image.
 
@@ -3357,10 +3130,10 @@ def view_frames(
     """
     if not asset_ids:
         raise ValueError("name at least one asset to show frames from")
-    if len(asset_ids) * count > MAX_STORYBOARD_TILES:
+    if len(asset_ids) * count > shared.MAX_STORYBOARD_TILES:
         raise ValueError(
             f"{len(asset_ids)} assets at {count} frames each is more than one sheet holds; "
-            f"ask for at most {MAX_STORYBOARD_TILES} frames in total"
+            f"ask for at most {shared.MAX_STORYBOARD_TILES} frames in total"
         )
     if len(asset_ids) > 1 and (start or end is not None):
         raise ValueError("a time range only means something for one asset; drop start and end, or ask about one file")
@@ -3368,7 +3141,7 @@ def view_frames(
     shots: List[tuple[str, float, str]] = []
     listing: List[str] = []
     for asset_id in asset_ids:
-        asset = _get_asset(asset_id)
+        asset = shared.get_asset(asset_id)
         if not asset.has_video or asset.duration is None:
             raise ValueError(f"asset {asset_id} has no video frames to show")
         duration = float(asset.duration)
@@ -3397,7 +3170,7 @@ def view_render(
     times: Optional[List[Annotated[float, Field(ge=0)]]] = None,
     start: Annotated[float, Field(ge=0)] = 0,
     end: Optional[float] = None,
-    count: Annotated[int, Field(ge=1, le=MAX_STORYBOARD_TILES)] = 12,
+    count: Annotated[int, Field(ge=1, le=shared.MAX_STORYBOARD_TILES)] = 12,
 ) -> ToolResult:
     """Look at frames of a finished render: what the viewer will see, captions and transitions included.
 
@@ -3463,10 +3236,10 @@ def view_render(
         stop = last if last is not None else start + 1
         step = (stop - start) / count
         wanted = [(start + step * (index + 0.5), "") for index in range(count)]
-    if len(wanted) > MAX_STORYBOARD_TILES:
-        said.append(f"{len(wanted)} frames wanted, the first {MAX_STORYBOARD_TILES} shown; look at the rest with "
+    if len(wanted) > shared.MAX_STORYBOARD_TILES:
+        said.append(f"{len(wanted)} frames wanted, the first {shared.MAX_STORYBOARD_TILES} shown; look at the rest with "
                     "a later `start`")
-        wanted = wanted[:MAX_STORYBOARD_TILES]
+        wanted = wanted[:shared.MAX_STORYBOARD_TILES]
     if _changed_since(job):
         said.append("the project has been edited since this render, so it may no longer show what the cut is now")
     if length is not None:
@@ -3504,7 +3277,7 @@ def _project_as_rendered(job: Job) -> Tuple[Optional[Project], bool]:
     project = _rendered_from(job)
     if project is None or not _changed_since(job):
         return project, project is not None
-    for version in history.versions_of("projects/", f"{project.id}.json", 50):
+    for version in runtime.history.versions_of("projects/", f"{project.id}.json", 50):
         data = _project_json_at(project.id, version.commit)
         if data is not None and data.get("version") == job.project_version:
             return Project.model_validate(data), True
@@ -3608,7 +3381,7 @@ def inspect_join(
     elif _changed_since(job):
         said.append("the project has been edited since this render; these are the joins of the version rendered")
     listed = joins_in(project, {asset_id: os.path.basename(asset.path)
-                                for asset_id, asset in _referenced_assets(project).items()})
+                                for asset_id, asset in shared.referenced_assets(project).items()})
     if not listed:
         return ToolResult(content=["\n".join([*said, f"render {job_id} has no joins: it is one shot"])])
     findings = [finding for finding in _findings(project, job.captioned) if finding.spans]
@@ -3628,10 +3401,10 @@ def inspect_join(
     wanted = list(dict.fromkeys(wanted))
     steps = round(seconds * fps)
     per_join = 2 * (steps + 1)
-    if per_join > MAX_STORYBOARD_TILES:
+    if per_join > shared.MAX_STORYBOARD_TILES:
         raise ValueError(f"{seconds:g}s at {fps:g} frames a second is {per_join} frames a join, more than the "
-                         f"{MAX_STORYBOARD_TILES} a sheet holds; look less far, or more thinly")
-    fits = MAX_STORYBOARD_TILES // per_join
+                         f"{shared.MAX_STORYBOARD_TILES} a sheet holds; look less far, or more thinly")
+    fits = shared.MAX_STORYBOARD_TILES // per_join
     if len(wanted) > fits:
         said.append(f"{', '.join(f'#{number}' for number in wanted[fits:])} did not fit on the sheet; "
                     "look at them in another call")
@@ -3654,7 +3427,7 @@ def inspect_join(
                               f"#{number} {moment - join.at:+.2f}s"))
                 borders.append(CUT_BORDER if index == edge else None)
         opened, closed = max(0.0, join.at - seconds), min(length, join.at + seconds)
-        keep_as = os.path.join(WORKSPACE_DIR, "temp", "joins", f"render-{job_id[:8]}-{join.at:.2f}.wav")
+        keep_as = os.path.join(runtime.WORKSPACE_DIR, "temp", "joins", f"render-{job_id[:8]}-{join.at:.2f}.wav")
         heard = words_heard(project, analyses, opened, closed)
         text += [
             _join_line(number, join, _found_at(join, findings)),
@@ -3664,7 +3437,7 @@ def inspect_join(
         if heard:
             # The words above are as the transcriber timed them; this is what they say, corrected
             # with the glossary the captions use, so a misheard word fixed once reads fixed here.
-            sides = [_glossed("".join(word.text for word in heard if (word.start >= join.at) == later))
+            sides = [shared.glossed("".join(word.text for word in heard if (word.start >= join.at) == later))
                      for later in (False, True)]
             text.append(f"  reads: 「{sides[0]}」 ‖ 「{sides[1]}」")
         # The captions are what somebody read and corrected, word for word, where the transcript
@@ -3720,12 +3493,12 @@ def create_project(
         id=str(uuid.uuid4()), name=name.strip(),
         width=width, height=height, fps_num=fps_num, fps_den=fps_den,
     )
-    repo.add_project(project)
-    return _with_preferences(_plain(project.model_dump()))
+    runtime.repo.add_project(project)
+    return _with_preferences(shared.plain(project.model_dump()))
 
 def _with_preferences(result: dict) -> dict:
     """Add how the user likes their videos to what a tool says, when anything is kept."""
-    kept = repo.preferences()
+    kept = runtime.repo.preferences()
     if kept:
         result["preferences"] = [{"id": preference.id, "text": preference.text} for preference in kept]
     return result
@@ -3741,7 +3514,7 @@ def list_projects() -> dict:
     """
     return _with_preferences({"projects": [
         {"id": project.id, "name": project.name, "version": project.version}
-        for project in repo.list_projects()
+        for project in runtime.repo.list_projects()
     ]})
 
 @mcp.tool()
@@ -3767,7 +3540,7 @@ def get_project(project_id: str, include_subtitles: bool = False) -> dict:
     Raises:
         ValueError: If no project with `project_id` exists.
     """
-    project = repo.get_project(project_id)
+    project = runtime.repo.get_project(project_id)
     if not project:
         raise ValueError(f"project {project_id} not found")
     # Clips are dumped without the fields that are still at their defaults, which is most of them
@@ -3793,7 +3566,7 @@ def get_project(project_id: str, include_subtitles: bool = False) -> dict:
         state["subtitles"] = [cue.model_dump() for cue in project.subtitles]
     else:
         state.pop("subtitles", None)
-    return _with_preferences(_plain(state))
+    return _with_preferences(shared.plain(state))
 
 @mcp.tool()
 def apply_edits(project_id: str, expected_version: int, operations: list[EditOperation], note: str = "") -> dict:
@@ -3865,7 +3638,7 @@ def apply_edits(project_id: str, expected_version: int, operations: list[EditOpe
             an operation references a missing or duplicate track or clip, or
             the resulting timeline breaks a rule above.
     """
-    before = repo.get_project(project_id)
+    before = runtime.repo.get_project(project_id)
     saved = _apply(project_id, expected_version, operations)
     prepare_playback(saved)
     result = {"status": "success", "new_version": saved.version}
@@ -3876,13 +3649,13 @@ def apply_edits(project_id: str, expected_version: int, operations: list[EditOpe
         result["caption_style"] = saved.caption_style.model_dump(mode="json")
     touched = _touched_captions(before, saved, operations)
     if touched:
-        shared = [cue for cue in touched if not cue.local]
-        if shared:
-            repo.remember_captions([cue.model_copy(update={"remembered_in": saved.id}) for cue in shared])
+        shared_cues = [cue for cue in touched if not cue.local]
+        if shared_cues:
+            runtime.repo.remember_captions([cue.model_copy(update={"remembered_in": saved.id}) for cue in shared_cues])
         result["captions"] = [_caption_line(saved, cue) for cue in touched]
-        if not shared:
+        if not shared_cues:
             result["captions_kept"] = "in this project only"
-        elif len(shared) < len(touched):
+        elif len(shared_cues) < len(touched):
             result["captions_kept"] = ("remembered against their footage, so every project that captions it starts "
                                        "from them — except the ones marked (this project only)")
         else:
@@ -3968,7 +3741,7 @@ def _apply(
             or the result breaks a timeline rule. Nothing is saved in that
             case.
     """
-    project = repo.get_project(project_id)
+    project = runtime.repo.get_project(project_id)
     if not project:
         raise ValueError(f"project {project_id} not found")
     if project.version != expected_version:
@@ -3978,7 +3751,7 @@ def _apply(
     # imported would store cleanly and then never appear, which reads as a captioning
     # bug rather than a typo, so it is refused here where the typo still has a name.
     named = {cue.asset_id for op in operations if isinstance(op, SetSubtitlesOp) for cue in op.cues}
-    unknown = sorted(named - set(repo.get_assets(named)))
+    unknown = sorted(named - set(runtime.repo.get_assets(named)))
     if unknown:
         raise ValueError(
             f"caption(s) name assets that are not imported: {', '.join(unknown)}; "
@@ -3991,23 +3764,23 @@ def _apply(
         if isinstance(op, FitTrackOp):
             track = next((item for item in project.tracks if item.id == op.track_id), None)
             for asset_id in {clip.asset_id for clip in (track.clips if track else [])}:
-                analysis = repo.get_analysis(asset_id)
+                analysis = runtime.repo.get_analysis(asset_id)
                 span = clean_cuts(analysis).loop if analysis is not None else None
                 if span is not None:
                     op.loops[asset_id] = (Decimal(str(span[0])), Decimal(str(span[1])))
     # A photo a title card is to stand on is not in the cut until the card puts it there.
-    known = repo.get_assets({clip.asset_id for track in project.tracks for clip in track.clips}
-                            | {op.photo_asset_id for op in operations if getattr(op, "photo_asset_id", None)})
+    known = runtime.repo.get_assets({clip.asset_id for track in project.tracks for clip in track.clips}
+                                    | {op.photo_asset_id for op in operations if getattr(op, "photo_asset_id", None)})
     for op in operations:
         apply_operation(project, op, known)
     if stamp is not None:
         stamp(project)
-    assets = _referenced_assets(project)
+    assets = shared.referenced_assets(project)
     validate_project(project, assets)
-    renderer.check_supported(project, assets)
+    runtime.renderer.check_supported(project, assets)
 
     project.version += 1
-    repo.update_project(project, expected_version)
+    runtime.repo.update_project(project, expected_version)
     return project
 
 def _plan_context(plan: EditPlan) -> tuple:
@@ -4023,10 +3796,10 @@ def _plan_context(plan: EditPlan) -> tuple:
     Raises:
         ValueError: If the timeline the plan names is gone.
     """
-    timeline = repo.get_semantic_timeline(plan.timeline_id)
+    timeline = runtime.repo.get_semantic_timeline(plan.timeline_id)
     if timeline is None:
         raise ValueError(f"the plan is written against timeline {plan.timeline_id}, which no longer exists")
-    clips = repo.query_semantic_clips(timeline.id, limit=MAX_TIMELINE_CLIPS)
+    clips = runtime.repo.query_semantic_clips(timeline.id, limit=shared.MAX_TIMELINE_CLIPS)
     children: dict[str, List[SemanticClip]] = {}
     for clip in clips:
         if clip.parent_id:
@@ -4042,10 +3815,10 @@ def _plan_context(plan: EditPlan) -> tuple:
     cuts = {}
     budget = [BACKFILL_SECONDS]
     for asset_id in sorted(footage | songs):
-        analysis = repo.get_analysis(asset_id)
+        analysis = runtime.repo.get_analysis(asset_id)
         if analysis is not None:
             cuts[asset_id] = clean_cuts(_listened_to(analysis, budget) if asset_id in footage else analysis)
-    return timeline, {clip.id: clip for clip in clips}, children, _dated(repo.get_assets(footage | songs)), cuts
+    return timeline, {clip.id: clip for clip in clips}, children, shared.dated(runtime.repo.get_assets(footage | songs)), cuts
 
 def _require_plan(plan_id: Optional[str]) -> EditPlan:
     """Fetch a plan, or the one saved most recently.
@@ -4059,7 +3832,7 @@ def _require_plan(plan_id: Optional[str]) -> EditPlan:
     Raises:
         ValueError: If it does not exist, or nothing has been planned yet.
     """
-    plan = repo.get_plan(plan_id)
+    plan = runtime.repo.get_plan(plan_id)
     if plan is None:
         raise ValueError(f"plan {plan_id} not found" if plan_id else "no plan has been saved yet; write one with save_plan")
     return plan
@@ -4111,14 +3884,14 @@ def save_plan(plan: EditPlan, note: str = "") -> dict:
         ValueError: If the timeline does not exist, or the plan was saved at a
             version other than the stored one.
     """
-    timeline = repo.get_semantic_timeline(plan.timeline_id)
+    timeline = runtime.repo.get_semantic_timeline(plan.timeline_id)
     if timeline is None:
         raise ValueError(f"semantic timeline {plan.timeline_id} not found; build one before planning against it")
 
     stamped = plan.model_copy(update={"timeline_input_hash": timeline.input_hash})
-    stored = repo.save_plan(stamped, note)
+    stored = runtime.repo.save_plan(stamped, note)
     problems, notes = check_plan(stored, *_plan_context(stored))
-    newest = repo.get_semantic_timeline(None)
+    newest = runtime.repo.get_semantic_timeline(None)
     if newest is not None and newest.id != timeline.id:
         notes.append(Note(f"a newer timeline ({newest.id}) has been built since; this plan is about {timeline.id}",
                           "newer_timeline"))
@@ -4168,18 +3941,18 @@ def copy_plan(plan_id: str, timeline_id: Optional[str] = None, version: Optional
             in the clip matched to it. A rejected clip with no match is
             simply not carried over, since there is nothing to reject.
     """
-    plan = repo.get_plan(plan_id) if version is None else repo.get_plan_version(plan_id, version)
+    plan = runtime.repo.get_plan(plan_id) if version is None else runtime.repo.get_plan_version(plan_id, version)
     if plan is None:
         raise ValueError(f"plan {plan_id} not found" + ("" if version is None else f" at version {version}"))
     copy = plan.model_copy(deep=True, update={"id": str(uuid.uuid4()), "version": 1})
     target = timeline_id or plan.timeline_id
     if target != plan.timeline_id:
-        if repo.get_semantic_timeline(target) is None:
+        if runtime.repo.get_semantic_timeline(target) is None:
             raise ValueError(f"semantic timeline {target} not found")
         everything = 1_000_000
         mapping, nearby, shifts = _matched_clips(
-            repo.query_semantic_clips(plan.timeline_id, limit=everything),
-            repo.query_semantic_clips(target, limit=everything),
+            runtime.repo.query_semantic_clips(plan.timeline_id, limit=everything),
+            runtime.repo.query_semantic_clips(target, limit=everything),
         )
         used = [
             *(item.clip_id for item in copy.selections),
@@ -4371,11 +4144,11 @@ def amend_plan(plan_id: str, expected_version: int, amendments: list[PlanAmendme
     for amendment in amendments:
         apply_amendment(amended, amendment)
 
-    timeline = repo.get_semantic_timeline(amended.timeline_id)
+    timeline = runtime.repo.get_semantic_timeline(amended.timeline_id)
     if timeline is None:
         raise ValueError(f"the plan is written against timeline {amended.timeline_id}, which no longer exists")
     done = "; ".join(describe_amendment(amendment) for amendment in amendments)
-    stored = repo.save_plan(
+    stored = runtime.repo.save_plan(
         amended.model_copy(update={"timeline_input_hash": timeline.input_hash}),
         f"{note} — {done}" if note and done else note or done,
     )
@@ -4404,9 +4177,9 @@ def _plan_at(plan_id: str, version: Optional[int]) -> EditPlan:
     plan = _require_plan(plan_id)
     if version is None or version == plan.version:
         return plan
-    earlier = repo.get_plan_version(plan_id, version)
+    earlier = runtime.repo.get_plan_version(plan_id, version)
     if earlier is None:
-        kept = ", ".join(str(item["version"]) for item in repo.list_plan_versions(plan_id)) or "none"
+        kept = ", ".join(str(item["version"]) for item in runtime.repo.list_plan_versions(plan_id)) or "none"
         raise ValueError(f"plan {plan_id} has no version {version}; the versions kept are {kept}")
     return earlier
 
@@ -4430,10 +4203,10 @@ def list_plan_versions(plan_id: Optional[str] = None) -> dict:
         ValueError: If the plan does not exist.
     """
     plan = _require_plan(plan_id)
-    versions = repo.list_plan_versions(plan.id)
+    versions = runtime.repo.list_plan_versions(plan.id)
     listed, before = [], None
     for item in versions:
-        now = repo.get_plan_version(plan.id, int(item["version"]))
+        now = runtime.repo.get_plan_version(plan.id, int(item["version"]))
         changed = diff_plans(before, now) if before is not None and now is not None else {}
         listed.append({**item, "changed": {group: len(lines) for group, lines in changed.items()}})
         before = now
@@ -4467,7 +4240,7 @@ def revert_plan(plan_id: str, to_version: int, expected_version: int, note: str 
     if plan.version != expected_version:
         raise ValueError(f"version conflict: plan {plan.id} is at version {plan.version}, not {expected_version}")
     earlier = _plan_at(plan_id, to_version)
-    stored = repo.save_plan(
+    stored = runtime.repo.save_plan(
         earlier.model_copy(update={"version": plan.version}),
         f"back to version {to_version}" + (f" — {note}" if note else ""),
     )
@@ -4504,7 +4277,7 @@ def get_plan(plan_id: Optional[str] = None, version: Optional[int] = None) -> di
         "plan": plan.model_dump(),
         "other_plans": [
             {"plan_id": other.id, "goal": other.goal, "timeline_id": other.timeline_id, "version": other.version}
-            for other in repo.list_plans() if other.id != plan.id
+            for other in runtime.repo.list_plans() if other.id != plan.id
         ],
     }
 
@@ -4594,7 +4367,7 @@ def compile_plan(project_id: str, expected_version: int, plan_id: Optional[str] 
     if problems:
         raise ValueError("this plan cannot be compiled yet:\n- " + "\n- ".join(problems))
 
-    project = repo.get_project(project_id)
+    project = runtime.repo.get_project(project_id)
     if not project:
         raise ValueError(f"project {project_id} not found")
     pieces, left_out = as_left(plan_pieces(plan, clips, children, assets, cuts), project)
@@ -4637,7 +4410,7 @@ def _songs_in(plan: EditPlan) -> List[dict]:
     for cue in plan.music.cues if plan.music is not None else []:
         if cue.asset_id is None or any(song["id"] == cue.asset_id for song in found):
             continue
-        asset = repo.get_assets([cue.asset_id]).get(cue.asset_id)
+        asset = runtime.repo.get_assets([cue.asset_id]).get(cue.asset_id)
         if asset is not None:
             found.append({"id": asset.id, "name": os.path.basename(asset.path), **heard.get(asset.id, {})})
     return found
@@ -4721,28 +4494,28 @@ def preview_sound(
             sequence.
         RuntimeError: If FFmpeg cannot render the sound.
     """
-    project = repo.get_project(project_id)
+    project = runtime.repo.get_project(project_id)
     if not project:
         raise ValueError(f"project {project_id} not found")
     if project.base_video_track is None or not project.base_video_track.clips:
         raise ValueError(f"project {project_id} has nothing on its sequence to listen to")
-    checks = housekeeping.sound_dir(WORKSPACE_DIR, project_id)
+    checks = housekeeping.sound_dir(runtime.WORKSPACE_DIR, project_id)
     folder = os.path.join(checks, str(uuid.uuid4()))
     os.makedirs(folder, exist_ok=True)
     # A sound check is looked at once; only the newest of a project's is kept.
     housekeeping.prune(checks, {os.path.basename(folder)})
     mix = os.path.join(folder, _output_name(project, "sound").replace(".mp4", ".m4a"))
     voice, music = os.path.join(folder, "voice.wav"), os.path.join(folder, "music.wav")
-    assets, voices = _referenced_assets(project), _voices(project)
+    assets, voices = shared.referenced_assets(project), _voices(project)
     talking = _talking(project, voices)
-    command = renderer.build_sound(
+    command = runtime.renderer.build_sound(
         project, assets, mix, voice, music, loudness_target, voices=voices, talking=talking,
     )
     graph = os.path.join(folder, "graph.txt")
     if loudness_target is not None:
         raw = os.path.join(folder, "raw.wav")
         measured = subprocess.run(
-            graph_from_file(renderer.build_mix(project, assets, raw, voices=voices, talking=talking), graph),
+            graph_from_file(runtime.renderer.build_mix(project, assets, raw, voices=voices, talking=talking), graph),
             capture_output=True, creationflags=hidden_window_flags(),
         )
         if measured.returncode != 0:
@@ -4837,12 +4610,12 @@ def preview_plan_diff(
             length = f"{change.was.played:.1f}s -> {piece.played:.1f}s"
         if change.status != "kept":
             lines.append(f"#{number}: {change.status} | {where} | {length} | {', '.join(piece.from_clip_ids)}")
-    if len(shots) > MAX_STORYBOARD_TILES:
-        lines.append(f"the sheet shows the first {MAX_STORYBOARD_TILES} of {len(shots)} shots")
+    if len(shots) > shared.MAX_STORYBOARD_TILES:
+        lines.append(f"the sheet shows the first {shared.MAX_STORYBOARD_TILES} of {len(shots)} shots")
     shape = FRAME_SHAPES.get(aspect) if aspect else None
     image = storyboard_sheet(
-        shots[:MAX_STORYBOARD_TILES], aspect=shape[0] / shape[1] if shape else None,
-        borders=borders[:MAX_STORYBOARD_TILES],
+        shots[:shared.MAX_STORYBOARD_TILES], aspect=shape[0] / shape[1] if shape else None,
+        borders=borders[:shared.MAX_STORYBOARD_TILES],
     )
     return ToolResult(content=["\n".join(lines), Image(data=image, format="jpeg")])
 
@@ -4891,7 +4664,7 @@ def propose_broll(plan_id: Optional[str] = None) -> dict:
 @mcp.tool()
 def preview_project(
     project_id: str,
-    count: Annotated[int, Field(ge=1, le=MAX_STORYBOARD_TILES)] = 12,
+    count: Annotated[int, Field(ge=1, le=shared.MAX_STORYBOARD_TILES)] = 12,
     frame: Optional[Literal["landscape", "portrait", "square"]] = None,
     follow_faces: bool = True,
 ) -> ToolResult:
@@ -4930,7 +4703,7 @@ def preview_project(
             track, or a video clip uses an asset without video.
         RuntimeError: If frames cannot be decoded.
     """
-    project = repo.get_project(project_id)
+    project = runtime.repo.get_project(project_id)
     if not project:
         raise ValueError(f"project {project_id} not found")
     project = _reshaped(project, frame)
@@ -4941,7 +4714,7 @@ def preview_project(
     if not clips:
         raise ValueError(f"project {project_id} has no clips on a video track to preview")
 
-    assets = _referenced_assets(project)
+    assets = shared.referenced_assets(project)
     for clip in clips:
         asset = assets.get(clip.asset_id)
         if asset is None:
@@ -4974,10 +4747,10 @@ def preview_project(
         )
 
     # One tile per clip is the floor, so a one-second clip in a long edit is still shown.
-    omitted = max(0, total_clips - MAX_STORYBOARD_TILES)
+    omitted = max(0, total_clips - shared.MAX_STORYBOARD_TILES)
     if omitted:
-        stride = total_clips / MAX_STORYBOARD_TILES
-        chosen = sorted({min(int(stride * index), total_clips - 1) for index in range(MAX_STORYBOARD_TILES)})
+        stride = total_clips / shared.MAX_STORYBOARD_TILES
+        chosen = sorted({min(int(stride * index), total_clips - 1) for index in range(shared.MAX_STORYBOARD_TILES)})
     else:
         chosen = list(range(total_clips))
     # Every tile carries what fell between the tile before it and itself, so a clip that is
@@ -5107,14 +4880,14 @@ def _joined_people(project: Project, heard: Mapping[str, Sequence[SpeakerTurn]])
     compiled_from = {clip.from_plan_id for track in project.tracks for clip in track.clips if clip.from_plan_id}
     files: set = set()
     for plan_id in sorted(compiled_from):
-        plan = repo.get_plan(plan_id)
-        timeline = repo.get_semantic_timeline(plan.timeline_id) if plan is not None else None
+        plan = runtime.repo.get_plan(plan_id)
+        timeline = runtime.repo.get_semantic_timeline(plan.timeline_id) if plan is not None else None
         if timeline is not None:
             files |= set(timeline.asset_ids)
     analyses = {
         asset_id: analysis
         for asset_id in (files or set(heard))
-        if (analysis := repo.get_analysis(asset_id)) is not None
+        if (analysis := runtime.repo.get_analysis(asset_id)) is not None
     }
     return join_voices(analyses)
 
@@ -5186,7 +4959,7 @@ def generate_subtitles(
         ValueError: If the project does not exist, or nothing it plays has
             been transcribed.
     """
-    project = repo.get_project(project_id)
+    project = runtime.repo.get_project(project_id)
     if not project:
         raise ValueError(f"project {project_id} not found")
 
@@ -5202,7 +4975,7 @@ def generate_subtitles(
     for clip in captioned_clips(project):
         if clip.asset_id in transcripts or clip.asset_id in untranscribed:
             continue
-        analysis = repo.get_analysis(clip.asset_id)
+        analysis = runtime.repo.get_analysis(clip.asset_id)
         if analysis is not None and analysis.transcript is not None:
             transcripts[clip.asset_id] = analysis.transcript
             silences[clip.asset_id] = analysis.silences
@@ -5233,7 +5006,7 @@ def generate_subtitles(
         for asset_id, turns in speakers.items()
     }
     style = project.caption_style
-    glossary = repo.update_glossary(fix_words) if fix_words else repo.glossary()
+    glossary = runtime.repo.update_glossary(fix_words) if fix_words else runtime.repo.glossary()
     proposed = [
         _corrected(cue, glossary) for cue in timeline_cues(
             project, transcripts, max_characters=max_characters, max_seconds=max_seconds,
@@ -5242,16 +5015,16 @@ def generate_subtitles(
             min_seconds=style.min_seconds,
         )
     ]
-    reviewed = {asset_id: repo.reviewed_captions(asset_id) for asset_id in {cue.asset_id for cue in proposed}}
+    reviewed = {asset_id: runtime.repo.reviewed_captions(asset_id) for asset_id in {cue.asset_id for cue in proposed}}
     reviewed.update({
-        clip.asset_id: repo.reviewed_captions(clip.asset_id)
+        clip.asset_id: runtime.repo.reviewed_captions(clip.asset_id)
         for clip in (base.clips if base else []) if clip.asset_id not in reviewed
     })
     # What this project kept to itself comes first, then what was corrected on the footage
     # for every project, then the transcript: each fills only what the ones before left.
     # A correction stored before captions had to be said to be for every project is no longer
     # handed on, but one this project already shows is its own: kept, not lost to the transcript.
-    unclaimed = {asset_id: repo.unclaimed_captions(asset_id) for asset_id in {cue.asset_id for cue in project.subtitles}}
+    unclaimed = {asset_id: runtime.repo.unclaimed_captions(asset_id) for asset_id in {cue.asset_id for cue in project.subtitles}}
     local = [
         cue.model_copy(update={"id": "", "local": True}) for cue in project.subtitles
         if cue.local or (cue.remembered_in is None and any(
@@ -5313,7 +5086,7 @@ def generate_subtitles(
 
 def _project_name(project_id: Optional[str]) -> str:
     """A project's name to show the user, or what to say when it is gone."""
-    found = repo.get_project(project_id) if project_id else None
+    found = runtime.repo.get_project(project_id) if project_id else None
     return found.name if found is not None else "a project since deleted"
 
 # How much of a file two captions, or a caption and a word, may share or miss by and still be
@@ -5346,12 +5119,12 @@ def _caption_sources(project: Project) -> Dict[str, dict]:
             sources[cue.id] = {"from": "this_project"}
             continue
         if cue.asset_id not in remembered:
-            remembered[cue.asset_id] = repo.reviewed_captions(cue.asset_id)
+            remembered[cue.asset_id] = runtime.repo.reviewed_captions(cue.asset_id)
         if any(_overlaps(cue, known) and known.text == cue.text for known in remembered[cue.asset_id]):
             sources[cue.id] = {"from": "reviewed"}
             continue
         if cue.asset_id not in analyses:
-            analyses[cue.asset_id] = repo.get_analysis(cue.asset_id)
+            analyses[cue.asset_id] = runtime.repo.get_analysis(cue.asset_id)
         analysis = analyses[cue.asset_id]
         # The same sliver `_overlaps` allows: a caption's edges were cut from these words' times.
         words = [
@@ -5378,8 +5151,8 @@ def _overlaps(first: SubtitleCue, second: SubtitleCue) -> bool:
     Returns:
         True when they share more than a sliver of the file.
     """
-    shared = min(first.source_end, second.source_end) - max(first.source_start, second.source_start)
-    return float(shared) > CAPTION_SLIVER
+    overlap = min(first.source_end, second.source_end) - max(first.source_start, second.source_start)
+    return float(overlap) > CAPTION_SLIVER
 
 def _corrected(cue: SubtitleCue, glossary: Mapping[str, str]) -> SubtitleCue:
     """Correct a proposed caption's text with the workspace glossary.
@@ -5392,7 +5165,7 @@ def _corrected(cue: SubtitleCue, glossary: Mapping[str, str]) -> SubtitleCue:
         The caption with every glossary word replaced, and its word timings
         kept where the correction left them fitting.
     """
-    text = _glossed(cue.text, glossary)
+    text = shared.glossed(cue.text, glossary)
     if text == cue.text:
         return cue
     return cue.model_copy(update={"text": text, "words": retimed_words(cue.words, text)})
@@ -5439,7 +5212,7 @@ def get_subtitles(
         ValueError: If the project does not exist, or `end` is not after
             `start`.
     """
-    project = repo.get_project(project_id)
+    project = runtime.repo.get_project(project_id)
     if not project:
         raise ValueError(f"project {project_id} not found")
     placed = place_cues(project, project.subtitles)
@@ -5451,7 +5224,7 @@ def get_subtitles(
             raise ValueError(f"the window ends at {limit}s, which is not after its start at {start}s")
     heard = _caption_sources(project)
     window = [
-        _plain({**cue.model_dump(exclude=None if words else {"words"}), **heard.get(cue.cue_id, {})})
+        shared.plain({**cue.model_dump(exclude=None if words else {"words"}), **heard.get(cue.cue_id, {})})
         for cue in placed
         if float(cue.end) > start and float(cue.start) < limit
     ]
@@ -5504,7 +5277,7 @@ def _renamed(project: Project) -> dict:
 
 def _delivered(job_id: str) -> bool:
     """Whether a full render finished and its file was saved, so its working folder can go."""
-    job = repo.get_job(job_id)
+    job = runtime.repo.get_job(job_id)
     return job is not None and job.status == JobStatus.COMPLETED
 
 def _delivery_name(project: Project, kind: str, extension: str, captioned: bool = False) -> str:
@@ -5553,7 +5326,7 @@ def _picture_cache() -> str:
     Returns:
         The cache directory.
     """
-    folder = os.path.join(WORKSPACE_DIR, "cache", "pictures")
+    folder = os.path.join(runtime.WORKSPACE_DIR, "cache", "pictures")
     os.makedirs(folder, exist_ok=True)
     stale = time.time() - PICTURE_CACHE_DAYS * 86400
     for entry in os.scandir(folder):
@@ -5608,10 +5381,10 @@ def _framing(project: Project, assets: Mapping[str, Asset], follow_faces: bool =
     """
     faces = {}
     for asset_id in assets:
-        analysis = repo.get_analysis(asset_id)
+        analysis = runtime.repo.get_analysis(asset_id)
         if analysis is not None and analysis.faces:
             faces[asset_id] = analysis.faces
-    return frame_project(project, _sized(assets), faces, follow_faces)
+    return frame_project(project, shared.sized(assets), faces, follow_faces)
 
 @mcp.tool()
 def render_project(
@@ -5717,10 +5490,10 @@ def _previewed(project_id: str, frame: Optional[str]) -> bool:
         True when there is one; False too when the project does not exist,
         which rendering says in its own words.
     """
-    project = repo.get_project(project_id)
+    project = runtime.repo.get_project(project_id)
     return project is not None and any(
         job.preview and job.project_version == project.version and job.frame == frame
-        for job in repo.renders_of(project_id)
+        for job in runtime.repo.renders_of(project_id)
     )
 
 def _start_render(
@@ -5746,7 +5519,7 @@ def _start_render(
     Returns:
         As `render_project`.
     """
-    project = repo.get_project(project_id)
+    project = runtime.repo.get_project(project_id)
     if not project:
         raise ValueError(f"project {project_id} not found")
 
@@ -5768,17 +5541,17 @@ def _start_render(
     kind = ("preview" if is_preview else "output") + (f"-{frame}" if frame else "")
     if is_preview:
         _make_room()
-    housekeeping.sweep_renders(WORKSPACE_DIR, _delivered)
+    housekeeping.sweep_renders(runtime.WORKSPACE_DIR, _delivered)
     job = Job(kind=JobKind.RENDER, project_id=project_id, project_version=project.version, captioned=burn_subtitles,
               preview=is_preview, frame=frame)
     delivered: Optional[str] = None
     if is_preview:
-        job.work_dir = os.path.join(housekeeping.preview_dir(WORKSPACE_DIR, project_id), job.job_id)
+        job.work_dir = os.path.join(housekeeping.preview_dir(runtime.WORKSPACE_DIR, project_id), job.job_id)
         job.output_path = os.path.join(job.work_dir, _output_name(project, kind))
     else:
         # Rendered in the workspace and moved out whole once finished, so the videos
         # folder never holds half a file.
-        job.work_dir = os.path.join(housekeeping.render_dir(WORKSPACE_DIR), job.job_id)
+        job.work_dir = os.path.join(housekeeping.render_dir(runtime.WORKSPACE_DIR), job.job_id)
         delivered = housekeeping.unique_path(str(output_dir()), _delivery_name(project, kind, ".mp4", burn_subtitles))
     render_path = os.path.join(job.work_dir, _output_name(project, kind))
 
@@ -5814,14 +5587,14 @@ def _start_render(
         with open(chapters_path, "w", encoding="utf-8") as handle:
             handle.write(chapter_metadata(listed))
 
-    assets = _referenced_assets(project)
+    assets = shared.referenced_assets(project)
     framing = _framing(project, assets, follow_faces)
     voices = _voices(project)
     talking = _talking(project, voices)
     pieces: list = []
     if is_preview:
         cache = _picture_cache()
-        command, pieces = renderer.build_incremental(
+        command, pieces = runtime.renderer.build_incremental(
             project, assets, render_path, cache,
             loudness_target=loudness_target, subtitle_path=subtitle_path, framing=framing,
             chapters_path=chapters_path, voices=voices, talking=talking,
@@ -5831,14 +5604,14 @@ def _start_render(
             if argument.startswith(cache) and os.path.exists(argument):
                 os.utime(argument)
     else:
-        command = renderer.build_command(
+        command = runtime.renderer.build_command(
             project, assets, render_path, loudness_target=loudness_target, subtitle_path=subtitle_path,
             framing=framing, chapters_path=chapters_path, voices=voices, talking=talking,
         )
     # One input per clip, all opened at once, is what a render's memory use is made of.
     job.memory_estimate = resources.render_memory_bytes(command.count("-i"))
     spec = {
-        "command": command, "duration_seconds": float(renderer.output_duration(project)), "pieces": pieces,
+        "command": command, "duration_seconds": float(runtime.renderer.output_duration(project)), "pieces": pieces,
         "render_path": render_path,
     }
     if delivered:
@@ -5849,10 +5622,10 @@ def _start_render(
     if loudness_target is not None:
         mix_path = os.path.join(job.work_dir, "mix.wav")
         spec["loudness"] = {
-            "mix_command": renderer.build_mix(project, assets, mix_path, voices=voices, talking=talking),
+            "mix_command": runtime.renderer.build_mix(project, assets, mix_path, voices=voices, talking=talking),
             "mix_path": mix_path, "target": loudness_target,
         }
-    job = job_manager.start_job(job, spec)
+    job = runtime.job_manager.start_job(job, spec)
     # Every clip on a picture track is one picture, the sequence's and the ones drawn over it.
     pictures = sum(len(track.clips) for track in project.video_tracks)
 
@@ -5879,7 +5652,7 @@ def _talking(project: Project, voices: Mapping[str, float]) -> Optional[Talking]
         None when any clip whose words are heard was never transcribed: then
         nobody knows where all the talking is, and the music ducks by level.
     """
-    assets = _referenced_assets(project)
+    assets = shared.referenced_assets(project)
     return talking_in(
         project, assets, _analyses(project), voices, lambda clip: song_level(assets[clip.asset_id].path, clip),
     )
@@ -5893,7 +5666,7 @@ def _voices(project: Project) -> Dict[str, float]:
     Returns:
         As `voice_keys`, with each voice clip's talking measured from its file.
     """
-    assets = _referenced_assets(project)
+    assets = shared.referenced_assets(project)
 
     def loudness(clip: Clip) -> Optional[float]:
         asset = assets.get(clip.asset_id)
@@ -5918,7 +5691,7 @@ def _analyses(project: Project, listened: bool = False) -> Dict[str, MediaAnalys
     found: Dict[str, MediaAnalysis] = {}
     budget = [BACKFILL_SECONDS]
     for asset_id in sorted({clip.asset_id for track in project.tracks for clip in track.clips}):
-        analysis = repo.get_analysis(asset_id)
+        analysis = runtime.repo.get_analysis(asset_id)
         if analysis is not None:
             found[asset_id] = _listened_to(analysis, budget) if listened else analysis
     return found
@@ -5964,7 +5737,7 @@ def _second_listened(analysis: MediaAnalysis, budget: List[float]) -> MediaAnaly
         return analysis
     if analysis.duration > budget[0]:
         return analysis
-    asset = repo.get_assets([analysis.asset_id]).get(analysis.asset_id)
+    asset = runtime.repo.get_assets([analysis.asset_id]).get(analysis.asset_id)
     if asset is None or not os.path.exists(asset.path):
         return analysis
     budget[0] -= analysis.duration
@@ -5974,11 +5747,11 @@ def _second_listened(analysis: MediaAnalysis, budget: List[float]) -> MediaAnaly
         return analysis
     # Read again before writing, so an analysis taken again meanwhile is not overwritten
     # with the one this started from.
-    current = repo.get_analysis(analysis.asset_id)
+    current = runtime.repo.get_analysis(analysis.asset_id)
     if current is None or current.analyzed_at != analysis.analyzed_at:
         return analysis.model_copy(update={"second_listen": listened})
     current.second_listen = listened
-    repo.save_analysis(current)
+    runtime.repo.save_analysis(current)
     return current
 
 def _plan_target(project: Project) -> Optional[float]:
@@ -6000,7 +5773,7 @@ def _compiled_plan(project: Project) -> Optional[EditPlan]:
     compiled_from = {clip.from_plan_id for clip in base.clips} if base else set()
     if len(compiled_from) != 1 or None in compiled_from:
         return None
-    return repo.get_plan(next(iter(compiled_from)))
+    return runtime.repo.get_plan(next(iter(compiled_from)))
 
 def _findings(project: Project, burn_subtitles: bool) -> list:
     """Check a cut before it is rendered.
@@ -6013,8 +5786,8 @@ def _findings(project: Project, burn_subtitles: bool) -> list:
         What `delivery.check_delivery` finds.
     """
     placed = place_cues(project, project.subtitles) if burn_subtitles and project.subtitles else None
-    assets = _referenced_assets(project)
-    dated = _dated(assets)
+    assets = shared.referenced_assets(project)
+    dated = shared.dated(assets)
     analyses = _analyses(project, listened=True)
     return check_delivery(
         project, analyses, _plan_target(project), placed, project.caption_style,
@@ -6037,7 +5810,7 @@ def _looks(clips: Sequence[Clip], assets: Mapping[str, Asset]) -> Dict[str, Tupl
         asset = assets.get(asset_id)
         if asset is None or not asset.has_video or not os.path.exists(asset.path):
             continue
-        kept = repo.looks(asset_id)
+        kept = runtime.repo.looks(asset_id)
         new: Dict[float, int] = {}
         for clip in (clip for clip in clips if clip.asset_id == asset_id):
             start, length = float(clip.source_range.start), float(clip.source_range.end - clip.source_range.start)
@@ -6050,7 +5823,7 @@ def _looks(clips: Sequence[Clip], assets: Mapping[str, Asset]) -> Dict[str, Tupl
                 continue
             found[clip.id] = tuple(kept.get(at, new.get(at)) for at in moments)
         if new:
-            repo.save_looks(asset_id, new)
+            runtime.repo.save_looks(asset_id, new)
     return found
 
 @mcp.tool()
@@ -6096,7 +5869,7 @@ def check_render(
     Raises:
         ValueError: If the project does not exist.
     """
-    project = repo.get_project(project_id)
+    project = runtime.repo.get_project(project_id)
     if not project:
         raise ValueError(f"project {project_id} not found")
     if project.base_video_track is None or not project.base_video_track.clips:
@@ -6134,20 +5907,20 @@ def read_cut(project_id: str) -> dict:
         and the words on screen; what plays over it on a track above is under
         it, indented.
     """
-    project = repo.get_project(project_id)
+    project = runtime.repo.get_project(project_id)
     if not project:
         raise ValueError(f"project {project_id} not found")
     base = project.base_video_track
     if base is None or not base.clips:
         raise ValueError(f"project {project_id} has nothing on its sequence to read")
-    assets = _referenced_assets(project)
+    assets = shared.referenced_assets(project)
     parts = marked_parts(project)
     placed = place_cues(project, project.subtitles) if project.subtitles else []
 
     def seen(clip: Clip) -> str:
         if clip.card is not None:
             return f"card 「{clip.card.title}」" + (f" 「{clip.card.subtitle}」" if clip.card.subtitle else "")
-        described = [repo.get_semantic_clip(clip_id) for clip_id in clip.from_clip_ids]
+        described = [runtime.repo.get_semantic_clip(clip_id) for clip_id in clip.from_clip_ids]
         words = "; ".join(found.description for found in described if found is not None and found.description)
         asset = assets.get(clip.asset_id)
         name = os.path.basename(asset.path) if asset is not None else clip.asset_id
@@ -6210,7 +5983,7 @@ def get_chapters(project_id: str) -> dict:
     Raises:
         ValueError: If the project does not exist.
     """
-    project = repo.get_project(project_id)
+    project = runtime.repo.get_project(project_id)
     if not project:
         raise ValueError(f"project {project_id} not found")
     listed, problems = chapters(project)
@@ -6264,7 +6037,7 @@ def propose_covers(
         ValueError: If the project or the part does not exist, or there is
             nothing to offer.
     """
-    project = repo.get_project(project_id)
+    project = runtime.repo.get_project(project_id)
     if not project:
         raise ValueError(f"project {project_id} not found")
     project = _reshaped(project, frame)
@@ -6287,9 +6060,9 @@ def propose_covers(
         offered = [item for item in offered if opens <= item[2] < closes]
     if not offered:
         raise ValueError(f"project {project_id} has no picture to take a cover from")
-    left_out = max(0, len(offered) - MAX_STORYBOARD_TILES)
-    offered = offered[:MAX_STORYBOARD_TILES]
-    assets = _referenced_assets(project)
+    left_out = max(0, len(offered) - shared.MAX_STORYBOARD_TILES)
+    offered = offered[:shared.MAX_STORYBOARD_TILES]
+    assets = shared.referenced_assets(project)
     framing = _framing(project, assets, follow_faces)
     fps = Fraction(project.fps_num, project.fps_den)
     said = place_cues(project, project.subtitles) if project.subtitles else []
@@ -6349,7 +6122,7 @@ def export_cover(
         ValueError: If the project does not exist, nothing is on screen then,
             or what is on screen is a title card.
     """
-    project = repo.get_project(project_id)
+    project = runtime.repo.get_project(project_id)
     if not project:
         raise ValueError(f"project {project_id} not found")
     project = _reshaped(project, frame)
@@ -6358,7 +6131,7 @@ def export_cover(
         raise ValueError(f"nothing is on screen at {seconds:g}s of project {project_id}")
     if clip.card is not None:
         raise ValueError(f"{seconds:g}s of project {project_id} is a title card; take the cover from a shot")
-    assets = _referenced_assets(project)
+    assets = shared.referenced_assets(project)
     source = float(clip.source_range.start) + (seconds - float(clip.timeline_in)) * clip.speed
     framed = _framing(project, assets, follow_faces).get(clip.id)
     fps = Fraction(project.fps_num, project.fps_den)
@@ -6434,7 +6207,7 @@ def export_timeline(
         ValueError: If the project does not exist, has nothing on its
             sequence, or has no captions to write as SRT.
     """
-    project = repo.get_project(project_id)
+    project = runtime.repo.get_project(project_id)
     if not project:
         raise ValueError(f"project {project_id} not found")
     if format == "srt":
@@ -6456,7 +6229,7 @@ def export_timeline(
         if titled:
             base = shown.base_video_track
             base.clips = [clip for clip in base.clips if clip.card is None]
-        assets = _referenced_assets(shown)
+        assets = shared.referenced_assets(shown)
         text, behind = writer(shown, assets, _timecodes(assets))
         if titled:
             behind.append("title cards (they come across as gaps; add them as titles there): "
@@ -6486,7 +6259,7 @@ ROOM_CHECK_SECONDS = 60
 def _being_prepared() -> set:
     """The files preparation jobs still waiting or running will write, so none is asked for twice."""
     paths = set()
-    for job in repo.jobs_to_show(datetime.now(timezone.utc))[0]:
+    for job in runtime.repo.jobs_to_show(datetime.now(timezone.utc))[0]:
         if job.kind != JobKind.PREPARE or not job.work_dir:
             continue
         try:
@@ -6517,8 +6290,8 @@ def _start_preparing(steps: List[dict], urgent: bool, asset_id: Optional[str] = 
         return None
     job = Job(kind=JobKind.PREPARE, asset_id=asset_id, project_id=project_id, priority=-1 if urgent else 1,
               memory_estimate=PREPARE_MEMORY_BYTES)
-    job.work_dir = os.path.join(WORKSPACE_DIR, "jobs", job.job_id)
-    return job_manager.start_job(job, {"steps": steps}).job_id
+    job.work_dir = os.path.join(runtime.WORKSPACE_DIR, "jobs", job.job_id)
+    return runtime.job_manager.start_job(job, {"steps": steps}).job_id
 
 def prepare_playback(project: Project, urgent: bool = False) -> List[str]:
     """Start making what the browser still needs to play a cut: proxies, repaired sound, its loudness.
@@ -6537,9 +6310,9 @@ def prepare_playback(project: Project, urgent: bool = False) -> List[str]:
     if not PREPARE_PLAYBACK:
         return []
     _make_room()
-    assets = _referenced_assets(project)
+    assets = shared.referenced_assets(project)
     busy = _being_prepared()
-    proxies = playback.proxy_dir(WORKSPACE_DIR)
+    proxies = playback.proxy_dir(runtime.WORKSPACE_DIR)
     started = []
     for asset_id in playback.missing(project, assets, os.listdir(proxies)):
         asset = assets[asset_id]
@@ -6549,7 +6322,7 @@ def prepare_playback(project: Project, urgent: bool = False) -> List[str]:
         step = {"command": playback.proxy_command(asset, path + ".part", _frame_rate(asset)), "part": path + ".part",
                 "path": path, "seconds": float(asset.duration or 1), "stage": "making a copy to play from"}
         started.append(_start_preparing([step], urgent, asset_id=asset_id))
-    sound = playback.sound_dir(WORKSPACE_DIR)
+    sound = playback.sound_dir(runtime.WORKSPACE_DIR)
     steps = []
     for track in project.tracks:
         for clip in track.clips:
@@ -6564,7 +6337,7 @@ def prepare_playback(project: Project, urgent: bool = False) -> List[str]:
     if project.tracks and float(project.duration) > 0 and not os.path.exists(gain) and gain not in busy:
         voices = _voices(project)
         mix = gain + ".wav"
-        steps.append({"command": renderer.build_mix(project, assets, mix, voices, _talking(project, voices)),
+        steps.append({"command": runtime.renderer.build_mix(project, assets, mix, voices, _talking(project, voices)),
                       "part": mix, "path": gain, "seconds": float(project.duration), "measure": True,
                       "target": playback.LOUDNESS_TARGET, "stage": "measuring loudness"})
     started.append(_start_preparing(steps, urgent, project_id=project.id))
@@ -6580,9 +6353,9 @@ def playback_of(project: Project, urgent: bool = True) -> dict:
     Returns:
         What `playback.describe` returns.
     """
-    assets = _referenced_assets(project)
-    proxies = playback.proxy_dir(WORKSPACE_DIR)
-    sound = playback.sound_dir(WORKSPACE_DIR)
+    assets = shared.referenced_assets(project)
+    proxies = playback.proxy_dir(runtime.WORKSPACE_DIR)
+    sound = playback.sound_dir(runtime.WORKSPACE_DIR)
     have = {}
     for asset_id, asset in assets.items():
         name = playback.proxy_name(asset)
@@ -6615,21 +6388,15 @@ def playback_of(project: Project, urgent: bool = True) -> dict:
 # version that was rendered out, not as a preview, wears it by itself.
 VERSION_MARKS = ("starred", "published")
 
-def _say_in_history(words: str) -> None:
-    """Give the version being made these words, unless the user's own were passed on."""
-    batch = current_batch()
-    if batch is not None and not batch.note and words:
-        batch.note = words
-
 def _project_json_at(project_id: str, commit: str) -> Optional[dict]:
     """A project as its file held it at one version, or None when it was not there then."""
-    path = history.find("projects/", f"{project_id}.json", commit)
-    content = history.read(path, commit) if path else None
+    path = runtime.history.find("projects/", f"{project_id}.json", commit)
+    content = runtime.history.read(path, commit) if path else None
     return json.loads(content) if content else None
 
 def _branches_of(project_id: str) -> List[Project]:
     """The projects started as branches of this one."""
-    return [other for other in repo.list_projects()
+    return [other for other in runtime.repo.list_projects()
             if other.branched_from is not None and other.branched_from.project_id == project_id]
 
 def _version_record(version: Version, marks: Iterable[str] = ()) -> dict:
@@ -6650,12 +6417,12 @@ def _project_versions(project_id: str, limit: int) -> List[Tuple[Version, Option
         it away. A version whose finished video is still there is `exported`;
         one whose finished video has gone since, `removed`.
     """
-    marks = repo.version_marks(project_id)
+    marks = runtime.repo.version_marks(project_id)
     delivered = _delivered_renders(project_id)
     there = {job.project_version for job in delivered if os.path.exists(job.output_path)}
     gone = {job.project_version for job in delivered} - there
     found = []
-    for version in history.versions_of("projects/", f"{project_id}.json", limit):
+    for version in runtime.history.versions_of("projects/", f"{project_id}.json", limit):
         data = _project_json_at(project_id, version.commit)
         marked = set(marks.get(version.commit, ()))
         if data is not None and data.get("version") in there:
@@ -6667,8 +6434,8 @@ def _project_versions(project_id: str, limit: int) -> List[Tuple[Version, Option
 
 def _delivered_renders(project_id: str) -> List[Job]:
     """Every full render of a project that finished, whether its file is still there or not."""
-    previews = os.path.abspath(housekeeping.preview_dir(WORKSPACE_DIR, project_id))
-    return [job for job in repo.renders_of(project_id)
+    previews = os.path.abspath(housekeeping.preview_dir(runtime.WORKSPACE_DIR, project_id))
+    return [job for job in runtime.repo.renders_of(project_id)
             if job.output_path and not os.path.abspath(job.output_path).startswith(previews)]
 
 def _outputs_of(project_id: str) -> List[Job]:
@@ -6677,7 +6444,7 @@ def _outputs_of(project_id: str) -> List[Job]:
 
 def _project_caches(project_id: str) -> List[str]:
     """The folders of a project's previews and sound checks: made again when wanted."""
-    return [housekeeping.preview_dir(WORKSPACE_DIR, project_id), housekeeping.sound_dir(WORKSPACE_DIR, project_id)]
+    return [housekeeping.preview_dir(runtime.WORKSPACE_DIR, project_id), housekeeping.sound_dir(runtime.WORKSPACE_DIR, project_id)]
 
 def project_storage(project_id: str) -> dict:
     """What a video takes on disk, and what deleting its other versions would give back.
@@ -6698,12 +6465,12 @@ def project_storage(project_id: str) -> dict:
     Raises:
         ValueError: If there is no such project.
     """
-    project = repo.get_project(project_id)
+    project = runtime.repo.get_project(project_id)
     if project is None:
         raise ValueError(f"project {project_id} not found")
     # Only the marked versions are read: the storage page asks this of every video at once.
     kept = {project.version}
-    for commit, marks in repo.version_marks(project_id).items():
+    for commit, marks in runtime.repo.version_marks(project_id).items():
         if marks & set(VERSION_MARKS):
             data = _project_json_at(project_id, commit)
             if data:
@@ -6713,7 +6480,7 @@ def project_storage(project_id: str) -> dict:
     size = {job.job_id: housekeeping.size_of(job.output_path) for job in outputs}
     cache = _cache_bytes(project_id)
     return {
-        "versions": history.counts("projects/").get(project_id, 0), "branches": len(_branches_of(project_id)),
+        "versions": runtime.history.counts("projects/").get(project_id, 0), "branches": len(_branches_of(project_id)),
         "exported": len({job.project_version for job in outputs}),
         "outputs_megabytes": round(sum(size.values()) / 1e6, 1),
         "cache_megabytes": round(cache / 1e6, 1),
@@ -6746,7 +6513,7 @@ def trim_project(project_id: str, typed_name: str) -> dict:
     Raises:
         ValueError: If there is no such project, or the name typed is not its name.
     """
-    project = repo.get_project(project_id)
+    project = runtime.repo.get_project(project_id)
     if project is None:
         raise ValueError(f"project {project_id} not found")
     if not (project.name or "").strip():
@@ -6759,7 +6526,7 @@ def trim_project(project_id: str, typed_name: str) -> dict:
     if paths:
         trashed = housekeeping.put_in_trash(str(output_dir()), "outputs", project_id, project.name or "", {}, paths)
         freed += trashed.bytes
-    busy = repo.active_job_ids()
+    busy = runtime.repo.active_job_ids()
     for folder in _project_caches(project_id):
         if not os.path.isdir(folder):
             continue
@@ -6786,11 +6553,11 @@ def trash_projects(project_ids: List[str]) -> dict:
         `deleted`, the IDs moved, and `busy`, the names of those being
         rendered; when `busy` is not empty nothing was moved.
     """
-    job_manager.forget_abandoned()
-    before = {project_id: project for project_id in project_ids if (project := repo.get_project(project_id))}
-    filed = repo.folder_of("projects")
+    runtime.job_manager.forget_abandoned()
+    before = {project_id: project for project_id in project_ids if (project := runtime.repo.get_project(project_id))}
+    filed = runtime.repo.folder_of("projects")
     named = [project.name for project in before.values() if project.name]
-    _say_in_history(f"把「{'」「'.join(named[:3])}」移到垃圾桶" + (f"等 {len(named)} 支" if len(named) > 3 else ""))
+    shared.say_in_history(f"把「{'」「'.join(named[:3])}」移到垃圾桶" + (f"等 {len(named)} 支" if len(named) > 3 else ""))
     outputs = str(output_dir())
     trashed = {
         project_id: housekeeping.put_in_trash(outputs, "project", project_id, project.name or "", {
@@ -6799,7 +6566,7 @@ def trash_projects(project_ids: List[str]) -> dict:
         }, [])
         for project_id, project in before.items()
     }
-    deleted, busy = repo.delete_projects(list(before))
+    deleted, busy = runtime.repo.delete_projects(list(before))
     for project_id, kept in trashed.items():
         if project_id not in deleted:
             housekeeping.let_go(outputs, kept.key)
@@ -6855,15 +6622,15 @@ def restore_from_trash(key: str) -> dict:
         raise ValueError(f"{key} is not in the trash") from exc
     project_id = what.project_id
     if what.kind == "project" and "project.json" in kept:
-        _say_in_history(f"從垃圾桶放回「{what.name}」")
+        shared.say_in_history(f"從垃圾桶放回「{what.name}」")
         project = Project.model_validate_json(kept["project.json"])
-        if repo.get_project(project.id) is not None:
+        if runtime.repo.get_project(project.id) is not None:
             project = project.model_copy(update={"id": str(uuid.uuid4())})
-        repo.add_project(project)
+        runtime.repo.add_project(project)
         project_id = project.id
         folder = json.loads(kept.get("place.json", b"{}")).get("folder_id")
-        if folder and any(item["id"] == folder for item in repo.list_folders("projects")):
-            repo.file_items("projects", [project.id], folder)
+        if folder and any(item["id"] == folder for item in runtime.repo.list_folders("projects")):
+            runtime.repo.file_items("projects", [project.id], folder)
     back = housekeeping.take_out_of_trash(outputs, key)
     return {"kind": what.kind, "name": what.name, "project_id": project_id, "files": back}
 
@@ -6875,7 +6642,7 @@ def _make_room() -> None:
     if time.monotonic() - _room_checked < ROOM_CHECK_SECONDS:
         return
     _room_checked = time.monotonic()
-    housekeeping.give_cache_back(WORKSPACE_DIR, repo.active_job_ids())
+    housekeeping.give_cache_back(runtime.WORKSPACE_DIR, runtime.repo.active_job_ids())
 
 def _base_clips(data: Optional[dict]) -> List[dict]:
     """A project's sequence, as its file holds it, in the order it plays."""
@@ -6959,15 +6726,15 @@ def version_graph(project_id: str, limit: int = 200) -> dict:
     Raises:
         ValueError: If there is no such project.
     """
-    project = repo.get_project(project_id)
+    project = runtime.repo.get_project(project_id)
     if project is None:
         raise ValueError(f"project {project_id} not found")
     branches = _branches_of(project_id)
     starts = {branch.branched_from.commit for branch in branches}
     parent = None
     if project.branched_from is not None:
-        source = repo.get_project(project.branched_from.project_id)
-        start = next((version for version in history.versions_of(
+        source = runtime.repo.get_project(project.branched_from.project_id)
+        start = next((version for version in runtime.history.versions_of(
             "projects/", f"{project.branched_from.project_id}.json", 500)
             if version.commit == project.branched_from.commit), None)
         parent = {"project_id": project.branched_from.project_id, "commit": project.branched_from.commit,
@@ -7008,7 +6775,7 @@ def project_history(project_id: str, limit: Annotated[int, Field(ge=1, le=200)] 
     Raises:
         ValueError: If there is no such project.
     """
-    project = repo.get_project(project_id)
+    project = runtime.repo.get_project(project_id)
     if project is None:
         raise ValueError(f"project {project_id} not found")
     return {
@@ -7023,10 +6790,10 @@ def _project_at(project_id: str, commit: str) -> Project:
         ValueError: If there is no such version, or the project was not there then.
     """
     try:
-        path = history.find("projects/", f"{project_id}.json", commit)
+        path = runtime.history.find("projects/", f"{project_id}.json", commit)
     except KeyError as exc:
         raise ValueError(str(exc).strip("'\"")) from exc
-    content = history.read(path, commit) if path else None
+    content = runtime.history.read(path, commit) if path else None
     if content is None:
         raise ValueError(f"project {project_id} did not exist at version {commit}")
     return Project.model_validate_json(content)
@@ -7035,7 +6802,7 @@ def _plans_at(project: Project, commit: str) -> Dict[str, EditPlan]:
     """The plans a project's clips were compiled from, as they were at one version."""
     found: Dict[str, EditPlan] = {}
     for plan_id in {clip.from_plan_id for track in project.tracks for clip in track.clips if clip.from_plan_id}:
-        content = history.read(f"plans/{plan_id}.json", commit)
+        content = runtime.history.read(f"plans/{plan_id}.json", commit)
         if content is not None:
             found[plan_id] = EditPlan.model_validate_json(content)
     return found
@@ -7051,7 +6818,7 @@ def _with_plans(project: Project, renamed: Mapping[str, str]) -> Project:
 
 def _copied_plan(plan: EditPlan, why: str) -> str:
     """Save a plan under a new ID, as the starting point of its own history; returns the ID."""
-    stored = repo.save_plan(plan.model_copy(update={"id": str(uuid.uuid4()), "version": 1}), why)
+    stored = runtime.repo.save_plan(plan.model_copy(update={"id": str(uuid.uuid4()), "version": 1}), why)
     return stored.id
 
 @mcp.tool()
@@ -7079,35 +6846,36 @@ def restore_version(project_id: str, commit: str, expected_version: int, note: s
         ValueError: If the project or version does not exist, or the project
             has moved on from `expected_version`.
     """
-    current = repo.get_project(project_id)
+    current = runtime.repo.get_project(project_id)
     if current is None:
         raise ValueError(f"project {project_id} not found")
     if current.version != expected_version:
         raise ValueError(f"version conflict: project {project_id} is at version {current.version}, not {expected_version}")
     earlier = _project_at(project_id, commit)
-    chosen = next((version for version in history.versions_of("projects/", f"{project_id}.json", 500)
+    chosen = next((version for version in runtime.history.versions_of("projects/", f"{project_id}.json", 500)
                    if version.commit.startswith(commit.strip().lower())), None)
     if chosen is not None:
-        _say_in_history(f"回到「{chosen.subject}」那一版")
+        shared.say_in_history(f"回到「{chosen.subject}」那一版")
     renamed: Dict[str, str] = {}
     copied = False
-    others = [other for other in repo.list_projects() if other.id != project_id]
+    others = [other for other in runtime.repo.list_projects() if other.id != project_id]
     for plan_id, plan in _plans_at(earlier, commit).items():
-        shared = any(clip.from_plan_id == plan_id for other in others for track in other.tracks for clip in track.clips)
-        if shared:
+        used_elsewhere = any(clip.from_plan_id == plan_id
+                             for other in others for track in other.tracks for clip in track.clips)
+        if used_elsewhere:
             renamed[plan_id] = _copied_plan(plan, f"「{current.name or project_id}」回到舊版時另存的計畫")
             copied = True
             continue
-        now = repo.get_plan(plan_id)
+        now = runtime.repo.get_plan(plan_id)
         if now is None:
-            repo.save_plan(plan.model_copy(update={"version": 1}), "回到舊版時放回的計畫")
+            runtime.repo.save_plan(plan.model_copy(update={"version": 1}), "回到舊版時放回的計畫")
         elif now.model_dump(exclude={"version", "updated_at"}) != plan.model_dump(exclude={"version", "updated_at"}):
-            repo.save_plan(plan.model_copy(update={"version": now.version}), "跟著影片回到舊版")
+            runtime.repo.save_plan(plan.model_copy(update={"version": now.version}), "跟著影片回到舊版")
     restored = _with_plans(earlier, renamed).model_copy(update={
         "id": project_id, "version": current.version + 1, "branched_from": current.branched_from,
     })
-    repo.update_project(restored, current.version)
-    prepare_playback(repo.get_project(project_id))
+    runtime.repo.update_project(restored, current.version)
+    prepare_playback(runtime.repo.get_project(project_id))
     return {
         "new_version": restored.version,
         "restored": {"commit": chosen.commit[:10], "what": chosen.subject} if chosen else {"commit": commit},
@@ -7136,16 +6904,16 @@ def branch_project(project_id: str, name: str, commit: Optional[str] = None, not
     Raises:
         ValueError: If the project or version does not exist.
     """
-    current = repo.get_project(project_id)
+    current = runtime.repo.get_project(project_id)
     if current is None:
         raise ValueError(f"project {project_id} not found")
     if commit is None:
-        versions = history.versions_of("projects/", f"{project_id}.json", 1)
+        versions = runtime.history.versions_of("projects/", f"{project_id}.json", 1)
         if not versions:
             raise ValueError(f"project {project_id} has no version in the history yet")
         commit = versions[0].commit
     start = _project_at(project_id, commit)
-    found = next((version.commit for version in history.versions_of("projects/", f"{project_id}.json", 500)
+    found = next((version.commit for version in runtime.history.versions_of("projects/", f"{project_id}.json", 500)
                   if version.commit.startswith(commit.strip().lower())), commit)
     renamed = {plan_id: _copied_plan(plan, f"「{name}」分支的計畫")
                for plan_id, plan in _plans_at(start, commit).items()}
@@ -7153,12 +6921,12 @@ def branch_project(project_id: str, name: str, commit: Optional[str] = None, not
         "id": str(uuid.uuid4()), "name": name.strip(), "version": 1,
         "branched_from": BranchPoint(project_id=project_id, commit=found),
     })
-    _say_in_history(f"從「{current.name or project_id}」開分支「{branch.name}」")
-    repo.add_project(branch)
+    shared.say_in_history(f"從「{current.name or project_id}」開分支「{branch.name}」")
+    runtime.repo.add_project(branch)
     prepare_playback(branch)
-    folder = repo.folder_of("projects").get(project_id)
+    folder = runtime.repo.folder_of("projects").get(project_id)
     if folder:
-        repo.file_items("projects", [branch.id], folder)
+        runtime.repo.file_items("projects", [branch.id], folder)
     return {"project_id": branch.id, "name": branch.name, "branched_from": branch.branched_from.model_dump()}
 
 # Provisional (roadmap §13): a word counts as said in a stretch only when this much of it is
@@ -7169,27 +6937,13 @@ SHORTEST_STRETCH_SECONDS = 0.05
 
 def _said_between(asset_id: str, start: float, end: float) -> str:
     """What the transcript has said in a file between two of its seconds, glossary words corrected; empty when nothing was."""
-    analysis = repo.get_analysis(asset_id)
+    analysis = runtime.repo.get_analysis(asset_id)
     if analysis is None or analysis.transcript is None:
         return ""
-    return _glossed("".join(
+    return shared.glossed("".join(
         word.text for segment in analysis.transcript.segments if not was_made_up(segment) for word in segment.words
         if word.start < end - WORD_INSIDE_SECONDS and word.end > start + WORD_INSIDE_SECONDS
     ).strip())
-
-def _glossed(text: str, glossary: Optional[Mapping[str, str]] = None) -> str:
-    """Text the transcriber wrote, with every word in the glossary corrected as the captions are.
-
-    Args:
-        text: The text.
-        glossary: Heard words mapped to meant ones; the workspace's when not given.
-
-    Returns:
-        The text corrected.
-    """
-    for heard, meant in (repo.glossary() if glossary is None else glossary).items():
-        text = text.replace(heard, meant)
-    return text
 
 def _version_at(project_id: str, commit: Optional[str]) -> Tuple[Project, dict]:
     """A project at one of its versions, or as it is now, with that version as the AI reads it.
@@ -7204,10 +6958,10 @@ def _version_at(project_id: str, commit: Optional[str]) -> Tuple[Project, dict]:
     Raises:
         ValueError: If the project or the version does not exist.
     """
-    current = repo.get_project(project_id)
+    current = runtime.repo.get_project(project_id)
     if current is None:
         raise ValueError(f"project {project_id} not found")
-    versions = history.versions_of("projects/", f"{project_id}.json", 500)
+    versions = runtime.history.versions_of("projects/", f"{project_id}.json", 500)
     if not commit:
         return current, (_version_record(versions[0]) if versions else {"commit": None, "what": "目前"})
     chosen = next((version for version in versions if version.commit.startswith(commit.strip().lower())), None)
@@ -7225,7 +6979,7 @@ def compare_projects(before: Project, after: Project) -> dict:
     Returns:
         What `compare.compare` returns.
     """
-    names = {asset_id: os.path.basename(asset.path) for asset_id, asset in repo.get_assets(
+    names = {asset_id: os.path.basename(asset.path) for asset_id, asset in runtime.repo.get_assets(
         {clip.asset_id for project in (before, after) for track in project.tracks for clip in track.clips}).items()}
     return compare(before, after, _said_between, lambda asset_id: names.get(asset_id, asset_id))
 
@@ -7284,7 +7038,7 @@ def _merged_plan(before: Project, after: Project, commits: Tuple[Optional[str], 
 
     def plan_at(project: Project, plan_id: str, commit: Optional[str]) -> Optional[EditPlan]:
         """A plan as it was at a version, or as it is."""
-        return _plans_at(project, commit).get(plan_id) if commit else repo.get_plan(plan_id)
+        return _plans_at(project, commit).get(plan_id) if commit else runtime.repo.get_plan(plan_id)
 
     left_ids, right_ids = plan_ids(before), plan_ids(after)
     if not from_left or not left_ids:
@@ -7298,15 +7052,15 @@ def _merged_plan(before: Project, after: Project, commits: Tuple[Optional[str], 
     if left.timeline_id != right.timeline_id:
         return merged, "沒有合併剪輯計畫：兩份計畫用的是不同的素材時間軸"
     combined = merge_plans(left, right, from_left)
-    stored = repo.get_plan(right_id)
-    shared = any(clip.from_plan_id == right_id for other in repo.list_projects() if other.id != merged.id
-                 for track in other.tracks for clip in track.clips)
-    if shared or stored is None:
+    stored = runtime.repo.get_plan(right_id)
+    used_elsewhere = any(clip.from_plan_id == right_id for other in runtime.repo.list_projects() if other.id != merged.id
+                         for track in other.tracks for clip in track.clips)
+    if used_elsewhere or stored is None:
         plan_id = _copied_plan(combined, f"「{name}」合成兩版時另存的計畫")
-        said = "剪輯計畫也合併了；原本的計畫有別支影片在用，所以另存了一份" if shared else "剪輯計畫也依段落合併了"
+        said = "剪輯計畫也合併了；原本的計畫有別支影片在用，所以另存了一份" if used_elsewhere else "剪輯計畫也依段落合併了"
     else:
         # Saved on top of the plan as it is now, whichever version the right side was.
-        plan_id = repo.save_plan(combined.model_copy(update={"version": stored.version}), "合成兩版").id
+        plan_id = runtime.repo.save_plan(combined.model_copy(update={"version": stored.version}), "合成兩版").id
         said = "剪輯計畫也依段落合併了"
     relinked = merged.model_copy(update={"tracks": [
         track.model_copy(update={"clips": [
@@ -7339,7 +7093,7 @@ def merge_versions(project_id: str, commit_a: str, commit_b: Optional[str], pick
         ValueError: If the project or a version does not exist, a pick is
             not `a` or `b`, or the project moved on from `expected_version`.
     """
-    current = repo.get_project(project_id)
+    current = runtime.repo.get_project(project_id)
     if current is None:
         raise ValueError(f"project {project_id} not found")
     if current.version != expected_version:
@@ -7360,12 +7114,12 @@ def merge_versions(project_id: str, commit_a: str, commit_b: Optional[str], pick
     merged, plan_said = _merged_plan(before, after, (commit_a or None, commit_b), merged, from_left,
                                      current.name or project_id)
     taken = [name for name, side in picks.items() if side == "a"]
-    _say_in_history(f"合成兩版：{'、'.join(taken) or '全部'}用「{a.get('what')}」" if taken else "合成兩版")
+    shared.say_in_history(f"合成兩版：{'、'.join(taken) or '全部'}用「{a.get('what')}」" if taken else "合成兩版")
     result = merged.model_copy(update={"id": project_id, "version": current.version + 1,
                                        "name": current.name, "branched_from": current.branched_from})
-    validate_project(result, repo.get_assets({clip.asset_id for track in result.tracks for clip in track.clips}))
-    repo.update_project(result, current.version)
-    prepare_playback(repo.get_project(project_id))
+    validate_project(result, runtime.repo.get_assets({clip.asset_id for track in result.tracks for clip in track.clips}))
+    runtime.repo.update_project(result, current.version)
+    prepare_playback(runtime.repo.get_project(project_id))
     said = {"new_version": result.version, "seconds": round(float(result.duration), 3), "from_a": taken}
     if plan_said:
         said["plan"] = plan_said
@@ -7422,28 +7176,28 @@ def mark_version(project_id: str, commit: str, mark: Literal["starred", "publish
     Raises:
         ValueError: If the project or version does not exist.
     """
-    if repo.get_project(project_id) is None:
+    if runtime.repo.get_project(project_id) is None:
         raise ValueError(f"project {project_id} not found")
-    chosen = next((version for version in history.versions_of("projects/", f"{project_id}.json", 500)
+    chosen = next((version for version in runtime.history.versions_of("projects/", f"{project_id}.json", 500)
                    if version.commit.startswith(commit.strip().lower())), None)
     if chosen is None:
         raise ValueError(f"project {project_id} has no version {commit}")
-    repo.set_version_mark(project_id, chosen.commit, mark, on)
+    runtime.repo.set_version_mark(project_id, chosen.commit, mark, on)
     marks = next((marked for version, _, marked in _project_versions(project_id, 500)
-                  if version.commit == chosen.commit), set(repo.version_marks(project_id).get(chosen.commit, ())))
+                  if version.commit == chosen.commit), set(runtime.repo.version_marks(project_id).get(chosen.commit, ())))
     return {"commit": chosen.commit[:10], "marks": sorted(marks)}
 
 # ------------------------------------------------------------------ what the user said about a moment
 
 def _current_commit(project_id: str) -> Optional[str]:
     """The version a project is at now, as its latest commit; None before it has one."""
-    found = history.versions_of("projects/", f"{project_id}.json", 1)
+    found = runtime.history.versions_of("projects/", f"{project_id}.json", 1)
     return found[0].commit if found else None
 
 def _comment_said(project: Project, comment: Comment) -> dict:
     """A comment as the AI and the editor read it: where it is on the cut now, and what was said back."""
     now = where_now(project, comment)
-    asset = repo.get_assets([comment.start_anchor.asset_id]).get(comment.start_anchor.asset_id) \
+    asset = runtime.repo.get_assets([comment.start_anchor.asset_id]).get(comment.start_anchor.asset_id) \
         if comment.start_anchor else None
     return {
         "id": comment.id, "text": comment.text, "by": comment.by, "status": comment.status,
@@ -7473,7 +7227,7 @@ def open_comments(project_id: str) -> int:
     Returns:
         The number of open comments.
     """
-    return sum(comment.waiting for comment in repo.comments(project_id))
+    return sum(comment.waiting for comment in runtime.repo.comments(project_id))
 
 # How far either side of the problem a judge sees, for whether the change broke what is
 # around it. Provisional.
@@ -7488,7 +7242,7 @@ def _render_length(path: str) -> Optional[float]:
 
 def _trial_dir(trial_id: str) -> str:
     """Where a trial keeps its own copies of the two renders."""
-    return os.path.join(WORKSPACE_DIR, "trials", trial_id)
+    return os.path.join(runtime.WORKSPACE_DIR, "trials", trial_id)
 
 @mcp.tool()
 def start_trial(
@@ -7542,7 +7296,7 @@ def start_trial(
                   at=at, end=end, before_job=before_job, before_version=job.project_version)
     os.makedirs(_trial_dir(trial.id), exist_ok=True)
     shutil.copyfile(path, os.path.join(_trial_dir(trial.id), "before.mp4"))
-    repo.save_trial(trial)
+    runtime.repo.save_trial(trial)
     return {"trial_id": trial.id, "next": (
         "make the change, render a preview of it, and give it with `trial_candidate`")}
 
@@ -7569,7 +7323,7 @@ def trial_candidate(
         ValueError: If the trial does not exist or has been judged, or the
             render is not a finished one of the same project after the first.
     """
-    trial = repo.trial(trial_id)
+    trial = runtime.repo.trial(trial_id)
     if trial is None:
         raise ValueError(f"there is no trial {trial_id}")
     if trial.verdict is not None:
@@ -7584,7 +7338,7 @@ def trial_candidate(
     trial.candidate_at = trial.at if candidate_at is None else candidate_at
     trial.candidate_end = trial.end if candidate_end is None else candidate_end
     trial.candidate_is = secrets.choice(["X", "Y"])
-    repo.save_trial(trial)
+    runtime.repo.save_trial(trial)
     return {"trial_id": trial.id, "next": (
         "have it judged by someone who has not seen the change: start a fresh subagent with no part in this "
         "conversation, give it only `trial_pack` and ask which of X and Y handles the problem better and which, "
@@ -7610,7 +7364,7 @@ def trial_pack(trial_id: str) -> ToolResult:
     Raises:
         ValueError: If the trial does not exist or has no candidate yet.
     """
-    trial = repo.trial(trial_id)
+    trial = runtime.repo.trial(trial_id)
     if trial is None:
         raise ValueError(f"there is no trial {trial_id}")
     if trial.candidate_is is None:
@@ -7619,7 +7373,7 @@ def trial_pack(trial_id: str) -> ToolResult:
     files = {"before": (os.path.join(folder, "before.mp4"), trial.at, trial.end),
              "after": (os.path.join(folder, "after.mp4"), trial.candidate_at, trial.candidate_end)}
     labels = {trial.candidate_is: "after", ("Y" if trial.candidate_is == "X" else "X"): "before"}
-    per_side = MAX_STORYBOARD_TILES // 2
+    per_side = shared.MAX_STORYBOARD_TILES // 2
     shots, lines = [], [f"The problem: {trial.problem}"]
     if trial.evidence:
         lines.append(f"What shows it: {trial.evidence}")
@@ -7674,7 +7428,7 @@ def judge_trial(
         ValueError: If the trial does not exist, has no change yet, or was
             judged already.
     """
-    trial = repo.trial(trial_id)
+    trial = runtime.repo.trial(trial_id)
     if trial is None:
         raise ValueError(f"there is no trial {trial_id}")
     if trial.candidate_is is None:
@@ -7682,7 +7436,7 @@ def judge_trial(
     if trial.verdict is not None:
         raise ValueError(f"trial {trial_id} was judged already: {trial.verdict.better}")
     trial.verdict = Verdict(better=better, broke=broke, why=why.strip(), judged_by=judged_by)
-    repo.save_trial(trial)
+    runtime.repo.save_trial(trial)
     shutil.rmtree(_trial_dir(trial.id), ignore_errors=True)
     keep = "change" if better == trial.candidate_is and broke not in (trial.candidate_is, "both") else "original"
     said = {
@@ -7716,7 +7470,7 @@ def get_trials(project_id: str) -> dict:
         `trials`, oldest first: the problem, what was changed and expected,
         and the verdict with who gave it.
     """
-    return {"trials": [_trial_said(trial) for trial in repo.trials(project_id)]}
+    return {"trials": [_trial_said(trial) for trial in runtime.repo.trials(project_id)]}
 
 @mcp.tool()
 def ask_user(project_id: str, questions: Annotated[List[Question], Field(min_length=1, max_length=8)]) -> dict:
@@ -7741,7 +7495,7 @@ def ask_user(project_id: str, questions: Annotated[List[Question], Field(min_len
     Raises:
         ValueError: If the project does not exist.
     """
-    project = repo.get_project(project_id)
+    project = runtime.repo.get_project(project_id)
     if project is None:
         raise ValueError(f"project {project_id} not found")
     asked = []
@@ -7755,14 +7509,14 @@ def ask_user(project_id: str, questions: Annotated[List[Question], Field(min_len
     for question in questions:
         end = question.end
         comment = Comment(
-            id="c" + uuid.uuid4().hex[:7], project_id=project_id, by=f"AI（{_calling_client.get()}）",
+            id="c" + uuid.uuid4().hex[:7], project_id=project_id, by=f"AI（{runtime.calling_client.get()}）",
             text=question.question.strip() + (f"\n（{question.why.strip()}）" if question.why.strip() else ""),
             commit=_current_commit(project_id), question=True,
             start=round(question.start, 3), end=round(end, 3) if end is not None else None,
             start_anchor=anchor_at(project, question.start),
             end_anchor=anchor_at(project, end) if end is not None else None,
         )
-        repo.save_comment(comment, f"AI 問：{question.question[:30]}")
+        runtime.repo.save_comment(comment, f"AI 問：{question.question[:30]}")
         asked.append(_comment_said(project, comment))
     return {"asked": asked}
 
@@ -7785,7 +7539,7 @@ def remember_preference(text: Annotated[str, Field(min_length=1, max_length=300)
         `kept`, the preference with its `id`; and `preferences`, all of them.
     """
     preference = Preference(id="p" + uuid.uuid4().hex[:7], text=text.strip(), project_id=project_id)
-    repo.save_preference(preference)
+    runtime.repo.save_preference(preference)
     return _with_preferences({"kept": {"id": preference.id, "text": preference.text}})
 
 @mcp.tool()
@@ -7801,7 +7555,7 @@ def forget_preference(preference_id: str) -> dict:
     Raises:
         ValueError: If no preference has that ID.
     """
-    if not repo.delete_preference(preference_id):
+    if not runtime.repo.delete_preference(preference_id):
         raise ValueError(f"there is no preference {preference_id}")
     return _with_preferences({"forgotten": preference_id})
 
@@ -7847,7 +7601,7 @@ def offer_songs(
             has no sound or is shorter than the second it is heard from, or
             the stretch is empty.
     """
-    project = repo.get_project(project_id)
+    project = runtime.repo.get_project(project_id)
     if project is None:
         raise ValueError(f"project {project_id} not found")
     length = float(project.duration)
@@ -7866,7 +7620,7 @@ def offer_songs(
         raise ValueError(f"the stretch {start:g}–{end:g}s is not inside the {length:.1f}s cut")
     names = []
     for song in songs:
-        asset = repo.get_assets([asset_id_for(song.asset_id)]).get(asset_id_for(song.asset_id))
+        asset = runtime.repo.get_assets([shared.asset_id_for(song.asset_id)]).get(shared.asset_id_for(song.asset_id))
         if asset is None:
             raise ValueError(f"there is no song {song.asset_id}")
         if not asset.has_audio:
@@ -7888,7 +7642,7 @@ def offer_songs(
                    if float(clip.timeline_in) < end and float(clip.timeline_out) > start]
         if playing:
             offer = offer.model_copy(update={"volume": playing[0].volume})
-    repo.save_song_offer(offer, project_id)
+    runtime.repo.save_song_offer(offer, project_id)
     return {"offered": names, "say": (
         f"tell the user {len(names)} songs are waiting in the editor to hear under {clock(start)}–{clock(end)}; "
         "their pick comes back as a comment")}
@@ -7906,7 +7660,7 @@ def song_trial(project: Project, offer: SongOffer, number: int) -> Project:
         song laid over the stretch from its second, faded in and out.
     """
     song = offer.songs[number - 1]
-    asset = repo.get_assets([song.asset_id]).get(song.asset_id)
+    asset = runtime.repo.get_assets([song.asset_id]).get(song.asset_id)
     trial = project.model_copy(deep=True)
     music = [track for track in trial.tracks if track.track_type == TrackType.AUDIO and track.duck_under_speech]
     for track in music:
@@ -7953,21 +7707,21 @@ def pick_song(project_id: str, number: int) -> dict:
     Raises:
         ValueError: If nothing is offered, or there is no such song.
     """
-    offer = repo.song_offer(project_id)
+    offer = runtime.repo.song_offer(project_id)
     if offer is None or not 1 <= number <= len(offer.songs):
         raise ValueError("no such song is offered")
     song = offer.songs[number - 1]
-    asset = repo.get_assets([song.asset_id]).get(song.asset_id)
+    asset = runtime.repo.get_assets([song.asset_id]).get(song.asset_id)
     name = os.path.basename(asset.path) if asset is not None else song.asset_id
     said = f"配樂選「{name}」，從歌的 {song.start:g} 秒開始（{song.asset_id}）"
-    found = _offered_cue(repo.get_project(project_id), offer)
+    found = _offered_cue(runtime.repo.get_project(project_id), offer)
     if found is not None:
         plan, cue = found
         amended = amend_plan(plan.id, plan.version, [SetMusicCueOp(beat_id=cue.beat_id, asset_id=song.asset_id,
                                                                      start=song.start)], note=said)
         said += f"；已寫進計畫 {plan.id} 第 {amended['version']} 版，重新 compile_plan 後生效"
     made = add_comment(project_id, said, offer.start, offer.end)
-    repo.save_song_offer(None, project_id)
+    runtime.repo.save_song_offer(None, project_id)
     return made
 
 def add_comment(project_id: str, text: str, start: float, end: Optional[float] = None) -> dict:
@@ -7987,7 +7741,7 @@ def add_comment(project_id: str, text: str, start: float, end: Optional[float] =
     Raises:
         ValueError: If the project does not exist or the text is empty.
     """
-    project = repo.get_project(project_id)
+    project = runtime.repo.get_project(project_id)
     if project is None:
         raise ValueError(f"project {project_id} not found")
     if not text.strip():
@@ -8001,7 +7755,7 @@ def add_comment(project_id: str, text: str, start: float, end: Optional[float] =
         start=round(max(0.0, start), 3), end=round(end, 3) if end is not None else None,
         start_anchor=anchor_at(project, start), end_anchor=anchor_at(project, end) if end is not None else None,
     )
-    repo.save_comment(comment, f"留言：{comment.text[:30]}")
+    runtime.repo.save_comment(comment, f"留言：{comment.text[:30]}")
     return _comment_said(project, comment)
 
 def change_comment(project_id: str, comment_id: str, by: str, reply: str = "",
@@ -8021,8 +7775,8 @@ def change_comment(project_id: str, comment_id: str, by: str, reply: str = "",
     Raises:
         ValueError: If the project or comment does not exist.
     """
-    project = repo.get_project(project_id)
-    comment = next((item for item in repo.comments(project_id) if item.id == comment_id), None)
+    project = runtime.repo.get_project(project_id)
+    comment = next((item for item in runtime.repo.comments(project_id) if item.id == comment_id), None)
     if project is None or comment is None:
         raise ValueError(f"project {project_id} has no comment {comment_id}")
     commit = _current_commit(project_id)
@@ -8033,7 +7787,7 @@ def change_comment(project_id: str, comment_id: str, by: str, reply: str = "",
     elif status == "open":
         comment.status, comment.resolved_commit = "open", None
     said = {"resolved": "處理了一則留言", "open": "重開一則留言"}.get(status or "", "回覆一則留言")
-    repo.save_comment(comment, f"{said}：{comment.text[:30]}")
+    runtime.repo.save_comment(comment, f"{said}：{comment.text[:30]}")
     return _comment_said(project, comment)
 
 @mcp.tool()
@@ -8062,10 +7816,10 @@ def get_comments(project_id: str, include_resolved: bool = False) -> dict:
     Raises:
         ValueError: If the project does not exist.
     """
-    project = repo.get_project(project_id)
+    project = runtime.repo.get_project(project_id)
     if project is None:
         raise ValueError(f"project {project_id} not found")
-    every = repo.comments(project_id)
+    every = runtime.repo.comments(project_id)
     return {
         "comments": [_comment_said(project, comment) for comment in every
                      if include_resolved or comment.status == "open"],
@@ -8097,7 +7851,7 @@ def resolve_comment(project_id: str, comment_id: str, reply: str, resolved: bool
     """
     if not reply.strip():
         raise ValueError("say what was done, or what you need to know")
-    return change_comment(project_id, comment_id, f"AI（{_calling_client.get()}）", reply,
+    return change_comment(project_id, comment_id, f"AI（{runtime.calling_client.get()}）", reply,
                           "resolved" if resolved else None)
 
 @mcp.tool()
@@ -8182,9 +7936,9 @@ def _job_states(job_ids: List[str]) -> List[dict]:
     """
     listed: List[dict] = []
     now = datetime.now(timezone.utc)
-    ahead = queue_positions(repo.jobs_to_show(now)[0])
+    ahead = queue_positions(runtime.repo.jobs_to_show(now)[0])
     for job_id in dict.fromkeys(job_ids):
-        job = job_manager.get_job(job_id)
+        job = runtime.job_manager.get_job(job_id)
         if not job:
             raise ValueError(f"job {job_id} not found")
         entry = {
@@ -8209,7 +7963,7 @@ def _job_states(job_ids: List[str]) -> List[dict]:
             elif job.spots:
                 entry["frames"] = _frame_spots(job)
         if job.kind == JobKind.ANALYZE and job.status == JobStatus.COMPLETED and job.asset_id:
-            heard = repo.get_analysis(job.asset_id)
+            heard = runtime.repo.get_analysis(job.asset_id)
             voices = len({turn.speaker for turn in heard.speakers}) if heard else 0
             if voices > MANY_VOICES:
                 entry["note"] = (
@@ -8237,7 +7991,7 @@ def _frame_spots(job: Job) -> dict:
     project, _ = _project_as_rendered(job)
     clips = sorted(project.base_video_track.clips, key=lambda clip: clip.timeline_in) if (
         project is not None and project.base_video_track is not None) else []
-    assets = _referenced_assets(project) if project is not None else {}
+    assets = shared.referenced_assets(project) if project is not None else {}
     slack = 1 / (project.fps_num / project.fps_den) if project is not None else 0.04
 
     def meant(kind: str, start: float, end: float, here: List[Clip]) -> Optional[str]:
@@ -8295,7 +8049,7 @@ def cancel_job(job_id: str) -> dict:
         current `status` (null if the job does not exist). `cancelled` is
         false if the job does not exist or had already finished.
     """
-    job = job_manager.cancel_job(job_id)
+    job = runtime.job_manager.cancel_job(job_id)
     return {
         "job_id": job_id,
         "cancelled": job is not None and job.status == JobStatus.CANCELLED,
@@ -8328,9 +8082,9 @@ def storage_usage() -> dict:
         video's 版本 tab); suggest them, never claim to have done them.
         `trash` lists what is in the trash.
     """
-    items = housekeeping.usage(WORKSPACE_DIR, str(output_dir()))
+    items = housekeeping.usage(runtime.WORKSPACE_DIR, str(output_dir()))
     videos = []
-    for project in repo.list_projects():
+    for project in runtime.repo.list_projects():
         found = project_storage(project.id)
         videos.append({"project_id": project.id, "name": project.name, **{
             key: found[key] for key in ("versions", "exported", "outputs_megabytes", "cache_megabytes",
@@ -8361,8 +8115,8 @@ def clean_storage(kinds: List[Literal["previews", "thumbnails", "playback", "wor
     Returns:
         `freed_megabytes`.
     """
-    job_manager.forget_abandoned()
-    freed = housekeeping.clean(WORKSPACE_DIR, kinds, repo.active_job_ids())
+    runtime.job_manager.forget_abandoned()
+    freed = housekeeping.clean(runtime.WORKSPACE_DIR, kinds, runtime.repo.active_job_ids())
     return {"freed_megabytes": round(freed / 1e6, 1)}
 
 @mcp.tool()
@@ -8387,7 +8141,7 @@ def tidy_old_outputs(confirm: bool = False) -> dict:
         it: `kept` (where each went), `recycled`, and `left` — files that
         could not be moved, such as one open in a player.
     """
-    planned = housekeeping.legacy_plan(WORKSPACE_DIR, str(output_dir()))
+    planned = housekeeping.legacy_plan(runtime.WORKSPACE_DIR, str(output_dir()))
     if not confirm:
         recycled = [item for item in planned if item.duplicate]
         stays = [item for item in planned if not item.keep_as and not item.duplicate]
@@ -8397,7 +8151,7 @@ def tidy_old_outputs(confirm: bool = False) -> dict:
             "recycle": {"files": len(recycled), "megabytes": round(sum(item.bytes for item in recycled) / 1e6, 1)},
             "left_in_place": {"files": len(stays), "megabytes": round(sum(item.bytes for item in stays) / 1e6, 1)},
         }
-    return housekeeping.legacy_apply(WORKSPACE_DIR, planned)
+    return housekeeping.legacy_apply(runtime.WORKSPACE_DIR, planned)
 
 # How often a running server moves the job queue along. Provisional.
 TEND_JOBS_SECONDS = 15.0
@@ -8413,7 +8167,7 @@ def tend_jobs() -> None:
     """
     while True:
         try:
-            job_manager.launch_ready()
+            runtime.job_manager.launch_ready()
         except Exception:
             # A failed look is tried again next time; it is never the end of the server.
             pass

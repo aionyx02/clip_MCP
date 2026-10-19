@@ -30,7 +30,7 @@ from starlette.responses import FileResponse, JSONResponse, Response
 from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 
-from app import clients, server
+from app import clients, runtime, server
 from app.models.comment import USER
 from app.engine.ffmpeg import hidden_window_flags
 from app.engine import models
@@ -46,7 +46,7 @@ from app.ui import dialogs, updates
 STATIC_DIR = Path(__file__).parent / "static"
 # What `/api/ping` answers, so a second start can tell this editor from anything else on the port.
 APP_ID = "clip-mcp-editor"
-CACHE_DIR = Path(housekeeping.ui_cache_dir(server.WORKSPACE_DIR))
+CACHE_DIR = Path(housekeeping.ui_cache_dir(runtime.WORKSPACE_DIR))
 # How many states back undo reaches, per project. Each is one project's JSON.
 UNDO_DEPTH = 50
 # Samples per second kept for a waveform: enough to draw a clip a few pixels per
@@ -84,7 +84,7 @@ def _asset_summary(asset) -> dict:
         "width": asset.width,
         "height": asset.height,
         # Shown on the file, so the user checking captions later knows to expect misheard words.
-        "fast_transcript": server.transcription_of(server.repo.transcript_model(asset.id)) == "fast",
+        "fast_transcript": server.transcription_of(runtime.repo.transcript_model(asset.id)) == "fast",
         "notes": asset.notes,
         "library": library_of(asset),
         "source": asset.source.model_dump() if asset.source is not None else None,
@@ -107,9 +107,9 @@ async def projects(request: Request) -> Response:
             {"action": "add_track", "track_id": "music", "track_type": "audio", "duck_under_speech": True},
         ]))
         return JSONResponse({"id": made["id"]})
-    listed, filed = [], server.repo.folder_of("projects")
-    counts = server.history.counts("projects/")
-    everything = server.repo.list_projects()
+    listed, filed = [], runtime.repo.folder_of("projects")
+    counts = runtime.history.counts("projects/")
+    everything = runtime.repo.list_projects()
     branched = {}
     for project in everything:
         if project.branched_from is not None:
@@ -118,7 +118,7 @@ async def projects(request: Request) -> Response:
         base = project.base_video_track
         clips = base.clips if base else []
         used = {clip.asset_id for track in project.tracks for clip in track.clips}
-        found = server.repo.get_assets(used)
+        found = runtime.repo.get_assets(used)
         missing = sorted(os.path.basename(asset.path) for asset in found.values() if not os.path.exists(asset.path))
         first = clips[0] if clips else None
         listed.append({
@@ -140,13 +140,13 @@ async def projects(request: Request) -> Response:
 async def project(request: Request) -> Response:
     """One project as the page draws it: its tracks and clips, its markers, and the files they play."""
     project_id = request.path_params["project_id"]
-    found = server.repo.get_project(project_id)
+    found = runtime.repo.get_project(project_id)
     if not found:
         return _error(f"project {project_id} not found", 404)
     state = json.loads(found.model_dump_json(exclude={"subtitles"}))
     state["duration"] = float(found.duration)
     used = {clip.asset_id for track in found.tracks for clip in track.clips}
-    state["assets"] = {asset_id: _asset_summary(asset) for asset_id, asset in server.repo.get_assets(used).items()}
+    state["assets"] = {asset_id: _asset_summary(asset) for asset_id, asset in runtime.repo.get_assets(used).items()}
     with _undo_lock:
         stack = _undo.get(project_id, [])
         state["can_undo"] = bool(stack) and stack[-1][0] == found.version
@@ -156,7 +156,7 @@ async def edits(request: Request) -> Response:
     """Apply a batch of edits, keeping the state before it for undo."""
     project_id = request.path_params["project_id"]
     body = await request.json()
-    before = server.repo.get_project(project_id)
+    before = runtime.repo.get_project(project_id)
     if not before:
         return _error(f"project {project_id} not found", 404)
     try:
@@ -174,7 +174,7 @@ async def edits(request: Request) -> Response:
 async def undo(request: Request) -> Response:
     """Put back the state before this page's last edit, if nothing else has edited since."""
     project_id = request.path_params["project_id"]
-    current = server.repo.get_project(project_id)
+    current = runtime.repo.get_project(project_id)
     if not current:
         return _error(f"project {project_id} not found", 404)
     with _undo_lock:
@@ -186,7 +186,7 @@ async def undo(request: Request) -> Response:
             return _error("nothing to undo: the project was changed elsewhere since your last edit", 409)
         _, before = stack.pop()
         restored = before.model_copy(update={"version": current.version + 1})
-        server.repo.update_project(restored, current.version)
+        runtime.repo.update_project(restored, current.version)
         server.prepare_playback(restored)
         # The states further back now follow this version, not the one they were saved after.
         if stack:
@@ -199,7 +199,7 @@ def _preview_state(project_id: str) -> dict:
         entry = dict(_previews.get(project_id) or {})
     if not entry.get("job_id"):
         return entry
-    job = server.job_manager.get_job(entry["job_id"])
+    job = runtime.job_manager.get_job(entry["job_id"])
     if job:
         entry.update({"status": job.status.value, "progress": round(job.progress, 3), "stage": job.stage})
         if job.status.value == "completed" and job.output_path and os.path.exists(job.output_path):
@@ -213,7 +213,7 @@ def _start_preview(project_id: str) -> dict:
 
     A preview of an older version still rendering is stopped: nobody is going to watch it.
     """
-    project = server.repo.get_project(project_id)
+    project = runtime.repo.get_project(project_id)
     if not project:
         raise ValueError(f"project {project_id} not found")
     with _previews_lock:
@@ -223,7 +223,7 @@ def _start_preview(project_id: str) -> dict:
         if state.get("status") not in ("failed", "cancelled") or state.get("empty"):
             return state
     if current and current.get("job_id"):
-        old = server.job_manager.get_job(current["job_id"])
+        old = runtime.job_manager.get_job(current["job_id"])
         if old and old.status.is_active:
             server.cancel_job(old.job_id)
     if not project.base_video_track or not project.base_video_track.clips:
@@ -255,7 +255,7 @@ async def preview(request: Request) -> Response:
 
 async def version(request: Request) -> Response:
     """The project's version alone, asked every few seconds to notice the AI changing it."""
-    found = server.repo.get_project(request.path_params["project_id"])
+    found = runtime.repo.get_project(request.path_params["project_id"])
     if not found:
         return _error("project not found", 404)
     return JSONResponse({"version": found.version})
@@ -267,7 +267,7 @@ async def words(request: Request) -> Response:
         at = float(request.query_params.get("at", "0"))
     except ValueError:
         return _error("at is a number")
-    analysis = server.repo.get_analysis(asset_id)
+    analysis = runtime.repo.get_analysis(asset_id)
     if not analysis or not analysis.transcript:
         return JSONResponse({"words": [], "transcribed": False})
     found = []
@@ -286,9 +286,9 @@ def _untranscribed(project: Project) -> List[dict]:
         if clip.asset_id in seen:
             continue
         seen.add(clip.asset_id)
-        analysis = server.repo.get_analysis(clip.asset_id)
+        analysis = runtime.repo.get_analysis(clip.asset_id)
         if analysis is None or analysis.transcript is None:
-            asset = server.repo.get_assets([clip.asset_id]).get(clip.asset_id)
+            asset = runtime.repo.get_assets([clip.asset_id]).get(clip.asset_id)
             if asset:
                 missing.append(_asset_summary(asset))
     return missing
@@ -300,7 +300,7 @@ def _speech_model_missing() -> bool:
 
 async def captions(request: Request) -> Response:
     """The project's captions, each where it falls in the cut as it stands."""
-    found = server.repo.get_project(request.path_params["project_id"])
+    found = runtime.repo.get_project(request.path_params["project_id"])
     if not found:
         return _error("project not found", 404)
     placed = place_cues(found, found.subtitles)
@@ -317,7 +317,7 @@ async def make_captions(request: Request) -> Response:
     """
     project_id = request.path_params["project_id"]
     body = await request.json()
-    found = server.repo.get_project(project_id)
+    found = runtime.repo.get_project(project_id)
     if not found:
         return _error("project not found", 404)
     missing = _untranscribed(found)
@@ -364,13 +364,13 @@ def _job_card(job, names: dict, ahead: int, now: datetime) -> dict:
 
 def _jobs_to_show() -> dict:
     """Every job that is queued or running, whoever started it, and the ones that just ended."""
-    server.job_manager.forget_abandoned()
+    runtime.job_manager.forget_abandoned()
     now = datetime.now(timezone.utc)
-    active, ended = server.repo.jobs_to_show(now - ENDED_SHOWN_FOR)
+    active, ended = runtime.repo.jobs_to_show(now - ENDED_SHOWN_FOR)
     wanted = [job.asset_id for job in active + ended if job.asset_id]
-    names = {asset_id: os.path.basename(asset.path) for asset_id, asset in server.repo.get_assets(wanted).items()}
+    names = {asset_id: os.path.basename(asset.path) for asset_id, asset in runtime.repo.get_assets(wanted).items()}
     for project_id in {job.project_id for job in active + ended if job.project_id}:
-        project = server.repo.get_project(project_id)
+        project = runtime.repo.get_project(project_id)
         if project is not None:
             names[project_id] = project.name or ""
     ahead = server.queue_positions(active)
@@ -400,18 +400,18 @@ async def assets(request: Request) -> Response:
     """
     everything = request.query_params.get("all") == "1"
     library = request.query_params.get("library")
-    filed = {**server.repo.folder_of("assets"), **server.repo.folder_of("music")}
+    filed = {**runtime.repo.folder_of("assets"), **runtime.repo.folder_of("music")}
     listed = []
     heard = server.song_tags() if library == MUSIC else {}
     analyzing = server.analyzing_assets()
-    for asset in server.repo.list_assets():
+    for asset in runtime.repo.list_assets():
         if library in LIBRARIES and library_of(asset) != library:
             continue
         present = os.path.exists(asset.path)
         if present or everything:
             entry = {**_asset_summary(asset), "folder_id": filed.get(asset.id), "missing": not present}
             if entry["library"] == MUSIC:
-                analysis = server.repo.get_analysis(asset.id)
+                analysis = runtime.repo.get_analysis(asset.id)
                 entry.update(server.song_details(asset, analysis, heard, analyzing))
                 if analysis is not None and analysis.music is not None:
                     energy = analysis.music.energy
@@ -518,12 +518,12 @@ async def comments(request: Request) -> Response:
 async def songs(request: Request) -> Response:
     """The songs the AI put to the user to hear under a stretch, each with its name, or none."""
     project_id = request.path_params["project_id"]
-    offer = await run_in_threadpool(server.repo.song_offer, project_id)
+    offer = await run_in_threadpool(runtime.repo.song_offer, project_id)
     if offer is None:
         return JSONResponse({"offer": None})
     listed = []
     for number, song in enumerate(offer.songs, start=1):
-        asset = (await run_in_threadpool(server.repo.get_assets, [song.asset_id])).get(song.asset_id)
+        asset = (await run_in_threadpool(runtime.repo.get_assets, [song.asset_id])).get(song.asset_id)
         listed.append({"number": number, "name": os.path.basename(asset.path) if asset else song.asset_id,
                        "start": song.start, "why": song.why})
     return JSONResponse({"offer": {"start": offer.start, "end": offer.end, "songs": listed}})
@@ -536,8 +536,8 @@ async def song(request: Request) -> Response:
             return JSONResponse(await run_in_threadpool(server.pick_song, project_id, number))
         except ValueError as error:
             return _error(str(error), 400)
-    project = await run_in_threadpool(server.repo.get_project, project_id)
-    offer = await run_in_threadpool(server.repo.song_offer, project_id)
+    project = await run_in_threadpool(runtime.repo.get_project, project_id)
+    offer = await run_in_threadpool(runtime.repo.song_offer, project_id)
     if project is None or offer is None or not 1 <= number <= len(offer.songs):
         return _error("no such song is offered", 404)
     trial = await run_in_threadpool(server.song_trial, project, offer, number)
@@ -549,7 +549,7 @@ async def comment(request: Request) -> Response:
     body = await request.json()
     try:
         if body.get("delete"):
-            if not await run_in_threadpool(server.repo.delete_comment, project_id, comment_id):
+            if not await run_in_threadpool(runtime.repo.delete_comment, project_id, comment_id):
                 return _error(f"project {project_id} has no comment {comment_id}", 404)
             return JSONResponse({"deleted": comment_id})
         status = body.get("status")
@@ -571,7 +571,7 @@ async def playback(request: Request) -> Response:
     commit = request.query_params.get("commit")
     try:
         project = (server._project_at(project_id, commit) if commit
-                   else server.repo.get_project(project_id))
+                   else runtime.repo.get_project(project_id))
     except ValueError as error:
         return _error(str(error), 404)
     if project is None:
@@ -594,12 +594,12 @@ def _cached(folder: str, name: str, kind: str) -> Response:
 async def proxy(request: Request) -> Response:
     """A file's small copy, for the browser to play the cut from."""
     name = request.path_params["name"]
-    return _cached(playback_module.proxy_dir(server.WORKSPACE_DIR), name,
+    return _cached(playback_module.proxy_dir(runtime.WORKSPACE_DIR), name,
                    "video/mp4" if name.endswith(".mp4") else "audio/mp4")
 
 async def sound(request: Request) -> Response:
     """A clip's repaired sound, for the browser to play in place of its own."""
-    return _cached(playback_module.sound_dir(server.WORKSPACE_DIR), request.path_params["name"], "audio/mp4")
+    return _cached(playback_module.sound_dir(runtime.WORKSPACE_DIR), request.path_params["name"], "audio/mp4")
 
 async def asset_notes(request: Request) -> Response:
     """Write the notes on how a file may be used, the ones the AI reads wherever it reads about the file.
@@ -625,12 +625,12 @@ def _remove_assets(asset_ids: List[str], recycle: bool) -> dict:
     loses its footage cannot be played or exported, and the user may not know
     which projects use what.
     """
-    found = server.repo.get_assets(asset_ids)
+    found = runtime.repo.get_assets(asset_ids)
     unknown = sorted(set(asset_ids) - set(found))
     if unknown:
         raise LookupError(f"asset {unknown[0]} not found")
-    server.job_manager.forget_abandoned()
-    using = server.repo.delete_unused_assets(found)
+    runtime.job_manager.forget_abandoned()
+    using = runtime.repo.delete_unused_assets(found)
 
     def name(asset_id: str) -> str:
         return os.path.basename(found[asset_id].path)
@@ -704,20 +704,20 @@ async def folders(request: Request) -> Response:
         kind = request.query_params.get("kind", "")
         if kind not in FOLDER_KINDS:
             return _error("kind is assets or projects")
-        return JSONResponse({"folders": server.repo.list_folders(kind)})
+        return JSONResponse({"folders": runtime.repo.list_folders(kind)})
     body = await request.json()
     action, folder_id = body.get("action"), body.get("id")
     try:
         if action == "create":
-            made = server.repo.create_folder(uuid.uuid4().hex, str(body.get("kind", "")), str(body.get("name", "")),
-                                             body.get("parent_id") or None)
+            made = runtime.repo.create_folder(uuid.uuid4().hex, str(body.get("kind", "")), str(body.get("name", "")),
+                                              body.get("parent_id") or None)
             return JSONResponse(made)
         if action == "rename":
-            server.repo.rename_folder(str(folder_id), str(body.get("name", "")))
+            runtime.repo.rename_folder(str(folder_id), str(body.get("name", "")))
         elif action == "move":
-            server.repo.move_folder(str(folder_id), body.get("parent_id") or None)
+            runtime.repo.move_folder(str(folder_id), body.get("parent_id") or None)
         elif action == "delete":
-            server.repo.delete_folder(str(folder_id))
+            runtime.repo.delete_folder(str(folder_id))
         else:
             return _error("action is create, rename, move or delete")
     except FolderNotFoundError as error:
@@ -731,21 +731,21 @@ async def file_items(request: Request) -> Response:
     body = await request.json()
     kind = body.get("kind")
     ids = [str(item_id) for item_id in body.get("ids", []) if item_id]
-    known = ({asset.id for asset in server.repo.list_assets()} if kind in ("assets", "music")
-             else {project.id for project in server.repo.list_projects()} if kind == "projects" else None)
+    known = ({asset.id for asset in runtime.repo.list_assets()} if kind in ("assets", "music")
+             else {project.id for project in runtime.repo.list_projects()} if kind == "projects" else None)
     if known is None:
         return _error("kind is assets or projects")
     if not ids or not set(ids) <= known:
         return _error("nothing to file, or something that is not there", 404)
     try:
-        server.repo.file_items(kind, ids, body.get("folder_id") or None)
+        runtime.repo.file_items(kind, ids, body.get("folder_id") or None)
     except FolderNotFoundError as error:
         return _error(str(error), 404)
     return JSONResponse({"ok": True})
 
 def _asset_or_none(asset_id: str):
     """The asset by its ID, or None when it is unknown or its file has gone."""
-    found = server.repo.get_assets([asset_id]).get(asset_id)
+    found = runtime.repo.get_assets([asset_id]).get(asset_id)
     return found if found and os.path.exists(found.path) else None
 
 async def media(request: Request) -> Response:
@@ -833,7 +833,7 @@ def _export_state(project_id: str) -> dict:
     """The project's last export, as the page shows it: how far along, and where the file went."""
     with _previews_lock:
         entry = dict(_exports.get(project_id) or {})
-    job = server.job_manager.get_job(entry["job_id"]) if entry.get("job_id") else None
+    job = runtime.job_manager.get_job(entry["job_id"]) if entry.get("job_id") else None
     if job:
         entry.update({"status": job.status.value, "progress": round(job.progress, 3), "stage": job.stage,
                       "file": os.path.basename(job.output_path or ""), "folder": os.path.dirname(job.output_path or "")})
@@ -866,7 +866,7 @@ async def export(request: Request) -> Response:
 
 def _finished_file(job_id: str) -> Optional[str]:
     """A finished render's file, by its job: the only files the page may ask to open."""
-    job = server.job_manager.get_job(job_id)
+    job = runtime.job_manager.get_job(job_id)
     if job and job.status.value == "completed" and job.output_path and os.path.exists(job.output_path):
         return job.output_path
     return None
@@ -900,7 +900,7 @@ async def job(request: Request) -> Response:
 
 async def output(request: Request) -> Response:
     """A finished render, to play in the viewer or save."""
-    found = server.job_manager.get_job(request.path_params["job_id"])
+    found = runtime.job_manager.get_job(request.path_params["job_id"])
     if not found or not found.output_path or not os.path.exists(found.output_path):
         return _error("no file for that render", 404)
     return FileResponse(found.output_path, media_type="video/mp4")
@@ -927,16 +927,16 @@ async def pick(request: Request) -> Response:
             failed.append(os.path.basename(path))
     if library and kind == "folder" and ids:
         # A folder is listened to file by file; added on the music page, its songs are music all the same.
-        server.set_asset_library([asset_id for asset_id, asset in server.repo.get_assets(ids).items()
+        server.set_asset_library([asset_id for asset_id, asset in runtime.repo.get_assets(ids).items()
                                   if not asset.has_video], library)
-    found = server.repo.get_assets(ids)
+    found = runtime.repo.get_assets(ids)
     music = [asset_id for asset_id in ids if asset_id in found and library_of(found[asset_id]) == MUSIC]
     # Chosen with one of the library's folders open: filed there, where the user is looking.
     folder_id = body.get("folder_id")
     if folder_id and ids:
         here = music if body.get("library") == MUSIC else [asset_id for asset_id in ids if asset_id not in music]
         try:
-            server.repo.file_items(LIBRARY_FOLDERS[MUSIC if body.get("library") == MUSIC else FOOTAGE], here, str(folder_id))
+            runtime.repo.file_items(LIBRARY_FOLDERS[MUSIC if body.get("library") == MUSIC else FOOTAGE], here, str(folder_id))
         except FolderNotFoundError:
             # The folder went while the window was open; the files are in the library all the same.
             pass
@@ -954,7 +954,7 @@ async def storage(request: Request) -> Response:
 def _openable() -> Dict[str, str]:
     """The folders the page may open, by name: never a path the page made up."""
     folders = {"outputs": str(server.output_dir())}
-    folders.update({item.key: item.path for item in housekeeping.usage(server.WORKSPACE_DIR, folders["outputs"])})
+    folders.update({item.key: item.path for item in housekeeping.usage(runtime.WORKSPACE_DIR, folders["outputs"])})
     return folders
 
 async def open_folder(request: Request) -> Response:
@@ -1018,8 +1018,8 @@ async def update(request: Request) -> Response:
     """
     if request.method == "GET":
         return JSONResponse(await run_in_threadpool(updates.latest))
-    server.job_manager.forget_abandoned()
-    if server.repo.active_job_ids():
+    runtime.job_manager.forget_abandoned()
+    if runtime.repo.active_job_ids():
         return _error("busy", 409)
     try:
         installing = await run_in_threadpool(updates.start_update, lambda: os._exit(0))
@@ -1037,7 +1037,7 @@ async def ping(request: Request) -> Response:
     The workspace matters: an editor for a test workspace and one for the real
     workspace are two different editors, even when one finds the other's port.
     """
-    return JSONResponse({"app": APP_ID, "workspace": os.path.normcase(os.path.abspath(server.WORKSPACE_DIR))})
+    return JSONResponse({"app": APP_ID, "workspace": os.path.normcase(os.path.abspath(runtime.WORKSPACE_DIR))})
 
 async def index(request: Request) -> Response:
     """The page."""
@@ -1073,10 +1073,10 @@ class _Stamp:
             return
         path = scope["path"]
         doing = next((said for ending, said in EDITOR_DOING if path.endswith(ending)), "在編輯器操作")
-        with server.history.step("編輯器", doing=doing, later=True) as batch:
+        with runtime.history.step("編輯器", doing=doing, later=True) as batch:
             await self.application(scope, receive, send)
         # Committing waits on the disk and a lock the MCP server shares: off the event loop.
-        await run_in_threadpool(server.history.finish, batch)
+        await run_in_threadpool(runtime.history.finish, batch)
 
 class _FreshStatic(StaticFiles):
     """The page's own files, checked with the server every time.

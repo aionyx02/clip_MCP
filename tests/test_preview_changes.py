@@ -105,11 +105,12 @@ def test_the_mix_is_saved_to_listen_to(talk_over_music: str) -> None:
 def test_ducking_shows_as_the_music_dropping_under_the_voice(talk_over_music: str, tmp_path: Path) -> None:
     """Measured off the stems themselves, so the sentence is known to come from the sound."""
     from app.engine.builder import FFmpegRenderer
-    from app.server import _referenced_assets, repo
+    from app.runtime import repo
+    from app.tools.shared import referenced_assets
 
     project = repo.get_project(talk_over_music)
     voice, music = tmp_path / "voice.wav", tmp_path / "music.wav"
-    command = FFmpegRenderer().build_sound(project, _referenced_assets(project), str(tmp_path / "mix.m4a"),
+    command = FFmpegRenderer().build_sound(project, referenced_assets(project), str(tmp_path / "mix.m4a"),
                                            str(voice), str(music), loudness_target=None)
     assert subprocess.run(command, capture_output=True).returncode == 0
     parts = parts_of(project, levels(str(voice)), levels(str(music)))
@@ -153,7 +154,7 @@ def test_a_render_with_music_under_the_talking_is_heard_without_it(
     talk_over_music: str, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """#89: 「買一送四」 sixteen decibels over the music was heard as 「買壽司」."""
-    from app import server
+    from app import runtime, server
     from app.engine import analysis
     from app.models.media import Transcript
     from helpers import finished
@@ -169,7 +170,7 @@ def test_a_render_with_music_under_the_talking_is_heard_without_it(
     monkeypatch.setattr(analysis, "_run_whisper", model)
     found = server.listen_again(job_id=job["job_id"], start=2.0, end=5.0)
     assert found["heard_without_music"] is True
-    voice = Path(server.repo.get_job(job["job_id"]).work_dir) / "voice.wav"
+    voice = Path(runtime.repo.get_job(job["job_id"]).work_dir) / "voice.wav"
     assert voice.exists()
     # What the user plays is the stretch as rendered, music and all.
     assert Path(found["audio_path"]).exists()

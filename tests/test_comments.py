@@ -8,14 +8,14 @@ import pytest
 from fastmcp import Client
 from starlette.testclient import TestClient
 
-from app import server
+from app import runtime, server
 from helpers import build_project, edit, insert, video_track
 
 
 def call(name: str, arguments: dict):
     """Call a tool the way a client does; returns the structured result or the error's message."""
     async def go():
-        async with Client(server.mcp) as client:
+        async with Client(runtime.mcp) as client:
             result = await client.call_tool(name, arguments, raise_on_error=False)
             return result.content[0].text if result.is_error else result.structured_content
     return asyncio.run(go())
@@ -61,7 +61,7 @@ def test_the_ai_is_reminded_closes_it_with_what_it_did_and_cannot_delete_it(medi
     assert "open_comments" not in call("get_project", {"project_id": project})
     assert server.get_comments(project)["comments"] == []
     assert len(server.get_comments(project, include_resolved=True)["comments"]) == 1
-    tools = {tool.name for tool in asyncio.run(server.mcp.list_tools())}
+    tools = {tool.name for tool in asyncio.run(runtime.mcp.list_tools())}
     assert {"get_comments", "resolve_comment"} <= tools and not any("delete" in name and "comment" in name
                                                                      for name in tools)
 

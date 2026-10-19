@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from app import server
+from app import runtime, server
 from app.engine import analysis
 from app.engine.diarize import speaker_model_name
 from app.engine.rhythm import rhythm_model_name
@@ -41,9 +41,9 @@ def test_the_threshold_is_where_doubt_begins() -> None:
 @pytest.fixture
 def analysed(tmp_path: Path) -> str:
     asset = Asset(id="confidence-talk", path=str(tmp_path / "talk.mp4"), duration=10, has_video=True, has_audio=True)
-    server.repo.save_asset(asset)
+    runtime.repo.save_asset(asset)
     model = analysis.FAST_WHISPER_MODEL
-    server.repo.save_analysis(MediaAnalysis(
+    runtime.repo.save_analysis(MediaAnalysis(
         asset_id=asset.id, duration=10.0,
         transcript=Transcript(language="zh", model=model, segments=[
             segment(word("大家好", 0, SURE)),
@@ -69,4 +69,4 @@ def test_words_carry_their_probability_when_asked_for(analysed: str) -> None:
 
 def test_the_stored_transcript_never_holds_the_marks(analysed: str) -> None:
     server.get_analysis(analysed)
-    assert "⟦" not in server.repo.get_analysis(analysed).transcript.segments[1].text
+    assert "⟦" not in runtime.repo.get_analysis(analysed).transcript.segments[1].text

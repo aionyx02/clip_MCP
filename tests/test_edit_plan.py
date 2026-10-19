@@ -52,6 +52,7 @@ from app.models.plan import (
 )
 from app.models.semantic import SectionChoice, SemanticClip, SemanticTimeline
 from app.models.timeline import Clip, Marker, Project, Track
+from app.runtime import repo as runtime_repo
 from app.server import (
     amend_plan,
     apply_edits,
@@ -64,7 +65,6 @@ from app.server import (
     save_plan,
     validate_plan,
 )
-from app.server import repo as server_repo
 from helpers import video_track
 from test_semantic_timeline import ASSET_ID, analysis, asset, spans
 
@@ -1056,7 +1056,7 @@ def planned(media: Path) -> dict:
     from app.server import build_semantic_timeline, query_clips
 
     asset_id = import_asset(str(media / "wide.mp4"))["id"]
-    server_repo.save_analysis(analysis(asset_id=asset_id, **FOOTAGE))
+    runtime_repo.save_analysis(analysis(asset_id=asset_id, **FOOTAGE))
     built = build_semantic_timeline([asset_id], rebuild=True)
     speech = query_clips(timeline_id=built["timeline_id"], text="句話")["clips"]
     saved = save_plan(EditPlan(
@@ -1202,7 +1202,7 @@ def test_covering_picture_compiles_onto_a_track_of_its_own(planned: dict, media:
     from app.server import build_semantic_timeline, propose_broll, query_clips
 
     quiet = import_asset(str(media / "silent.mp4"))["id"]
-    server_repo.save_analysis(analysis(duration=4.0, scenes=[(0.0, 4.0)], asset_id=quiet))
+    runtime_repo.save_analysis(analysis(duration=4.0, scenes=[(0.0, 4.0)], asset_id=quiet))
     plan = EditPlan.model_validate(get_plan(planned["plan_id"])["plan"])
     # Rebuilt over both files, so the plan is rewritten against the new timeline.
     built = build_semantic_timeline([clip["asset_id"] for clip in planned["clips"]] + [quiet], rebuild=True)
@@ -1296,7 +1296,7 @@ def test_a_hand_made_transition_and_j_cut_survive_the_next_compile(planned: dict
     ))
     compile_plan(project_id=project, expected_version=get_project(project)["version"],
                  plan_id=planned["plan_id"])
-    kept = server_repo.get_project(project).tracks[0].clips[1]
+    kept = runtime_repo.get_project(project).tracks[0].clips[1]
     assert kept.pinned is True
     assert float(kept.audio_lead) == pytest.approx(0.2)
     assert kept.transition_in is not None
@@ -1450,7 +1450,7 @@ def test_markers_land_on_the_timeline_in_order() -> None:
         {"id": "b", "name": "結尾", "timeline_in": 9},
         {"id": "a", "name": "開場", "timeline_in": 0},
     ]}))
-    stored = server_repo.get_project(project_id)
+    stored = runtime_repo.get_project(project_id)
     assert [marker.name for marker in stored.markers] == ["開場", "結尾"]
 
 
@@ -1848,7 +1848,7 @@ def test_the_music_changes_where_the_part_of_the_video_does(planned: dict, tmp_p
     low, high = tone(tmp_path, "low.mp3", 700), tone(tmp_path, "high.mp3", 1500)
     # The beat is stamped on rather than measured: a steady tone has none, and the point
     # here is where the music goes, not how its beat is found.
-    server_repo.save_analysis(MediaAnalysis(
+    runtime_repo.save_analysis(MediaAnalysis(
         asset_id=low, duration=20.0, rhythm=Rhythm(tempo=120.0, beats=every(0.5, seconds=20.0)),
     ))
     stored = EditPlan.model_validate(get_plan(planned["plan_id"])["plan"])
@@ -2354,7 +2354,7 @@ def test_how_a_beat_comes_in_and_how_a_piece_plays_reach_the_timeline(planned: d
     ))
     assert result["problems"] == []
     project = compiled_project(planned)
-    kept = server_repo.get_project(project).tracks[0].clips[1]
+    kept = runtime_repo.get_project(project).tracks[0].clips[1]
     assert (kept.transition_in.kind, float(kept.transition_in.seconds)) == ("dissolve", 0.4)
     assert float(kept.audio_lead) == pytest.approx(0.3)
     assert (kept.speed, kept.volume) == (1.5, 0.5)
@@ -2363,7 +2363,7 @@ def test_a_plan_is_copied_onto_a_timeline_built_over_more_files(planned: dict, m
     from app.server import build_semantic_timeline, copy_plan, get_semantic_clip
 
     quiet = import_asset(str(media / "silent.mp4"))["id"]
-    server_repo.save_analysis(analysis(duration=4.0, scenes=[(0.0, 4.0)], asset_id=quiet))
+    runtime_repo.save_analysis(analysis(duration=4.0, scenes=[(0.0, 4.0)], asset_id=quiet))
     wider = build_semantic_timeline([planned["clips"][0]["asset_id"], quiet], rebuild=True)["timeline_id"]
     assert wider != planned["timeline_id"]
 
@@ -2382,7 +2382,7 @@ def test_a_plan_follows_its_sentences_after_the_footage_is_transcribed_again(pla
 
     asset_id = planned["clips"][0]["asset_id"]
     # The second listen puts every sentence edge a little elsewhere.
-    server_repo.save_analysis(analysis(asset_id=asset_id, duration=20.0, segments=[
+    runtime_repo.save_analysis(analysis(asset_id=asset_id, duration=20.0, segments=[
         (0.8, 3.1, "第一句話"), (3.5, 5.0, "第二句話"), (8.2, 10.4, "第三句話。"), (12.0, 14.0, "第四句話"),
     ], silences=[(0.0, 0.8), (3.1, 3.5), (5.0, 8.2), (10.4, 12.0), (14.0, 20.0)]))
     again = build_semantic_timeline([asset_id], rebuild=True)["timeline_id"]
@@ -2398,7 +2398,7 @@ def heard_again(planned: dict, third: tuple = (8.2, 10.4)) -> str:
     from app.server import build_semantic_timeline
 
     asset_id = planned["clips"][0]["asset_id"]
-    server_repo.save_analysis(analysis(asset_id=asset_id, duration=20.0, segments=[
+    runtime_repo.save_analysis(analysis(asset_id=asset_id, duration=20.0, segments=[
         (0.8, 3.1, "第一句話"), (3.5, 5.0, "第二句話"), (*third, "第三句話。"), (12.0, 14.0, "第四句話"),
     ], silences=[(0.0, 0.8), (3.1, 3.5), (5.0, third[0]), (third[1], 12.0), (14.0, 20.0)]))
     return build_semantic_timeline([asset_id], rebuild=True)["timeline_id"]
@@ -2620,9 +2620,9 @@ def test_a_song_picked_by_ear_under_the_plan_s_music_is_written_into_its_cue(pla
     compile_plan(project_id=project, expected_version=1, plan_id=planned["plan_id"])
     offer_songs(project, [OfferedSong(asset_id=song, start=2)])
     # Heard as the plan's cue would play it.
-    offer = server_repo.song_offer(project)
+    offer = runtime_repo.song_offer(project)
     assert (offer.volume, offer.fade_in) == (0.3, 0.4)
-    trial = song_trial(server_repo.get_project(project), offer, 1)
+    trial = song_trial(runtime_repo.get_project(project), offer, 1)
     assert any(clip.asset_id == song and float(clip.audio_fade_in) == 0.4 for track in trial.tracks for clip in track.clips)
     picked = pick_song(project, 1)
     assert "已寫進計畫" in picked["text"]

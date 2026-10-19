@@ -17,8 +17,10 @@ from app.engine.builder import FFmpegRenderer
 from app.engine.ffmpeg import graph_from_file, run_ffmpeg
 from app.engine.renderer import WARMUP, JobManager
 from app.models.job import Job, JobKind, JobStatus
-from app.server import _referenced_assets, import_asset, repo
+from app.runtime import repo
+from app.server import import_asset
 from app.storage.repo import Repository
+from app.tools.shared import referenced_assets
 from helpers import build_project, insert, video_track
 
 GIGABYTE = 1024 * resources.MEGABYTE
@@ -204,7 +206,7 @@ def _command_for_clips(media: Path, count: int) -> List[str]:
     asset = import_asset(str(media / "wide.mp4"))
     operations = [video_track()] + [insert(f"c{index}", asset["id"], index, index + 1) for index in range(count)]
     project = repo.get_project(build_project(operations))
-    return FFmpegRenderer().build_command(project, _referenced_assets(project), "out.mp4")
+    return FFmpegRenderer().build_command(project, referenced_assets(project), "out.mp4")
 
 def test_a_long_timeline_holds_every_decoder_to_one_thread(media: Path) -> None:
     command = _command_for_clips(media, resources.MANY_INPUTS + 1)
@@ -231,7 +233,7 @@ def test_a_timeline_too_long_for_a_command_line_still_renders(media: Path, tmp_p
     ]
     project = repo.get_project(build_project(operations))
     output = tmp_path / "long.mp4"
-    command = FFmpegRenderer().build_command(project, _referenced_assets(project), str(output), loudness_target=None)
+    command = FFmpegRenderer().build_command(project, referenced_assets(project), str(output), loudness_target=None)
     assert len(command[command.index("-filter_complex") + 1]) > 32767
     run_ffmpeg(command, str(tmp_path / "ffmpeg.log"), 18.0, lambda fraction: None, lambda: False)
     assert output.stat().st_size > 0
@@ -240,15 +242,15 @@ def test_a_timeline_too_long_for_a_command_line_still_renders(media: Path, tmp_p
 def test_get_job_can_wait_for_a_job_to_end_and_comes_back_as_soon_as_one_does(ended_after: list) -> None:
     import threading
     import time as clock
-    from app import server
+    from app import runtime, server
 
     running = Job(kind=JobKind.RENDER, status=JobStatus.RUNNING)
-    server.repo.add_job(running)
+    runtime.repo.add_job(running)
     ended_after.append(running.job_id)
 
     def finish() -> None:
         clock.sleep(1.0)
-        server.repo.update_job(running.job_id, lambda job: setattr(job, "status", JobStatus.COMPLETED))
+        runtime.repo.update_job(running.job_id, lambda job: setattr(job, "status", JobStatus.COMPLETED))
 
     threading.Thread(target=finish, daemon=True).start()
     began = clock.monotonic()
@@ -258,10 +260,10 @@ def test_get_job_can_wait_for_a_job_to_end_and_comes_back_as_soon_as_one_does(en
 
 def test_waiting_on_a_job_that_does_not_end_gives_up_when_the_time_is_up(ended_after: list) -> None:
     import time as clock
-    from app import server
+    from app import runtime, server
 
     running = Job(kind=JobKind.RENDER, status=JobStatus.RUNNING)
-    server.repo.add_job(running)
+    runtime.repo.add_job(running)
     ended_after.append(running.job_id)
     began = clock.monotonic()
     found = server.get_job([running.job_id], wait_seconds=1.5)

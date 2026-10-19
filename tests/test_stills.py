@@ -4,7 +4,8 @@ from pathlib import Path
 
 import pytest
 
-from app import server
+from app import runtime, server
+from app.tools import shared
 from app.engine import stills
 from app.engine.frames import extract_frame
 from helpers import build_project, clips_of, edit, insert, render, video_track
@@ -35,7 +36,7 @@ def test_a_photo_is_added_as_a_photo(photo: Path) -> None:
     added = server.import_asset(str(photo))
     listed = next(asset for asset in server.list_assets()["assets"] if asset["id"] == added["id"])
     assert listed["photo"] is True and listed["duration"] is None
-    assert server.repo.get_assets([added["id"]])[added["id"]].duration == stills.STILL_LONGEST
+    assert runtime.repo.get_assets([added["id"]])[added["id"]].duration == stills.STILL_LONGEST
 
 
 def test_a_photo_renders_for_as_long_as_its_clip(photo: Path, tmp_path: Path) -> None:
@@ -57,7 +58,7 @@ def test_a_photo_is_looked_at_for_faces_only(photo: Path, tmp_path: Path) -> Non
     from app.engine.analysis import analyze_media
 
     added = server.import_asset(str(photo))["id"]
-    asset = server.repo.get_assets([added])[added]
+    asset = runtime.repo.get_assets([added])[added]
     analysis = analyze_media(asset, str(tmp_path), True, None, None, None, lambda *_: None, lambda: False, "ffmpeg")
     assert analysis.duration == stills.STILL_SECONDS
     assert [(span.start, span.end) for span in analysis.scenes] == [(0.0, stills.STILL_SECONDS)]
@@ -70,8 +71,8 @@ def test_a_photo_is_looked_at_for_faces_only(photo: Path, tmp_path: Path) -> Non
 def test_a_landscape_photo_in_a_vertical_video_sits_whole_over_its_blur(photo: Path, tmp_path: Path) -> None:
     asset = server.import_asset(str(photo))["id"]
     project = build_project([video_track(), insert("a", asset, 0, 2)], width=360, height=640, name="直式照片")
-    stored = server.repo.get_project(project)
-    framing = server._framing(stored, server._referenced_assets(stored))
+    stored = runtime.repo.get_project(project)
+    framing = server._framing(stored, shared.referenced_assets(stored))
     assert framing["a"].whole
     out = tmp_path / "out.mp4"
     render(project, out, loudness_target=None, framing=framing)
@@ -85,8 +86,8 @@ def test_the_editor_plays_a_photo_from_the_file_itself(photo: Path) -> None:
 
     asset = server.import_asset(str(photo))["id"]
     project = build_project([video_track(), insert("a", asset, 0, 4)], width=320, height=240, name="播照片")
-    stored = server.repo.get_project(project)
-    assets = server._referenced_assets(stored)
+    stored = runtime.repo.get_project(project)
+    assets = shared.referenced_assets(stored)
     shown = playback.describe(stored, assets, playback.Prepared({}, {}, None), None, {}, {})
     clip = shown["tracks"][0]["clips"][0]
     assert clip["still"] and clip["proxy"] == f"/media/{asset}" and clip["motion"] == stills.DEFAULT_MOTION

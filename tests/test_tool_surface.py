@@ -4,7 +4,8 @@ import asyncio
 
 from fastmcp import Client
 
-from app.server import CORE_TOOLS, mcp
+import app.server  # noqa: F401 — registers every tool on mcp
+from app.runtime import CORE_TOOLS, mcp
 
 # Claude Code cuts an MCP tool's description off at 2048 characters, and the rule that
 # matters is as likely to be in the last paragraph as the first. Kept a little under.

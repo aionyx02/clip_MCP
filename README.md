@@ -24,6 +24,8 @@ editor (ui/) ──HTTP──────┤
 | 模組 | 職責 |
 |---|---|
 | `server.py` | MCP 工具介面與參數驗證 |
+| `runtime.py` | 伺服器執行期間共用的物件：工作區、資料庫、版本歷史、工作佇列、MCP server |
+| `tools/` | `shared.py` 放多個領域共用的輔助函式；工具模組之後依領域陸續從 `server.py` 搬過來（#108） |
 | `engine/` | 分析、語意時間軸、計畫編譯、filtergraph 建構、render、字幕、交換格式 |
 | `models/` | Pydantic 領域模型（素材、語意片段、計畫、時間軸、工作） |
 | `storage/` | SQLite 持久化、版本歷史、儲存空間管理 |

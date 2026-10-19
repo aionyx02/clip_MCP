@@ -25,6 +25,7 @@ from app.engine.sections import (
 from app.engine.semantic import build_timeline, combined_from_clips
 from app.models.media import Span
 from app.models.semantic import ClipKind, ClipLevel, SectionChoice, SemanticClip
+from app.runtime import repo as runtime_repo
 from app.server import (
     build_semantic_timeline,
     import_asset,
@@ -32,7 +33,6 @@ from app.server import (
     query_clips,
     set_sections,
 )
-from app.server import repo as server_repo
 from test_semantic_timeline import ASSET_ID, analysis, asset
 
 TWO_SUBJECTS = dict(
@@ -224,7 +224,7 @@ def sectioned(media) -> dict:
         A dictionary with the `timeline_id` and the `sections` that were sent.
     """
     asset_id = import_asset(str(media / "wide.mp4"))["id"]
-    server_repo.save_analysis(analysis(asset_id=asset_id, **TWO_SUBJECTS))
+    runtime_repo.save_analysis(analysis(asset_id=asset_id, **TWO_SUBJECTS))
     built = build_semantic_timeline([asset_id], rebuild=True)
     proposed = propose_sections(timeline_id=built["timeline_id"])
 
@@ -250,7 +250,7 @@ def test_a_topic_gathers_the_sections_that_share_it(sectioned: dict) -> None:
     assert [clip["name"] for clip in found["clips"]] == ["午餐"]
 
 def test_what_judged_the_sections_is_recorded(sectioned: dict) -> None:
-    timeline = server_repo.get_semantic_timeline(sectioned["timeline_id"])
+    timeline = runtime_repo.get_semantic_timeline(sectioned["timeline_id"])
     assert timeline.sections_by == "test-model/1"
     assert timeline.candidate_hash
     assert ClipLevel.SECTION in timeline.levels

@@ -13,9 +13,10 @@ from pathlib import Path
 import pytest
 
 from app.models.media import MediaAnalysis, Transcript, TranscriptSegment, TranscriptWord
+from app.runtime import repo
 from app.server import (
     generate_subtitles, get_job, get_project, get_subtitles,
-    import_folder, preview_project, render_project, repo,
+    import_folder, preview_project, render_project,
 )
 from helpers import caption, build_project, edit, loudness, render
 

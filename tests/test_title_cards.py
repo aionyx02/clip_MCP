@@ -4,7 +4,8 @@ from pathlib import Path
 
 import pytest
 
-from app import server
+from app import runtime, server
+from app.tools import shared
 from app.engine import cards
 from app.engine.frames import extract_frame
 from app.engine.subtitles import build_ass
@@ -48,7 +49,7 @@ def test_a_card_renders_its_words_over_a_dark_blur(media: Path, tmp_path: Path) 
     asset = server.import_asset(str(media / "wide.mp4"))["id"]
     project = build_project([video_track(), insert("a", asset, 0, 2), card(before_clip_id="a", subtitle="副標")],
                             width=640, height=360, name="輸出卡片")
-    stored = server.repo.get_project(project)
+    stored = runtime.repo.get_project(project)
     titles = cards.ass_events(stored, stored.caption_style)
     assert len(titles) == 2 and "第一章" in titles[0] and "\\fad(" in titles[0]
     ass = tmp_path / "cards.ass"
@@ -78,8 +79,8 @@ def test_the_editor_draws_a_card_as_the_render_does(media: Path) -> None:
     asset = server.import_asset(str(media / "wide.mp4"))["id"]
     project = build_project([video_track(), insert("a", asset, 0, 2), card(before_clip_id="a")],
                             width=640, height=360, name="播卡片")
-    stored = server.repo.get_project(project)
-    shown = playback.describe(stored, server._referenced_assets(stored), playback.Prepared({}, {}, None), None, {}, {})
+    stored = runtime.repo.get_project(project)
+    shown = playback.describe(stored, shared.referenced_assets(stored), playback.Prepared({}, {}, None), None, {}, {})
     clip = shown["tracks"][0]["clips"][0]
     assert clip["card"] == {"background": "blur", "colour": "#111114", "at": 0.0}
     [event] = shown["cards"]["events"]

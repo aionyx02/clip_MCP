@@ -24,7 +24,9 @@ from app.engine.reframe import (
 )
 from app.models.media import FaceMeasurement, MediaAnalysis
 from app.models.timeline import Clip, TimeRange
-from app.server import _framing, _referenced_assets, _reshaped, import_asset, repo
+from app.runtime import repo
+from app.server import _framing, _reshaped, import_asset
+from app.tools.shared import referenced_assets
 from helpers import build_project, insert, video_track
 
 FPS = Fraction(30)
@@ -147,7 +149,7 @@ def portrait(project_id: str, path: Path, follow_faces: bool = True) -> None:
         follow_faces: Whether the crop follows the face.
     """
     project = _reshaped(repo.get_project(project_id), "portrait")
-    assets = _referenced_assets(project)
+    assets = referenced_assets(project)
     command = FFmpegRenderer().build_command(
         project, assets, str(path), loudness_target=None,
         framing=_framing(project, assets) if follow_faces else None,

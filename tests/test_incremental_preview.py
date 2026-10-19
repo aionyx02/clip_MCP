@@ -12,7 +12,9 @@ from pathlib import Path
 import pytest
 
 from app.engine.builder import FFmpegRenderer
-from app.server import _preview_sized, _referenced_assets, import_asset, render_project, repo
+from app.runtime import repo
+from app.server import _preview_sized, import_asset, render_project
+from app.tools.shared import referenced_assets
 from helpers import build_project, edit, insert, level, video_track
 
 def preview(project_id: str, cache: Path, out: Path) -> int:
@@ -28,7 +30,7 @@ def preview(project_id: str, cache: Path, out: Path) -> int:
     """
     project = _preview_sized(repo.get_project(project_id))
     command, pieces = FFmpegRenderer().build_incremental(
-        project, _referenced_assets(project), str(out), str(cache), loudness_target=None,
+        project, referenced_assets(project), str(out), str(cache), loudness_target=None,
     )
     for piece in pieces:
         result = subprocess.run(piece["command"], capture_output=True)
