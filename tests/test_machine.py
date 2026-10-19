@@ -134,8 +134,8 @@ def test_a_mac_whose_vm_stat_fails_is_unknown(monkeypatch: pytest.MonkeyPatch) -
     assert resources._mac_memory() is None
 
 def test_the_ai_hears_the_tier_as_soon_as_it_connects() -> None:
-    from app import server
+    from app import runtime
 
     here = machine.profile()
-    assert f"speed tier for the local models is {here.tier}" in server.mcp.instructions
-    assert "dry_run" in server.mcp.instructions
+    assert f"speed tier for the local models is {here.tier}" in runtime.mcp.instructions
+    assert "dry_run" in runtime.mcp.instructions

@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from app import server
+from app import runtime, server
 from app.engine import playback, renderer
 from app.models.job import Job, JobKind, JobStatus
 from helpers import build_project, edit, insert, video_track
@@ -47,19 +47,19 @@ def test_a_cut_is_described_for_the_browser_and_its_copies_are_made(preparing, m
     edit(project, [{"action": "set_clip_look", "track_id": "main", "clip_id": "b",
                     "transition_in": {"kind": "dissolve", "seconds": 0.5}},
                    {"action": "set_clip_audio", "track_id": "main", "clip_id": "a", "cleanup": {"hiss": True}}])
-    first = server.playback_of(server.repo.get_project(project))
+    first = server.playback_of(runtime.repo.get_project(project))
     assert first["width"] == 1920 and first["duration"] == pytest.approx(6.0)
     clips = first["tracks"][0]["clips"]
     assert [clip["id"] for clip in clips] == ["a", "b"]
     assert clips[1]["transition"]["kind"] == "dissolve" and clips[1]["box"] == [0, 0, 1920, 1080]
     assert first["waiting"]  # nothing made yet, and asking started making it
 
-    jobs = [job.job_id for job in server.repo.jobs_to_show(datetime.now(timezone.utc) - timedelta(minutes=5))[0]
+    jobs = [job.job_id for job in runtime.repo.jobs_to_show(datetime.now(timezone.utc) - timedelta(minutes=5))[0]
             if job.kind == JobKind.PREPARE]
     wait_for(jobs)
-    ready = server.playback_of(server.repo.get_project(project))
+    ready = server.playback_of(runtime.repo.get_project(project))
     assert ready["waiting"] == []
-    proxy = server.WORKSPACE_DIR + "/cache/proxies/" + ready["tracks"][0]["clips"][0]["proxy"].split("/")[-1]
+    proxy = runtime.WORKSPACE_DIR + "/cache/proxies/" + ready["tracks"][0]["clips"][0]["proxy"].split("/")[-1]
     # Never bigger than the file: this one is 640x360, so it is copied at its own size.
     assert (stream(proxy)["width"], stream(proxy)["height"]) == (640, 360)
     assert ready["tracks"][0]["clips"][0]["repaired"].startswith("/sound/")
@@ -74,7 +74,7 @@ def test_the_editor_serves_the_description_and_the_copies(preparing, media: Path
     project = build_project([video_track(), insert("a", asset, 0, 2)], name="播放編輯器")
     client = TestClient(editor.create_app())
     described = client.get(f"/api/projects/{project}/playback").json()
-    jobs = [job.job_id for job in server.repo.jobs_to_show(datetime.now(timezone.utc) - timedelta(minutes=5))[0]
+    jobs = [job.job_id for job in runtime.repo.jobs_to_show(datetime.now(timezone.utc) - timedelta(minutes=5))[0]
             if job.kind == JobKind.PREPARE]
     wait_for(jobs)
     described = client.get(f"/api/projects/{project}/playback").json()
@@ -91,7 +91,7 @@ def test_somebody_waiting_to_watch_goes_ahead_of_the_other_work(monkeypatch: pyt
     older = Job(kind=JobKind.ANALYZE, created_at=now - timedelta(seconds=10))
     behind = Job(kind=JobKind.PREPARE, priority=1, created_at=now - timedelta(seconds=20))
     watched = Job(kind=JobKind.PREPARE, priority=-1, created_at=now)
-    renderer.JobManager(server.repo)._plan([behind, older, watched])
+    renderer.JobManager(runtime.repo)._plan([behind, older, watched])
     assert watched.admitted_at is not None
     assert older.admitted_at is None and behind.admitted_at is None
     assert all(job.status == JobStatus.QUEUED for job in (older, behind, watched))
@@ -105,21 +105,21 @@ def test_a_version_is_got_ready_in_the_background_but_never_while_exporting(monk
     background = Job(kind=JobKind.PREPARE, priority=1, created_at=now - timedelta(seconds=20))
     song = Job(kind=JobKind.ANALYZE, priority=1, created_at=now)
     watched = Job(kind=JobKind.PREPARE, priority=-1, created_at=now)
-    renderer.JobManager(server.repo)._plan([export, background, song, watched])
+    renderer.JobManager(runtime.repo)._plan([export, background, song, watched])
     assert background.admitted_at is None and background.stage == renderer.EXPORT_FIRST
     # Nothing waits behind it, and somebody waiting to watch still goes ahead.
     assert song.admitted_at is not None and watched.admitted_at is not None
-    renderer.JobManager(server.repo)._plan([background])
+    renderer.JobManager(runtime.repo)._plan([background])
     assert background.admitted_at is not None
     # An exact preview is not an export: the background goes on beside it.
     preview = Job(kind=JobKind.RENDER, status=JobStatus.RUNNING, admitted_at=now, preview=True)
     later = Job(kind=JobKind.PREPARE, priority=1, created_at=now)
-    renderer.JobManager(server.repo)._plan([preview, later])
+    renderer.JobManager(runtime.repo)._plan([preview, later])
     assert later.admitted_at is not None
     # An export starting in the same pass holds it back too.
     queued_export = Job(kind=JobKind.RENDER, created_at=now - timedelta(seconds=5))
     held = Job(kind=JobKind.PREPARE, priority=1, created_at=now)
-    renderer.JobManager(server.repo)._plan([queued_export, held])
+    renderer.JobManager(runtime.repo)._plan([queued_export, held])
     assert queued_export.admitted_at is not None and held.admitted_at is None
 
 
@@ -133,7 +133,7 @@ def test_going_back_to_a_version_gets_it_ready_to_play(media: Path, monkeypatch:
     first = server.project_history(project)["versions"][0]["commit"]
     edit(project, [{"action": "delete_clip", "track_id": "main", "clip_id": "a"}])
     monkeypatch.setattr(server, "prepare_playback", lambda cut, urgent=False: asked.append((cut.id, urgent)))
-    server.restore_version(project, first, server.repo.get_project(project).version)
+    server.restore_version(project, first, runtime.repo.get_project(project).version)
     assert asked == [(project, False)]
 
 
@@ -142,7 +142,7 @@ def test_a_proxy_is_named_after_the_file_as_it_is(media: Path, tmp_path: Path) -
 
     copy = tmp_path / "會變的檔.mp4"
     shutil.copy(media / "wide.mp4", copy)
-    asset = server.repo.get_assets([server.import_asset(str(copy))["id"]])
+    asset = runtime.repo.get_assets([server.import_asset(str(copy))["id"]])
     asset = next(iter(asset.values()))
     first = playback.proxy_name(asset)
     shutil.copy(media / "tall.mp4", copy)

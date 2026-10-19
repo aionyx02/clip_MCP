@@ -8,8 +8,9 @@ import pytest
 from fastmcp import Client
 
 from app.models.plan import EditPlan, short_clip_ids, with_whole_clip_ids
-from app.server import build_semantic_timeline, import_asset, mcp, query_clips
-from app.server import repo as server_repo
+from app.runtime import mcp
+from app.runtime import repo as runtime_repo
+from app.server import build_semantic_timeline, import_asset, query_clips
 from test_edit_plan import FOOTAGE
 from test_semantic_timeline import analysis
 
@@ -33,7 +34,7 @@ def call(name: str, arguments: dict):
 def timeline(media: Path) -> dict:
     """A timeline over one real file, and the IDs of its spoken clips, whole."""
     asset_id = import_asset(str(media / "wide.mp4"))["id"]
-    server_repo.save_analysis(analysis(asset_id=asset_id, **FOOTAGE))
+    runtime_repo.save_analysis(analysis(asset_id=asset_id, **FOOTAGE))
     built = build_semantic_timeline([asset_id], rebuild=True)
     speech = query_clips(timeline_id=built["timeline_id"], text="句話")["clips"]
     return {"timeline_id": built["timeline_id"], "clips": [clip["clip_id"] for clip in speech], "asset_id": asset_id}
@@ -69,7 +70,7 @@ def test_a_client_never_sees_a_whole_clip_id(timeline: dict) -> None:
     }})
     assert saved["problems"] == []
     # Stored whole, so nothing that reads the plan has to know about the short way.
-    assert server_repo.get_plan(saved["plan_id"]).selections[0].clip_id == timeline["clips"][0]
+    assert runtime_repo.get_plan(saved["plan_id"]).selections[0].clip_id == timeline["clips"][0]
 
     read = call("get_plan", {"plan_id": saved["plan_id"]})
     assert read["plan"]["selections"][0]["clip_id"] == short[0]
@@ -81,7 +82,7 @@ def test_a_client_never_sees_a_whole_clip_id(timeline: dict) -> None:
         {"action": "add_selection", "selection": {"clip_id": short[1], "beat_id": "b1"}},
     ]})
     assert amended["problems"] == []
-    assert [item.clip_id for item in server_repo.get_plan(saved["plan_id"]).selections] == timeline["clips"][:2]
+    assert [item.clip_id for item in runtime_repo.get_plan(saved["plan_id"]).selections] == timeline["clips"][:2]
 
 
 def test_an_error_names_the_clip_the_short_way(timeline: dict) -> None:
@@ -118,7 +119,7 @@ def test_a_short_id_in_two_timelines_is_the_newest_one_s(timeline: dict, media: 
 
     shutil.copy(media / "tall.mp4", tmp_path / "另一條時間軸.mp4")
     other = import_asset(str(tmp_path / "另一條時間軸.mp4"))["id"]
-    server_repo.save_analysis(analysis(asset_id=other, **FOOTAGE))
+    runtime_repo.save_analysis(analysis(asset_id=other, **FOOTAGE))
     newest = build_semantic_timeline([other], rebuild=True)["timeline_id"]
     short = timeline["clips"][0].split(":")[1]
     # As a search does: the newest build, and it says which one that is.

@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from app import server
+from app import runtime, server
 from app.engine import analysis
 from app.models.media import MediaAnalysis, Transcript, TranscriptSegment, TranscriptWord
 from helpers import build_project, caption, edit, insert, video_track
@@ -27,7 +27,7 @@ def finished(job: dict) -> str:
 def rendered(tmp_path_factory: pytest.TempPathFactory, media: Path) -> dict:
     """A two-shot cut with a dissolve between them and captions burned in, rendered as a preview."""
     asset = server.import_asset(str(media / "wide.mp4"))["id"]
-    server.repo.save_analysis(MediaAnalysis(asset_id=asset, duration=10.0, transcript=Transcript(
+    runtime.repo.save_analysis(MediaAnalysis(asset_id=asset, duration=10.0, transcript=Transcript(
         language="zh", model="test", segments=[
             TranscriptSegment(start=1.0, end=2.5, text="第一句", words=[TranscriptWord(start=1.0, end=2.5, text="第一句")]),
             TranscriptSegment(start=6.0, end=7.5, text="第二句", words=[TranscriptWord(start=6.0, end=7.5, text="第二句")]),
@@ -110,8 +110,8 @@ def test_a_render_is_heard_with_its_levels(rendered: dict, monkeypatch: pytest.M
 def test_a_preview_breaks_its_captions_where_the_finished_video_does(rendered: dict) -> None:
     # Laid out at the delivered size and shrunk by libass: laid out at the preview's own size,
     # rounded pixels gave a line room for 13.47 characters there and 13.35 in the finished video.
-    project = server.repo.get_project(rendered["project"])
-    job = server.repo.get_job(rendered["job_id"])
+    project = runtime.repo.get_project(rendered["project"])
+    job = runtime.repo.get_job(rendered["job_id"])
     script = (Path(job.work_dir) / "subtitles.ass").read_text(encoding="utf-8")
     assert f"PlayResX: {project.width}" in script and f"PlayResY: {project.height}" in script
     assert min(project.width, project.height) > server.PREVIEW_SHORT_SIDE

@@ -16,7 +16,8 @@ from fastmcp import Client
 
 from app.models.plan import PlanAmendment
 from app.models.timeline import EditOperation
-from app.server import SKILLS_DIR, mcp
+import app.server  # noqa: F401 — registers every tool on mcp
+from app.runtime import SKILLS_DIR, mcp
 
 SKILL_DIR = Path(SKILLS_DIR) / "clip-editing"
 SKILL = (SKILL_DIR / "SKILL.md").read_text(encoding="utf-8")

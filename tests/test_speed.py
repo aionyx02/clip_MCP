@@ -103,14 +103,14 @@ def test_this_computer_is_named_without_looking_at_the_card() -> None:
 def test_the_reply_to_an_analysis_says_how_long_the_transcription_will_take(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from app import server
+    from app import runtime, server
     from app.models.media import Asset
 
-    monkeypatch.setattr(server.job_manager, "start_job", lambda job, spec: job)
+    monkeypatch.setattr(runtime.job_manager, "start_job", lambda job, spec: job)
     talk = Asset(id="speed-talk", path=str(tmp_path / "talk.mp4"), duration=1800, has_video=True, has_audio=True)
     silent = Asset(id="speed-silent", path=str(tmp_path / "silent.mp4"), duration=600, has_video=True, has_audio=False)
     for asset in (talk, silent):
-        server.repo.save_asset(asset)
+        runtime.repo.save_asset(asset)
 
     found = server.analyze_asset([talk.id, silent.id], again=True)["estimate"]
     assert found["footage_minutes"] == 30.0  # the silent file is not transcribed

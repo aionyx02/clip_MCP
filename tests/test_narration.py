@@ -13,7 +13,9 @@ import pytest
 
 from app.engine.builder import FFmpegRenderer
 from app.models.media import MediaAnalysis, Rhythm, Transcript, TranscriptSegment
-from app.server import _referenced_assets, _voices, import_asset, repo
+from app.runtime import repo
+from app.server import _voices, import_asset
+from app.tools.shared import referenced_assets
 from helpers import build_project, edit, insert, level, render, video_track
 
 @pytest.fixture(scope="module")
@@ -141,7 +143,7 @@ def test_the_sound_preview_puts_the_narration_on_the_voice_side(
     stored = repo.get_project(street_and_narration(audio_media, narration))
     voice, rest = tmp_path / "voice.wav", tmp_path / "rest.wav"
     command = FFmpegRenderer().build_sound(
-        stored, _referenced_assets(stored), str(tmp_path / "mix.m4a"), str(voice), str(rest),
+        stored, referenced_assets(stored), str(tmp_path / "mix.m4a"), str(voice), str(rest),
         loudness_target=None, voices=_voices(stored),
     )
     subprocess.run(command, check=True, capture_output=True)

@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from app import server
+from app import runtime, server
 from app.engine.analysis import current_recipe, whisper_model_name
 from app.engine.diarize import speaker_model_name
 from app.engine.rhythm import rhythm_model_name
@@ -75,9 +75,9 @@ def test_empty_folder_imports_nothing(tmp_path: Path) -> None:
 
 def test_a_folder_is_analyzed_in_one_call_and_what_is_current_is_left_alone(footage_folder: Path, monkeypatch) -> None:
     started = []
-    monkeypatch.setattr(server.job_manager, "start_job", lambda job, spec: started.append(job.asset_id) or job)
+    monkeypatch.setattr(runtime.job_manager, "start_job", lambda job, spec: started.append(job.asset_id) or job)
     assets = [asset["id"] for asset in import_folder(str(footage_folder))["assets"]]
-    server.repo.save_analysis(MediaAnalysis(asset_id=assets[1], duration=1.0, recipe=current_recipe(
+    runtime.repo.save_analysis(MediaAnalysis(asset_id=assets[1], duration=1.0, recipe=current_recipe(
         whisper_model_name(), speaker_model=speaker_model_name(), rhythm_model=rhythm_model_name(),
     )))
 
@@ -93,7 +93,7 @@ def test_a_batch_of_jobs_is_read_back_with_one_summary() -> None:
     broken = Job(kind=JobKind.ANALYZE, status=JobStatus.FAILED, error_message="no audio")
     running = Job(kind=JobKind.RENDER, status=JobStatus.RUNNING, progress=0.5)
     for job in (done, broken, running):
-        server.repo.add_job(job)
+        runtime.repo.add_job(job)
     result = server.get_job([done.job_id, broken.job_id, running.job_id])
     assert (result["finished"], result["failed"], result["total"]) == (2, 1, 3)
     assert result["jobs"][1]["error_message"] == "no audio"
@@ -103,9 +103,9 @@ def test_a_file_split_into_too_many_voices_is_pointed_out(media: Path) -> None:
     from app.models.media import SpeakerTurn
 
     asset = server.import_asset(str(media / "wide.mp4"))["id"]
-    server.repo.save_analysis(MediaAnalysis(asset_id=asset, duration=40.0, speakers=[
+    runtime.repo.save_analysis(MediaAnalysis(asset_id=asset, duration=40.0, speakers=[
         SpeakerTurn(speaker=f"S{index}", start=index, end=index + 1) for index in range(40)
     ]))
     done = Job(kind=JobKind.ANALYZE, status=JobStatus.COMPLETED, progress=1.0, asset_id=asset)
-    server.repo.add_job(done)
+    runtime.repo.add_job(done)
     assert "heard 40 different voices" in server.get_job([done.job_id])["jobs"][0]["note"]

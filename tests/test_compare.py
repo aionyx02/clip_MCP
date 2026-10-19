@@ -2,7 +2,7 @@
 
 from pathlib import Path
 
-from app import server
+from app import runtime, server
 from app.engine.compare import compare
 from helpers import build_project, edit, insert, video_track
 
@@ -24,12 +24,12 @@ def words(asset_id: str, start: float, end: float) -> str:
 
 def test_what_changed_is_said_part_by_part(media: Path) -> None:
     project = three_shots(media)
-    before = server.repo.get_project(project)
+    before = runtime.repo.get_project(project)
     edit(project, [
         {"action": "trim_clip", "track_id": "main", "clip_id": "a", "new_source_range": {"start": 1, "end": 4}},
         {"action": "delete_clip", "track_id": "main", "clip_id": "c"},
     ])
-    after = server.repo.get_project(project)
+    after = runtime.repo.get_project(project)
     compared = compare(before, after, words, lambda asset_id: "x.mp4")
     opening, body = compared["parts"]
     assert opening["name"] == "開場" and any("開頭剪掉 1.0 秒" in change["what"] and "嗨大家" in change["what"]
@@ -43,7 +43,7 @@ def test_what_changed_is_said_part_by_part(media: Path) -> None:
 
 def test_the_same_footage_under_new_clip_ids_is_not_a_change(media: Path) -> None:
     project = three_shots(media)
-    before = server.repo.get_project(project)
+    before = runtime.repo.get_project(project)
     renamed = before.model_copy(deep=True)
     for index, clip in enumerate(renamed.tracks[0].clips):
         clip.id = f"p{index:03d}"

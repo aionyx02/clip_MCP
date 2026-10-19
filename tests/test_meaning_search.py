@@ -9,7 +9,7 @@ order the answer comes back.
 import numpy as np
 import pytest
 
-from app import server
+from app import runtime, server
 from app.engine import meaning
 from app.models.media import Span
 from app.models.semantic import ClipKind, ClipLevel, SemanticClip, SemanticTimeline
@@ -41,7 +41,7 @@ def _timeline(timeline_id: str, said: dict) -> str:
                      source_range=Span(start=index * 5.0, end=index * 5.0 + 4), kind=ClipKind.SPEECH, text=text)
         for index, text in enumerate(said.values())
     ]
-    server.repo.save_semantic_timeline(
+    runtime.repo.save_semantic_timeline(
         SemanticTimeline(id=timeline_id, asset_ids=["a"], input_hash=f"hash-{timeline_id}", derivation_version=1), clips)
     return timeline_id
 
@@ -66,8 +66,8 @@ def test_each_clip_is_embedded_once_and_again_only_when_its_words_change(embedde
     server.query_clips(timeline_id=timeline, about="好喝")
     server.query_clips(timeline_id=timeline, about="歡迎")
     assert [len(batch) for batch in embedded] == [3]
-    changed = server.repo.get_semantic_clip(f"{timeline}:u0002").model_copy(update={"text": "夜市雞排"})
-    server.repo.update_semantic_clips([changed])
+    changed = runtime.repo.get_semantic_clip(f"{timeline}:u0002").model_copy(update={"text": "夜市雞排"})
+    runtime.repo.update_semantic_clips([changed])
     server.query_clips(timeline_id=timeline, about="雞排")
     # The changed clip, and the one beside it, which is read with it.
     assert sorted(text.split("\n", 1)[0] for text in embedded[-1]) == sorted([changed.text, SAID["hello"]])
@@ -88,7 +88,7 @@ def test_a_rebuild_drops_the_vectors_of_clips_it_no_longer_has(embedded: list) -
     timeline = _timeline("meaning-rebuild", SAID)
     server.query_clips(timeline_id=timeline, about="好喝")
     _timeline(timeline, {"food": SAID["food"]})
-    assert set(server.repo.clip_vectors([f"{timeline}:u{index:04d}" for index in range(4)])) == {f"{timeline}:u0000"}
+    assert set(runtime.repo.clip_vectors([f"{timeline}:u{index:04d}" for index in range(4)])) == {f"{timeline}:u0000"}
 
 def test_meaning_combines_with_the_other_conditions_and_pages(embedded: list) -> None:
     timeline = _timeline("meaning-pages", SAID)

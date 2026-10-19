@@ -26,9 +26,9 @@ from app.models.media import (
     TranscriptWord,
 )
 from app.models.semantic import ClipDescription, ClipKind, ClipLevel
+from app.runtime import repo as runtime_repo
 from app.server import (
     CLIP_SUMMARY_CHARACTERS,
-    MAX_STORYBOARD_TILES,
     build_semantic_timeline,
     frames_for_clips,
     get_semantic_clip,
@@ -36,9 +36,9 @@ from app.server import (
     query_clips,
     set_clip_tags,
 )
-from app.server import repo as server_repo
 from app.storage import repo as repo_module
 from app.storage.repo import Repository
+from app.tools.shared import MAX_STORYBOARD_TILES
 
 ASSET_ID = "asset-1"
 
@@ -401,7 +401,7 @@ def analyzed(media: Path) -> str:
         The asset's ID.
     """
     asset_id = import_asset(str(media / "wide.mp4"))["id"]
-    server_repo.save_analysis(analysis(
+    runtime_repo.save_analysis(analysis(
         10.0,
         segments=[(1.0, 4.0, "我們當初在設計這個系統的時候踩了很多坑"), (6.0, 7.0, "後來重寫")],
         silences=[(0.0, 1.0), (4.0, 6.0), (7.0, 10.0)],
@@ -461,10 +461,10 @@ def test_a_clip_s_words_say_which_the_speech_model_was_unsure_of(analyzed: str) 
     record = get_semantic_clip(clip_id, include_words=True)
     # Made without probabilities, it says so rather than leave them null with no reason.
     assert record["unsure"] == [] and "analyze_asset again" in record["unsure_unknown"]
-    known = server_repo.get_analysis(analyzed)
+    known = runtime_repo.get_analysis(analyzed)
     for segment in known.transcript.segments:
         segment.words = [word.model_copy(update={"probability": 0.2}) for word in segment.words]
-    server_repo.save_analysis(known)
+    runtime_repo.save_analysis(known)
     record = get_semantic_clip(clip_id, include_words=True)
     assert record["unsure"] == ["後來重寫"] and "unsure_unknown" not in record
 
@@ -479,9 +479,9 @@ def test_a_search_by_meaning_says_how_its_scores_spread_and_when_the_timeline_is
     built = build_semantic_timeline([analyzed])
     found = query_clips(timeline_id=built["timeline_id"], about="設計系統")
     assert found["spread"]["highest"] >= found["spread"]["lowest"] and "outdated" not in found
-    known = server_repo.get_analysis(analyzed)
+    known = runtime_repo.get_analysis(analyzed)
     known.transcript.segments[1].text = "後來重寫了"
-    server_repo.save_analysis(known)
+    runtime_repo.save_analysis(known)
     assert "build_semantic_timeline" in query_clips(timeline_id=built["timeline_id"], about="設計系統")["outdated"]
 
 def test_reading_a_clip_that_does_not_exist_says_where_to_look() -> None:
@@ -562,10 +562,10 @@ def test_asking_for_more_frames_than_a_sheet_holds_is_refused(analyzed: str) -> 
 
 def test_footage_can_be_read_through_one_line_a_clip(media: Path) -> None:
     from app.server import build_semantic_timeline, import_asset, query_clips
-    from app.server import repo as server_repo
+    from app.runtime import repo as runtime_repo
 
     asset_id = import_asset(str(media / "wide.mp4"))["id"]
-    server_repo.save_analysis(analysis(
+    runtime_repo.save_analysis(analysis(
         duration=10.0, segments=[(1.0, 3.0, "第一句話"), (4.0, 6.0, "第二句話")],
         silences=[(0.0, 1.0), (3.0, 4.0), (6.0, 10.0)], asset_id=asset_id,
     ))
@@ -605,10 +605,10 @@ def test_a_database_an_older_release_set_back_still_opens(tmp_path: Path) -> Non
 def test_old_timelines_are_listed_and_cleared_unless_a_plan_is_built_on_them(
     stored: Repository, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from app import server
+    from app import runtime, server
     from app.models.plan import Beat, EditPlan
 
-    monkeypatch.setattr(server, "repo", stored)
+    monkeypatch.setattr(runtime, "repo", stored)
     planned = timeline_id(stored)
     other, clips = build_timeline({"b": asset("b")}, {"b": analysis(5.0, segments=[(1.0, 2.0, "另一批")])})
     stored.save_semantic_timeline(other, clips)

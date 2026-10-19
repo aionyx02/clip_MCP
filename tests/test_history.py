@@ -6,7 +6,7 @@ from pathlib import Path
 
 from fastmcp import Client
 
-from app import server
+from app import runtime, server
 from app.storage.history import History, canonical, describe_project
 from helpers import build_project, edit, insert, video_track
 
@@ -21,7 +21,7 @@ def call(name: str, arguments: dict):
 
 
 def mcp_server():
-    return server.mcp
+    return runtime.mcp
 
 
 def test_a_file_is_written_the_same_way_every_time() -> None:
@@ -76,14 +76,14 @@ def test_going_back_is_one_more_version_and_can_be_undone(kept_history, media: P
     edit(project, [insert("b", asset, 4, 6)])
     current = server.get_project(project)["version"]
     restored = call("restore_version", {"project_id": project, "commit": first, "expected_version": current})
-    assert [clip.id for clip in server.repo.get_project(project).tracks[0].clips] == ["a"]
+    assert [clip.id for clip in runtime.repo.get_project(project).tracks[0].clips] == ["a"]
     assert restored["plan_copied"] is False
     listed = call("project_history", {"project_id": project})["versions"]
     assert listed[0]["what"].startswith("回到「") and len(listed) == 4
     # The version that was gone back over is still there to go back to.
     again = call("restore_version", {"project_id": project, "commit": listed[1]["commit"],
                                      "expected_version": restored["new_version"]})
-    assert [clip.id for clip in server.repo.get_project(project).tracks[0].clips] == ["a", "b"]
+    assert [clip.id for clip in runtime.repo.get_project(project).tracks[0].clips] == ["a", "b"]
     assert again["new_version"] == restored["new_version"] + 1
 
 
@@ -91,10 +91,10 @@ def test_a_branch_is_a_project_of_its_own_beside_the_first(kept_history, media: 
     asset = server.import_asset(str(media / "wide.mp4"))["id"]
     project = build_project([video_track(), insert("a", asset, 0, 3)], name="原本那支")
     branched = call("branch_project", {"project_id": project, "name": "原本那支 Reels 版"})
-    branch = server.repo.get_project(branched["project_id"])
+    branch = runtime.repo.get_project(branched["project_id"])
     assert branch.name == "原本那支 Reels 版" and branch.branched_from.project_id == project
     edit(branch.id, [{"action": "rename_project", "name": "Reels 版改過"}])
-    assert server.repo.get_project(project).name == "原本那支"
+    assert runtime.repo.get_project(project).name == "原本那支"
     assert call("project_history", {"project_id": branch.id})["branched_from"]["project_id"] == project
 
 
@@ -139,14 +139,14 @@ def test_going_back_leaves_another_video_compiled_from_the_same_plan_alone(kept_
 
     restored = call("restore_version", {"project_id": portrait, "commit": first, "expected_version": 3})
     assert restored["plan_copied"] is True
-    copy = {clip.from_plan_id for track in server.repo.get_project(portrait).tracks for clip in track.clips
+    copy = {clip.from_plan_id for track in runtime.repo.get_project(portrait).tracks for clip in track.clips
             if clip.from_plan_id}
     assert copy and planned["plan_id"] not in copy
-    assert server.repo.get_plan(copy.pop()).goal == "做一支短的"
+    assert runtime.repo.get_plan(copy.pop()).goal == "做一支短的"
     # The landscape cut and the shared plan are as they were.
-    assert server.repo.get_plan(planned["plan_id"]).goal == "改過的目標"
+    assert runtime.repo.get_plan(planned["plan_id"]).goal == "改過的目標"
     assert all(clip.from_plan_id == planned["plan_id"]
-               for track in server.repo.get_project(landscape).tracks for clip in track.clips if clip.from_plan_id)
+               for track in runtime.repo.get_project(landscape).tracks for clip in track.clips if clip.from_plan_id)
 
 
 def test_the_version_panel_folds_one_sitting_into_one_dot(kept_history, media: Path) -> None:
@@ -162,11 +162,11 @@ def test_the_version_panel_folds_one_sitting_into_one_dot(kept_history, media: P
     assert nodes[0]["thumb"]["asset_id"] == asset
 
     # Rendering one out marks it, and starts a new dot after it.
-    rendered = server.repo.get_project(project).version
+    rendered = runtime.repo.get_project(project).version
     finished = media / "版本面板.mp4"
     finished.write_bytes(b"finished")
-    server.repo.add_job(Job(kind=JobKind.RENDER, project_id=project, project_version=rendered,
-                            status=JobStatus.COMPLETED, output_path=str(finished)))
+    runtime.repo.add_job(Job(kind=JobKind.RENDER, project_id=project, project_version=rendered,
+                             status=JobStatus.COMPLETED, output_path=str(finished)))
     edit(project, [{"action": "rename_project", "name": "第四版"}])
     nodes = server.version_graph(project)["nodes"]
     assert [node["marks"] for node in nodes] == [[], ["exported"]]

@@ -76,10 +76,10 @@ def test_no_network_is_simply_no_update(tmp_path: Path, monkeypatch: pytest.Monk
 def test_the_editor_will_not_update_while_a_render_runs(monkeypatch: pytest.MonkeyPatch) -> None:
     from starlette.testclient import TestClient
 
-    from app import server
+    from app import runtime
     from app.ui import app as editor
 
-    monkeypatch.setattr(server.repo, "active_job_ids", lambda: {"job"})
+    monkeypatch.setattr(runtime.repo, "active_job_ids", lambda: {"job"})
     monkeypatch.setattr(updates, "start_update", lambda on_started: pytest.fail("started an update"))
     assert TestClient(editor.create_app()).post("/api/update", json={}).status_code == 409
 

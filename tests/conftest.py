@@ -1,7 +1,7 @@
 """Shared fixtures: an isolated workspace and small generated media files.
 
-The workspace must be set before `app.server` is imported, because the server
-opens its database at import time.
+The workspace must be set before `app.runtime` is imported, directly or through
+`app.server`, because it opens the database at import time.
 """
 
 import os
@@ -78,7 +78,7 @@ def forget_reviewed_captions() -> Iterator[None]:
     next — which is exactly what the memory is for, and exactly what a test
     that checks captions made from a transcript must not see.
     """
-    from app.server import repo
+    from app.runtime import repo
 
     with repo._transaction() as conn:
         conn.execute("DELETE FROM reviewed_captions")
@@ -186,7 +186,7 @@ def ended_after() -> Iterator[list]:
     """
     started: list = []
     yield started
-    from app import server
+    from app import runtime
     from app.models.job import JobStatus
 
     def end(job) -> None:
@@ -194,7 +194,7 @@ def ended_after() -> Iterator[list]:
             job.status = JobStatus.CANCELLED
 
     for job_id in started:
-        server.repo.update_job(job_id, end)
+        runtime.repo.update_job(job_id, end)
 
 @pytest.fixture(autouse=True)
 def history_off() -> Iterator[None]:
@@ -203,7 +203,7 @@ def history_off() -> Iterator[None]:
     Every commit is a few dozen file writes, which across the whole run is
     minutes; the history is tested where it is the subject.
     """
-    from app.server import repo
+    from app.runtime import repo
 
     kept, repo.history = repo.history, None
     yield
@@ -216,7 +216,7 @@ def kept_history(history_off):
     Returns:
         The history.
     """
-    from app.server import history, repo
+    from app.runtime import history, repo
 
     repo.history = history
     return history

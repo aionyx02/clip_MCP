@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from app import server
+from app import runtime, server
 from app.engine import fetch
 
 
@@ -58,7 +58,7 @@ def test_a_song_is_taken_only_by_the_plan_the_user_heard(media: Path, monkeypatc
     with pytest.raises(ValueError):
         server.add_music_from_url(url, page, "Tone", confirm_plan="nope")
     taken = server.add_music_from_url(url, page, "Tone", confirm_plan=shown["plan"])
-    asset = server.repo.get_assets([taken["id"]])[taken["id"]]
+    asset = runtime.repo.get_assets([taken["id"]])[taken["id"]]
     assert asset.library == "music" and asset.source.licence == "CC BY 4.0"
     assert Path(taken["path"]).parent == tmp_path / "音樂"
 

@@ -7,21 +7,21 @@ from pathlib import Path
 
 import pytest
 
-from app import server
+from app import runtime, server
 from app.models.media import Asset
 
 def stored(name: str, folder: str, tmp_path: Path, seconds: float = 12.5) -> str:
     """Register an asset without probing a file, filed in a folder when one is named."""
     asset = Asset(id=f"list-{uuid.uuid4().hex[:8]}", path=str(tmp_path / folder / name),
                   duration=Decimal(str(seconds)), has_video=True, has_audio=True)
-    server.repo.save_asset(asset)
+    runtime.repo.save_asset(asset)
     return asset.id
 
 @pytest.fixture
 def shelf(tmp_path: Path) -> dict:
-    folder = server.repo.create_folder(f"f-{uuid.uuid4().hex[:8]}", "assets", f"抽杯架-{uuid.uuid4().hex[:12]}")
+    folder = runtime.repo.create_folder(f"f-{uuid.uuid4().hex[:8]}", "assets", f"抽杯架-{uuid.uuid4().hex[:12]}")
     inside = [stored(f"杯架{index}.mp4", "a", tmp_path) for index in range(3)]
-    server.repo.file_items("assets", inside, folder["id"])
+    runtime.repo.file_items("assets", inside, folder["id"])
     name = f"台南-{uuid.uuid4().hex[:6]}"
     outside = stored(f"{name}.mp4", "b", tmp_path, seconds=30)
     return {"folder": folder["id"], "inside": inside, "outside": outside, "name": name}
@@ -77,7 +77,7 @@ def test_importing_a_file_again_keeps_its_notes(media: Path) -> None:
     asset_id = server.import_asset(str(media / "song.mp3"))["id"]
     server.edit_asset(asset_id, "只用前 20 秒")
     assert server.import_asset(str(media / "song.mp3"))["id"] == asset_id
-    assert server.repo.get_assets([asset_id])[asset_id].notes == "只用前 20 秒"
+    assert runtime.repo.get_assets([asset_id])[asset_id].notes == "只用前 20 秒"
     server.edit_asset(asset_id, "")
 
 def test_the_editor_writes_the_same_notes(shelf: dict) -> None:
@@ -86,6 +86,6 @@ def test_the_editor_writes_the_same_notes(shelf: dict) -> None:
 
     client = TestClient(editor.create_app())
     assert client.post("/api/assets/notes", json={"asset_id": shelf["outside"], "notes": "可不放"}).status_code == 200
-    assert server.repo.get_assets([shelf["outside"]])[shelf["outside"]].notes == "可不放"
+    assert runtime.repo.get_assets([shelf["outside"]])[shelf["outside"]].notes == "可不放"
     shown = next(item for item in client.get("/api/assets?all=1").json()["assets"] if item["id"] == shelf["outside"])
     assert shown["notes"] == "可不放"

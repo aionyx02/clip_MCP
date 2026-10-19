@@ -11,9 +11,9 @@ from pydantic import TypeAdapter
 from app.engine import loudness as levelling
 from app.engine.builder import DEFAULT_LOUDNESS_TARGET, FFmpegRenderer
 from app.models.timeline import Clip, EditOperation
-from app.server import (
-    _referenced_assets, apply_edits, create_project, generate_subtitles, get_job, get_project, repo,
-)
+from app.runtime import repo
+from app.server import apply_edits, create_project, generate_subtitles, get_job, get_project
+from app.tools.shared import referenced_assets
 
 _OPERATIONS = TypeAdapter(List[EditOperation])
 
@@ -142,7 +142,7 @@ def render(project_id: str, path: Path, **options) -> None:
         AssertionError: If FFmpeg rejects the filter graph or fails.
     """
     project = repo.get_project(project_id)
-    renderer, assets = FFmpegRenderer(), _referenced_assets(project)
+    renderer, assets = FFmpegRenderer(), referenced_assets(project)
     command = renderer.build_command(project, assets, str(path), **options)
     target = options.get("loudness_target", DEFAULT_LOUDNESS_TARGET)
     if target is not None:

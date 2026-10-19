@@ -5,7 +5,7 @@ from pathlib import Path
 import pytest
 from starlette.testclient import TestClient
 
-from app import server
+from app import runtime, server
 from app.engine import library
 from app.engine.analysis import analyze_media
 from app.models.media import Asset
@@ -88,7 +88,7 @@ def test_a_song_moved_to_footage_is_listened_to_for_what_is_said(media: Path, mo
     from app.models.media import MediaAnalysis, Rhythm
 
     song = server.import_asset(str(media / "jingle.wav"))["id"]
-    server.repo.save_analysis(MediaAnalysis(asset_id=song, duration=4.0, rhythm=Rhythm(tempo=None, beats=[])))
+    runtime.repo.save_analysis(MediaAnalysis(asset_id=song, duration=4.0, rhythm=Rhythm(tempo=None, beats=[])))
     started = []
     monkeypatch.setattr(server, "ANALYZE_MUSIC_ON_ADD", True)
     monkeypatch.setattr(server, "_start_analysis", lambda asset, transcribe, *args, **kwargs: started.append(
@@ -108,7 +108,7 @@ def test_music_laid_by_hand_that_stops_early_is_said(media: Path) -> None:
                               "duck_under_speech": True},
                              {"action": "insert_clip", "track_id": "music", "clip_id": "m", "asset_id": song,
                               "source_range": {"start": 0, "end": 4}}], name="音樂太短")
-    assert "stops at 4.0s" in server._music_ends_early(server.repo.get_project(project))
+    assert "stops at 4.0s" in server._music_ends_early(runtime.repo.get_project(project))
 
 
 def test_analyzing_again_measures_only_what_would_come_out_different(media: Path, tmp_path: Path,
@@ -133,7 +133,7 @@ def test_analyzing_music_says_how_much_of_each_file_is_somebody_talking(media: P
     from app.models.job import Job, JobKind
 
     song = server.import_asset(str(media / "song.mp3"))["id"]
-    server.repo.save_asset(server.repo.get_assets([song])[song].model_copy(update={"library": library.MUSIC}))
+    runtime.repo.save_asset(runtime.repo.get_assets([song])[song].model_copy(update={"library": library.MUSIC}))
     monkeypatch.setattr(server, "_start_analysis", lambda asset, *args, **kwargs: Job(kind=JobKind.ANALYZE,
                                                                                        asset_id=asset.id))
     monkeypatch.setattr(server, "speech_share", lambda *_: 0.8)
@@ -147,23 +147,23 @@ def test_analyzing_music_says_how_much_of_each_file_is_somebody_talking(media: P
 def test_a_dry_run_sorts_nothing_and_says_what_music_sounds_like_speech(media: Path,
                                                                       monkeypatch: pytest.MonkeyPatch) -> None:
     song = server.import_asset(str(media / "song.mp3"))["id"]
-    server.repo.save_asset(server.repo.get_assets([song])[song].model_copy(update={"library": None}))
+    runtime.repo.save_asset(runtime.repo.get_assets([song])[song].model_copy(update={"library": None}))
     monkeypatch.setattr(server, "classify", lambda asset: pytest.fail("a dry run listened to sort the file"))
     monkeypatch.setattr(server, "speech_share", lambda *_: 0.8)
     found = server.analyze_asset([song], again=True, dry_run=True)
     # Asked before anything starts, so a narration filed with the songs is moved before it is beat-tracked.
     assert found["music"][0]["sounds_like_speech"] is True
-    assert server.repo.get_assets([song])[song].library is None
+    assert runtime.repo.get_assets([song])[song].library is None
 
 
 def test_a_file_never_sorted_is_sorted_before_it_is_analyzed(media: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from app.models.job import Job, JobKind
 
     song = server.import_asset(str(media / "song.mp3"))["id"]
-    unsorted = server.repo.get_assets([song])[song].model_copy(update={"library": None})
-    server.repo.save_asset(unsorted)
+    unsorted = runtime.repo.get_assets([song])[song].model_copy(update={"library": None})
+    runtime.repo.save_asset(unsorted)
     monkeypatch.setattr(server, "_start_analysis", lambda asset, *args, **kwargs: Job(kind=JobKind.ANALYZE,
                                                                                        asset_id=asset.id))
     monkeypatch.setattr(server, "classify", lambda asset: library.FOOTAGE)
     server.analyze_asset([song], again=True)
-    assert server.repo.get_assets([song])[song].library == library.FOOTAGE
+    assert runtime.repo.get_assets([song])[song].library == library.FOOTAGE

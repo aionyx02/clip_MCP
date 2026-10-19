@@ -4,9 +4,9 @@ import os
 import time
 from pathlib import Path
 
+from app.runtime import WORKSPACE_DIR
 from app.server import (
     _OPERATIONS,
-    WORKSPACE_DIR,
     apply_edits,
     create_project,
     import_asset,
