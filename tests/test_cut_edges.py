@@ -1,0 +1,318 @@
+"""Tests for how a cut begins and ends: the first words heard, the last, and the words after a join.
+
+Whether an opening grabs or an ending satisfies is judgement, and stays with
+whoever writes the plan. What can be measured is narrower: a video that ends
+partway through a sentence, or on the first line of the next subject, or on
+somebody else's next question, has not ended; a piece that opens on 「因為」
+after the cause was cut out leans on something the viewer never heard. Those
+are refused with the way out, and a written reason gets past them when the
+writer means it.
+"""
+
+from typing import List, Optional, Sequence, Tuple, Union
+
+from app.engine.plan import check_plan
+from app.engine.semantic import build_timeline, clean_cuts
+from app.models.media import SecondListen, Span, SpeakerTurn, TranscriptWord
+from app.models.plan import Selection, Trim, TrimKind
+from app.models.semantic import SemanticClip
+from test_edit_plan import plan_for, sourced
+from test_semantic_timeline import ASSET_ID, analysis
+
+TALK = [
+    (1.0, 3.0, "今天我們去爬山。"),
+    (3.5, 5.0, "山上風很大。"),
+    (8.0, 10.0, "最後我們看到了日出。"),
+    (12.0, 18.0, "真的很值得這樣一路走上來。"),
+]
+
+Words = Sequence[Tuple[str, float, float]]
+
+def checked(
+    segments: Sequence[Union[Tuple[float, float, str], Words]], choose, voices: Optional[Sequence[str]] = None,
+    voiced: Optional[Sequence[Tuple[float, float]]] = None,
+) -> Tuple[List[str], List[str]]:
+    """Check a plan of the given talk, one file, one beat.
+
+    Args:
+        segments: Per stretch the transcriber wrote, either `(start, end,
+            text)`, said as one word, or its words as `(text, start, end)`.
+        choose: Turns the file's sentence clips, in order, into the plan's selections.
+        voices: Who says each sentence, in the same order; nobody told apart when None.
+        voiced: Where a second listen heard somebody talking; not listened to again when None.
+
+    Returns:
+        `(problems, notes)` from `check_plan`.
+    """
+    worded = [list(segment) if isinstance(segment, list) else [(segment[2], segment[0], segment[1])]
+              for segment in segments]
+    segments = [(words[0][1], words[-1][2], "".join(text for text, _, _ in words)) for words in worded]
+    silences, last = [], 0.0
+    for start, end, _ in segments:
+        silences.append((last, start))
+        last = end
+    silences.append((last, 20.0))
+    made = analysis(20.0, segments=segments, silences=silences)
+    made = made.model_copy(update={"transcript": made.transcript.model_copy(update={"segments": [
+        segment.model_copy(update={"words": [TranscriptWord(text=text, start=start, end=end)
+                                             for text, start, end in words]})
+        for segment, words in zip(made.transcript.segments, worded)
+    ]})})
+    if voiced is not None:
+        made = made.model_copy(update={"second_listen": SecondListen(
+            voiced=[Span(start=start, end=end) for start, end in voiced], model="test")})
+    if voices is not None:
+        made = made.model_copy(update={"speakers": [
+            SpeakerTurn(start=start, end=end, speaker=voice) for (start, end, _), voice in zip(segments, voices)
+        ]})
+    assets = {ASSET_ID: sourced()}
+    timeline, clips = build_timeline(assets, {ASSET_ID: made})
+    spoken: List[SemanticClip] = [clip for clip in clips if clip.text]
+    plan = plan_for(choose(spoken)).model_copy(
+        update={"timeline_id": timeline.id, "timeline_input_hash": timeline.input_hash})
+    return check_plan(plan, timeline, {clip.id: clip for clip in clips}, {}, assets, {ASSET_ID: clean_cuts(made)})
+
+def test_a_cut_that_ends_partway_through_its_last_sentence_is_refused() -> None:
+    problems, _ = checked(TALK, lambda spoken: [
+        Selection(clip_id=spoken[0].id, beat_id="b1"),
+        Selection(clip_id=spoken[3].id, beat_id="b1", trim=Trim(kind=TrimKind.HEAD, seconds=2.0)),
+    ])
+    assert any("真的很值得" in problem and "partway" in problem for problem in problems)
+
+def test_an_ending_that_stops_short_on_purpose_passes_with_its_reason() -> None:
+    problems, _ = checked(TALK, lambda spoken: [
+        Selection(clip_id=spoken[0].id, beat_id="b1"),
+        Selection(clip_id=spoken[3].id, beat_id="b1", trim=Trim(kind=TrimKind.HEAD, seconds=2.0),
+                  edge_reason="話講到一半被打斷，就是這支的笑點"),
+    ])
+    assert not any("partway" in problem for problem in problems)
+
+def test_a_single_trim_stops_where_it_was_asked_to() -> None:
+    # 「剪掉後面」 on one recording is the user's own cut, not an ending somebody chose.
+    problems, _ = checked(TALK, lambda spoken: [
+        Selection(clip_id=spoken[3].id, beat_id="b1", trim=Trim(kind=TrimKind.HEAD, seconds=2.0)),
+    ])
+    assert problems == []
+
+def test_the_refused_ending_is_not_also_reported_as_a_window_stopping_short() -> None:
+    problems, notes = checked(TALK, lambda spoken: [
+        Selection(clip_id=spoken[0].id, beat_id="b1"),
+        Selection(clip_id=spoken[3].id, beat_id="b1", trim=Trim(kind=TrimKind.HEAD, seconds=2.0)),
+    ])
+    assert any("partway" in problem for problem in problems)
+    assert not any("stop before the sentence ends" in note for note in notes)
+
+NEXT_SUBJECT = [
+    (1.0, 3.0, "今天我們去爬山。"),
+    (3.5, 5.0, "山上風很大。"),
+    (8.0, 10.0, "接下來我們去吃飯。"),
+]
+
+def test_a_cut_that_ends_on_the_first_line_of_the_next_subject_is_refused() -> None:
+    problems, _ = checked(NEXT_SUBJECT, lambda spoken: [
+        Selection(clip_id=spoken[0].id, beat_id="b1"),
+        Selection(clip_id=spoken[2].id, beat_id="b1"),
+    ])
+    assert any("接下來我們去吃飯" in problem and "next" in problem for problem in problems)
+
+def test_a_cut_that_ends_on_a_finished_line_passes() -> None:
+    problems, _ = checked(NEXT_SUBJECT, lambda spoken: [
+        Selection(clip_id=spoken[0].id, beat_id="b1"),
+        Selection(clip_id=spoken[1].id, beat_id="b1"),
+    ])
+    assert problems == []
+
+INTERVIEW = [
+    (1.0, 3.0, "我第一次爬山就迷路了。"),
+    (3.5, 5.0, "最後是靠星星找到路的。"),
+    (8.0, 10.0, "那你後來還敢再去嗎？"),
+]
+
+def test_a_cut_that_ends_on_somebody_else_asking_the_next_question_is_refused() -> None:
+    problems, _ = checked(INTERVIEW, lambda spoken: [
+        Selection(clip_id=spoken[0].id, beat_id="b1"),
+        Selection(clip_id=spoken[2].id, beat_id="b1"),
+    ], voices=["S1", "S1", "S2"])
+    assert any("那你後來還敢再去嗎" in problem and "question" in problem for problem in problems)
+
+def test_a_question_the_same_voice_ends_on_is_an_ending() -> None:
+    # 「你們覺得呢？」 to the camera is how a lot of videos close.
+    problems, _ = checked(INTERVIEW, lambda spoken: [
+        Selection(clip_id=spoken[0].id, beat_id="b1"),
+        Selection(clip_id=spoken[2].id, beat_id="b1"),
+    ], voices=["S1", "S1", "S1"])
+    assert problems == []
+
+def test_a_question_nobody_told_the_voices_of_is_not_judged() -> None:
+    problems, _ = checked(INTERVIEW, lambda spoken: [
+        Selection(clip_id=spoken[0].id, beat_id="b1"),
+        Selection(clip_id=spoken[2].id, beat_id="b1"),
+    ])
+    assert problems == []
+
+def opening_on(first_line: str) -> List[str]:
+    """Check a cut of two lines whose first words are `first_line`.
+
+    Args:
+        first_line: What the video opens on.
+
+    Returns:
+        The problems.
+    """
+    problems, _ = checked([(1.0, 3.0, first_line), (8.0, 10.0, "真的很值得。")], lambda spoken: [
+        Selection(clip_id=spoken[0].id, beat_id="b1"),
+        Selection(clip_id=spoken[1].id, beat_id="b1"),
+    ])
+    return problems
+
+def test_a_video_that_opens_on_a_word_leaning_on_what_came_before_is_refused() -> None:
+    for line in ("所以我們決定去爬山。", "然後我們就出發了。", "因為天氣很好。", "還有一件事。"):
+        assert any(line in problem and "opens" in problem for problem in opening_on(line)), line
+
+def test_a_video_that_opens_on_a_particle_no_sentence_starts_with_is_refused() -> None:
+    assert any("opens" in problem for problem in opening_on("的時候我們才出發。"))
+
+def test_a_video_may_open_on_an_exclamation_or_a_plain_sentence() -> None:
+    for line in ("哇今天天氣也太好了吧。", "欸你們看這個。", "今天我們去爬山。", "那天我們去爬山。"):
+        assert opening_on(line) == [], line
+
+def test_a_window_refused_for_its_opening_still_says_it_stops_short() -> None:
+    problems, notes = checked([(1.0, 7.0, "所以我們決定一路走到山頂再下來。"), (8.0, 10.0, "真的很值得。")],
+                              lambda spoken: [
+        Selection(clip_id=spoken[0].id, beat_id="b1", trim=Trim(kind=TrimKind.HEAD, seconds=3.0)),
+        Selection(clip_id=spoken[1].id, beat_id="b1"),
+    ])
+    assert any("所以" in problem for problem in problems)
+    assert any("stop before the sentence ends" in note for note in notes)
+
+def test_a_video_that_opens_partway_through_a_sentence_is_refused() -> None:
+    problems, _ = checked([(1.0, 7.0, "今天我們決定一路走到山頂再下來。"), (8.0, 10.0, "真的很值得。")],
+                          lambda spoken: [
+        Selection(clip_id=spoken[0].id, beat_id="b1", trim=Trim(kind=TrimKind.RANGE, from_seconds=3.0,
+                                                                to_seconds=6.0)),
+        Selection(clip_id=spoken[1].id, beat_id="b1"),
+    ])
+    assert any("partway" in problem and "starts" in problem for problem in problems)
+
+STORY = [
+    (1.0, 3.0, "今天我們去爬山。"),
+    (3.5, 5.0, "山上風很大。"),
+    (8.0, 10.0, "因為昨天下過雨。"),
+    (12.0, 14.0, "然後我們就到山頂了。"),
+    (15.0, 17.0, "真的很值得。"),
+]
+
+def test_a_line_leaning_on_a_cause_that_was_cut_out_is_refused_after_a_join() -> None:
+    problems, _ = checked(STORY, lambda spoken: [
+        Selection(clip_id=spoken[0].id, beat_id="b1"),
+        Selection(clip_id=spoken[2].id, beat_id="b1"),
+        Selection(clip_id=spoken[4].id, beat_id="b1"),
+    ])
+    assert any("因為昨天下過雨" in problem and "after a join" in problem for problem in problems)
+
+def test_a_line_that_carries_the_story_on_may_follow_a_join() -> None:
+    problems, _ = checked(STORY, lambda spoken: [
+        Selection(clip_id=spoken[0].id, beat_id="b1"),
+        Selection(clip_id=spoken[3].id, beat_id="b1"),
+        Selection(clip_id=spoken[4].id, beat_id="b1"),
+    ])
+    assert problems == []
+
+def test_a_line_heard_straight_after_the_one_before_it_in_the_file_leans_on_what_was_heard() -> None:
+    problems, _ = checked(STORY, lambda spoken: [
+        Selection(clip_id=spoken[1].id, beat_id="b1"),
+        Selection(clip_id=spoken[2].id, beat_id="b1"),
+        Selection(clip_id=spoken[4].id, beat_id="b1"),
+    ])
+    assert problems == []
+
+def test_a_window_nobody_hears_opens_on_nothing() -> None:
+    # A shot kept for its picture under the music says no 「因為」 to anybody.
+    problems, _ = checked(STORY, lambda spoken: [
+        Selection(clip_id=spoken[0].id, beat_id="b1"),
+        Selection(clip_id=spoken[2].id, beat_id="b1", volume=0),
+        Selection(clip_id=spoken[4].id, beat_id="b1"),
+    ])
+    assert problems == []
+
+def test_a_join_that_leans_on_purpose_passes_with_its_reason() -> None:
+    problems, _ = checked(STORY, lambda spoken: [
+        Selection(clip_id=spoken[0].id, beat_id="b1"),
+        Selection(clip_id=spoken[2].id, beat_id="b1", edge_reason="字卡已經交代下過雨，這句接得上"),
+        Selection(clip_id=spoken[4].id, beat_id="b1"),
+    ])
+    assert problems == []
+
+def test_a_join_into_the_middle_of_a_sentence_is_refused() -> None:
+    problems, _ = checked([(1.0, 3.0, "今天我們去爬山。"), (5.0, 11.0, "我們一路慢慢走到山頂再下來。"),
+                           (12.0, 14.0, "真的很值得。")], lambda spoken: [
+        Selection(clip_id=spoken[0].id, beat_id="b1"),
+        Selection(clip_id=spoken[2].id, beat_id="b1"),
+        Selection(clip_id=spoken[1].id, beat_id="b1", trim=Trim(kind=TrimKind.RANGE, from_seconds=3.0,
+                                                                to_seconds=7.0)),
+    ])
+    assert any("after a join" in problem and "partway" in problem for problem in problems)
+
+# One stretch the transcriber ran two sentences together in, with a pause between them.
+RUN_ON = [("今天我們一路走", 1.0, 3.0), ("走得很累。", 3.0, 4.0), ("後來我們到了山頂。", 5.0, 7.0)]
+
+def test_a_join_at_a_pause_inside_a_run_on_stretch_starts_a_sentence() -> None:
+    problems, _ = checked([(0.1, 0.4, "出發。"), (0.5, 0.9, "天還沒亮。"), RUN_ON, (12.0, 14.0, "真的很值得。")],
+                          lambda spoken: [
+        Selection(clip_id=spoken[0].id, beat_id="b1"),
+        Selection(clip_id=spoken[2].id, beat_id="b1", trim=Trim(kind=TrimKind.TAIL, seconds=2.0)),
+        Selection(clip_id=spoken[3].id, beat_id="b1"),
+    ])
+    assert problems == []
+
+def test_the_last_line_is_the_last_sentence_heard_not_the_start_of_its_stretch() -> None:
+    stretch = [("然後呢我們走了很久。", 1.0, 4.0), ("今天就到這裡。", 5.0, 7.0)]
+    problems, _ = checked([(0.2, 0.8, "出發。"), stretch], lambda spoken: [
+        Selection(clip_id=spoken[0].id, beat_id="b1"),
+        Selection(clip_id=spoken[1].id, beat_id="b1"),
+    ])
+    assert problems == []
+
+# The transcriber laid these words end to end and stretched 「我」 over the pause before it; a
+# second listen heard nobody between 3.2s and 3.6s.
+GLUED = [("今天我們", 1.0, 2.0), ("走得很累", 2.0, 3.0), ("我", 3.0, 4.0), ("後來到了山頂。", 4.0, 6.0)]
+
+def test_a_pause_a_second_listen_heard_begins_a_phrase_the_word_timings_ran_over() -> None:
+    problems, _ = checked([(0.1, 0.4, "出發。"), (0.5, 0.9, "天還沒亮。"), GLUED, (12.0, 14.0, "真的很值得。")],
+                          lambda spoken: [
+        Selection(clip_id=spoken[0].id, beat_id="b1"),
+        Selection(clip_id=spoken[2].id, beat_id="b1", trim=Trim(kind=TrimKind.TAIL, seconds=3.0)),
+        Selection(clip_id=spoken[3].id, beat_id="b1"),
+    ], voiced=[(0.1, 0.9), (1.0, 3.2), (3.6, 6.0), (12.0, 14.0)])
+    assert problems == []
+
+def test_without_a_second_listen_words_laid_end_to_end_are_one_phrase() -> None:
+    problems, _ = checked([(0.1, 0.4, "出發。"), (0.5, 0.9, "天還沒亮。"), GLUED, (12.0, 14.0, "真的很值得。")],
+                          lambda spoken: [
+        Selection(clip_id=spoken[0].id, beat_id="b1"),
+        Selection(clip_id=spoken[2].id, beat_id="b1", trim=Trim(kind=TrimKind.TAIL, seconds=3.0)),
+        Selection(clip_id=spoken[3].id, beat_id="b1"),
+    ])
+    assert any("partway" in problem for problem in problems)
+
+def test_a_cut_in_real_quiet_does_not_cut_into_the_word_stretched_over_it() -> None:
+    # 「那」 was given 3.5s to 6.5s, but nobody speaks until 5.7s: the cut at 5.0s takes nothing off.
+    stretch = [("那", 3.5, 6.5), ("我們就回家了。", 6.5, 8.5)]
+    problems, _ = checked([(0.1, 0.4, "出發。"), (1.0, 3.0, "天還沒亮。"), stretch, (12.0, 14.0, "真的很值得。")],
+                          lambda spoken: [
+        Selection(clip_id=spoken[0].id, beat_id="b1"),
+        Selection(clip_id=spoken[2].id, beat_id="b1", trim=Trim(kind=TrimKind.TAIL, seconds=3.5)),
+        Selection(clip_id=spoken[3].id, beat_id="b1"),
+    ], voiced=[(0.1, 0.4), (1.0, 3.0), (5.7, 8.5), (12.0, 14.0)])
+    assert problems == []
+
+def test_a_phrase_opened_after_the_particle_the_transcriber_hung_on_its_front_starts_clean() -> None:
+    # 「首先呢」 heard with the pause before 「呢」: starting on 「先」 takes only the particle off.
+    stretch = [("首先", 1.0, 1.6), ("呢", 2.0, 2.3), ("先把它關機。", 2.3, 4.0)]
+    problems, _ = checked([(0.1, 0.4, "出發。"), (0.5, 0.9, "天還沒亮。"), stretch, (12.0, 14.0, "真的很值得。")],
+                          lambda spoken: [
+        Selection(clip_id=spoken[0].id, beat_id="b1"),
+        Selection(clip_id=spoken[2].id, beat_id="b1", trim=Trim(kind=TrimKind.TAIL, seconds=1.7)),
+        Selection(clip_id=spoken[3].id, beat_id="b1"),
+    ])
+    assert problems == []

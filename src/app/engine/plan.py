@@ -31,7 +31,7 @@ from app.models.media import Asset
 from app.models.plan import (
     STRUCTURES, Beat, BeatRole, EditPlan, MusicCue, Selection, Structure, TrimKind, short_clip_ids,
 )
-from app.engine.semantic import EDGE_TOLERANCE_SECONDS, CleanCuts
+from app.engine.semantic import CLEAN_SILENCE_SECONDS, EDGE_TOLERANCE_SECONDS, CleanCuts
 from app.models.semantic import ClipKind, SemanticClip, SemanticTimeline
 from app.models.timeline import MAX_SPEED, MIN_SPEED, Clip, Project, TitleCard, card_background
 
@@ -1964,6 +1964,7 @@ def _cut_notes(
     unsnapped: Sequence[Piece],
     cuts: Optional[Mapping[str, CleanCuts]],
     duration: float,
+    refused: Sequence[Piece] = (),
 ) -> List[str]:
     """Say what the compiler did to the cuts, and what it left for somebody to decide.
 
@@ -1987,6 +1988,8 @@ def _cut_notes(
         cuts: Where each file may be cut without splitting a word, keyed by
             asset ID.
         duration: How long the compiled cut runs, for costing what is owed.
+        refused: Windows whose stopping short is already refused, so it is
+            not said again as something to weigh.
 
     Returns:
         The notes, empty when nothing was transcribed and so nothing is known.
@@ -2039,7 +2042,7 @@ def _cut_notes(
     owed = [
         (known.rest_of_sentence(piece.end), piece)
         for piece in heard
-        if (known := cuts.get(piece.asset_id)) and known.splits_a_sentence(piece.end)
+        if (known := cuts.get(piece.asset_id)) and known.splits_a_sentence(piece.end) and piece not in refused
     ]
     if owed:
         total = sum(seconds for seconds, _ in owed)
@@ -2054,6 +2057,191 @@ def _cut_notes(
             look=True,
         ))
     return said
+
+# What a sentence opens on when it starts the next subject rather than finishing this one;
+# a cut whose last line opens on one ends on a beginning. Words that also close a subject
+# (那我們、好那、說到) are left out, since 「那我們下次見」 ends a video well.
+NEXT_SUBJECT_OPENERS = ("接下來", "那接下來", "另外", "再來", "然後呢", "對了")
+# Words that only make sense after the clause they answer: a because, a so, a but. A line
+# that opens on one where that clause is not heard leans on nothing.
+LEANING_OPENERS = ("因為", "所以", "但是", "可是", "不過", "而且", "結果", "就是說")
+# Words that carry a story on from the last thing said. Across a join that is what they
+# are for, so they are only refused as the first words of the video, where nothing came first.
+SEQUENCE_OPENERS = ("然後", "還有", "再來")
+# Particles that end a phrase and so cannot begin one: a line that starts on one is the
+# tail of a sentence somebody split. 了 is left out for 了解, and 的確 is a word of its own.
+FRAGMENT_OPENERS = ("的", "呢", "吧", "嗎", "嘛", "囉", "啦", "呀")
+# What may be taken off the front of a phrase without leaving a fragment: the particles and
+# the sounds somebody makes before they start.
+DROPPABLE = set("".join(FRAGMENT_OPENERS) + "了啊喔欸嗯哦呃")
+
+def _quiet(known: CleanCuts, seconds: float) -> bool:
+    """Say whether nobody is talking at a moment, whatever the word timings say."""
+    return known.quiet_on_second_listen(seconds) or any(
+        start <= seconds <= end and end - start >= CLEAN_SILENCE_SECONDS for start, end in known.pauses)
+
+def _phrase(known: CleanCuts, first: int, last: Optional[int] = None) -> Tuple[int, int, str]:
+    """Find the phrase a word belongs to, and what it says.
+
+    Args:
+        known: What is known about the file.
+        first: A word, by its place in `known.words`.
+        last: Where to stop instead of at the end of the phrase, for the part of
+            one that is heard.
+
+    Returns:
+        `(opens, closes, said)`: the phrase's first and last word, and its text up
+        to `last` when given.
+    """
+    opens = first
+    while not known.begins_phrase(opens):
+        opens -= 1
+    closes = first
+    while closes + 1 < len(known.words) and not known.begins_phrase(closes + 1):
+        closes += 1
+    stop = closes if last is None else last
+    said = "".join(known.spoken[opens:stop + 1]).strip() if len(known.spoken) == len(known.words) else ""
+    return opens, closes, said
+
+def _opening_problem(piece: Piece, word: int, known: CleanCuts, first: bool) -> Optional[str]:
+    """Say what is wrong with the first words a window opens on, if anything.
+
+    Args:
+        piece: The window.
+        word: The first word of its file heard in it, by its place in `known.words`.
+        known: What is known about that file.
+        first: Whether these are the first words of the video.
+
+    Returns:
+        The problem, or None when the window opens on the start of a phrase that stands.
+    """
+    where = f"{_edge_of(piece, 'starts', piece.start)}, the first words {'of the video' if first else 'after a join'}"
+    opens, closes, phrase = _phrase(known, word)
+    taken = "".join(known.spoken[opens:word]) if len(known.spoken) == len(known.words) else "?"
+    if opens != word and all(character in DROPPABLE or character.isspace() for character in taken):
+        # Only a particle or a sound before speaking comes off the front, so the phrase starts here.
+        opens, phrase = word, "".join(known.spoken[word:closes + 1]).strip()
+    bitten = known.words[word][0] < piece.start - EDGE_TOLERANCE_SECONDS and not _quiet(known, piece.start)
+    if opens != word or bitten:
+        begins = known.words[opens][0]
+        return (f"{where}, starts partway through 「{phrase}」, {piece.start - begins:.1f}s after it begins: start "
+                f"where it begins, at {begins:.2f}s of the file, or give `edge_reason` on that selection if it "
+                "should open there")
+    earlier = (f"; the phrase before it in the file starts at {known.words[_phrase(known, word - 1)[0]][0]:.2f}s"
+               if word > 0 else "")
+    if phrase.startswith(FRAGMENT_OPENERS) and not phrase.startswith("的確"):
+        return (f"{where}, opens on 「{phrase}」, the tail of a sentence split in two: start where that sentence "
+                f"begins{earlier}, or give `edge_reason` on that selection if it should open there")
+    leaning = next((opener for opener in (*LEANING_OPENERS, *(SEQUENCE_OPENERS if first else ()))
+                    if phrase.startswith(opener)), None)
+    if leaning is not None:
+        return (f"{where}, opens on 「{phrase}」, whose 「{leaning}」 leans on something before it that is not "
+                f"heard: start where that begins{earlier}, or give `edge_reason` on that selection if it should "
+                "open there")
+    return None
+
+def _ending_problem(
+    last: Piece, heard: Sequence[Tuple[str, int]], known: CleanCuts,
+) -> Tuple[Optional[str], bool]:
+    """Say why the last words heard do not end the video, if they do not.
+
+    Args:
+        last: The last window anything is said in.
+        heard: Every word heard, in order, as `(asset ID, place in its file's words)`.
+        known: What is known about the last window's file.
+
+    Returns:
+        `(problem, stopped)`: the problem, or None when the video ends on a
+        finished phrase, and whether it is that the words stop partway.
+    """
+    word = heard[-1][1]
+    opens, closes, phrase = _phrase(known, word, last=word)
+    bitten = known.words[word][1] > last.end + EDGE_TOLERANCE_SECONDS and not _quiet(known, last.end)
+    if closes != word or bitten:
+        rest = known.words[closes][1] - last.end
+        return (f"{_edge_of(last, 'ends', last.end)}, partway through 「{_phrase(known, word)[2]}」, "
+                f"{rest:.1f}s before it finishes, and nothing after it is heard, so the video stops rather than "
+                "ends: end where that phrase finishes, end on an earlier one that does, or give `edge_reason` on "
+                "that selection if it should stop there"), True
+    if phrase.startswith(NEXT_SUBJECT_OPENERS):
+        return (f"{_edge_of(last, 'ends', last.end)}, and the last thing heard is 「{phrase}」, which opens the next "
+                "subject rather than finishing this one: end on the phrase before it, or give `edge_reason` on "
+                "that selection if the video should end on it"), False
+    # Voices are told apart within one file only, so a line from another file says nothing about who asks.
+    before = next((said for said in reversed(heard) if said[0] != last.asset_id or said[1] < opens), None)
+    if phrase.endswith(("？", "?")) and len(known.voices) == len(known.words) and before is not None \
+            and before[0] == last.asset_id:
+        asker, answerer = known.voices[opens], known.voices[before[1]]
+        if asker is not None and answerer is not None and asker != answerer:
+            return (f"{_edge_of(last, 'ends', last.end)}, on 「{phrase}」, a question from {asker} after {answerer} "
+                    "spoke, which is the next question rather than an ending: end on the answer before it, or give "
+                    "`edge_reason` on that selection if the video should end on the question"), False
+    return None, False
+
+def _edge_problems(
+    plan: EditPlan, pieces: Sequence[Piece], cuts: Optional[Mapping[str, CleanCuts]],
+) -> Tuple[List[str], Optional[Piece]]:
+    """Refuse a cut whose first words lean on nothing or whose last words stop short of an ending.
+
+    A single selection is a trim, and where it starts and stops is what was
+    asked for. Past that, a video that stops partway through what somebody is
+    saying has not ended, and no length target makes it end; finishing it costs
+    seconds, so it is handed back rather than done. Nor has one whose last line
+    is the first of the next subject, or somebody else's next question. And a
+    video that opens on 「所以」 opens on the middle of a thought.
+
+    Everything is read by the phrase, between two places the speaker stopped,
+    rather than by the transcriber's sentence, which can run half a minute.
+
+    Args:
+        plan: The plan.
+        pieces: Its windows, as compiled.
+        cuts: What is known about each file, keyed by asset ID.
+
+    Returns:
+        `(problems, ending)`: one problem per edge that does not hold, saying
+        the way out, and the last window when it is refused for stopping
+        partway through what is being said, which is then not said again as a
+        note.
+    """
+    if len(plan.selections) < 2 or not cuts:
+        return [], None
+    reasons = {selection.clip_id: selection.edge_reason for selection in plan.selections}
+
+    def excused(piece: Piece) -> bool:
+        return any(reasons.get(clip_id) for clip_id in piece.from_clip_ids)
+
+    # Every word heard, in the order it is heard, as (file, place in its words); and each window
+    # with the word it opens on and whether the word heard before it is the one before it in the file.
+    heard: List[Tuple[str, int]] = []
+    opens: List[Tuple[Piece, int, bool]] = []
+    for piece in pieces:
+        known = cuts.get(piece.asset_id)
+        if piece.gain <= 0 or piece.card is not None or known is None:
+            continue
+        words = [index for index, (start, end) in enumerate(known.words)
+                 if start < piece.end - EDGE_TOLERANCE_SECONDS and end > piece.start + EDGE_TOLERANCE_SECONDS]
+        if not words:
+            continue
+        before = heard[-1] if heard else None
+        # The same phrase with a pause taken out of it runs straight on.
+        straight = before is not None and before[0] == piece.asset_id and words[0] - before[1] in (0, 1)
+        opens.append((piece, words[0], straight))
+        heard += [(piece.asset_id, index) for index in words if heard[-1:] != [(piece.asset_id, index)]]
+    if not opens:
+        return [], None
+    found: List[str] = []
+    for position, (piece, word, straight) in enumerate(opens):
+        if straight or excused(piece):
+            continue
+        opening = _opening_problem(piece, word, cuts[piece.asset_id], first=position == 0)
+        if opening is not None:
+            found.append(opening)
+    last = opens[-1][0]
+    ending, stopped = (None, False) if excused(last) else _ending_problem(last, heard, cuts[last.asset_id])
+    if ending is not None:
+        found.append(ending)
+    return found, last if stopped else None
 
 def _unfit_transitions(
     plan: EditPlan, pieces: Sequence[Piece], clips: Optional[Mapping[str, SemanticClip]] = None,
@@ -2550,11 +2738,12 @@ def check_plan(
     if not problems:
         pieces, cleaned = compile_pieces(plan, clips, children, assets, cuts)
         duration = compiled_duration(pieces)
+        edges, stopped = _edge_problems(plan, pieces, cuts)
         notes.extend(_cut_notes(
             pieces,
             _selected(plan, clips, children, assets, cuts),
             _selected(plan, clips, children, assets, None),
-            cuts, duration,
+            cuts, duration, [stopped] if stopped is not None else [],
         ))
         notes.extend(cleaned)
         problems.extend(_cue_problems(plan, pieces))
@@ -2565,6 +2754,7 @@ def check_plan(
         notes[:] = [note for note in notes if not (isinstance(note, Note) and note.kind == "join_left_out"
                                                    and note.beat_id in refused)]
         problems.extend(_unplayed_evidence(plan, pieces, clips, children))
+        problems.extend(edges)
         for position, cue in enumerate(cues, start=1):
             entry = song_entry(cue, (cuts or {}).get(cue.asset_id) if cue.asset_id is not None else None)
             if entry != cue.start:

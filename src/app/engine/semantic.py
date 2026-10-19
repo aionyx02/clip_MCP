@@ -39,6 +39,16 @@ MIN_UTTERANCE_SECONDS = 0.4
 # Silence edges and transcript boundaries are both rounded to milliseconds, so a
 # boundary can land a hair outside the silence it was snapped to.
 EDGE_TOLERANCE_SECONDS = 0.02
+# A cut is clean where the speaker stopped: between two words at least this far apart.
+# Shorter gaps are the spaces inside a phrase, and a cut there sounds like a word bitten
+# off. Provisional.
+CLEAN_GAP_SECONDS = 0.2
+# A cut inside a measured silence at least this long is clean whatever the word timings
+# say: the transcriber runs a word on across a pause often enough that taking its word
+# for it refused cuts made in the middle of real silence. Provisional.
+CLEAN_SILENCE_SECONDS = 0.3
+# What a word ends on when the transcriber heard the phrase end there.
+PHRASE_END_PUNCTUATION = "。！？!?…，,、；;：:"
 # The transcriber places a word's start late, or its end early, often enough to cut a
 # syllable off: the first edit made with the server lost the 「抽」 of 「抽杯」, which began
 # 0.39s before the next word the transcript knew of. Sound this long between a measured
@@ -856,6 +866,10 @@ class CleanCuts:
         sentences: Every transcribed sentence the same way.
         said: What each of those sentences says, in the same order, for
             telling two takes of one line apart.
+        spoken: What each word says, in the order of `words`.
+        voices: Who says each word, in the order of `words`, as the speaker
+            split labelled them within this file; None for a word no voice was
+            told apart in, and empty when nobody split them.
         pauses: Every measured silence, which is where the dead air is.
         bad_picture: Every stretch the viewer should not be shown a frame of:
             black and frozen picture, merged into one list because a cut point
@@ -888,6 +902,8 @@ class CleanCuts:
     words: Tuple[Tuple[float, float], ...] = ()
     sentences: Tuple[Tuple[float, float], ...] = ()
     said: Tuple[str, ...] = ()
+    spoken: Tuple[str, ...] = ()
+    voices: Tuple[Optional[str], ...] = ()
     pauses: Tuple[Tuple[float, float], ...] = ()
     bad_picture: Tuple[Tuple[float, float], ...] = ()
     transcribed: bool = False
@@ -898,6 +914,46 @@ class CleanCuts:
     heard: Tuple[Tuple[float, float, str], ...] = ()
     listened: bool = False
     duration: Optional[float] = None
+
+    def begins_phrase(self, index: int) -> bool:
+        """Say whether a word is the first of a phrase: what somebody says between two stops.
+
+        A transcriber's sentence is not always a sentence. Without punctuation
+        to go on it runs several together, half a minute of them at a time, so
+        where the speaker stopped is read off the words themselves: a pause
+        long enough to cut in, a measured silence or a stretch the second
+        listen heard nobody in between them however the word timings run,
+        punctuation, a space the transcriber put between them, or the start
+        of one of its sentences.
+
+        Args:
+            index: The word, by its place in `words`.
+
+        Returns:
+            True when a phrase begins on it. A file whose words carry no text
+            answers on the timings alone.
+        """
+        if index <= 0:
+            return True
+        (earlier_start, before), (start, end) = self.words[index - 1], self.words[index]
+        if start - before >= CLEAN_GAP_SECONDS:
+            return True
+        if any(earlier_start <= quiet_start and quiet_end <= end and quiet_end - quiet_start >= CLEAN_SILENCE_SECONDS
+               for quiet_start, quiet_end in self.pauses):
+            return True
+        # The transcriber often lays words end to end and stretches one over the pause before it.
+        talking = sorted(self.voiced)
+        if any(earlier_start <= stops and resumes <= end and resumes - stops >= CLEAN_GAP_SECONDS
+               for (_, stops), (resumes, _) in zip(talking, talking[1:])):
+            return True
+        if any(before - EDGE_TOLERANCE_SECONDS <= opens <= start + EDGE_TOLERANCE_SECONDS
+               for opens, _ in self.sentences):
+            return True
+        if len(self.spoken) == len(self.words):
+            earlier, this = self.spoken[index - 1], self.spoken[index]
+            return (earlier.rstrip().endswith(tuple(PHRASE_END_PUNCTUATION))
+                    or this[:1].isspace() or earlier[-1:].isspace())
+        return False
 
     def word_split_at(self, seconds: float) -> Optional[Tuple[float, float]]:
         """Find the word a cut here would land inside, as `(start, end)`; None when it lands in none."""
@@ -1523,6 +1579,12 @@ def clean_cuts(analysis: MediaAnalysis) -> CleanCuts:
         ),
         sentences=tuple((segment.start, segment.end) for segment in segments),
         said=tuple(segment.text for segment in segments),
+        spoken=tuple(word.text for segment in segments for word in segment.words),
+        voices=tuple(
+            next((turn.speaker for turn in analysis.speakers
+                  if turn.start <= (word.start + word.end) / 2 < turn.end), None)
+            for segment in segments for word in segment.words
+        ) if analysis.speakers else (),
         pauses=tuple((span.start, span.end) for span in analysis.silences),
         bad_picture=_joined([*analysis.black_frames, *analysis.frozen_frames]),
         transcribed=transcript is not None,
