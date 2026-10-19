@@ -2054,16 +2054,19 @@ def _cut_notes(
     owed = [
         (known.rest_of_sentence(piece.end), piece)
         for piece in heard
-        if (known := cuts.get(piece.asset_id)) and known.splits_a_sentence(piece.end) and piece not in refused
+        # By identity: the same cut heard earlier in the video is not the ending that was refused.
+        if (known := cuts.get(piece.asset_id)) and known.splits_a_sentence(piece.end)
+        and all(piece is not ending for ending in refused)
     ]
     if owed:
         total = sum(seconds for seconds, _ in owed)
         worst, piece = max(owed, key=lambda item: item[0])
         share = f", {total / duration:.0%} of the cut" if duration else ""
-        short = [f"{cut.from_clip_ids[0]} {seconds:.1f}s" for seconds, cut in owed if cut.from_clip_ids]
+        # A window ends on the last clip it was merged from, so that is the one named.
+        short = [f"{cut.from_clip_ids[-1]} {seconds:.1f}s" for seconds, cut in owed if cut.from_clip_ids]
         said.append(Note(
             f"{len(owed)} window(s) stop before the sentence ends: {', '.join(short)} short. Finishing them all "
-            f"would add {total:.1f}s{share}; the longest is {piece.from_clip_ids[0]}, {worst:.1f}s short. "
+            f"would add {total:.1f}s{share}; the longest is {piece.from_clip_ids[-1]}, {worst:.1f}s short. "
             "Give those seconds to the ones that sound abrupt, or leave them",
             "stops_before_the_sentence_ends", clip_ids=_first_clips(cut for _, cut in owed), seconds=total,
             look=True,
@@ -2131,6 +2134,9 @@ def _opening_problem(piece: Piece, word: int, known: CleanCuts, first: bool) -> 
     """
     where = f"{_edge_of(piece, 'starts', piece.start)}, the first words {'of the video' if first else 'after a join'}"
     opens, closes, phrase = _phrase(known, word)
+    # Where the phrase starts before any particle comes off its front: the one before that is
+    # the earlier start to offer, since starting on the particle would open on a tail.
+    unstripped = opens
     taken = "".join(known.spoken[opens:word]) if len(known.spoken) == len(known.words) else "?"
     if opens != word and all(character in DROPPABLE or character.isspace() for character in taken):
         # Only a particle or a sound before speaking comes off the front, so the phrase starts here.
@@ -2142,7 +2148,7 @@ def _opening_problem(piece: Piece, word: int, known: CleanCuts, first: bool) -> 
                 "file, or give `edge_reason` on that selection if it should open there")
     # Nothing said before it in the file means nothing to start from instead.
     instead = (f"start where that begins; the phrase before it in the file starts at "
-               f"{known.words[_phrase(known, word - 1)[0]][0]:.2f}s" if word > 0
+               f"{known.words[_phrase(known, unstripped - 1)[0]][0]:.2f}s" if unstripped > 0
                else "nothing is said before it in the file, so open on another piece")
     if phrase.startswith(FRAGMENT_OPENERS) and not phrase.startswith("的確"):
         return (f"{where}, opens on 「{phrase}」, the tail of a sentence split in two: {instead}, or give "

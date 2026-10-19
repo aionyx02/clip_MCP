@@ -451,3 +451,23 @@ def test_an_ending_on_a_window_merged_from_two_selections_names_the_last_one() -
 
     problems, _ = checked([(1.0, 3.0, "今天我們去爬山。"), (3.1, 9.0, "真的很值得這樣一路走上來。")], choose)
     assert any(f"{holder[1].id} ends" in problem and "partway" in problem for problem in problems)
+
+def test_a_join_refused_after_its_particle_comes_off_offers_the_phrase_before_the_particle() -> None:
+    # 「呢」 belongs to 「首先呢」: opening on it would open on a tail, so the start offered is 「首先」's.
+    stretch = [("首先", 1.0, 1.6), ("呢", 2.0, 2.3), ("所以把它關機。", 2.3, 4.0)]
+    problems, _ = checked([(0.1, 0.4, "出發。"), (0.5, 0.9, "天還沒亮。"), stretch, (12.0, 14.0, "真的很值得。")],
+                          lambda spoken: [
+        Selection(clip_id=spoken[0].id, beat_id="b1"),
+        Selection(clip_id=spoken[2].id, beat_id="b1", trim=Trim(kind=TrimKind.TAIL, seconds=1.7)),
+        Selection(clip_id=spoken[3].id, beat_id="b1"),
+    ])
+    assert any("所以" in problem and "starts at 1.00s" in problem for problem in problems)
+
+def test_a_window_like_the_refused_ending_still_says_it_stops_short() -> None:
+    # Only the last window's ending is refused; the same cut heard earlier is still owed its note.
+    _, notes = checked(TALK, lambda spoken: [
+        Selection(clip_id=spoken[3].id, beat_id="b1", trim=Trim(kind=TrimKind.HEAD, seconds=2.0)),
+        Selection(clip_id=spoken[0].id, beat_id="b1"),
+        Selection(clip_id=spoken[3].id, beat_id="b1", trim=Trim(kind=TrimKind.HEAD, seconds=2.0)),
+    ])
+    assert any("stop before the sentence ends" in note for note in notes)
