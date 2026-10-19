@@ -18,6 +18,7 @@ model to decide which candidate boundaries are real ones, and thresholds
 that cannot be picked honestly without a corpus to pick them against.
 """
 
+import bisect
 import hashlib
 import json
 import math
@@ -1527,6 +1528,33 @@ class CleanCuts:
         inside = [closed for opened, closed in self.words if opened >= start and closed <= end]
         return max(inside) if inside else None
 
+def _voices(moments: Sequence[float], turns: Sequence[SpeakerTurn]) -> Tuple[Optional[str], ...]:
+    """Say who is speaking at each moment, by the file's speaker turns.
+
+    An hour of talk is thousands of words and turns, so each moment looks only
+    at the turns that started late enough to still be running, rather than at
+    all of them.
+
+    Args:
+        moments: Seconds into the file, one per word.
+        turns: The file's speaker turns, in any order, possibly overlapping.
+
+    Returns:
+        A voice per moment, None where no turn covers it; empty when there are no turns.
+    """
+    if not turns:
+        return ()
+    ordered = sorted(turns, key=lambda turn: turn.start)
+    starts = [turn.start for turn in ordered]
+    longest = max(turn.end - turn.start for turn in ordered)
+    voices: List[Optional[str]] = []
+    for moment in moments:
+        at = bisect.bisect_right(starts, moment) - 1
+        while at >= 0 and starts[at] > moment - longest and moment >= ordered[at].end:
+            at -= 1
+        voices.append(ordered[at].speaker if at >= 0 and moment < ordered[at].end else None)
+    return tuple(voices)
+
 def _joined(spans: Sequence[Span]) -> Tuple[Tuple[float, float], ...]:
     """Merge overlapping stretches into one list, in order.
 
@@ -1580,11 +1608,8 @@ def clean_cuts(analysis: MediaAnalysis) -> CleanCuts:
         sentences=tuple((segment.start, segment.end) for segment in segments),
         said=tuple(segment.text for segment in segments),
         spoken=tuple(word.text for segment in segments for word in segment.words),
-        voices=tuple(
-            next((turn.speaker for turn in analysis.speakers
-                  if turn.start <= (word.start + word.end) / 2 < turn.end), None)
-            for segment in segments for word in segment.words
-        ) if analysis.speakers else (),
+        voices=_voices([(word.start + word.end) / 2 for segment in segments for word in segment.words],
+                       analysis.speakers),
         pauses=tuple((span.start, span.end) for span in analysis.silences),
         bad_picture=_joined([*analysis.black_frames, *analysis.frozen_frames]),
         transcribed=transcript is not None,

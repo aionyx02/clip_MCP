@@ -20,7 +20,7 @@ import hashlib
 import math
 import os
 import re
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from datetime import timedelta
 from difflib import SequenceMatcher
 from typing import AbstractSet, Dict, Iterable, List, Mapping, Optional, Sequence, Tuple
@@ -227,6 +227,10 @@ class Piece:
             made by hand, or the plan's and changed by hand — the plan it came
             from, if any, and whether it is pinned; None for one the plan
             makes now.
+        excused: Per clip in `from_clip_ids`, whether its selection gave an
+            `edge_reason`, so a reason on one of two selections of the same
+            clip stays with that one. Left out of comparing windows: it says
+            what may be heard at an edge, not what plays.
     """
 
     asset_id: str
@@ -242,6 +246,7 @@ class Piece:
     sound_lead: float = 0.0
     card: Optional[TitleCard] = None
     card_from: Optional[Tuple[Optional[str], bool]] = None
+    excused: Tuple[bool, ...] = field(default=(), compare=False)
 
     @property
     def duration(self) -> float:
@@ -442,6 +447,7 @@ def _merge(pieces: Sequence[Piece]) -> List[Piece]:
             # marker inside a shot would say a new part starts partway through it.
             merged[-1] = replace(
                 last, end=max(last.end, piece.end), from_clip_ids=(*last.from_clip_ids, *piece.from_clip_ids),
+                excused=(*last.excused, *piece.excused),
             )
         else:
             merged.append(piece)
@@ -501,6 +507,7 @@ def _selected(
                 own_speed=selection.speed is not None,
                 gain=1.0 if selection.volume is None else selection.volume,
                 keep_level=selection.keep_level,
+                excused=(bool(selection.edge_reason),),
             )
             for piece in _selection_pieces(
                 selection, clip, children.get(clip.id, []), asset,
@@ -2062,6 +2069,8 @@ def _cut_notes(
 # a cut whose last line opens on one ends on a beginning. Words that also close a subject
 # (那我們、好那、說到) are left out, since 「那我們下次見」 ends a video well.
 NEXT_SUBJECT_OPENERS = ("接下來", "那接下來", "另外", "再來", "然後呢", "對了")
+# Marks that part a line without ending it: what follows one still belongs to the line it is in.
+CLAUSE_PUNCTUATION = "，,、；;：:"
 # Words that only make sense after the clause they answer: a because, a so, a but. A line
 # that opens on one where that clause is not heard leans on nothing.
 LEANING_OPENERS = ("因為", "所以", "但是", "可是", "不過", "而且", "結果", "就是說")
@@ -2127,26 +2136,28 @@ def _opening_problem(piece: Piece, word: int, known: CleanCuts, first: bool) -> 
         return (f"{where}, starts partway through 「{phrase}」, {piece.start - begins:.1f}s after it begins: start "
                 f"where it begins, at {begins:.2f}s of the file, or give `edge_reason` on that selection if it "
                 "should open there")
-    earlier = (f"; the phrase before it in the file starts at {known.words[_phrase(known, word - 1)[0]][0]:.2f}s"
-               if word > 0 else "")
+    # Nothing said before it in the file means nothing to start from instead.
+    instead = (f"start where that begins; the phrase before it in the file starts at "
+               f"{known.words[_phrase(known, word - 1)[0]][0]:.2f}s" if word > 0
+               else "nothing is said before it in the file, so open on another piece")
     if phrase.startswith(FRAGMENT_OPENERS) and not phrase.startswith("的確"):
-        return (f"{where}, opens on 「{phrase}」, the tail of a sentence split in two: start where that sentence "
-                f"begins{earlier}, or give `edge_reason` on that selection if it should open there")
+        return (f"{where}, opens on 「{phrase}」, the tail of a sentence split in two: {instead}, or give "
+                "`edge_reason` on that selection if it should open there")
     leaning = next((opener for opener in (*LEANING_OPENERS, *(SEQUENCE_OPENERS if first else ()))
                     if phrase.startswith(opener)), None)
     if leaning is not None:
         return (f"{where}, opens on 「{phrase}」, whose 「{leaning}」 leans on something before it that is not "
-                f"heard: start where that begins{earlier}, or give `edge_reason` on that selection if it should "
-                "open there")
+                f"heard: {instead}, or give `edge_reason` on that selection if it should open there")
     return None
 
 def _ending_problem(
-    last: Piece, heard: Sequence[Tuple[str, int]], known: CleanCuts,
+    last: Piece, opened: int, heard: Sequence[Tuple[str, int]], known: CleanCuts,
 ) -> Tuple[Optional[str], bool]:
     """Say why the last words heard do not end the video, if they do not.
 
     Args:
         last: The last window anything is said in.
+        opened: The first word heard in it, by its place in `known.words`.
         heard: Every word heard, in order, as `(asset ID, place in its file's words)`.
         known: What is known about the last window's file.
 
@@ -2158,15 +2169,27 @@ def _ending_problem(
     opens, closes, phrase = _phrase(known, word, last=word)
     bitten = known.words[word][1] > last.end + EDGE_TOLERANCE_SECONDS and not _quiet(known, last.end)
     if closes != word or bitten:
-        rest = known.words[closes][1] - last.end
-        return (f"{_edge_of(last, 'ends', last.end)}, partway through 「{_phrase(known, word)[2]}」, "
-                f"{rest:.1f}s before it finishes, and nothing after it is heard, so the video stops rather than "
-                "ends: end where that phrase finishes, end on an earlier one that does, or give `edge_reason` on "
-                "that selection if it should stop there"), True
-    if phrase.startswith(NEXT_SUBJECT_OPENERS):
-        return (f"{_edge_of(last, 'ends', last.end)}, and the last thing heard is 「{phrase}」, which opens the next "
-                "subject rather than finishing this one: end on the phrase before it, or give `edge_reason` on "
-                "that selection if the video should end on it"), False
+        finishes = known.words[closes][1]
+        # The phrase before it in the window, if one finishes inside it, is the other place to stop.
+        earlier = (f", end where the phrase before it finishes, at {known.words[opens - 1][1]:.2f}s"
+                   if opens > opened else "")
+        return (f"{_edge_of(last, 'ends', last.end)}, partway through 「{_phrase(known, word)[2]}」, and nothing "
+                "after it is heard, so the video stops rather than ends: end where that phrase finishes, at "
+                f"{finishes:.2f}s of the file, {(finishes - last.end) / last.speed:.1f}s more of the video{earlier}, "
+                "or give `edge_reason` on that selection if it should stop there"), True
+    # A transcriber writes 「接下來，我們去吃飯」, and the comma begins a phrase; the line still opens
+    # on 「接下來」, so it is read back over its commas, as far as the window goes.
+    line = opens
+    while line > opened and len(known.spoken) == len(known.words)             and known.spoken[line - 1].rstrip().endswith(tuple(CLAUSE_PUNCTUATION)):
+        line = max(_phrase(known, line - 1)[0], opened)
+    said = "".join(known.spoken[line:word + 1]).strip() if line != opens else phrase
+    if said.startswith(NEXT_SUBJECT_OPENERS):
+        ends = known.words[line - 1][1] if line > opened else None
+        instead = (f"end on the phrase before it, at {ends:.2f}s of the file" if ends is not None
+                   else "end on the piece before it")
+        return (f"{_edge_of(last, 'ends', last.end)}, and the last thing heard is 「{said}」, which opens the next "
+                f"subject rather than finishing this one: {instead}, or give `edge_reason` on that selection if "
+                "the video should end on it"), False
     # Voices are told apart within one file only, so a line from another file says nothing about who asks.
     before = next((said for said in reversed(heard) if said[0] != last.asset_id or said[1] < opens), None)
     if phrase.endswith(("？", "?")) and len(known.voices) == len(known.words) and before is not None \
@@ -2206,11 +2229,6 @@ def _edge_problems(
     """
     if len(plan.selections) < 2 or not cuts:
         return [], None
-    reasons = {selection.clip_id: selection.edge_reason for selection in plan.selections}
-
-    def excused(piece: Piece) -> bool:
-        return any(reasons.get(clip_id) for clip_id in piece.from_clip_ids)
-
     # Every word heard, in the order it is heard, as (file, place in its words); and each window
     # with the word it opens on and whether the word heard before it is the one before it in the file.
     heard: List[Tuple[str, int]] = []
@@ -2224,7 +2242,8 @@ def _edge_problems(
         if not words:
             continue
         before = heard[-1] if heard else None
-        # The same phrase with a pause taken out of it runs straight on.
+        # The same phrase with a pause taken out of it runs straight on; the word heard last is heard
+        # again when the cut between the two falls inside it.
         straight = before is not None and before[0] == piece.asset_id and words[0] - before[1] in (0, 1)
         opens.append((piece, words[0], straight))
         heard += [(piece.asset_id, index) for index in words if heard[-1:] != [(piece.asset_id, index)]]
@@ -2232,13 +2251,15 @@ def _edge_problems(
         return [], None
     found: List[str] = []
     for position, (piece, word, straight) in enumerate(opens):
-        if straight or excused(piece):
+        # A window merged from several selections opens on the first one's words and ends on the last one's.
+        if straight or any(piece.excused[:1]):
             continue
         opening = _opening_problem(piece, word, cuts[piece.asset_id], first=position == 0)
         if opening is not None:
             found.append(opening)
-    last = opens[-1][0]
-    ending, stopped = (None, False) if excused(last) else _ending_problem(last, heard, cuts[last.asset_id])
+    last, opened, _ = opens[-1]
+    ending, stopped = ((None, False) if any(last.excused[-1:])
+                       else _ending_problem(last, opened, heard, cuts[last.asset_id]))
     if ending is not None:
         found.append(ending)
     return found, last if stopped else None

@@ -29,8 +29,9 @@ TALK = [
 Words = Sequence[Tuple[str, float, float]]
 
 def checked(
-    segments: Sequence[Union[Tuple[float, float, str], Words]], choose, voices: Optional[Sequence[str]] = None,
-    voiced: Optional[Sequence[Tuple[float, float]]] = None,
+    segments: Sequence[Union[Tuple[float, float, str], Words]], choose,
+    voices: Optional[Sequence[Optional[str]]] = None, voiced: Optional[Sequence[Tuple[float, float]]] = None,
+    quiet: Sequence[Tuple[float, float]] = (),
 ) -> Tuple[List[str], List[str]]:
     """Check a plan of the given talk, one file, one beat.
 
@@ -38,8 +39,10 @@ def checked(
         segments: Per stretch the transcriber wrote, either `(start, end,
             text)`, said as one word, or its words as `(text, start, end)`.
         choose: Turns the file's sentence clips, in order, into the plan's selections.
-        voices: Who says each sentence, in the same order; nobody told apart when None.
+        voices: Who says each sentence, in the same order, None for one no turn
+            covers; nobody told apart when None.
         voiced: Where a second listen heard somebody talking; not listened to again when None.
+        quiet: Silences measured inside the stretches, besides the ones between them.
 
     Returns:
         `(problems, notes)` from `check_plan`.
@@ -52,6 +55,7 @@ def checked(
         silences.append((last, start))
         last = end
     silences.append((last, 20.0))
+    silences = sorted([*silences, *quiet])
     made = analysis(20.0, segments=segments, silences=silences)
     made = made.model_copy(update={"transcript": made.transcript.model_copy(update={"segments": [
         segment.model_copy(update={"words": [TranscriptWord(text=text, start=start, end=end)
@@ -64,6 +68,7 @@ def checked(
     if voices is not None:
         made = made.model_copy(update={"speakers": [
             SpeakerTurn(start=start, end=end, speaker=voice) for (start, end, _), voice in zip(segments, voices)
+            if voice is not None
         ]})
     assets = {ASSET_ID: sourced()}
     timeline, clips = build_timeline(assets, {ASSET_ID: made})
@@ -316,3 +321,87 @@ def test_a_phrase_opened_after_the_particle_the_transcriber_hung_on_its_front_st
         Selection(clip_id=spoken[3].id, beat_id="b1"),
     ])
     assert problems == []
+
+def test_a_refused_ending_says_where_its_phrase_finishes_and_what_that_costs_the_video() -> None:
+    problems, _ = checked(TALK, lambda spoken: [
+        Selection(clip_id=spoken[0].id, beat_id="b1"),
+        Selection(clip_id=spoken[3].id, beat_id="b1", trim=Trim(kind=TrimKind.HEAD, seconds=2.0), speed=2.0),
+    ])
+    # The phrase finishes at 18.00s of the file; 4s of it at double speed is 2s of the video.
+    assert any("18.00s" in problem and "2.0s more of the video" in problem for problem in problems)
+
+def test_a_cut_that_ends_on_the_next_subject_with_a_comma_after_it_is_refused() -> None:
+    # Transcribers write 「接下來，」, and the comma alone does not make what follows a new line.
+    problems, _ = checked([*NEXT_SUBJECT[:2], [("接下來，", 8.0, 8.8), ("我們去吃飯。", 8.8, 10.0)]], lambda spoken: [
+        Selection(clip_id=spoken[0].id, beat_id="b1"),
+        Selection(clip_id=spoken[2].id, beat_id="b1"),
+    ])
+    assert any("接下來，我們去吃飯" in problem and "next" in problem for problem in problems)
+
+def test_a_question_whose_answer_no_turn_covers_is_not_judged() -> None:
+    problems, _ = checked(INTERVIEW, lambda spoken: [
+        Selection(clip_id=spoken[0].id, beat_id="b1"),
+        Selection(clip_id=spoken[2].id, beat_id="b1"),
+    ], voices=[None, None, "S2"])
+    assert problems == []
+
+def test_a_reason_on_one_of_two_selections_of_the_same_line_excuses_that_one_only() -> None:
+    problems, _ = checked(STORY, lambda spoken: [
+        Selection(clip_id=spoken[0].id, beat_id="b1"),
+        Selection(clip_id=spoken[2].id, beat_id="b1", edge_reason="字卡已經交代下過雨，這句接得上"),
+        Selection(clip_id=spoken[4].id, beat_id="b1"),
+        Selection(clip_id=spoken[2].id, beat_id="b1"),
+        Selection(clip_id=spoken[4].id, beat_id="b1"),
+    ])
+    assert len([problem for problem in problems if "因為昨天下過雨" in problem]) == 1
+
+def test_a_video_whose_first_words_are_the_first_said_in_the_file_is_told_to_open_elsewhere() -> None:
+    # There is no earlier start to offer: nothing is said before 「所以」.
+    assert any("open on another piece" in problem for problem in opening_on("所以我們決定去爬山。"))
+
+def test_a_video_may_open_on_a_word_that_only_starts_with_a_particle() -> None:
+    assert opening_on("的確很值得去一次。") == []
+
+def test_an_ending_cut_in_real_quiet_does_not_stop_partway_through_the_word_stretched_over_it() -> None:
+    # 「真的很值得。」 was given 12s to 16s, but nobody speaks after 13.5s: ending at 14s finishes it.
+    problems, _ = checked([*TALK[:3], (12.0, 16.0, "真的很值得。")], lambda spoken: [
+        Selection(clip_id=spoken[0].id, beat_id="b1"),
+        Selection(clip_id=spoken[3].id, beat_id="b1", trim=Trim(kind=TrimKind.HEAD, seconds=2.0)),
+    ], voiced=[(1.0, 3.0), (3.5, 5.0), (8.0, 10.0), (12.0, 13.5)])
+    assert problems == []
+
+def joined_at(stretch: Sequence[Union[Tuple[float, float, str], Words]], **given) -> List[str]:
+    """Check a cut that joins into the stretch starting at 4s, after a line from elsewhere in the file.
+
+    The words run end to end, so no gap between them says where a phrase begins.
+
+    Args:
+        stretch: The transcriber's stretches from 1s to 6s.
+        **given: Passed on to `checked`.
+
+    Returns:
+        The problems.
+    """
+    problems, _ = checked([(0.1, 0.4, "出發。"), *stretch, (12.0, 14.0, "真的很值得。")], lambda spoken: [
+        Selection(clip_id=spoken[0].id, beat_id="b1"),
+        Selection(clip_id=spoken[-2].id, beat_id="b1", trim=Trim(kind=TrimKind.TAIL, seconds=2.0)),
+        Selection(clip_id=spoken[-1].id, beat_id="b1"),
+    ], **given)
+    return problems
+
+def test_words_laid_end_to_end_with_nothing_between_them_are_one_phrase() -> None:
+    assert any("partway" in problem for problem in joined_at(
+        [[("今天我們一路走", 1.0, 3.0), ("走得很累", 3.0, 4.0), ("後來我們到了山頂。", 4.0, 6.0)]]))
+
+def test_punctuation_ends_a_phrase_the_word_timings_run_straight_through() -> None:
+    assert joined_at([[("今天我們一路走", 1.0, 3.0), ("走得很累。", 3.0, 4.0), ("後來我們到了山頂。", 4.0, 6.0)]]) == []
+
+def test_a_space_the_transcriber_put_between_words_ends_a_phrase() -> None:
+    assert joined_at([[("今天我們一路走", 1.0, 3.0), ("走得很累", 3.0, 4.0), (" 後來我們到了山頂。", 4.0, 6.0)]]) == []
+
+def test_a_measured_silence_the_word_timings_run_over_ends_a_phrase() -> None:
+    assert joined_at([[("今天我們一路走", 1.0, 3.0), ("走得很累", 3.0, 4.0), ("後來我們到了山頂。", 4.0, 6.0)]],
+                     quiet=[(3.6, 4.0)]) == []
+
+def test_a_sentence_the_transcriber_started_starts_a_phrase() -> None:
+    assert joined_at([[("今天我們一路走", 1.0, 3.0), ("走得很累", 3.0, 4.0)], [("後來我們到了山頂", 4.0, 6.0)]]) == []
