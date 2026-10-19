@@ -9,7 +9,7 @@ import pytest
 from starlette.testclient import TestClient
 
 from app import runtime, server
-from app.tools import rendering
+from app.tools import editing, rendering, upkeep, versioning
 from app.models.job import Job, JobKind, JobStatus
 from app.storage import housekeeping
 from helpers import build_project, edit, insert, video_track
@@ -33,7 +33,7 @@ def finished(project_id: str, version: int, name: str) -> Path:
 
 
 def test_a_deleted_project_waits_in_the_trash_and_comes_back_where_it_was(client: TestClient) -> None:
-    project = server.create_project(name="垃圾桶裡的")["id"]
+    project = editing.create_project(name="垃圾桶裡的")["id"]
     folder = client.post("/api/folders", json={"action": "create", "kind": "projects", "name": "放回這裡"}).json()
     client.post("/api/file", json={"kind": "projects", "ids": [project], "folder_id": folder["id"]})
 
@@ -86,10 +86,10 @@ def test_other_versions_go_but_the_current_and_the_starred_stay(client: TestClie
 def test_a_starred_version_keeps_its_finished_video(kept_history, client: TestClient, media: Path) -> None:
     asset = server.import_asset(str(media / "wide.mp4"))["id"]
     project = build_project([video_track(), insert("a", asset, 0, 3)], name="標星號的")
-    starred = server.project_history(project)["versions"][0]["commit"]
+    starred = versioning.project_history(project)["versions"][0]["commit"]
     finished(project, runtime.repo.get_project(project).version, "標星號的 星號.mp4")
     edit(project, [insert("b", asset, 4, 6)])
-    server.mark_version(project, starred, "starred")
+    versioning.mark_version(project, starred, "starred")
     assert client.get(f"/api/projects/{project}/storage").json()["other_outputs"] == []
 
 
@@ -165,31 +165,33 @@ def test_a_folder_next_to_clip_mcp_s_own_is_not_taken_for_it(tmp_path: Path) -> 
 def test_the_ai_reading_the_trash_deletes_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(server, "output_dir", lambda: tmp_path)
     monkeypatch.setattr(rendering, "output_dir", lambda: tmp_path)
+    monkeypatch.setattr(upkeep, "output_dir", lambda: tmp_path)
     old = housekeeping.put_in_trash(str(tmp_path), "project", "b" * 36, "過期了", {"project.json": b"{}"}, [])
     meta = tmp_path / housekeeping.TRASH / old.key / "trashed.json"
     import json
     data = json.loads(meta.read_text(encoding="utf-8"))
     data["trashed_at"] = (datetime.now(timezone.utc) - timedelta(days=40)).isoformat()
     meta.write_text(json.dumps(data), encoding="utf-8")
-    assert [item["key"] for item in server.storage_usage()["trash"]] == [old.key]
+    assert [item["key"] for item in upkeep.storage_usage()["trash"]] == [old.key]
     # The editor's own look at it is what lets it go.
-    assert server.list_trash(expire=True)["items"] == []
+    assert upkeep.list_trash(expire=True)["items"] == []
 
 
 def test_a_broken_project_in_the_trash_stays_there(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(server, "output_dir", lambda: tmp_path)
     monkeypatch.setattr(rendering, "output_dir", lambda: tmp_path)
+    monkeypatch.setattr(upkeep, "output_dir", lambda: tmp_path)
     kept = housekeeping.put_in_trash(str(tmp_path), "project", "c" * 36, "壞掉的", {"project.json": b"not json"}, [])
     with pytest.raises(ValueError):
-        server.restore_from_trash(kept.key)
+        upkeep.restore_from_trash(kept.key)
     assert [item.key for item in housekeeping.in_trash(str(tmp_path))] == [kept.key]
 
 
 def test_other_versions_of_a_video_with_no_name_are_not_let_go(media: Path) -> None:
     import uuid
 
-    named = runtime.repo.get_project(server.create_project(name="有名字")["id"])
+    named = runtime.repo.get_project(editing.create_project(name="有名字")["id"])
     nameless = named.model_copy(update={"id": str(uuid.uuid4()), "name": ""})
     runtime.repo.add_project(nameless)
     with pytest.raises(ValueError, match="name the video first"):
-        server.trim_project(nameless.id, "")
+        upkeep.trim_project(nameless.id, "")

@@ -9,6 +9,7 @@ from fastmcp import Client
 from starlette.testclient import TestClient
 
 from app import runtime, server
+from app.tools import editing, versioning
 from helpers import build_project, edit, insert, video_track
 
 
@@ -89,7 +90,7 @@ def test_comments_are_kept_in_the_history_beside_the_project(media: Path, kept_h
     assert json.loads(kept)[0]["text"] == "換一首歌"
     # Closed, it says which version it was dealt with in.
     closed = server.change_comment(project, written["id"], "AI（測試）", "換成 Sunny", "resolved")
-    assert closed["resolved_in"] == server.project_history(project)["versions"][0]["commit"]
+    assert closed["resolved_in"] == versioning.project_history(project)["versions"][0]["commit"]
 
 
 def test_the_ai_asks_what_it_could_not_decide_on_its_moment_and_hears_the_answer(media: Path) -> None:
@@ -111,11 +112,11 @@ def test_the_ai_asks_what_it_could_not_decide_on_its_moment_and_hears_the_answer
 def test_a_preference_said_once_comes_back_with_every_project_until_it_is_forgotten() -> None:
     kept = server.remember_preference("開場不要超過三秒")["kept"]
     try:
-        assert {"id": kept["id"], "text": "開場不要超過三秒"} in server.list_projects()["preferences"]
-        made = server.create_project("下一支")
-        assert kept in made["preferences"] and kept in server.get_project(made["id"])["preferences"]
+        assert {"id": kept["id"], "text": "開場不要超過三秒"} in editing.list_projects()["preferences"]
+        made = editing.create_project("下一支")
+        assert kept in made["preferences"] and kept in editing.get_project(made["id"])["preferences"]
     finally:
         assert server.forget_preference(kept["id"]) == {"forgotten": kept["id"]}
-    assert kept not in server.list_projects().get("preferences", [])
+    assert kept not in editing.list_projects().get("preferences", [])
     with pytest.raises(ValueError, match="there is no preference"):
         server.forget_preference(kept["id"])

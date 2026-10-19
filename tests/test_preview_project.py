@@ -7,8 +7,9 @@ from pathlib import Path
 import pytest
 from PIL import Image
 
+from app.tools.editing import get_project
 from app.tools.rendering import preview_project
-from app.server import get_project, import_asset
+from app.server import import_asset
 from helpers import build_project, insert, video_track
 
 def storyboard(project_id: str, **kwargs) -> tuple:

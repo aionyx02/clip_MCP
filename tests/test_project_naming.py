@@ -3,8 +3,8 @@
 import pytest
 
 from app.models.timeline import Project
+from app.tools.editing import create_project, get_project, list_projects
 from app.tools.rendering import MAX_OUTPUT_NAME, output_name
-from app.server import create_project, get_project, list_projects
 from helpers import edit
 
 def test_a_project_can_be_named_when_it_is_created() -> None:

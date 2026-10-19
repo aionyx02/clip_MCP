@@ -9,7 +9,7 @@ import pytest
 from starlette.testclient import TestClient
 
 from app import runtime, server
-from app.tools import examining, rendering
+from app.tools import editing, examining, rendering, subtitles, upkeep
 from app.models.offer import OfferedSong
 from app.ui import app as editor
 from app.ui import dialogs
@@ -69,7 +69,7 @@ def test_only_the_apps_own_folders_can_be_opened(client: TestClient, monkeypatch
 
 def test_clearing_ignores_anything_but_what_can_be_made_again(client: TestClient, monkeypatch) -> None:
     asked = []
-    monkeypatch.setattr(server, "clean_storage", lambda kinds: asked.append(kinds) or {"freed_megabytes": 0})
+    monkeypatch.setattr(upkeep, "clean_storage", lambda kinds: asked.append(kinds) or {"freed_megabytes": 0})
     client.post("/api/storage", json={"kinds": ["previews", "data", "outputs", "model:whisper"]})
     assert asked == [["previews"]]
 
@@ -91,7 +91,7 @@ def test_undo_puts_back_the_last_edit_and_refuses_once_something_else_has_edited
          "source_range": {"start": 0, "end": 2}},
     ]})
     # The AI renames it meanwhile: undoing now would throw that away unseen.
-    server.apply_edits(made["id"], current + 1, server._OPERATIONS.validate_python([
+    editing.apply_edits(made["id"], current + 1, server._OPERATIONS.validate_python([
         {"action": "rename_project", "name": "AI 改的"},
     ]))
     assert client.post(f"/api/projects/{made['id']}/undo").status_code == 409
@@ -197,7 +197,7 @@ def test_captioning_asks_before_transcribing_and_says_if_the_model_must_download
 def test_captioning_footage_already_transcribed_goes_straight_to_captions(client: TestClient, media: Path, monkeypatch) -> None:
     project, _ = captioned_project(client, media)
     monkeypatch.setattr(editor, "_untranscribed", lambda found: [])
-    monkeypatch.setattr(server, "generate_subtitles", lambda project_id, version: {"new_version": version + 1, "captions": ["a", "b"]})
+    monkeypatch.setattr(subtitles, "generate_subtitles", lambda project_id, version: {"new_version": version + 1, "captions": ["a", "b"]})
     answer = client.post(f"/api/projects/{project}/captions/make", json={"expected_version": 7}).json()
     assert answer == {"new_version": 8, "count": 2}
 
@@ -426,7 +426,7 @@ def test_deleting_projects_takes_them_and_their_previews_and_keeps_what_was_deli
 ) -> None:
     from app.storage import housekeeping
 
-    first, second = (server.create_project(name=f"要刪掉的{n}") for n in (1, 2))
+    first, second = (editing.create_project(name=f"要刪掉的{n}") for n in (1, 2))
     folder = _folder(client, "projects", "舊專案")
     runtime.repo.file_items("projects", [first["id"]], folder)
     previews = Path(housekeeping.preview_dir(runtime.WORKSPACE_DIR, first["id"])) / "old"
@@ -446,7 +446,7 @@ def test_deleting_projects_takes_them_and_their_previews_and_keeps_what_was_deli
 def test_a_project_being_rendered_is_not_deleted(client: TestClient, ended_after: list) -> None:
     from app.models.job import Job, JobKind, JobStatus
 
-    project = server.create_project(name="輸出中")
+    project = editing.create_project(name="輸出中")
     render_job = Job(kind=JobKind.RENDER, status=JobStatus.RUNNING, project_id=project["id"])
     runtime.repo.add_job(render_job)
     ended_after.append(render_job.job_id)
@@ -470,7 +470,7 @@ def test_the_editor_sees_jobs_the_ai_started_with_what_they_are_for(
 
     asset = Asset(id="job-asset", path=str(tmp_path / "訪談.mp4"), has_video=True, has_audio=True)
     runtime.repo.save_asset(asset)
-    project = server.create_project(name="抽杯架 v3")
+    project = editing.create_project(name="抽杯架 v3")
     analysing = Job(kind=JobKind.ANALYZE, status=JobStatus.RUNNING, asset_id=asset.id, progress=0.4)
     render_job = Job(kind=JobKind.RENDER, project_id=project["id"])
     for job in (analysing, render_job):
@@ -483,7 +483,7 @@ def test_the_editor_sees_jobs_the_ai_started_with_what_they_are_for(
 def test_a_job_can_be_stopped_from_the_editor(client: TestClient, ended_after: list) -> None:
     from app.models.job import Job, JobKind
 
-    waiting = Job(kind=JobKind.RENDER, project_id=server.create_project(name="不要了")["id"])
+    waiting = Job(kind=JobKind.RENDER, project_id=editing.create_project(name="不要了")["id"])
     runtime.repo.add_job(waiting)
     ended_after.append(waiting.job_id)
     assert client.post("/api/jobs/cancel", json={"job_id": waiting.job_id}).status_code == 200
@@ -499,7 +499,7 @@ def test_offered_songs_are_heard_in_place_of_the_music_and_the_pick_comes_back_a
     wide = server.import_asset(str(media / "wide.mp4"))["id"]
     song = server.import_asset(str(media / "song.mp3"))["id"]
     jingle = server.import_asset(str(media / "jingle.wav"))["id"]
-    server.apply_edits(made["id"], runtime.repo.get_project(made["id"]).version, server._OPERATIONS.validate_python([
+    editing.apply_edits(made["id"], runtime.repo.get_project(made["id"]).version, server._OPERATIONS.validate_python([
         {"action": "insert_clip", "track_id": "video", "clip_id": "a", "asset_id": wide,
          "source_range": {"start": 0, "end": 6}},
         {"action": "insert_clip", "track_id": "music", "clip_id": "m", "asset_id": jingle,

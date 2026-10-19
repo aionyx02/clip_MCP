@@ -3,6 +3,7 @@
 from pathlib import Path
 
 from app import runtime, server
+from app.tools import versioning
 from app.engine.merge import merge, merge_plans
 from app.models.plan import Beat, EditPlan, Selection
 from helpers import build_project, edit, insert, video_track
@@ -39,16 +40,16 @@ def test_each_part_comes_whole_from_the_side_picked(media: Path) -> None:
 
 def test_a_merge_is_a_new_version_and_both_it_came_from_stay(media: Path, kept_history) -> None:
     project = three_shots(media)
-    whole = server.project_history(project)["versions"][0]["commit"]
+    whole = versioning.project_history(project)["versions"][0]["commit"]
     edit(project, [{"action": "delete_clip", "track_id": "main", "clip_id": "c"}])
     version = runtime.repo.get_project(project).version
-    before = len(server.project_history(project)["versions"])
+    before = len(versioning.project_history(project)["versions"])
     from test_comments import call
 
     merged = call("merge_version_parts", {"project_id": project, "commit_a": whole, "picks": {"主體": "a"},
                                           "expected_version": version})
     assert merged["new_version"] == version + 1 and merged["from_a"] == ["主體"] and merged["seconds"] == 10.0
-    history = server.project_history(project)["versions"]
+    history = versioning.project_history(project)["versions"]
     assert history[0]["what"].startswith("合成兩版") and len(history) == before + 1
 
 
@@ -57,7 +58,7 @@ def test_a_part_nobody_has_cannot_be_picked(media: Path) -> None:
 
     project = three_shots(media)
     with pytest.raises(ValueError, match="nothing called 結尾"):
-        server.merge_versions(project, "", None, {"結尾": "a"}, runtime.repo.get_project(project).version)
+        versioning.merge_versions(project, "", None, {"結尾": "a"}, runtime.repo.get_project(project).version)
 
 
 def test_the_plans_are_merged_beat_by_beat_with_their_reasons() -> None:

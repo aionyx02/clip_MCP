@@ -10,7 +10,8 @@ from fastmcp import Client
 from app.models.plan import EditPlan, short_clip_ids, with_whole_clip_ids
 from app.runtime import mcp
 from app.runtime import repo as runtime_repo
-from app.server import build_semantic_timeline, import_asset, query_clips
+from app.server import import_asset
+from app.tools.timelines import build_semantic_timeline, query_clips
 from test_edit_plan import FOOTAGE
 from test_semantic_timeline import analysis
 
@@ -115,7 +116,7 @@ def test_reading_through_footage_carries_each_file_s_notes_once(timeline: dict) 
 def test_a_short_id_in_two_timelines_is_the_newest_one_s(timeline: dict, media: Path, tmp_path: Path) -> None:
     import shutil
 
-    from app.server import get_semantic_clip
+    from app.tools.timelines import get_semantic_clip
 
     shutil.copy(media / "tall.mp4", tmp_path / "另一條時間軸.mp4")
     other = import_asset(str(tmp_path / "另一條時間軸.mp4"))["id"]

@@ -31,7 +31,7 @@ from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 
 from app import clients, runtime, server
-from app.tools import examining, rendering
+from app.tools import editing, examining, rendering, subtitles, upkeep, versioning
 from app.models.comment import USER
 from app.engine.ffmpeg import hidden_window_flags
 from app.engine import models
@@ -97,14 +97,14 @@ async def projects(request: Request) -> Response:
     if request.method == "POST":
         body = await request.json()
         try:
-            made = server.create_project(
+            made = editing.create_project(
                 name=str(body.get("name") or ""),
                 width=int(body.get("width", 1920)),
                 height=int(body.get("height", 1080)),
             )
         except (ValueError, TypeError) as error:
             return _error(str(error))
-        server.apply_edits(made["id"], made["version"], server._OPERATIONS.validate_python([
+        editing.apply_edits(made["id"], made["version"], server._OPERATIONS.validate_python([
             {"action": "add_track", "track_id": "video", "track_type": "video"},
             {"action": "add_track", "track_id": "music", "track_type": "audio", "duck_under_speech": True},
         ]))
@@ -135,7 +135,7 @@ async def projects(request: Request) -> Response:
             "branches": branched.get(project.id, 0),
             # Shown under the project it was branched from, when that one is in the same folder.
             "under": project.branched_from.project_id if project.branched_from else None,
-            "megabytes": server.disk_of(project.id),
+            "megabytes": upkeep.disk_of(project.id),
         })
     return JSONResponse({"projects": listed})
 
@@ -163,7 +163,7 @@ async def edits(request: Request) -> Response:
         return _error(f"project {project_id} not found", 404)
     try:
         operations = server._OPERATIONS.validate_python(body.get("operations", []))
-        result = server.apply_edits(project_id, int(body["expected_version"]), operations)
+        result = editing.apply_edits(project_id, int(body["expected_version"]), operations)
     except (ValueError, KeyError, TypeError) as error:
         conflict = "version conflict" in str(error)
         return _error(str(error), 409 if conflict else 400)
@@ -333,7 +333,7 @@ async def make_captions(request: Request) -> Response:
         )
         return JSONResponse({"jobs": [job["job_id"] for job in started["jobs"]]})
     try:
-        made = await run_in_threadpool(server.generate_subtitles, project_id, int(body["expected_version"]))
+        made = await run_in_threadpool(subtitles.generate_subtitles, project_id, int(body["expected_version"]))
     except (ValueError, KeyError) as error:
         return _error(str(error), 409 if "version conflict" in str(error) else 400)
     return JSONResponse({"new_version": made["new_version"], "count": len(made["captions"])})
@@ -442,7 +442,7 @@ async def move_library(request: Request) -> Response:
 async def versions(request: Request) -> Response:
     """The version panel: a video's versions grouped into dots, and the branches started from it."""
     try:
-        graph = await run_in_threadpool(server.version_graph, request.path_params["project_id"])
+        graph = await run_in_threadpool(versioning.version_graph, request.path_params["project_id"])
     except ValueError as error:
         return _error(str(error), 404)
     return JSONResponse(graph)
@@ -451,7 +451,7 @@ async def restore(request: Request) -> Response:
     """Make the video what it was at one version, as a new version on top."""
     body = await request.json()
     try:
-        result = await run_in_threadpool(server.restore_version, request.path_params["project_id"],
+        result = await run_in_threadpool(versioning.restore_version, request.path_params["project_id"],
                                           str(body["commit"]), int(body["expected_version"]))
     except (ValueError, KeyError, TypeError) as error:
         return _error(str(error), 409 if "version conflict" in str(error) else 400)
@@ -461,7 +461,7 @@ async def branch(request: Request) -> Response:
     """Start a branch of the video from one of its versions."""
     body = await request.json()
     try:
-        result = await run_in_threadpool(server.branch_project, request.path_params["project_id"],
+        result = await run_in_threadpool(versioning.branch_project, request.path_params["project_id"],
                                           str(body["name"]), body.get("commit"))
     except (ValueError, KeyError, TypeError) as error:
         return _error(str(error), 400)
@@ -470,10 +470,10 @@ async def branch(request: Request) -> Response:
 async def mark(request: Request) -> Response:
     """Put a star or the published mark on a version, or take it off."""
     body = await request.json()
-    if body.get("mark") not in server.VERSION_MARKS:
+    if body.get("mark") not in versioning.VERSION_MARKS:
         return _error("a version is marked starred or published", 400)
     try:
-        result = await run_in_threadpool(server.mark_version, request.path_params["project_id"],
+        result = await run_in_threadpool(versioning.mark_version, request.path_params["project_id"],
                                           str(body["commit"]), body["mark"], bool(body.get("on", True)))
     except (ValueError, KeyError) as error:
         return _error(str(error), 400)
@@ -485,9 +485,9 @@ async def compare_versions(request: Request) -> Response:
     try:
         def compared():
             """Both versions read and compared, off the event loop."""
-            before, a = server._version_at(project_id, request.query_params.get("a"))
-            after, b = server._version_at(project_id, request.query_params.get("b"))
-            return {"a": a, "b": b, **server.compare_projects(before, after)}
+            before, a = versioning.version_at(project_id, request.query_params.get("a"))
+            after, b = versioning.version_at(project_id, request.query_params.get("b"))
+            return {"a": a, "b": b, **versioning.compare_projects(before, after)}
         return JSONResponse(await run_in_threadpool(compared))
     except ValueError as error:
         return _error(str(error), 400)
@@ -497,7 +497,7 @@ async def merge_versions(request: Request) -> Response:
     body = await request.json()
     try:
         result = await run_in_threadpool(
-            server.merge_versions, request.path_params["project_id"], str(body["a"]), body.get("b") or None,
+            versioning.merge_versions, request.path_params["project_id"], str(body["a"]), body.get("b") or None,
             {str(key): str(value) for key, value in (body.get("picks") or {}).items()}, int(body["expected_version"]))
     except (ValueError, KeyError, TypeError) as error:
         return _error(str(error), 400)
@@ -572,7 +572,7 @@ async def playback(request: Request) -> Response:
     project_id = request.path_params["project_id"]
     commit = request.query_params.get("commit")
     try:
-        project = (server._project_at(project_id, commit) if commit
+        project = (versioning.project_at(project_id, commit) if commit
                    else runtime.repo.get_project(project_id))
     except ValueError as error:
         return _error(str(error), 404)
@@ -667,23 +667,23 @@ async def delete_projects(request: Request) -> Response:
     ids = [str(project_id) for project_id in body.get("ids", []) if project_id]
     if not ids:
         return _error("no projects chosen")
-    result = await run_in_threadpool(server.trash_projects, ids)
+    result = await run_in_threadpool(upkeep.trash_projects, ids)
     return JSONResponse(result, status_code=409 if result["busy"] else 200)
 
 async def trash(request: Request) -> Response:
     """What is in the trash (GET), or put one thing back from it (POST)."""
     if request.method == "GET":
-        return JSONResponse(await run_in_threadpool(server.list_trash, True))
+        return JSONResponse(await run_in_threadpool(upkeep.list_trash, True))
     body = await request.json()
     try:
-        return JSONResponse(await run_in_threadpool(server.restore_from_trash, str(body.get("key", ""))))
+        return JSONResponse(await run_in_threadpool(upkeep.restore_from_trash, str(body.get("key", ""))))
     except ValueError as error:
         return _error(str(error), 404)
 
 async def project_storage(request: Request) -> Response:
     """What one video takes on disk, and what deleting its other versions would give back."""
     try:
-        return JSONResponse(await run_in_threadpool(server.project_storage, request.path_params["project_id"]))
+        return JSONResponse(await run_in_threadpool(upkeep.project_storage, request.path_params["project_id"]))
     except ValueError as error:
         return _error(str(error), 404)
 
@@ -691,7 +691,7 @@ async def trim(request: Request) -> Response:
     """Delete a video's other versions, once the user has typed its name."""
     body = await request.json()
     try:
-        return JSONResponse(await run_in_threadpool(server.trim_project, request.path_params["project_id"],
+        return JSONResponse(await run_in_threadpool(upkeep.trim_project, request.path_params["project_id"],
                                                     str(body.get("name", ""))))
     except ValueError as error:
         return _error(str(error), 400)
@@ -950,8 +950,8 @@ async def storage(request: Request) -> Response:
     if request.method == "POST":
         body = await request.json()
         kinds = [kind for kind in body.get("kinds", []) if kind in ("previews", "thumbnails", "playback", "work")]
-        return JSONResponse(server.clean_storage(kinds))
-    return JSONResponse(server.storage_usage())
+        return JSONResponse(upkeep.clean_storage(kinds))
+    return JSONResponse(upkeep.storage_usage())
 
 def _openable() -> Dict[str, str]:
     """The folders the page may open, by name: never a path the page made up."""
