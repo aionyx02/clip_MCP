@@ -471,3 +471,35 @@ def test_a_window_like_the_refused_ending_still_says_it_stops_short() -> None:
         Selection(clip_id=spoken[3].id, beat_id="b1", trim=Trim(kind=TrimKind.HEAD, seconds=2.0)),
     ])
     assert any("stop before the sentence ends" in note for note in notes)
+
+def test_a_join_partway_through_a_phrase_is_offered_its_first_word_past_the_particle() -> None:
+    # Starting where the phrase begins would open on 「呢」, a tail; 「先把」 at 2.3s is where it can start.
+    stretch = [("首先", 1.0, 1.6), ("呢", 2.0, 2.3), ("先把", 2.3, 2.9), ("它關機。", 2.9, 4.0)]
+    problems, _ = checked([(0.1, 0.4, "出發。"), (0.5, 0.9, "天還沒亮。"), stretch, (12.0, 14.0, "真的很值得。")],
+                          lambda spoken: [
+        Selection(clip_id=spoken[0].id, beat_id="b1"),
+        Selection(clip_id=spoken[2].id, beat_id="b1", trim=Trim(kind=TrimKind.TAIL, seconds=1.1)),
+        Selection(clip_id=spoken[3].id, beat_id="b1"),
+    ])
+    assert any("partway" in problem and "2.30s of the file" in problem for problem in problems)
+
+def test_a_sound_made_before_speaking_does_not_hide_the_word_that_leans() -> None:
+    assert any("所以" in problem and "opens" in problem for problem in opening_on("嗯，所以我們決定去爬山。"))
+
+def test_a_sound_made_before_speaking_does_not_hide_the_next_subject() -> None:
+    problems, _ = checked([*NEXT_SUBJECT[:2], (8.0, 10.0, "嗯接下來我們去吃飯。")], lambda spoken: [
+        Selection(clip_id=spoken[0].id, beat_id="b1"),
+        Selection(clip_id=spoken[2].id, beat_id="b1"),
+    ])
+    assert any("接下來" in problem and "next" in problem for problem in problems)
+
+def test_a_pause_the_word_before_was_stretched_over_does_not_also_begin_the_word_after() -> None:
+    # 「我們」 was given 1.2s to 2.0s but said from 1.8s: the pause is before 「我們」, not after it,
+    # so 「去吃飯」 is still partway through 「我們去吃飯好開心」.
+    stretch = [("今天", 1.0, 1.2), ("我們", 1.2, 2.0), ("去吃飯", 2.0, 3.0), ("好開心", 3.0, 6.0)]
+    problems, _ = checked([(0.1, 0.4, "出發。"), stretch, (12.0, 14.0, "真的很值得。")], lambda spoken: [
+        Selection(clip_id=spoken[0].id, beat_id="b1"),
+        Selection(clip_id=spoken[1].id, beat_id="b1", trim=Trim(kind=TrimKind.TAIL, seconds=4.0)),
+        Selection(clip_id=spoken[2].id, beat_id="b1"),
+    ], voiced=[(0.1, 0.4), (1.0, 1.2), (1.8, 6.0), (12.0, 14.0)])
+    assert any("partway" in problem and "starts" in problem for problem in problems)

@@ -941,10 +941,11 @@ class CleanCuts:
         if start - before >= CLEAN_GAP_SECONDS:
             return True
         # The transcriber often lays words end to end and stretches one over the pause before it.
+        # A stretch that ends before the earlier word does was a pause before that word, not after.
         quiet = self._quiet_stretches
         at = bisect.bisect_left(quiet, (earlier_start, earlier_start))
         while at < len(quiet) and quiet[at][0] <= end:
-            if quiet[at][1] <= end:
+            if before - EDGE_TOLERANCE_SECONDS <= quiet[at][1] <= end:
                 return True
             at += 1
         opens = self._sentence_starts

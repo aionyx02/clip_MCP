@@ -2068,7 +2068,8 @@ def _cut_notes(
             f"{len(owed)} window(s) stop before the sentence ends: {', '.join(short)} short. Finishing them all "
             f"would add {total:.1f}s{share}; the longest is {piece.from_clip_ids[-1]}, {worst:.1f}s short. "
             "Give those seconds to the ones that sound abrupt, or leave them",
-            "stops_before_the_sentence_ends", clip_ids=_first_clips(cut for _, cut in owed), seconds=total,
+            "stops_before_the_sentence_ends", clip_ids=[cut.from_clip_ids[-1] for _, cut in owed if cut.from_clip_ids],
+            seconds=total,
             look=True,
         ))
     return said
@@ -2088,9 +2089,15 @@ SEQUENCE_OPENERS = ("然後", "還有", "再來")
 # Particles that end a phrase and so cannot begin one: a line that starts on one is the
 # tail of a sentence somebody split. 了 is left out for 了解, and 的確 is a word of its own.
 FRAGMENT_OPENERS = ("的", "呢", "吧", "嗎", "嘛", "囉", "啦", "呀")
-# What may be taken off the front of a phrase without leaving a fragment: the particles and
-# the sounds somebody makes before they start.
-DROPPABLE = set("".join(FRAGMENT_OPENERS) + "了啊喔欸嗯哦呃")
+# The sounds somebody makes before they start. They say nothing, so a line is read past them:
+# 「嗯，所以」 still opens on 「所以」.
+FILLERS = "啊喔欸嗯哦呃"
+# What may be taken off the front of a phrase without leaving a fragment: the particles and the fillers.
+DROPPABLE = set("".join(FRAGMENT_OPENERS) + "了" + FILLERS)
+
+def _past_fillers(said: str) -> str:
+    """What a line says once the sounds made before it, and the commas after them, are passed."""
+    return said.lstrip(FILLERS + CLAUSE_PUNCTUATION + " ")
 
 def _quiet(known: CleanCuts, seconds: float) -> bool:
     """Say whether nobody is talking at a moment, whatever the word timings say."""
@@ -2143,9 +2150,16 @@ def _opening_problem(piece: Piece, word: int, known: CleanCuts, first: bool) -> 
         opens, phrase = word, "".join(known.spoken[word:closes + 1]).strip()
     bitten = known.words[word][0] < piece.start - EDGE_TOLERANCE_SECONDS and not _quiet(known, piece.start)
     if opens != word or bitten:
-        begins = known.words[opens][0]
-        return (f"{where}, starts partway through 「{phrase}」: start where it begins, at {begins:.2f}s of the "
-                "file, or give `edge_reason` on that selection if it should open there")
+        # Where the phrase can be opened on: past any particle or filler on its front, which
+        # would leave the opening on a tail.
+        clean = opens
+        if len(known.spoken) == len(known.words):
+            clean = next((index for index in range(opens, word)
+                          if not all(character in DROPPABLE or character.isspace()
+                                     for character in known.spoken[index])), word)
+        begins = known.words[clean][0]
+        return (f"{where}, starts partway through 「{phrase}」: start on its first word, at {begins:.2f}s of "
+                "the file, or give `edge_reason` on that selection if it should open there")
     # Nothing said before it in the file means nothing to start from instead.
     instead = (f"start where that begins; the phrase before it in the file starts at "
                f"{known.words[_phrase(known, unstripped - 1)[0]][0]:.2f}s" if unstripped > 0
@@ -2154,7 +2168,7 @@ def _opening_problem(piece: Piece, word: int, known: CleanCuts, first: bool) -> 
         return (f"{where}, opens on 「{phrase}」, the tail of a sentence split in two: {instead}, or give "
                 "`edge_reason` on that selection if it should open there")
     leaning = next((opener for opener in (*LEANING_OPENERS, *(SEQUENCE_OPENERS if first else ()))
-                    if phrase.startswith(opener)), None)
+                    if _past_fillers(phrase).startswith(opener)), None)
     if leaning is not None:
         return (f"{where}, opens on 「{phrase}」, whose 「{leaning}」 leans on something before it that is not "
                 f"heard: {instead}, or give `edge_reason` on that selection if it should open there")
@@ -2196,7 +2210,8 @@ def _ending_problem(
         clauses.append(max(_phrase(known, clauses[-1] - 1)[0], opened))
     line = clauses[-1]
     said = "".join(known.spoken[line:word + 1]).strip() if line != opens else phrase
-    if any(_phrase(known, clause, last=word)[2].startswith(NEXT_SUBJECT_OPENERS) for clause in clauses):
+    if any(_past_fillers(_phrase(known, clause, last=word)[2]).startswith(NEXT_SUBJECT_OPENERS)
+           for clause in clauses):
         instead = (f"end on the phrase before it, at {known.words[line - 1][1]:.2f}s of the file" if line > opened
                    else "end on the piece before it")
         return (f"{_edge_of(last, 'ends', last.end)}, and the last thing heard is 「{said}」, which opens the next "
