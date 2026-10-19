@@ -83,6 +83,8 @@ def test_a_cut_that_ends_partway_through_its_last_sentence_is_refused() -> None:
         Selection(clip_id=spoken[3].id, beat_id="b1", trim=Trim(kind=TrimKind.HEAD, seconds=2.0)),
     ])
     assert any("真的很值得" in problem and "partway" in problem for problem in problems)
+    # The window opens on that phrase, so there is no earlier one in it to offer.
+    assert not any("phrase before it" in problem for problem in problems)
 
 def test_an_ending_that_stops_short_on_purpose_passes_with_its_reason() -> None:
     problems, _ = checked(TALK, lambda spoken: [
@@ -405,3 +407,47 @@ def test_a_measured_silence_the_word_timings_run_over_ends_a_phrase() -> None:
 
 def test_a_sentence_the_transcriber_started_starts_a_phrase() -> None:
     assert joined_at([[("今天我們一路走", 1.0, 3.0), ("走得很累", 3.0, 4.0)], [("後來我們到了山頂", 4.0, 6.0)]]) == []
+
+def test_a_cut_that_ends_on_the_next_subject_after_a_word_and_a_comma_is_refused() -> None:
+    problems, _ = checked([*NEXT_SUBJECT[:2], [("好，", 8.0, 8.4), ("接下來", 8.4, 9.0), ("我們去吃飯。", 9.0, 10.0)]],
+                          lambda spoken: [
+        Selection(clip_id=spoken[0].id, beat_id="b1"),
+        Selection(clip_id=spoken[2].id, beat_id="b1"),
+    ])
+    assert any("好，接下來我們去吃飯" in problem and "end on the piece before it" in problem for problem in problems)
+
+def test_a_refused_next_subject_says_where_the_phrase_before_it_finishes() -> None:
+    problems, _ = checked([*NEXT_SUBJECT[:2], [("好吃。", 8.0, 8.6), ("接下來我們去吃飯。", 8.6, 10.0)]], lambda spoken: [
+        Selection(clip_id=spoken[0].id, beat_id="b1"),
+        Selection(clip_id=spoken[2].id, beat_id="b1"),
+    ])
+    assert any("next" in problem and "8.60s of the file" in problem for problem in problems)
+
+def test_a_refused_ending_offers_the_phrase_before_it_in_the_window() -> None:
+    problems, _ = checked([*TALK[:3], [("今天天氣很好。", 12.0, 13.0), ("我們一路走上來", 13.0, 18.0)]], lambda spoken: [
+        Selection(clip_id=spoken[0].id, beat_id="b1"),
+        Selection(clip_id=spoken[3].id, beat_id="b1", trim=Trim(kind=TrimKind.HEAD, seconds=3.0)),
+    ])
+    assert any("partway" in problem and "18.00s" in problem and "13.00s of the file" in problem
+               for problem in problems)
+
+def test_a_question_split_by_a_comma_is_still_somebody_else_asking() -> None:
+    problems, _ = checked([*INTERVIEW[:2], [("那你呢，", 8.0, 8.8), ("後來還敢再去嗎？", 8.8, 10.0)]], lambda spoken: [
+        Selection(clip_id=spoken[0].id, beat_id="b1"),
+        Selection(clip_id=spoken[2].id, beat_id="b1"),
+    ], voices=["S1", "S1", "S2"])
+    assert any("那你呢，後來還敢再去嗎" in problem and "question" in problem for problem in problems)
+
+def test_an_ending_on_a_window_merged_from_two_selections_names_the_last_one() -> None:
+    # The two lines nearly touch, so they play as one window; its end is the second selection's.
+    holder: List[SemanticClip] = []
+
+    def choose(spoken: List[SemanticClip]) -> List[Selection]:
+        holder.extend(spoken)
+        return [
+            Selection(clip_id=spoken[0].id, beat_id="b1"),
+            Selection(clip_id=spoken[1].id, beat_id="b1", trim=Trim(kind=TrimKind.HEAD, seconds=2.0)),
+        ]
+
+    problems, _ = checked([(1.0, 3.0, "今天我們去爬山。"), (3.1, 9.0, "真的很值得這樣一路走上來。")], choose)
+    assert any(f"{holder[1].id} ends" in problem and "partway" in problem for problem in problems)

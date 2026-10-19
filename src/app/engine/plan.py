@@ -191,8 +191,13 @@ def _first_clips(pieces: Iterable["Piece"]) -> List[str]:
     return [piece.from_clip_ids[0] for piece in pieces if piece.from_clip_ids]
 
 def _edge_of(piece: "Piece", side: str, seconds: float) -> str:
-    """Say where one edge of a window is: `u0410 starts at 2.23s of its file`."""
-    return f"{(piece.from_clip_ids or (piece.asset_id,))[0]} {side} at {seconds:.2f}s of its file"
+    """Say where one edge of a window is: `u0410 starts at 2.23s of its file`.
+
+    A window merged from several clips starts on its first and ends on its last,
+    so that is the one named, and the one whose selection is to be changed.
+    """
+    named = piece.from_clip_ids or (piece.asset_id,)
+    return f"{named[-1] if side == 'ends' else named[0]} {side} at {seconds:.2f}s of its file"
 
 @dataclass(frozen=True)
 class Piece:
@@ -2133,9 +2138,8 @@ def _opening_problem(piece: Piece, word: int, known: CleanCuts, first: bool) -> 
     bitten = known.words[word][0] < piece.start - EDGE_TOLERANCE_SECONDS and not _quiet(known, piece.start)
     if opens != word or bitten:
         begins = known.words[opens][0]
-        return (f"{where}, starts partway through 「{phrase}」, {piece.start - begins:.1f}s after it begins: start "
-                f"where it begins, at {begins:.2f}s of the file, or give `edge_reason` on that selection if it "
-                "should open there")
+        return (f"{where}, starts partway through 「{phrase}」: start where it begins, at {begins:.2f}s of the "
+                "file, or give `edge_reason` on that selection if it should open there")
     # Nothing said before it in the file means nothing to start from instead.
     instead = (f"start where that begins; the phrase before it in the file starts at "
                f"{known.words[_phrase(known, word - 1)[0]][0]:.2f}s" if word > 0
@@ -2171,32 +2175,35 @@ def _ending_problem(
     if closes != word or bitten:
         finishes = known.words[closes][1]
         # The phrase before it in the window, if one finishes inside it, is the other place to stop.
-        earlier = (f", end where the phrase before it finishes, at {known.words[opens - 1][1]:.2f}s"
+        earlier = (f", end where the phrase before it finishes, at {known.words[opens - 1][1]:.2f}s of the file"
                    if opens > opened else "")
         return (f"{_edge_of(last, 'ends', last.end)}, partway through 「{_phrase(known, word)[2]}」, and nothing "
                 "after it is heard, so the video stops rather than ends: end where that phrase finishes, at "
                 f"{finishes:.2f}s of the file, {(finishes - last.end) / last.speed:.1f}s more of the video{earlier}, "
                 "or give `edge_reason` on that selection if it should stop there"), True
-    # A transcriber writes 「接下來，我們去吃飯」, and the comma begins a phrase; the line still opens
-    # on 「接下來」, so it is read back over its commas, as far as the window goes.
-    line = opens
-    while line > opened and len(known.spoken) == len(known.words)             and known.spoken[line - 1].rstrip().endswith(tuple(CLAUSE_PUNCTUATION)):
-        line = max(_phrase(known, line - 1)[0], opened)
+    # A transcriber writes 「好，接下來，我們去吃飯」, and each comma begins a phrase; the line is
+    # still one, so it is read back over its commas, as far as the window goes, and every
+    # place a clause of it starts is looked at.
+    clauses = [opens]
+    while (clauses[-1] > opened and len(known.spoken) == len(known.words)
+           and known.spoken[clauses[-1] - 1].rstrip().endswith(tuple(CLAUSE_PUNCTUATION))):
+        clauses.append(max(_phrase(known, clauses[-1] - 1)[0], opened))
+    line = clauses[-1]
     said = "".join(known.spoken[line:word + 1]).strip() if line != opens else phrase
-    if said.startswith(NEXT_SUBJECT_OPENERS):
-        ends = known.words[line - 1][1] if line > opened else None
-        instead = (f"end on the phrase before it, at {ends:.2f}s of the file" if ends is not None
+    if any(_phrase(known, clause, last=word)[2].startswith(NEXT_SUBJECT_OPENERS) for clause in clauses):
+        instead = (f"end on the phrase before it, at {known.words[line - 1][1]:.2f}s of the file" if line > opened
                    else "end on the piece before it")
         return (f"{_edge_of(last, 'ends', last.end)}, and the last thing heard is 「{said}」, which opens the next "
                 f"subject rather than finishing this one: {instead}, or give `edge_reason` on that selection if "
                 "the video should end on it"), False
     # Voices are told apart within one file only, so a line from another file says nothing about who asks.
-    before = next((said for said in reversed(heard) if said[0] != last.asset_id or said[1] < opens), None)
-    if phrase.endswith(("？", "?")) and len(known.voices) == len(known.words) and before is not None \
-            and before[0] == last.asset_id:
-        asker, answerer = known.voices[opens], known.voices[before[1]]
+    before = next((heard_word for heard_word in reversed(heard)
+                   if heard_word[0] != last.asset_id or heard_word[1] < line), None)
+    if (phrase.endswith(("？", "?")) and len(known.voices) == len(known.words) and before is not None
+            and before[0] == last.asset_id):
+        asker, answerer = known.voices[line], known.voices[before[1]]
         if asker is not None and answerer is not None and asker != answerer:
-            return (f"{_edge_of(last, 'ends', last.end)}, on 「{phrase}」, a question from {asker} after {answerer} "
+            return (f"{_edge_of(last, 'ends', last.end)}, on 「{said}」, a question from {asker} after {answerer} "
                     "spoke, which is the next question rather than an ending: end on the answer before it, or give "
                     "`edge_reason` on that selection if the video should end on the question"), False
     return None, False

@@ -24,6 +24,7 @@ import json
 import math
 import re
 from dataclasses import dataclass
+from functools import cached_property
 from typing import Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from app.models.media import SILENCE_DB, Asset, MediaAnalysis, Measured, Span, SpeakerTurn, TranscriptSegment
@@ -939,22 +940,38 @@ class CleanCuts:
         (earlier_start, before), (start, end) = self.words[index - 1], self.words[index]
         if start - before >= CLEAN_GAP_SECONDS:
             return True
-        if any(earlier_start <= quiet_start and quiet_end <= end and quiet_end - quiet_start >= CLEAN_SILENCE_SECONDS
-               for quiet_start, quiet_end in self.pauses):
-            return True
         # The transcriber often lays words end to end and stretches one over the pause before it.
-        talking = sorted(self.voiced)
-        if any(earlier_start <= stops and resumes <= end and resumes - stops >= CLEAN_GAP_SECONDS
-               for (_, stops), (resumes, _) in zip(talking, talking[1:])):
-            return True
-        if any(before - EDGE_TOLERANCE_SECONDS <= opens <= start + EDGE_TOLERANCE_SECONDS
-               for opens, _ in self.sentences):
+        quiet = self._quiet_stretches
+        at = bisect.bisect_left(quiet, (earlier_start, earlier_start))
+        while at < len(quiet) and quiet[at][0] <= end:
+            if quiet[at][1] <= end:
+                return True
+            at += 1
+        opens = self._sentence_starts
+        at = bisect.bisect_left(opens, before - EDGE_TOLERANCE_SECONDS)
+        if at < len(opens) and opens[at] <= start + EDGE_TOLERANCE_SECONDS:
             return True
         if len(self.spoken) == len(self.words):
             earlier, this = self.spoken[index - 1], self.spoken[index]
             return (earlier.rstrip().endswith(tuple(PHRASE_END_PUNCTUATION))
                     or this[:1].isspace() or earlier[-1:].isspace())
         return False
+
+    @cached_property
+    def _quiet_stretches(self) -> Tuple[Tuple[float, float], ...]:
+        """Every stretch long enough to begin a phrase after, in time order: a measured
+        silence of `CLEAN_SILENCE_SECONDS`, or a gap of `CLEAN_GAP_SECONDS` between two
+        stretches the second listen heard somebody in."""
+        talking = sorted(self.voiced)
+        return tuple(sorted(
+            [(start, end) for start, end in self.pauses if end - start >= CLEAN_SILENCE_SECONDS]
+            + [(stops, resumes) for (_, stops), (resumes, _) in zip(talking, talking[1:])
+               if resumes - stops >= CLEAN_GAP_SECONDS]))
+
+    @cached_property
+    def _sentence_starts(self) -> Tuple[float, ...]:
+        """Where the transcriber's sentences start, in time order."""
+        return tuple(sorted(opens for opens, _ in self.sentences))
 
     def word_split_at(self, seconds: float) -> Optional[Tuple[float, float]]:
         """Find the word a cut here would land inside, as `(start, end)`; None when it lands in none."""
