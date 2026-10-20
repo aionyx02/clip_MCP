@@ -10,7 +10,7 @@ from pydantic import ValidationError
 from app.engine.diarize import SAMPLE_RATE, read_samples
 from app.engine.frames import extract_frame
 from app.runtime import repo
-from app.server import import_asset
+from app.tools.catalog import import_asset
 from helpers import build_project, clips_of, edit, insert, render, video_track
 
 def luma(path: Path, seconds: float) -> float:

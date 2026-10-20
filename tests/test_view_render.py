@@ -5,8 +5,8 @@ from pathlib import Path
 
 import pytest
 
-from app import runtime, server
-from app.tools import examining, rendering
+from app import runtime
+from app.tools import catalog, delivery, examining, job_queue, looking, rendering
 from app.engine import analysis
 from app.models.media import MediaAnalysis, Transcript, TranscriptSegment, TranscriptWord
 from helpers import build_project, caption, edit, insert, video_track
@@ -16,7 +16,7 @@ def finished(job: dict) -> str:
     """Wait for a render to end, and give back its job ID."""
     deadline = time.monotonic() + 180
     while time.monotonic() < deadline:
-        state = server.get_job([job["job_id"]])["jobs"][0]
+        state = job_queue.get_job([job["job_id"]])["jobs"][0]
         if state["status"] in {"completed", "failed", "cancelled"}:
             assert state["status"] == "completed", state
             return job["job_id"]
@@ -27,7 +27,7 @@ def finished(job: dict) -> str:
 @pytest.fixture(scope="module")
 def rendered(tmp_path_factory: pytest.TempPathFactory, media: Path) -> dict:
     """A two-shot cut with a dissolve between them and captions burned in, rendered as a preview."""
-    asset = server.import_asset(str(media / "wide.mp4"))["id"]
+    asset = catalog.import_asset(str(media / "wide.mp4"))["id"]
     runtime.repo.save_analysis(MediaAnalysis(asset_id=asset, duration=10.0, transcript=Transcript(
         language="zh", model="test", segments=[
             TranscriptSegment(start=1.0, end=2.5, text="第一句", words=[TranscriptWord(start=1.0, end=2.5, text="第一句")]),
@@ -43,14 +43,14 @@ def rendered(tmp_path_factory: pytest.TempPathFactory, media: Path) -> dict:
 
 
 def test_a_render_lists_its_joins_without_frames(rendered: dict) -> None:
-    seen = server.inspect_join(rendered["job_id"])
+    seen = looking.inspect_join(rendered["job_id"])
     listing = seen.content[0].text
     assert "#1 " in listing and "(4.00s) dissolve: clip a: wide.mp4 0.00–4.00s → clip b: wide.mp4 5.00–9.00s" in listing
     assert len(seen.content) == 1
 
 
 def test_a_join_is_looked_at_frame_by_frame_with_its_words_and_sound(rendered: dict) -> None:
-    seen = server.inspect_join(rendered["job_id"], joins=[1])
+    seen = looking.inspect_join(rendered["job_id"], joins=[1])
     text = seen.content[0].text
     assert "a row of 7 up to the cut, then 7 from it" in text
     # 「第一句」 ends at 2.5s, before the stretch; 「第二句」 starts a second into clip b.
@@ -62,35 +62,35 @@ def test_a_join_is_looked_at_frame_by_frame_with_its_words_and_sound(rendered: d
 
 
 def test_a_join_is_found_by_time_and_a_number_not_in_the_list_is_refused(rendered: dict) -> None:
-    assert server.inspect_join(rendered["job_id"], at=[3.2]).content[0].text.startswith("#1 ")
+    assert looking.inspect_join(rendered["job_id"], at=[3.2]).content[0].text.startswith("#1 ")
     with pytest.raises(ValueError, match="has 1 joins; there is no #2"):
-        server.inspect_join(rendered["job_id"], joins=[2])
+        looking.inspect_join(rendered["job_id"], joins=[2])
     with pytest.raises(ValueError, match="more than the 36 a sheet holds"):
-        server.inspect_join(rendered["job_id"], joins=[1], seconds=3, fps=8)
+        looking.inspect_join(rendered["job_id"], joins=[1], seconds=3, fps=8)
 
 
 def test_a_render_is_looked_at_on_every_caption(rendered: dict) -> None:
-    listing = server.view_render(rendered["job_id"], at="captions").content[0].text
+    listing = looking.view_render(rendered["job_id"], at="captions").content[0].text
     assert "c1 第一句" in listing and "c2 第二句" in listing
     assert "no captions burned in" not in listing
 
 
 def test_a_render_says_when_the_project_has_moved_on_since(rendered: dict) -> None:
     edit(rendered["project"], [{"action": "rename_project", "name": "改過名字"}])
-    listing = server.view_render(rendered["job_id"], times=[1.0]).content[0].text
+    listing = looking.view_render(rendered["job_id"], times=[1.0]).content[0].text
     assert "edited since this render" in listing
 
 
 def test_a_render_lists_the_joins_it_was_made_with_after_the_cut_has_changed(rendered: dict) -> None:
     edit(rendered["project"], [{"action": "trim_clip", "track_id": "main", "clip_id": "a",
                                 "new_source_range": {"start": 0, "end": 3}, "ripple": True}])
-    listing = server.inspect_join(rendered["job_id"]).content[0].text
+    listing = looking.inspect_join(rendered["job_id"]).content[0].text
     assert "these are the joins of the version rendered" in listing and "(4.00s) dissolve" in listing
 
 
 def test_a_render_that_has_not_finished_is_not_looked_at() -> None:
     with pytest.raises(ValueError, match="not found"):
-        server.view_render("no-such-job")
+        looking.view_render("no-such-job")
 
 
 def test_a_render_is_heard_with_its_levels(rendered: dict, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -119,13 +119,13 @@ def test_a_preview_breaks_its_captions_where_the_finished_video_does(rendered: d
 
 
 def test_a_cut_is_read_back_as_a_script(rendered: dict) -> None:
-    script = server.read_cut(rendered["project"])["script"]
+    script = delivery.read_cut(rendered["project"])["script"]
     assert len(script) == 2 and script[0].startswith("0:00–") and "| clip a | wide.mp4 0.0–" in script[0]
     assert "said: 「第一句」" in script[0] and "captions: 第一句" in script[0]
     assert "said: 「第二句」" in script[1] and "captions: 第二句" in script[1]
 
 
 def test_a_join_shows_the_captions_on_screen_around_it(rendered: dict) -> None:
-    text = server.inspect_join(rendered["job_id"], joins=[1]).content[0].text
+    text = looking.inspect_join(rendered["job_id"], joins=[1]).content[0].text
     # The captions are what somebody read and could correct; they sit beside the words.
     assert "captions: +1.00 第二句" in text

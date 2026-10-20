@@ -4,8 +4,8 @@ from pathlib import Path
 
 import pytest
 
-from app import runtime, server
-from app.tools import examining
+from app import runtime
+from app.tools import catalog, examining
 from app.engine import analysis, renderer
 from app.engine.diarize import speaker_model_name
 from app.engine.rhythm import rhythm_model_name
@@ -100,7 +100,7 @@ def test_an_upgrade_says_the_whole_analysis_is_redone(talk: Asset, started: list
 
 def test_the_library_says_which_transcripts_are_fast(talk: Asset) -> None:
     runtime.repo.save_analysis(analysed_with(talk.id, analysis.FAST_WHISPER_MODEL))
-    listed = {asset["id"]: asset for asset in server.list_assets(text="talk.mp4", limit=200)["assets"]}
+    listed = {asset["id"]: asset for asset in catalog.list_assets(text="talk.mp4", limit=200)["assets"]}
     assert listed[talk.id]["transcription"] == "fast"
     assert examining.get_analysis(talk.id)["transcription"] == "fast"
 

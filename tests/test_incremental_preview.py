@@ -13,8 +13,8 @@ import pytest
 
 from app.engine.builder import FFmpegRenderer
 from app.runtime import repo
+from app.tools.catalog import import_asset
 from app.tools.rendering import preview_sized, render_project
-from app.server import import_asset
 from app.tools.shared import referenced_assets
 from helpers import build_project, edit, insert, level, video_track
 

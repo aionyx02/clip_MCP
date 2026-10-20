@@ -6,8 +6,8 @@ from pathlib import Path
 
 from fastmcp import Client
 
-from app import runtime, server
-from app.tools import editing, versioning
+from app import runtime
+from app.tools import catalog, editing, planning, versioning
 from app.storage.history import History, canonical, describe_project
 from helpers import build_project, edit, insert, video_track
 
@@ -57,7 +57,7 @@ def test_a_change_is_said_in_words() -> None:
 
 
 def test_every_change_to_a_project_is_a_version_with_who_and_what(kept_history, media: Path) -> None:
-    asset = server.import_asset(str(media / "wide.mp4"))["id"]
+    asset = catalog.import_asset(str(media / "wide.mp4"))["id"]
     project = call("create_project", {"name": "版本測試"})["id"]
     call("apply_edits", {"project_id": project, "expected_version": 1, "note": "先放兩段", "operations": [
         video_track(), insert("a", asset, 0, 3), insert("b", asset, 4, 6)]})
@@ -71,7 +71,7 @@ def test_every_change_to_a_project_is_a_version_with_who_and_what(kept_history, 
 
 
 def test_going_back_is_one_more_version_and_can_be_undone(kept_history, media: Path) -> None:
-    asset = server.import_asset(str(media / "wide.mp4"))["id"]
+    asset = catalog.import_asset(str(media / "wide.mp4"))["id"]
     project = build_project([video_track(), insert("a", asset, 0, 3)], name="回到舊版")
     first = call("project_history", {"project_id": project})["versions"][0]["commit"]
     edit(project, [insert("b", asset, 4, 6)])
@@ -89,7 +89,7 @@ def test_going_back_is_one_more_version_and_can_be_undone(kept_history, media: P
 
 
 def test_a_branch_is_a_project_of_its_own_beside_the_first(kept_history, media: Path) -> None:
-    asset = server.import_asset(str(media / "wide.mp4"))["id"]
+    asset = catalog.import_asset(str(media / "wide.mp4"))["id"]
     project = build_project([video_track(), insert("a", asset, 0, 3)], name="原本那支")
     branched = call("branch_project", {"project_id": project, "name": "原本那支 Reels 版"})
     branch = runtime.repo.get_project(branched["project_id"])
@@ -103,7 +103,7 @@ def test_a_change_made_in_the_editor_says_so(kept_history, media: Path) -> None:
     from starlette.testclient import TestClient
     from app.ui import app as editor
 
-    asset = server.import_asset(str(media / "wide.mp4"))["id"]
+    asset = catalog.import_asset(str(media / "wide.mp4"))["id"]
     project = build_project([video_track(), insert("a", asset, 0, 3)], name="編輯器改的")
     response = TestClient(editor.create_app()).post(f"/api/projects/{project}/edits", json={
         "expected_version": 2, "operations": [{"action": "rename_project", "name": "編輯器改過"}]})
@@ -130,13 +130,13 @@ def test_going_back_leaves_another_video_compiled_from_the_same_plan_alone(kept_
 
     portrait = editing.create_project("直式版", width=1080, height=1920)["id"]
     landscape = editing.create_project("橫式版")["id"]
-    server.compile_plan(portrait, 1, planned["plan_id"])
-    server.compile_plan(landscape, 1, planned["plan_id"])
+    planning.compile_plan(portrait, 1, planned["plan_id"])
+    planning.compile_plan(landscape, 1, planned["plan_id"])
     first = call("project_history", {"project_id": portrait})["versions"][0]["commit"]
     # The plan changes, and the portrait cut is compiled from it again.
-    stored = EditPlan.model_validate(server.get_plan(planned["plan_id"])["plan"])
-    server.save_plan(stored.model_copy(update={"goal": "改過的目標"}))
-    server.compile_plan(portrait, 2, planned["plan_id"])
+    stored = EditPlan.model_validate(planning.get_plan(planned["plan_id"])["plan"])
+    planning.save_plan(stored.model_copy(update={"goal": "改過的目標"}))
+    planning.compile_plan(portrait, 2, planned["plan_id"])
 
     restored = call("restore_version", {"project_id": portrait, "commit": first, "expected_version": 3})
     assert restored["plan_copied"] is True
@@ -153,7 +153,7 @@ def test_going_back_leaves_another_video_compiled_from_the_same_plan_alone(kept_
 def test_the_version_panel_folds_one_sitting_into_one_dot(kept_history, media: Path) -> None:
     from app.models.job import Job, JobKind, JobStatus
 
-    asset = server.import_asset(str(media / "wide.mp4"))["id"]
+    asset = catalog.import_asset(str(media / "wide.mp4"))["id"]
     project = build_project([video_track(), insert("a", asset, 0, 3)], name="版本面板")
     for name in ("第二版", "第三版"):
         edit(project, [{"action": "rename_project", "name": name}])

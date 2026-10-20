@@ -27,7 +27,7 @@ from app.models.media import (
 )
 from app.models.semantic import ClipDescription, ClipKind, ClipLevel
 from app.runtime import repo as runtime_repo
-from app.server import import_asset
+from app.tools.catalog import import_asset
 from app.tools.timelines import (
     CLIP_SUMMARY_CHARACTERS,
     build_semantic_timeline,
@@ -561,7 +561,7 @@ def test_asking_for_more_frames_than_a_sheet_holds_is_refused(analyzed: str) -> 
         frames_for_clips([])
 
 def test_footage_can_be_read_through_one_line_a_clip(media: Path) -> None:
-    from app.server import import_asset
+    from app.tools.catalog import import_asset
     from app.tools.timelines import build_semantic_timeline, query_clips
     from app.runtime import repo as runtime_repo
 

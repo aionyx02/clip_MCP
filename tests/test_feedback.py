@@ -15,7 +15,7 @@ from app.models.plan import (
     Beat, BrollShot, DropBeatOp, EditPlan, MusicCue, MusicPlan, Pacing, PlanAmendment, PlanTarget, Selection,
     SetMusicLevelOp, SetPacingOp, SetTargetOp, apply_amendment,
 )
-from app.server import (
+from app.tools.planning import (
     amend_plan, diff_plan, get_plan, list_plan_versions, preview_plan_diff, revert_plan, save_plan,
 )
 from test_edit_plan import checked, footage, planned, sectioned, speech_of  # noqa: F401 — fixtures and helpers

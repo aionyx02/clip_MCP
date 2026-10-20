@@ -30,13 +30,17 @@ from starlette.responses import FileResponse, JSONResponse, Response
 from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 
-from app import clients, runtime, server
-from app.tools import editing, examining, rendering, subtitles, upkeep, versioning
+from app import clients, runtime
+from app.tools import (
+    catalog, editing, examining, feedback, job_queue, planning, rendering, soundtrack, subtitles, upkeep,
+    versioning,
+)
 from app.models.comment import USER
 from app.engine.ffmpeg import hidden_window_flags
 from app.engine import models
 from app.engine import playback as playback_module
 from app.engine.analysis import transcription_of
+from app.engine.builder import DEFAULT_LOUDNESS_TARGET
 from app.engine.frames import extract_frame
 from app.engine.subtitles import captioned_clips, place_cues
 from app.models.timeline import Project
@@ -44,6 +48,7 @@ from app.storage import housekeeping
 from app.engine.library import FOLDER_KINDS as LIBRARY_FOLDERS, FOOTAGE, LIBRARIES, MUSIC, library_of
 from app.storage.repo import FOLDER_KINDS, FolderNotFoundError
 from app.ui import dialogs, updates
+from app.workspace import output_dir
 
 STATIC_DIR = Path(__file__).parent / "static"
 # What `/api/ping` answers, so a second start can tell this editor from anything else on the port.
@@ -104,7 +109,7 @@ async def projects(request: Request) -> Response:
             )
         except (ValueError, TypeError) as error:
             return _error(str(error))
-        editing.apply_edits(made["id"], made["version"], server._OPERATIONS.validate_python([
+        editing.apply_edits(made["id"], made["version"], planning.OPERATIONS.validate_python([
             {"action": "add_track", "track_id": "video", "track_type": "video"},
             {"action": "add_track", "track_id": "music", "track_type": "audio", "duck_under_speech": True},
         ]))
@@ -162,7 +167,7 @@ async def edits(request: Request) -> Response:
     if not before:
         return _error(f"project {project_id} not found", 404)
     try:
-        operations = server._OPERATIONS.validate_python(body.get("operations", []))
+        operations = planning.OPERATIONS.validate_python(body.get("operations", []))
         result = editing.apply_edits(project_id, int(body["expected_version"]), operations)
     except (ValueError, KeyError, TypeError) as error:
         conflict = "version conflict" in str(error)
@@ -227,14 +232,14 @@ def _start_preview(project_id: str) -> dict:
     if current and current.get("job_id"):
         old = runtime.job_manager.get_job(current["job_id"])
         if old and old.status.is_active:
-            server.cancel_job(old.job_id)
+            job_queue.cancel_job(old.job_id)
     if not project.base_video_track or not project.base_video_track.clips:
         with _previews_lock:
             _previews[project_id] = {"version": project.version, "empty": True}
         return _preview_state(project_id)
     def start(captions: bool) -> dict:
         return rendering.start_render(
-            project_id, True, server.DEFAULT_LOUDNESS_TARGET, captions, None, True, None, PREVIEW_SIDE,
+            project_id, True, DEFAULT_LOUDNESS_TARGET, captions, None, True, None, PREVIEW_SIDE,
         )
     try:
         started = start(bool(project.subtitles))
@@ -342,7 +347,7 @@ async def jobs(request: Request) -> Response:
     """How a batch of background jobs is getting on, such as the transcriptions captions wait for."""
     ids = [job_id for job_id in request.query_params.get("ids", "").split(",") if job_id]
     try:
-        return JSONResponse(server.get_job(ids))
+        return JSONResponse(job_queue.get_job(ids))
     except ValueError as error:
         return _error(str(error), 404)
 
@@ -375,7 +380,7 @@ def _jobs_to_show() -> dict:
         project = runtime.repo.get_project(project_id)
         if project is not None:
             names[project_id] = project.name or ""
-    ahead = server.queue_positions(active)
+    ahead = job_queue.queue_positions(active)
     return {
         "jobs": [_job_card(job, names, ahead.get(job.job_id, 0), now) for job in active],
         "ended": [_job_card(job, names, 0, now) for job in ended],
@@ -389,7 +394,7 @@ async def cancel_job(request: Request) -> Response:
     """Stop a job the user chose to stop; the AI sees it cancelled when it next asks."""
     body = await request.json()
     try:
-        found = await run_in_threadpool(server.cancel_job, str(body.get("job_id", "")))
+        found = await run_in_threadpool(job_queue.cancel_job, str(body.get("job_id", "")))
     except ValueError as error:
         return _error(str(error), 404)
     return JSONResponse(found)
@@ -434,7 +439,8 @@ async def move_library(request: Request) -> Response:
     if library not in LIBRARIES:
         return _error("library is footage or music")
     try:
-        result = await run_in_threadpool(server.set_asset_library, [str(item) for item in body.get("ids", [])], library)
+        result = await run_in_threadpool(catalog.set_asset_library, [str(item) for item in body.get("ids", [])],
+                                         library)
     except ValueError as error:
         return _error(str(error), 404)
     return JSONResponse(result)
@@ -508,10 +514,10 @@ async def comments(request: Request) -> Response:
     project_id = request.path_params["project_id"]
     try:
         if request.method == "GET":
-            return JSONResponse(await run_in_threadpool(server.get_comments, project_id, True))
+            return JSONResponse(await run_in_threadpool(feedback.get_comments, project_id, True))
         body = await request.json()
         end = body.get("end")
-        made = await run_in_threadpool(server.add_comment, project_id, str(body.get("text", "")),
+        made = await run_in_threadpool(feedback.add_comment, project_id, str(body.get("text", "")),
                                        float(body["start"]), float(end) if end is not None else None)
     except (ValueError, KeyError, TypeError) as error:
         return _error(str(error), 400)
@@ -535,14 +541,14 @@ async def song(request: Request) -> Response:
     project_id, number = request.path_params["project_id"], int(request.path_params["number"])
     if request.method == "POST":
         try:
-            return JSONResponse(await run_in_threadpool(server.pick_song, project_id, number))
+            return JSONResponse(await run_in_threadpool(soundtrack.pick_song, project_id, number))
         except ValueError as error:
             return _error(str(error), 400)
     project = await run_in_threadpool(runtime.repo.get_project, project_id)
     offer = await run_in_threadpool(runtime.repo.song_offer, project_id)
     if project is None or offer is None or not 1 <= number <= len(offer.songs):
         return _error("no such song is offered", 404)
-    trial = await run_in_threadpool(server.song_trial, project, offer, number)
+    trial = await run_in_threadpool(soundtrack.song_trial, project, offer, number)
     return JSONResponse(await run_in_threadpool(rendering.playback_of, trial))
 
 async def comment(request: Request) -> Response:
@@ -557,7 +563,7 @@ async def comment(request: Request) -> Response:
         status = body.get("status")
         if status not in (None, "open", "resolved"):
             return _error("a comment is open or resolved", 400)
-        changed = await run_in_threadpool(server.change_comment, project_id, comment_id, USER,
+        changed = await run_in_threadpool(feedback.change_comment, project_id, comment_id, USER,
                                           str(body.get("reply", "")), status)
     except ValueError as error:
         return _error(str(error), 400)
@@ -614,7 +620,7 @@ async def asset_notes(request: Request) -> Response:
     """
     body = await request.json()
     try:
-        found = await run_in_threadpool(server.edit_asset, str(body.get("asset_id", "")), str(body.get("notes", "")))
+        found = await run_in_threadpool(catalog.edit_asset, str(body.get("asset_id", "")), str(body.get("notes", "")))
     except ValueError as error:
         return _error(str(error), 404)
     return JSONResponse(found)
@@ -857,7 +863,7 @@ async def export(request: Request) -> Response:
     try:
         started = await run_in_threadpool(
             # The user exporting by hand has watched the cut here; only the AI is held to a preview first.
-            rendering.start_render, project_id, False, server.DEFAULT_LOUDNESS_TARGET, captions, frame, True,
+            rendering.start_render, project_id, False, DEFAULT_LOUDNESS_TARGET, captions, frame, True,
             body.get("allow") or None, rendering.PREVIEW_SHORT_SIDE,
         )
     except ValueError as error:
@@ -893,7 +899,7 @@ async def reveal(request: Request) -> Response:
 async def job(request: Request) -> Response:
     """How a render is getting on."""
     try:
-        found = server.get_job([request.path_params["job_id"]])["jobs"][0]
+        found = job_queue.get_job([request.path_params["job_id"]])["jobs"][0]
     except ValueError as error:
         return _error(str(error), 404)
     if found.get("output_path") and found["status"] == "completed":
@@ -918,19 +924,19 @@ async def pick(request: Request) -> Response:
     for path in chosen:
         try:
             if kind == "folder":
-                result = server.import_folder(path)
+                result = catalog.import_folder(path)
                 imported += len(result["assets"])
                 ids += [item["id"] for item in result["assets"]]
                 failed += [os.path.basename(item["path"]) for item in result["skipped"]]
             else:
-                ids.append(server.register_asset(path, library).id)
+                ids.append(catalog.register_asset(path, library).id)
                 imported += 1
         except (FileNotFoundError, ValueError, RuntimeError):
             failed.append(os.path.basename(path))
     if library and kind == "folder" and ids:
         # A folder is listened to file by file; added on the music page, its songs are music all the same.
-        server.set_asset_library([asset_id for asset_id, asset in runtime.repo.get_assets(ids).items()
-                                  if not asset.has_video], library)
+        catalog.set_asset_library([asset_id for asset_id, asset in runtime.repo.get_assets(ids).items()
+                                   if not asset.has_video], library)
     found = runtime.repo.get_assets(ids)
     music = [asset_id for asset_id in ids if asset_id in found and library_of(found[asset_id]) == MUSIC]
     # Chosen with one of the library's folders open: filed there, where the user is looking.
@@ -955,7 +961,7 @@ async def storage(request: Request) -> Response:
 
 def _openable() -> Dict[str, str]:
     """The folders the page may open, by name: never a path the page made up."""
-    folders = {"outputs": str(server.output_dir())}
+    folders = {"outputs": str(output_dir())}
     folders.update({item.key: item.path for item in housekeeping.usage(runtime.WORKSPACE_DIR, folders["outputs"])})
     return folders
 

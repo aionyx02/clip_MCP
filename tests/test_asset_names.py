@@ -7,7 +7,7 @@ from pathlib import Path
 from fastmcp import Client
 
 from app.runtime import mcp
-from app.server import import_asset
+from app.tools.catalog import import_asset
 
 
 def call(name: str, arguments: dict):

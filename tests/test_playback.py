@@ -8,8 +8,8 @@ from pathlib import Path
 
 import pytest
 
-from app import runtime, server
-from app.tools import rendering, versioning
+from app import runtime
+from app.tools import catalog, job_queue, rendering, versioning
 from app.engine import playback, renderer
 from app.models.job import Job, JobKind, JobStatus
 from helpers import build_project, edit, insert, video_track
@@ -19,7 +19,7 @@ def wait_for(job_ids) -> None:
     """Wait for jobs to end, and fail if any did not complete."""
     deadline = time.monotonic() + 180
     while time.monotonic() < deadline:
-        states = server.get_job(job_ids)["jobs"]
+        states = job_queue.get_job(job_ids)["jobs"]
         if all(state["status"] in {"completed", "failed", "cancelled"} for state in states):
             assert all(state["status"] == "completed" for state in states), states
             return
@@ -43,7 +43,7 @@ def stream(path: str) -> dict:
 
 
 def test_a_cut_is_described_for_the_browser_and_its_copies_are_made(preparing, media: Path) -> None:
-    asset = server.import_asset(str(media / "wide.mp4"))["id"]
+    asset = catalog.import_asset(str(media / "wide.mp4"))["id"]
     project = build_project([video_track(), insert("a", asset, 0, 3), insert("b", asset, 4, 7)], name="播放")
     edit(project, [{"action": "set_clip_look", "track_id": "main", "clip_id": "b",
                     "transition_in": {"kind": "dissolve", "seconds": 0.5}},
@@ -71,7 +71,7 @@ def test_the_editor_serves_the_description_and_the_copies(preparing, media: Path
     from starlette.testclient import TestClient
     from app.ui import app as editor
 
-    asset = server.import_asset(str(media / "tall.mp4"))["id"]
+    asset = catalog.import_asset(str(media / "tall.mp4"))["id"]
     project = build_project([video_track(), insert("a", asset, 0, 2)], name="播放編輯器")
     client = TestClient(editor.create_app())
     described = client.get(f"/api/projects/{project}/playback").json()
@@ -129,7 +129,7 @@ def test_going_back_to_a_version_gets_it_ready_to_play(media: Path, monkeypatch:
     from helpers import build_project, edit, insert, video_track
 
     asked = []
-    project = build_project([video_track(), insert("a", server.import_asset(str(media / "wide.mp4"))["id"], 0, 4)],
+    project = build_project([video_track(), insert("a", catalog.import_asset(str(media / "wide.mp4"))["id"], 0, 4)],
                             name="準備好")
     first = versioning.project_history(project)["versions"][0]["commit"]
     edit(project, [{"action": "delete_clip", "track_id": "main", "clip_id": "a"}])
@@ -143,7 +143,7 @@ def test_a_proxy_is_named_after_the_file_as_it_is(media: Path, tmp_path: Path) -
 
     copy = tmp_path / "會變的檔.mp4"
     shutil.copy(media / "wide.mp4", copy)
-    asset = runtime.repo.get_assets([server.import_asset(str(copy))["id"]])
+    asset = runtime.repo.get_assets([catalog.import_asset(str(copy))["id"]])
     asset = next(iter(asset.values()))
     first = playback.proxy_name(asset)
     shutil.copy(media / "tall.mp4", copy)

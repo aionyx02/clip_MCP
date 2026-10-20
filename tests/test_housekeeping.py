@@ -5,9 +5,10 @@ import time
 from pathlib import Path
 
 from app.runtime import WORKSPACE_DIR
+from app.tools.catalog import import_asset
 from app.tools.editing import apply_edits, create_project
+from app.tools.planning import OPERATIONS
 from app.tools.rendering import render_project
-from app.server import _OPERATIONS, import_asset
 from app.tools.upkeep import storage_usage, tidy_old_outputs
 from app.storage import housekeeping
 from app.workspace import output_dir
@@ -27,7 +28,7 @@ def one_clip_project(media: Path, name: str) -> str:
     """
     asset = import_asset(str(media / "wide.mp4"))["id"]
     project = create_project(name=name, width=320, height=180)
-    apply_edits(project["id"], project["version"], _OPERATIONS.validate_python([
+    apply_edits(project["id"], project["version"], OPERATIONS.validate_python([
         {"action": "add_track", "track_id": "v", "track_type": "video"},
         {"action": "insert_clip", "track_id": "v", "clip_id": "c1", "asset_id": asset,
          "source_range": {"start": 0, "end": 2}},

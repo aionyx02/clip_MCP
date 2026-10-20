@@ -14,8 +14,8 @@ import pytest
 from app.engine.builder import FFmpegRenderer
 from app.models.media import MediaAnalysis, Rhythm, Transcript, TranscriptSegment
 from app.runtime import repo
+from app.tools.catalog import import_asset
 from app.tools.rendering import voices_of
-from app.server import import_asset
 from app.tools.shared import referenced_assets
 from helpers import build_project, edit, insert, level, render, video_track
 

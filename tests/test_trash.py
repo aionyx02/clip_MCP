@@ -8,10 +8,11 @@ from pathlib import Path
 import pytest
 from starlette.testclient import TestClient
 
-from app import runtime, server
-from app.tools import editing, rendering, upkeep, versioning
+from app import runtime
+from app.tools import catalog, delivery, editing, rendering, soundtrack, upkeep, versioning
 from app.models.job import Job, JobKind, JobStatus
 from app.storage import housekeeping
+from app.workspace import output_dir
 from helpers import build_project, edit, insert, video_track
 
 
@@ -24,7 +25,7 @@ def client() -> TestClient:
 
 def finished(project_id: str, version: int, name: str) -> Path:
     """A finished video of one version, as a full render leaves it."""
-    path = Path(server.output_dir()) / name
+    path = Path(output_dir()) / name
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(b"finished " + name.encode("utf-8"))
     runtime.repo.add_job(Job(kind=JobKind.RENDER, project_id=project_id, project_version=version,
@@ -58,7 +59,7 @@ def test_the_trash_lets_go_after_thirty_days(tmp_path: Path) -> None:
 
 
 def test_other_versions_go_but_the_current_and_the_starred_stay(client: TestClient, media: Path) -> None:
-    asset = server.import_asset(str(media / "wide.mp4"))["id"]
+    asset = catalog.import_asset(str(media / "wide.mp4"))["id"]
     project = build_project([video_track(), insert("a", asset, 0, 3)], name="留下哪些")
     first = runtime.repo.get_project(project).version
     old = finished(project, first, "留下哪些 舊版.mp4")
@@ -84,7 +85,7 @@ def test_other_versions_go_but_the_current_and_the_starred_stay(client: TestClie
 
 
 def test_a_starred_version_keeps_its_finished_video(kept_history, client: TestClient, media: Path) -> None:
-    asset = server.import_asset(str(media / "wide.mp4"))["id"]
+    asset = catalog.import_asset(str(media / "wide.mp4"))["id"]
     project = build_project([video_track(), insert("a", asset, 0, 3)], name="標星號的")
     starred = versioning.project_history(project)["versions"][0]["commit"]
     finished(project, runtime.repo.get_project(project).version, "標星號的 星號.mp4")
@@ -112,7 +113,7 @@ def test_the_ai_files_footage_in_folders_and_deletes_nothing(media: Path) -> Non
     import asyncio
     from fastmcp import Client
 
-    asset = server.import_asset(str(media / "tall.mp4"))["id"]
+    asset = catalog.import_asset(str(media / "tall.mp4"))["id"]
 
     async def call(arguments):
         async with Client(runtime.mcp) as client:
@@ -124,7 +125,7 @@ def test_the_ai_files_footage_in_folders_and_deletes_nothing(media: Path) -> Non
     assert runtime.repo.folder_of("assets")[asset] == folder["id"]
     assert "整理測試直式" in done["done"][0]
     # There is no way for it to delete a folder or a file.
-    assert not any(step for step in ("delete_folder", "delete") if step in str(server.LibraryStep))
+    assert not any(step for step in ("delete_folder", "delete") if step in str(catalog.LibraryStep))
 
 
 def test_files_move_on_disk_only_once_agreed_and_never_over_another(media: Path, tmp_path: Path) -> None:
@@ -133,14 +134,14 @@ def test_files_move_on_disk_only_once_agreed_and_never_over_another(media: Path,
     source = tmp_path / "拍攝" / "要搬的.mp4"
     source.parent.mkdir()
     shutil.copy(media / "wide.mp4", source)
-    asset = server.import_asset(str(source))["id"]
+    asset = catalog.import_asset(str(source))["id"]
     project = build_project([video_track(), insert("a", asset, 0, 2)], name="搬檔")
     target = tmp_path / "整理好"
     target.mkdir()
     (target / "要搬的.mp4").write_bytes(b"already here")
 
-    moves = [server.FileMove(asset_id=asset, to_folder=str(target))]
-    shown = server.move_files(moves)
+    moves = [catalog.FileMove(asset_id=asset, to_folder=str(target))]
+    shown = catalog.move_files(moves)
     planned = shown["planned"][0]
     # Nothing moves without agreement, and the taken name gets a number.
     assert source.exists() and planned["numbered"] and planned["to"].endswith("要搬的 (2).mp4")
@@ -148,9 +149,9 @@ def test_files_move_on_disk_only_once_agreed_and_never_over_another(media: Path,
 
     # Only the plan the user was shown is carried out.
     with pytest.raises(ValueError):
-        server.move_files(moves, confirm_plan="something else")
+        catalog.move_files(moves, confirm_plan="something else")
     assert source.exists()
-    moved = server.move_files(moves, confirm_plan=shown["plan"])["moved"][0]
+    moved = catalog.move_files(moves, confirm_plan=shown["plan"])["moved"][0]
     assert not source.exists() and (target / "要搬的.mp4").read_bytes() == b"already here"
     assert runtime.repo.get_assets([asset])[asset].path == moved["to"] == str(target / "要搬的 (2).mp4")
     # The project still plays it, from where it went.
@@ -158,13 +159,15 @@ def test_files_move_on_disk_only_once_agreed_and_never_over_another(media: Path,
 
 
 def test_a_folder_next_to_clip_mcp_s_own_is_not_taken_for_it(tmp_path: Path) -> None:
-    assert server._inside(str(tmp_path / "work" / "a"), str(tmp_path / "work"))
-    assert not server._inside(str(tmp_path / "work2"), str(tmp_path / "work"))
+    assert catalog.inside(str(tmp_path / "work" / "a"), str(tmp_path / "work"))
+    assert not catalog.inside(str(tmp_path / "work2"), str(tmp_path / "work"))
 
 
 def test_the_ai_reading_the_trash_deletes_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(server, "output_dir", lambda: tmp_path)
+    monkeypatch.setattr(catalog, "output_dir", lambda: tmp_path)
+    monkeypatch.setattr(delivery, "output_dir", lambda: tmp_path)
     monkeypatch.setattr(rendering, "output_dir", lambda: tmp_path)
+    monkeypatch.setattr(soundtrack, "output_dir", lambda: tmp_path)
     monkeypatch.setattr(upkeep, "output_dir", lambda: tmp_path)
     old = housekeeping.put_in_trash(str(tmp_path), "project", "b" * 36, "過期了", {"project.json": b"{}"}, [])
     meta = tmp_path / housekeeping.TRASH / old.key / "trashed.json"
@@ -178,8 +181,10 @@ def test_the_ai_reading_the_trash_deletes_nothing(tmp_path: Path, monkeypatch: p
 
 
 def test_a_broken_project_in_the_trash_stays_there(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(server, "output_dir", lambda: tmp_path)
+    monkeypatch.setattr(catalog, "output_dir", lambda: tmp_path)
+    monkeypatch.setattr(delivery, "output_dir", lambda: tmp_path)
     monkeypatch.setattr(rendering, "output_dir", lambda: tmp_path)
+    monkeypatch.setattr(soundtrack, "output_dir", lambda: tmp_path)
     monkeypatch.setattr(upkeep, "output_dir", lambda: tmp_path)
     kept = housekeeping.put_in_trash(str(tmp_path), "project", "c" * 36, "壞掉的", {"project.json": b"not json"}, [])
     with pytest.raises(ValueError):
