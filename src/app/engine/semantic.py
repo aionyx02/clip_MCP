@@ -20,6 +20,7 @@ that cannot be picked honestly without a corpus to pick them against.
 
 import bisect
 import hashlib
+import itertools
 import json
 import math
 import re
@@ -942,9 +943,12 @@ class CleanCuts:
             return True
         # The transcriber often lays words end to end and stretches one over the pause before it.
         # A stretch inside the earlier word belongs to whichever of its ends it lies nearer: nearer
-        # its start, it was a pause before that word, not after it.
+        # its start, it was a pause before that word, not after it. The search starts at the first
+        # stretch that could reach the earlier word's end, so one that began before the earlier word
+        # and runs on past it is still weighed, however many others it overlaps.
         quiet = self._quiet_stretches
-        at = bisect.bisect_left(quiet, (earlier_start, earlier_start))
+        at = min(bisect.bisect_left(quiet, (earlier_start, earlier_start)),
+                 bisect.bisect_left(self._quiet_reach, before - EDGE_TOLERANCE_SECONDS))
         while at < len(quiet) and quiet[at][0] <= end:
             stops, resumes = quiet[at]
             if resumes <= end and (resumes >= before - EDGE_TOLERANCE_SECONDS
@@ -971,6 +975,13 @@ class CleanCuts:
             [(start, end) for start, end in self.pauses if end - start >= CLEAN_SILENCE_SECONDS]
             + [(stops, resumes) for (_, stops), (resumes, _) in zip(talking, talking[1:])
                if resumes - stops >= CLEAN_GAP_SECONDS]))
+
+    @cached_property
+    def _quiet_reach(self) -> Tuple[float, ...]:
+        """How far any stretch up to and including each one of `_quiet_stretches` reaches, so a
+        search can skip the ones that all end before a time; the stretches overlap and nest, so
+        their own ends are not in order."""
+        return tuple(itertools.accumulate((resumes for _, resumes in self._quiet_stretches), max))
 
     @cached_property
     def _sentence_starts(self) -> Tuple[float, ...]:

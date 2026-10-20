@@ -412,6 +412,22 @@ def test_a_measured_silence_the_word_timings_run_over_ends_a_phrase() -> None:
     assert joined_at([[("今天我們一路走", 1.0, 3.0), ("走得很累", 3.0, 4.0), ("後來我們到了山頂。", 4.0, 6.0)]],
                      quiet=[(3.6, 4.0)]) == []
 
+def test_a_silence_that_began_before_the_earlier_word_and_runs_to_the_next_ends_a_phrase() -> None:
+    assert joined_at([[("今天我們一路走", 1.0, 3.0), ("走得很累", 3.0, 4.0), ("後來我們到了山頂。", 4.0, 6.0)]],
+                     quiet=[(2.9, 4.0)]) == []
+
+def test_a_gap_between_two_listens_is_not_lost_behind_a_shorter_pause_inside_it() -> None:
+    assert joined_at([[("今天我們一路走", 1.0, 3.0), ("走得很累", 3.0, 4.0), ("後來我們到了山頂。", 4.0, 6.0)]],
+                     voiced=[(0.0, 2.5), (4.0, 10.0)], quiet=[(2.9, 3.4)]) == []
+
+def test_a_long_pause_is_not_lost_behind_a_shorter_one_nested_in_it() -> None:
+    assert joined_at([[("今天我們一路走", 1.0, 3.0), ("走得很累", 3.0, 4.0), ("後來我們到了山頂。", 4.0, 6.0)]],
+                     quiet=[(2.0, 4.0), (2.5, 3.5)]) == []
+
+def test_a_silence_ending_just_inside_the_earlier_word_s_start_is_a_pause_before_it() -> None:
+    assert any("partway" in problem for problem in joined_at(
+        [[("今天我們一路走", 1.0, 3.0), ("走得很累", 3.0, 4.0), ("後來我們到了山頂。", 4.0, 6.0)]], quiet=[(2.5, 3.2)]))
+
 def test_a_sentence_the_transcriber_started_starts_a_phrase() -> None:
     assert joined_at([[("今天我們一路走", 1.0, 3.0), ("走得很累", 3.0, 4.0)], [("後來我們到了山頂", 4.0, 6.0)]]) == []
 
