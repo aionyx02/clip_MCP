@@ -29,7 +29,10 @@ JOIN_WINDOW_SECONDS = 2.0
 MAX_LAG_SECONDS = 0.5
 # The grid voicing is compared on, in seconds.
 LAG_STEP_SECONDS = 0.01
-# The share of the window that must agree at the best lag for it to be believed. Provisional.
+# The voice detector decides in steps of this many seconds (512 samples at 16 kHz), so a lag
+# smaller than one says nothing, whatever the frame rate.
+VOICE_STEP_SECONDS = 0.032
+# The share of the voice in the window that must line up at the best lag for it to be believed. Provisional.
 MIN_AGREEMENT = 0.8
 
 def stream_mismatch(probed: dict, frame: float) -> Optional[dict]:
@@ -70,6 +73,8 @@ def expected_voicing(clips: Sequence[Clip],
                      voiced: Mapping[str, Sequence[Tuple[float, float]]]) -> List[Tuple[float, float]]:
     """Work out where the cut says each source file's talking should be heard.
 
+    A title card has no sound of its own, so its clip contributes nothing.
+
     Args:
         clips: The base video track's clips.
         voiced: Per asset ID, the source file's voiced stretches in seconds.
@@ -81,7 +86,7 @@ def expected_voicing(clips: Sequence[Clip],
     """
     found: List[Tuple[float, float]] = []
     for clip in clips:
-        if clip.volume <= 0 or clip.asset_id not in voiced:
+        if clip.volume <= 0 or clip.card is not None or clip.asset_id not in voiced:
             continue
         begin = float(clip.timeline_in) - float(clip.audio_lead)
         source_start = float(clip.audio_source_start)
@@ -104,9 +109,13 @@ def expected_voicing(clips: Sequence[Clip],
 def joins(clips: Sequence[Clip], voiced: Mapping[str, Sequence[Tuple[float, float]]]) -> List[float]:
     """Say where one shot hands over to the next, where both have sound and the voice there is known.
 
-    A file nobody listened to for voicing is silence to `expected_voicing`, so
-    a voice heard from it would read as one out of place: a join is compared
-    only when every clip heard within `JOIN_WINDOW_SECONDS` of it was listened to.
+    A title card is silent, so a join into or out of one is left out. A file
+    nobody listened to for voicing is silence to `expected_voicing`, so a
+    voice heard from it would read as one out of place: a join is compared
+    only when every clip heard within `JOIN_WINDOW_SECONDS` plus
+    `MAX_LAG_SECONDS` of it was listened to. A clip up to `MAX_LAG_SECONDS`
+    further out can still be pulled into the window `lag_at` searches, so the
+    exclusion reaches that far too.
 
     Args:
         clips: The base video track's clips.
@@ -115,17 +124,18 @@ def joins(clips: Sequence[Clip], voiced: Mapping[str, Sequence[Tuple[float, floa
 
     Returns:
         The `timeline_in` of each clip after the first, in timeline order,
-        leaving out a join whose clip before or after it is muted.
+        leaving out a join whose clip before or after it is muted or a card.
     """
     ordered = sorted(clips, key=lambda clip: clip.timeline_in)
     heard = [(float(clip.timeline_in) - float(clip.audio_lead), float(clip.timeline_out) + float(clip.audio_lag),
-              clip.asset_id) for clip in ordered if clip.volume > 0]
+              clip.asset_id) for clip in ordered if clip.volume > 0 and clip.card is None]
     found: List[float] = []
+    reach = JOIN_WINDOW_SECONDS + MAX_LAG_SECONDS
     for before, after in zip(ordered, ordered[1:]):
         at = float(after.timeline_in)
-        if before.volume > 0 and after.volume > 0 and all(
+        if (before.volume > 0 and after.volume > 0 and before.card is None and after.card is None and all(
                 asset_id in voiced for start, end, asset_id in heard
-                if start < at + JOIN_WINDOW_SECONDS and end > at - JOIN_WINDOW_SECONDS):
+                if start < at + reach and end > at - reach)):
             found.append(at)
     return found
 
@@ -136,6 +146,12 @@ def _on(stretches: Sequence[Sequence[float]], moment: float) -> bool:
 def lag_at(expected: Sequence[Sequence[float]], measured: Sequence[Sequence[float]], at: float) -> Optional[float]:
     """Say how far the sound at one join is heard from where the cut put it.
 
+    Agreement at a lag is the share, among window samples where the expected
+    voicing or the shifted measured voicing is on, of those where both are on.
+    A lag with no sample on in either has an agreement of 0. A lag at the edge
+    of the search may be a real offset larger than the search, so it is not
+    reported.
+
     Args:
         expected: Where the cut says talking is, as `(start, end)` on the render.
         measured: Where the sound was heard talking, likewise.
@@ -144,7 +160,8 @@ def lag_at(expected: Sequence[Sequence[float]], measured: Sequence[Sequence[floa
     Returns:
         The lag in seconds whose voicing agrees with the cut's best, rounded to
         two places; positive when the sound is heard late. None when the window
-        holds no change to line up, or no lag agrees well enough.
+        holds no change to line up, no lag agrees well enough, or the best lag
+        is at the edge of what was searched.
     """
     # Only the stretches that can reach the window, so a long cut costs no more per join.
     reach = JOIN_WINDOW_SECONDS + MAX_LAG_SECONDS
@@ -159,12 +176,17 @@ def lag_at(expected: Sequence[Sequence[float]], measured: Sequence[Sequence[floa
     best: Optional[Tuple[Tuple[float, float, int], float, float]] = None
     for number in range(-limit, limit + 1):
         lag = number * LAG_STEP_SECONDS
-        agreement = sum(value == _on(measured, moment + lag) for value, moment in zip(wanted, window)) / len(window)
+        heard = [_on(measured, moment + lag) for moment in window]
+        either = sum(cut or sound for cut, sound in zip(wanted, heard))
+        together = sum(cut and sound for cut, sound in zip(wanted, heard))
+        agreement = together / either if either else 0.0
         # The best agreement first, then the smaller move, and a negative one before a positive.
         key = (-agreement, abs(lag), 0 if lag < 0 else 1)
         if best is None or key < best[0]:
             best = (key, lag, agreement)
     if best is None or best[2] < MIN_AGREEMENT:
+        return None
+    if abs(best[1]) >= MAX_LAG_SECONDS - LAG_STEP_SECONDS / 2:
         return None
     return round(best[1], 2)
 
@@ -182,17 +204,17 @@ def check(render_path: str, expected: Sequence[Sequence[float]], at: Sequence[fl
 
     Returns:
         `streams`, what `stream_mismatch` found or None; `joins`, `{at, lag}`
-        for each join that could be lined up; and `frame`, rounded to four
-        places.
+        for each join that could be lined up; `joins_asked`, how many joins were
+        offered to the check; and `frame`, rounded to four places.
     """
     streams = stream_mismatch(probe_file(render_path, ffprobe_bin), frame)
     lags: List[dict] = []
-    if expected:
+    if expected and at:
         samples = np.frombuffer(read_samples(render_path, ffmpeg_bin), dtype=np.float32)
         measured = voiced_stretches(samples)
         lags = [{"at": round(moment, 3), "lag": lag}
                 for moment in at if (lag := lag_at(expected, measured, moment)) is not None]
-    return {"streams": streams, "joins": lags, "frame": round(frame, 4)}
+    return {"streams": streams, "joins": lags, "joins_asked": len(at), "frame": round(frame, 4)}
 
 def keep(work_dir: str, found: dict) -> None:
     """Write what the check found next to the render."""

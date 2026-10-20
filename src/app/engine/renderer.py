@@ -510,12 +510,13 @@ def _run_render(job: Job, spec: Dict[str, Any], context: JobContext, repo: Optio
     checking = spec.get("sync")
     if checking:
         context.report(start + share, "checking sound against picture")
+        # The video is made, and a check that breaks leaves it unchecked, never lost.
         try:
             sync.keep(job.work_dir, sync.check(
                 spec["render_path"], checking["expected"], checking["joins"], checking["frame"],
                 command[0], "ffprobe",
             ))
-        except (RuntimeError, OSError, ValueError, OperationCancelled):
+        except Exception:
             pass
     if repo is not None:
         speed.record_render(repo, computer, job.preview, taken)

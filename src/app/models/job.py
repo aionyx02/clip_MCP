@@ -69,7 +69,8 @@ class Job(BaseModel):
         default=None,
         description="What a finished render's sound was found doing against its picture: `streams`, how far the "
                     "two streams' starts and lengths differ or null when they line up; `joins`, `{at, lag}` for each "
-                    "join whose voicing could be compared, lag in seconds and positive when the sound is late; and "
+                    "join whose voicing could be compared, lag in seconds and positive when the sound is late; "
+                    "`joins_asked`, how many joins were offered to the check; and "
                     "`frame`, one frame of the render in seconds. Null when it was not checked (render jobs)",
     )
     error_message: Optional[str] = None
