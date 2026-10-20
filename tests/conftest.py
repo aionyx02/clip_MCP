@@ -105,6 +105,24 @@ def forget_analyses() -> Iterator[None]:
         conn.execute("DELETE FROM analyses")
     yield
 
+@pytest.fixture(autouse=True)
+def keep_analyses() -> Iterator[None]:
+    """Put the stored analyses back as they were before each test once it ends.
+
+    The same leak as between files happens between two tests of one file: a
+    made-up analysis one test saves is read by the next. What a module-scoped
+    fixture saved is there before the test starts, so it is kept.
+    """
+    from app.runtime import repo
+
+    with repo._transaction() as conn:
+        before = conn.execute("SELECT * FROM analyses").fetchall()
+    yield
+    with repo._transaction() as conn:
+        conn.execute("DELETE FROM analyses")
+        if before:
+            conn.executemany(f"INSERT INTO analyses VALUES ({', '.join('?' * len(before[0]))})", before)
+
 @pytest.fixture(scope="session")
 def media(tmp_path_factory: pytest.TempPathFactory) -> Path:
     """Create the media files the tests import.
