@@ -40,9 +40,17 @@ def get_job(
         analysis or the `output_path` of a render, `remaining_seconds` once a
         running job has gone far enough for its pace to say, `ahead` — how
         many queued jobs go before a queued one — for a failed job its
-        `error_message`, for a finished analysis worth a second look a
-        `note` to pass on, and for a finished render whose every frame was
-        found black, frozen or a flash somewhere, `frames`: `found`, what the
+        `error_message`, for a failed or cancelled job its `failure_kind` —
+        `input`: a file of the library it reads is missing or cannot be
+        opened, and the same call fails again until it can; `made`: a file
+        the server made for it, a picture from the cache, the chapters or
+        the words drawn on, was gone, and the same call again makes it anew; `render`: FFmpeg
+        failed with every file it reads there; `worker`: its worker
+        never started, crashed or was stopped, and the same call again may
+        well work; `cancelled`; left out when the cause is none of these —
+        for a finished analysis worth a second look a `note` to pass on, and
+        for a finished render whose every frame was found black, frozen or a
+        flash somewhere, `frames`: `found`, what the
         cut did not ask for — look at them with `view_render` `at: "spots"` —
         and `meant`, inside a fade, a dip, a card or a photo; or `not_read`
         when the check could not read it, which says nothing about its frames; and a summary
@@ -118,6 +126,8 @@ def _job_states(job_ids: List[str]) -> List[dict]:
             entry["ahead"] = ahead[job.job_id]
         if job.error_message:
             entry["error_message"] = job.error_message
+        if job.failure_kind:
+            entry["failure_kind"] = job.failure_kind.value
         if job.kind == JobKind.RENDER and job.status == JobStatus.COMPLETED:
             if job.spots is None:
                 entry["frames"] = {"not_read": "every frame was not read — the check failed or was stopped — so "

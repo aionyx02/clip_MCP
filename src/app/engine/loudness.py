@@ -21,7 +21,7 @@ import re
 import subprocess
 from typing import List, Tuple
 
-from app.engine.ffmpeg import hidden_window_flags
+from app.engine.ffmpeg import FFmpegFailed, hidden_window_flags
 
 # Stands in the render's filter graph for the gain until it has been measured.
 GAIN_TOKEN = "@LOUDNESS_GAIN@"
@@ -72,7 +72,7 @@ def measure(path: str, filters: str = "", ffmpeg_bin: str = "ffmpeg") -> Tuple[f
         `(lufs, peak_dbfs)`.
 
     Raises:
-        RuntimeError: If FFmpeg cannot read it.
+        FFmpegFailed: If FFmpeg cannot read it.
     """
     graph = f"{filters},ebur128=peak=true" if filters else "ebur128=peak=true"
     result = subprocess.run(
@@ -82,7 +82,7 @@ def measure(path: str, filters: str = "", ffmpeg_bin: str = "ffmpeg") -> Tuple[f
     loud = re.findall(r"I:\s+(-?[\d.]+|-inf) LUFS", result.stderr)
     peak = re.findall(r"Peak:\s+(-?[\d.]+|-inf) dBFS", result.stderr)
     if result.returncode != 0 or not loud or not peak:
-        raise RuntimeError(result.stderr.strip()[-500:] or "ffmpeg could not measure the mix")
+        raise FFmpegFailed(result.stderr.strip()[-500:] or "ffmpeg could not measure the mix")
     return float(loud[-1]), float(peak[-1])
 
 def settle_gain(mix_path: str, target: float, ffmpeg_bin: str = "ffmpeg") -> float:

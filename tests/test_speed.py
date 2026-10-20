@@ -136,6 +136,8 @@ def test_a_finished_analysis_leaves_its_speed_behind_and_a_failed_one_does_not(
 
     store = Repository(str(tmp_path / "runs.db"))
     asset = Asset(id="speed-run", path=str(tmp_path / "talk.mp4"), duration=1000, has_video=True, has_audio=True)
+    # The analysis reads the file first; analyze_media is stood in for, so any bytes will do.
+    (tmp_path / "talk.mp4").write_bytes(b"\0")
     store.save_asset(asset)
     job = Job(kind=JobKind.ANALYZE, asset_id=asset.id, work_dir=str(tmp_path))
     context = type("Context", (), {"report": lambda self, *a: None, "is_cancelled": lambda self: False})()
