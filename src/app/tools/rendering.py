@@ -10,7 +10,7 @@ import time
 from datetime import datetime, timezone
 from decimal import Decimal
 from fractions import Fraction
-from typing import Annotated, Dict, List, Literal, Mapping, Optional, Sequence, Tuple
+from typing import Annotated, Dict, Iterable, List, Literal, Mapping, Optional, Sequence, Tuple
 
 from fastmcp.tools import ToolResult
 from fastmcp.utilities.types import Image
@@ -672,7 +672,7 @@ def start_render(
     commands = [command, *(piece["command"] for piece in pieces)]
     if loudness_target is not None:
         commands.append(spec["loudness"]["mix_command"])
-    spec["inputs"] = _read_from(commands, assets)
+    spec["inputs"] = _read_from(commands, (path for piece in pieces for path in (piece["part"], piece["path"])))
     job = runtime.job_manager.start_job(job, spec)
     # Every clip on a picture track is one picture, the sequence's and the ones drawn over it.
     pictures = sum(len(track.clips) for track in project.video_tracks)
@@ -970,20 +970,23 @@ def _frame_rate(asset: Asset) -> float:
                 return 0.0
     return 0.0
 
-def _read_from(commands: Sequence[List[str]], assets: Mapping[str, Asset]) -> List[str]:
-    """The library's files a job's FFmpeg commands open, so a failure while one cannot be read is put down to it.
+def _read_from(commands: Sequence[List[str]], written: Iterable[str] = ()) -> List[str]:
+    """The files a job's FFmpeg commands open, so a failure while one cannot be read is put down to it.
+
+    A picture from the cache is one of them: removed after the job was queued,
+    it is a file the job could not read, and rendering again makes it anew.
 
     Args:
         commands: The commands, each starting with the executable.
-        assets: The assets they may read from.
+        written: What the job's own steps write, which a later step opens
+            and is not there to be read before the job runs.
 
     Returns:
-        The paths of the assets some command opens with `-i`. A picture taken
-        from the cache instead is not one of them.
+        The paths some command opens with `-i`, less those.
     """
     opened = {command[index + 1] for command in commands
               for index in range(len(command) - 1) if command[index] == "-i"}
-    return sorted({asset.path for asset in assets.values()} & opened)
+    return sorted(opened - set(written))
 
 def _start_preparing(steps: List[dict], urgent: bool, inputs: List[str], asset_id: Optional[str] = None,
                      project_id: Optional[str] = None) -> Optional[str]:
@@ -1042,7 +1045,8 @@ def prepare_playback(project: Project, urgent: bool = False) -> List[str]:
         steps.append({"command": runtime.renderer.build_mix(project, assets, mix, voices, talking_of(project, voices)),
                       "part": mix, "path": gain, "seconds": float(project.duration), "measure": True,
                       "target": playback.LOUDNESS_TARGET, "stage": "measuring loudness"})
-    started.append(_start_preparing(steps, urgent, _read_from([step["command"] for step in steps], assets),
+    written = [path for step in steps for path in (step["part"], step["path"])]
+    started.append(_start_preparing(steps, urgent, _read_from([step["command"] for step in steps], written),
                                     project_id=project.id))
     return [job_id for job_id in started if job_id]
 

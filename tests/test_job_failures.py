@@ -22,7 +22,7 @@ from app.engine.renderer import SPEC_FILE_NAME, JobManager, run_worker
 from app.models.job import FailureKind, Job, JobKind, JobStatus
 from app.models.media import Asset
 from app.storage.repo import Repository
-from app.tools import job_queue
+from app.tools import job_queue, rendering
 from app.tools.catalog import import_asset
 from app.tools.rendering import _read_from, render_project
 from helpers import build_project, insert, video_track
@@ -177,11 +177,11 @@ def test_get_job_says_what_ended_a_job_and_nothing_for_one_that_finished() -> No
     assert (listed[0]["failure_kind"], listed[0]["error_message"]) == ("input", "No such file or directory")
     assert "failure_kind" not in listed[1]
 
-def test_a_job_reads_the_library_files_its_commands_open_and_not_the_cache() -> None:
-    assets = {key: Asset(id=key, path=path, has_video=True, has_audio=True)
-              for key, path in (("a", "talk.mp4"), ("b", "unused.mp4"))}
-    commands = [["ffmpeg", "-i", "talk.mp4", "-i", "cache/picture.mp4", "out.mp4"], ["ffmpeg", "-i", "cache/mix.wav"]]
-    assert _read_from(commands, assets) == ["talk.mp4"]
+def test_a_job_reads_every_file_its_commands_open_but_not_what_it_writes_itself() -> None:
+    commands = [["ffmpeg", "-i", "talk.mp4", "-i", "cache/picture.mp4", "-i", "cache/new.mp4", "out.mp4"],
+                ["ffmpeg", "-i", "talk.mp4", "cache/new.mp4.part"]]
+    # A picture already in the cache is read; one this job makes is not there to be read before it runs.
+    assert _read_from(commands, ["cache/new.mp4.part", "cache/new.mp4"]) == ["cache/picture.mp4", "talk.mp4"]
 
 def test_a_render_is_queued_knowing_which_files_it_reads(media: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     wide = import_asset(str(media / "wide.mp4"))["id"]
@@ -195,3 +195,23 @@ def test_a_render_is_queued_knowing_which_files_it_reads(media: Path, monkeypatc
     monkeypatch.setattr(runtime.job_manager, "start_job", queue)
     render_project(project)
     assert specs[0]["inputs"] == [runtime.repo.get_assets([wide])[wide].path]
+
+def test_playback_is_prepared_knowing_which_files_it_reads(media: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    wide = import_asset(str(media / "wide.mp4"))["id"]
+    project = build_project([video_track(), insert("a", wide, 0, 1)], width=640, height=360)
+    specs: List[Dict[str, Any]] = []
+
+    def queue(job: Job, spec: Dict[str, Any]) -> Job:
+        specs.append(spec)
+        return job
+
+    monkeypatch.setattr(rendering, "PREPARE_PLAYBACK", True)
+    monkeypatch.setattr(rendering, "_make_room", lambda: None)
+    monkeypatch.setattr(rendering, "_being_prepared", set)
+    # Whatever an earlier test left in the shared folder, the copy to play from is made again.
+    monkeypatch.setattr(rendering.playback, "missing", lambda project, assets, present: [wide])
+    monkeypatch.setattr(runtime.job_manager, "start_job", queue)
+    rendering.prepare_playback(runtime.repo.get_project(project))
+    # The copy to play from, and the loudness measured from a mix the job writes and reads back itself.
+    assert [spec["steps"][-1]["stage"] for spec in specs] == ["making a copy to play from", "measuring loudness"]
+    assert [spec["inputs"] for spec in specs] == [[runtime.repo.get_assets([wide])[wide].path]] * 2
