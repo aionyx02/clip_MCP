@@ -672,7 +672,8 @@ def start_render(
     commands = [command, *(piece["command"] for piece in pieces)]
     if loudness_target is not None:
         commands.append(spec["loudness"]["mix_command"])
-    spec["inputs"] = _read_from(commands, (path for piece in pieces for path in (piece["part"], piece["path"])))
+    spec["inputs"], spec["made"] = _read_from(commands, (asset.path for asset in assets.values()),
+                                              (path for piece in pieces for path in (piece["part"], piece["path"])))
     job = runtime.job_manager.start_job(job, spec)
     # Every clip on a picture track is one picture, the sequence's and the ones drawn over it.
     pictures = sum(len(track.clips) for track in project.video_tracks)
@@ -970,33 +971,39 @@ def _frame_rate(asset: Asset) -> float:
                 return 0.0
     return 0.0
 
-def _read_from(commands: Sequence[List[str]], written: Iterable[str] = ()) -> List[str]:
+def _read_from(commands: Sequence[List[str]], library: Iterable[str],
+               written: Iterable[str] = ()) -> Tuple[List[str], List[str]]:
     """The files a job's FFmpeg commands open, so a failure while one cannot be read is put down to it.
 
-    A picture from the cache is one of them: removed after the job was queued,
-    it is a file the job could not read, and rendering again makes it anew.
+    The user's footage and what the server made for the job are told apart:
+    footage that is gone stays gone until the user puts it back, while a
+    picture from the cache or the chapters, removed after the job was queued,
+    is made anew by starting the job again.
 
     Args:
         commands: The commands, each starting with the executable.
+        library: The paths of the library's files.
         written: What the job's own steps write, which a later step opens
             and is not there to be read before the job runs.
 
     Returns:
-        The paths some command opens with `-i`, less those.
+        `(inputs, made)`: the library's files some command opens with `-i`,
+        and the other files it opens, less what the job writes.
     """
     opened = {command[index + 1] for command in commands
-              for index in range(len(command) - 1) if command[index] == "-i"}
-    return sorted(opened - set(written))
+              for index in range(len(command) - 1) if command[index] == "-i"} - set(written)
+    footage = opened & set(library)
+    return sorted(footage), sorted(opened - footage)
 
-def _start_preparing(steps: List[dict], urgent: bool, inputs: List[str], asset_id: Optional[str] = None,
-                     project_id: Optional[str] = None) -> Optional[str]:
-    """Queue one preparation job over its steps, which read `inputs`; its ID, or None with nothing to do."""
+def _start_preparing(steps: List[dict], urgent: bool, read: Tuple[List[str], List[str]],
+                     asset_id: Optional[str] = None, project_id: Optional[str] = None) -> Optional[str]:
+    """Queue one preparation job over its steps, which read the footage and made files in `read`; its ID, or None."""
     if not steps:
         return None
     job = Job(kind=JobKind.PREPARE, asset_id=asset_id, project_id=project_id, priority=-1 if urgent else 1,
               memory_estimate=PREPARE_MEMORY_BYTES)
     job.work_dir = os.path.join(runtime.WORKSPACE_DIR, "jobs", job.job_id)
-    return runtime.job_manager.start_job(job, {"steps": steps, "inputs": sorted(set(inputs))}).job_id
+    return runtime.job_manager.start_job(job, {"steps": steps, "inputs": read[0], "made": read[1]}).job_id
 
 def prepare_playback(project: Project, urgent: bool = False) -> List[str]:
     """Start making what the browser still needs to play a cut: proxies, repaired sound, its loudness.
@@ -1026,7 +1033,7 @@ def prepare_playback(project: Project, urgent: bool = False) -> List[str]:
             continue
         step = {"command": playback.proxy_command(asset, path + ".part", _frame_rate(asset)), "part": path + ".part",
                 "path": path, "seconds": float(asset.duration or 1), "stage": "making a copy to play from"}
-        started.append(_start_preparing([step], urgent, [asset.path], asset_id=asset_id))
+        started.append(_start_preparing([step], urgent, ([asset.path], []), asset_id=asset_id))
     sound = playback.sound_dir(runtime.WORKSPACE_DIR)
     steps = []
     for track in project.tracks:
@@ -1046,8 +1053,8 @@ def prepare_playback(project: Project, urgent: bool = False) -> List[str]:
                       "part": mix, "path": gain, "seconds": float(project.duration), "measure": True,
                       "target": playback.LOUDNESS_TARGET, "stage": "measuring loudness"})
     written = [path for step in steps for path in (step["part"], step["path"])]
-    started.append(_start_preparing(steps, urgent, _read_from([step["command"] for step in steps], written),
-                                    project_id=project.id))
+    read = _read_from([step["command"] for step in steps], (asset.path for asset in assets.values()), written)
+    started.append(_start_preparing(steps, urgent, read, project_id=project.id))
     return [job_id for job_id in started if job_id]
 
 def playback_of(project: Project, urgent: bool = True) -> dict:

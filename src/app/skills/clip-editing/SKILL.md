@@ -399,4 +399,4 @@ with options the user can pick from.
 | `compiling would undo work already on this project` | A hand-adjusted clip's footage left the plan: ask the user whether to put it back or unpin it. |
 | `the cut is not ready to render` | Tell the user each finding in plain words and ask; render with `allow` only for the kinds they chose to keep. |
 | `... is not supported yet` | Explain the limit and offer the closest supported result. |
-| Job `failed` | Summarize `error_message` for the user. Retry it unchanged only if its `failure_kind` is `worker`. |
+| Job `failed` | Summarize `error_message` for the user. Retry it unchanged only if its `failure_kind` is `worker` or `made`. |

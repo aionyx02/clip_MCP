@@ -693,6 +693,8 @@ def run_worker(repo: Repository, job_id: str) -> None:
             # other error's cause is not known here, and it is left without one.
             if _unreadable(_inputs(repo, job, spec)):
                 failure = FailureKind.INPUT
+            elif _unreadable(spec.get("made", [])):
+                failure = FailureKind.MADE
             elif isinstance(exc, FFmpegFailed):
                 failure = FailureKind.RENDER
 

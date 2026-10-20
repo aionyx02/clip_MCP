@@ -177,11 +177,20 @@ def test_get_job_says_what_ended_a_job_and_nothing_for_one_that_finished() -> No
     assert (listed[0]["failure_kind"], listed[0]["error_message"]) == ("input", "No such file or directory")
     assert "failure_kind" not in listed[1]
 
-def test_a_job_reads_every_file_its_commands_open_but_not_what_it_writes_itself() -> None:
+def test_a_job_reads_footage_and_made_files_apart_and_not_what_it_writes_itself() -> None:
     commands = [["ffmpeg", "-i", "talk.mp4", "-i", "cache/picture.mp4", "-i", "cache/new.mp4", "out.mp4"],
                 ["ffmpeg", "-i", "talk.mp4", "cache/new.mp4.part"]]
     # A picture already in the cache is read; one this job makes is not there to be read before it runs.
-    assert _read_from(commands, ["cache/new.mp4.part", "cache/new.mp4"]) == ["cache/picture.mp4", "talk.mp4"]
+    assert _read_from(commands, ["talk.mp4", "unused.mp4"], ["cache/new.mp4.part", "cache/new.mp4"]) == (
+        ["talk.mp4"], ["cache/picture.mp4"])
+
+def test_ffmpeg_failing_on_a_made_file_that_is_gone_is_put_down_to_it(store: Repository, tmp_path: Path) -> None:
+    source, picture = tmp_path / "talk.mp4", tmp_path / "picture.mp4"
+    source.write_bytes(b"footage")
+    spec = {**render_spec(tmp_path, picture), "inputs": [str(source)], "made": [str(picture)]}
+    job = ended(store, queued(store, tmp_path, spec, kind=JobKind.RENDER))
+    # The footage is there; the picture the cache held is not, and rendering again makes it.
+    assert (job.status, job.failure_kind) == (JobStatus.FAILED, FailureKind.MADE)
 
 def test_a_render_is_queued_knowing_which_files_it_reads(media: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     wide = import_asset(str(media / "wide.mp4"))["id"]
@@ -193,8 +202,13 @@ def test_a_render_is_queued_knowing_which_files_it_reads(media: Path, monkeypatc
         return job
 
     monkeypatch.setattr(runtime.job_manager, "start_job", queue)
-    render_project(project)
-    assert specs[0]["inputs"] == [runtime.repo.get_assets([wide])[wide].path]
+    footage = runtime.repo.get_assets([wide])[wide].path
+    # Without loudness there is no mix: the footage is read by the picture's own commands.
+    render_project(project, loudness_target=None)
+    assert (specs[0]["inputs"], specs[0]["made"]) == ([footage], [])
+    pieces = specs[0]["pieces"]
+    # A preview reads the pictures it makes as they are made, so they are not read before it runs.
+    assert pieces and not {piece["path"] for piece in pieces} & set(specs[0]["inputs"] + specs[0]["made"])
 
 def test_playback_is_prepared_knowing_which_files_it_reads(media: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     wide = import_asset(str(media / "wide.mp4"))["id"]
@@ -214,4 +228,5 @@ def test_playback_is_prepared_knowing_which_files_it_reads(media: Path, monkeypa
     rendering.prepare_playback(runtime.repo.get_project(project))
     # The copy to play from, and the loudness measured from a mix the job writes and reads back itself.
     assert [spec["steps"][-1]["stage"] for spec in specs] == ["making a copy to play from", "measuring loudness"]
-    assert [spec["inputs"] for spec in specs] == [[runtime.repo.get_assets([wide])[wide].path]] * 2
+    footage = runtime.repo.get_assets([wide])[wide].path
+    assert [(spec["inputs"], spec["made"]) for spec in specs] == [([footage], [])] * 2
