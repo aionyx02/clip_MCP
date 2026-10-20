@@ -29,7 +29,7 @@ from app.engine.semantic import (
 )
 from app.engine.subtitles import caption_overflow, captioned_clips
 from app.models.media import Asset, MediaAnalysis
-from app.models.timeline import CaptionStyle, Clip, Marker, PlacedCue, Project, TrackType
+from app.models.timeline.parts import CaptionStyle, Clip, Marker, PlacedCue, Project, TrackType
 
 # YouTube's rules for chapters written into a description: the first at 0:00, at least
 # three of them, each at least ten seconds long. The platform's rules, not a taste, and

@@ -51,7 +51,7 @@ from app.models.plan import (
     Established, Fact, Pacing, PlanTarget, Rejection, Selection, Structure, Trim, TrimKind, apply_amendment,
 )
 from app.models.semantic import SectionChoice, SemanticClip, SemanticTimeline
-from app.models.timeline import Clip, Marker, Project, Track
+from app.models.timeline.parts import Clip, Marker, Project, Track
 from app.runtime import repo as runtime_repo
 from app.tools.catalog import import_asset
 from app.tools.editing import apply_edits, create_project, get_project
@@ -1170,7 +1170,7 @@ def main_clips(project_id: str) -> List[dict]:
     Returns:
         The clips in timeline order.
     """
-    from app.models.timeline import Clip
+    from app.models.timeline.parts import Clip
 
     track = next(track for track in get_project(project_id)["tracks"] if track["id"] == "main")
     return [Clip.model_validate(clip).model_dump() for clip in track["clips"]]
@@ -1877,7 +1877,9 @@ def test_the_music_changes_where_the_part_of_the_video_does(planned: dict, tmp_p
 def test_a_looped_song_goes_onto_the_track_without_a_hair_of_overlap() -> None:
     """A song whose length is not a whole number of milliseconds: rounded the wrong way,
     one loop runs past the end of the file, or into the next one, and the track refuses it."""
-    from app.models.timeline import EditOperation, apply_operation, validate_project
+    from app.models.timeline.apply import apply_operation
+    from app.models.timeline.operations import EditOperation
+    from app.models.timeline.validate import validate_project
 
     plan, by_id, assets = parts()
     assets = {**assets, "jingle": sourced("jingle", seconds=1.3337).model_copy(update={"has_video": False})}
@@ -1908,7 +1910,7 @@ def music_by_hand(plan: EditPlan, by_id: dict, assets: dict, index: int = 0, **c
         `(project, laid)` — a project holding the music with that stretch
         changed, and the music operations the first compile made.
     """
-    from app.models.timeline import Clip, TimeRange, Track, TrackType
+    from app.models.timeline.parts import Clip, TimeRange, Track, TrackType
 
     operations, provenance = compile_operations(plan, by_id, {}, assets)
     laid = [op for op in operations if op.get("track_id") == "music" and op["action"] == "add_clip"]
@@ -1947,7 +1949,7 @@ def test_a_music_clip_from_before_stretches_had_names_is_taken_as_the_first() ->
     assert [op["volume"] for op in operations if op.get("track_id") == "music" and op["action"] == "add_clip"] == [0.2]
 
 def test_music_lengthened_by_hand_into_the_next_stretch_is_refused() -> None:
-    from app.models.timeline import TimeRange
+    from app.models.timeline.parts import TimeRange
 
     plan, by_id, assets = parts()
     plan = plan.model_copy(update={"music": MusicPlan(cues=[

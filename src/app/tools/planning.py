@@ -13,7 +13,8 @@ from app.models.plan import (
     EditPlan, PlanAmendment, Trim, TrimKind, apply_amendment, describe_amendment, with_whole_clip_ids,
 )
 from app.models.semantic import SemanticClip
-from app.models.timeline import EditOperation, Project
+from app.models.timeline.operations import EditOperation
+from app.models.timeline.parts import Project
 from app.engine import loudness
 from app.engine.plan import (
     COMPILED_TRACKS, Note, as_left, broll_covers, broll_slots, check_plan, check_recompile, compile_operations,

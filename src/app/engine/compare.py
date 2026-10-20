@@ -11,7 +11,7 @@ engine: the same two cuts always give the same list.
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Tuple
 
-from app.models.timeline import Clip, Project, TrackType
+from app.models.timeline.parts import Clip, Project, TrackType
 
 # Provisional (roadmap §13): shorter than this, a change in where a clip starts or ends is
 # rounding or a nudge nobody would notice, not an edit worth reading out.

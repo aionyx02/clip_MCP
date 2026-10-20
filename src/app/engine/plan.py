@@ -33,7 +33,7 @@ from app.models.plan import (
 )
 from app.engine.semantic import EDGE_TOLERANCE_SECONDS, CleanCuts
 from app.models.semantic import ClipKind, SemanticClip, SemanticTimeline
-from app.models.timeline import MAX_SPEED, MIN_SPEED, Clip, Project, TitleCard, card_background
+from app.models.timeline.parts import MAX_SPEED, MIN_SPEED, Clip, Project, TitleCard, card_background
 
 # Air left around a cut, taken from the clip's measured headroom, so a line does not
 # begin the instant the picture does. Never more than the headroom allows. The default

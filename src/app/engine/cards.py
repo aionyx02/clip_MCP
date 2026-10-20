@@ -14,7 +14,7 @@ from PIL import Image, ImageEnhance, ImageFilter
 
 from app.engine.subtitles import CAPTION_LINE_HEIGHT, DEFAULT_FONT, escape_ass_text, format_ass_time, wrap_caption
 from app.engine.texts import LINE_WIDTH
-from app.models.timeline import CaptionStyle, Clip, Project, TitleCard
+from app.models.timeline.parts import CaptionStyle, Clip, Project, TitleCard
 
 # Provisional (roadmap §13): how big a card's title is, as a share of the frame's short side.
 TITLE_SHARE = 0.1

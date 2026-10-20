@@ -13,7 +13,7 @@ from app.engine import cards, loudness, resources, stills
 from app.engine.ffmpeg import escape_filter_path
 from app.engine.reframe import Framing, crop_filter
 from app.models.media import Asset, MediaAnalysis
-from app.models.timeline import TOUCHING_SECONDS, Clip, Dip, Project, TrackType, Transition, VoiceCleanup, Wipe
+from app.models.timeline.parts import TOUCHING_SECONDS, Clip, Dip, Project, TrackType, Transition, VoiceCleanup, Wipe
 
 AUDIO_SAMPLE_RATE = 48000
 # Provisional (roadmap §13): how a shot shown whole sits on its blurred copy — how hard the copy

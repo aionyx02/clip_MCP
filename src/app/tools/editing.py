@@ -6,10 +6,12 @@ from typing import Annotated, Callable, List, Optional, Sequence
 
 from pydantic import Field
 
-from app.models.timeline import (
-    AddSubtitleOp, EditOperation, EditSubtitleOp, FitTrackOp, Project, SetCaptionStyleOp, SetSubtitlesOp,
-    SubtitleCue, TrackType, apply_operation, validate_project,
+from app.models.timeline.apply import apply_operation
+from app.models.timeline.operations import (
+    AddSubtitleOp, EditOperation, EditSubtitleOp, FitTrackOp, SetCaptionStyleOp, SetSubtitlesOp,
 )
+from app.models.timeline.parts import Project, SubtitleCue, TrackType
+from app.models.timeline.validate import validate_project
 from app.engine.semantic import clean_cuts
 from app.engine.frames import format_timestamp
 from app.engine.subtitles import place_cues
