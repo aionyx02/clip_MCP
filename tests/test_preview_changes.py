@@ -19,7 +19,7 @@ from app.models.plan import Beat, EditPlan, Selection, Trim, TrimKind
 from app.tools.catalog import import_asset
 from app.tools.planning import get_plan, preview_plan_diff, preview_sound, save_plan
 from helpers import build_project, edit, insert, video_track
-from test_edit_plan import planned  # noqa: F401 — the fixture
+from edit_plan.shared import planned  # noqa: F401 — the fixture
 
 def picture_of(result) -> Image.Image:
     """Decode the image a tool returned.
