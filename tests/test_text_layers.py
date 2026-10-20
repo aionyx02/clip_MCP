@@ -4,8 +4,8 @@ from pathlib import Path
 
 import pytest
 
-from app import runtime, server
-from app.tools import shared
+from app import runtime
+from app.tools import catalog, shared
 from app.engine import texts
 from app.engine.frames import extract_frame
 from app.engine.subtitles import build_ass
@@ -18,7 +18,7 @@ def words(clip_id: str = "a", text_id: str = "n", **fields) -> dict:
 
 
 def test_words_stay_with_their_footage(media: Path) -> None:
-    asset = server.import_asset(str(media / "wide.mp4"))["id"]
+    asset = catalog.import_asset(str(media / "wide.mp4"))["id"]
     project = build_project([video_track(), insert("a", asset, 2, 6), insert("b", asset, 0, 2)], name="文字")
     # Given in the cut's seconds, kept in the file's.
     edit(project, [words(timeline_start=1, timeline_end=3, second="店長")])
@@ -39,7 +39,7 @@ def test_words_stay_with_their_footage(media: Path) -> None:
 
 
 def test_words_are_changed_and_taken_off(media: Path) -> None:
-    asset = server.import_asset(str(media / "wide.mp4"))["id"]
+    asset = catalog.import_asset(str(media / "wide.mp4"))["id"]
     project = build_project([video_track(), insert("a", asset, 0, 4), words()], name="改文字")
     edit(project, [{"action": "set_text", "track_id": "main", "clip_id": "a", "text_id": "n", "style": "free",
                     "x": 0.3, "y": 0.2, "text": "注意", "second": ""}])
@@ -54,7 +54,7 @@ def test_words_are_changed_and_taken_off(media: Path) -> None:
 
 
 def test_each_kind_keeps_to_its_place(media: Path) -> None:
-    asset = server.import_asset(str(media / "tall.mp4"))["id"]
+    asset = catalog.import_asset(str(media / "tall.mp4"))["id"]
     project = build_project([video_track(), insert("a", asset, 0, 4)], width=1080, height=1920, name="位置")
     style = runtime.repo.get_project(project).caption_style
     layer = lambda kind: texts.placed(  # noqa: E731
@@ -67,7 +67,7 @@ def test_each_kind_keeps_to_its_place(media: Path) -> None:
 
 
 def test_a_name_bar_renders_on_its_box(media: Path, tmp_path: Path) -> None:
-    asset = server.import_asset(str(media / "wide.mp4"))["id"]
+    asset = catalog.import_asset(str(media / "wide.mp4"))["id"]
     project = build_project([video_track(), insert("a", asset, 0, 2), words(second="店長")],
                             width=640, height=360, name="輸出文字")
     stored = runtime.repo.get_project(project)
@@ -88,7 +88,7 @@ def test_a_name_bar_renders_on_its_box(media: Path, tmp_path: Path) -> None:
 def test_the_editor_draws_words_as_the_render_does(media: Path) -> None:
     from app.engine import playback
 
-    asset = server.import_asset(str(media / "wide.mp4"))["id"]
+    asset = catalog.import_asset(str(media / "wide.mp4"))["id"]
     project = build_project([video_track(), insert("a", asset, 1, 3), words(style="headline")],
                             width=640, height=360, name="播文字")
     stored = runtime.repo.get_project(project)
@@ -99,7 +99,7 @@ def test_the_editor_draws_words_as_the_render_does(media: Path) -> None:
 
 
 def test_a_title_card_keeps_its_own_words(media: Path) -> None:
-    asset = server.import_asset(str(media / "wide.mp4"))["id"]
+    asset = catalog.import_asset(str(media / "wide.mp4"))["id"]
     project = build_project([video_track(), insert("a", asset, 0, 2),
                              {"action": "add_title_card", "track_id": "main", "clip_id": "t", "title": "標題"}],
                             name="卡片沒文字")
@@ -121,7 +121,7 @@ def test_a_moved_name_keeps_its_box_and_the_safe_area(media: Path) -> None:
 
 
 def test_a_new_style_puts_moved_words_where_it_goes(media: Path) -> None:
-    asset = server.import_asset(str(media / "wide.mp4"))["id"]
+    asset = catalog.import_asset(str(media / "wide.mp4"))["id"]
     project = build_project([video_track(), insert("a", asset, 0, 4), words()], name="換樣式")
     edit(project, [{"action": "set_text", "track_id": "main", "clip_id": "a", "text_id": "n", "x": 0.3, "y": 0.2}])
     [layer] = clips_of(project, "main")[0]["texts"]
@@ -164,7 +164,7 @@ def test_where_words_are_drawn_puts_them_there_again() -> None:
 def test_words_fade_with_the_picture_they_are_on(media: Path) -> None:
     from app.engine import playback
 
-    asset = server.import_asset(str(media / "wide.mp4"))["id"]
+    asset = catalog.import_asset(str(media / "wide.mp4"))["id"]
     project = build_project([video_track(), insert("a", asset, 0, 4), words(style="headline"),
                              words(text_id="m", timeline_start=0.5, timeline_end=2)],
                             width=640, height=360, name="淡出的文字")
@@ -183,7 +183,7 @@ def test_words_fade_with_the_picture_they_are_on(media: Path) -> None:
 def test_punctuation_over_footage_is_drawn_where_a_glance_still_sees_it(media: Path) -> None:
     from app.engine import playback
 
-    asset = server.import_asset(str(media / "wide.mp4"))["id"]
+    asset = catalog.import_asset(str(media / "wide.mp4"))["id"]
     project = build_project([video_track(), insert("a", asset, 0, 4), words(style="headline", text="今天，出發。")],
                             width=640, height=360, name="標點")
     stored = runtime.repo.get_project(project)

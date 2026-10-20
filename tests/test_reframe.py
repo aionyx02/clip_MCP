@@ -25,8 +25,8 @@ from app.engine.reframe import (
 from app.models.media import FaceMeasurement, MediaAnalysis
 from app.models.timeline import Clip, TimeRange
 from app.runtime import repo
+from app.tools.catalog import import_asset
 from app.tools.rendering import framing_of, reshaped
-from app.server import import_asset
 from app.tools.shared import referenced_assets
 from helpers import build_project, insert, video_track
 

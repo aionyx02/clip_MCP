@@ -32,8 +32,9 @@ from app.models.timeline import (
     CaptionStyle, Clip, ClipLayout, Dissolve, Marker, PlacedCue, Project, SpeakerMark, TimeRange, Track, TrackType,
 )
 from app.runtime import repo
+from app.tools.catalog import import_asset
+from app.tools.delivery import export_cover, export_timeline, get_chapters
 from app.tools.rendering import check_render, render_project
-from app.server import export_cover, export_timeline, get_chapters, import_asset
 from helpers import build_project, edit, finished, insert, video_track
 
 def clip(clip_id: str, asset_id: str, start: float, end: float, at: float, **fields) -> Clip:
@@ -292,7 +293,7 @@ def test_a_close_look_shows_what_is_on_screen_either_side_of_one_moment() -> Non
     ]
 
 def test_covers_are_offered_one_part_at_a_time_with_what_the_video_is_for(media: Path) -> None:
-    from app.server import propose_covers
+    from app.tools.delivery import propose_covers
 
     asset = import_asset(str(media / "wide.mp4"))["id"]
     project = build_project([video_track(), insert("a", asset, 0, 3), insert("b", asset, 4, 8)], width=640, height=360)

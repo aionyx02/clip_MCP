@@ -53,8 +53,9 @@ from app.models.plan import (
 from app.models.semantic import SectionChoice, SemanticClip, SemanticTimeline
 from app.models.timeline import Clip, Marker, Project, Track
 from app.runtime import repo as runtime_repo
+from app.tools.catalog import import_asset
 from app.tools.editing import apply_edits, create_project, get_project
-from app.server import amend_plan, compile_plan, diff_plan, get_plan, import_asset, save_plan, validate_plan
+from app.tools.planning import amend_plan, compile_plan, diff_plan, get_plan, save_plan, validate_plan
 from helpers import video_track
 from test_semantic_timeline import ASSET_ID, analysis, asset, spans
 
@@ -1156,9 +1157,9 @@ def ops(*operations: dict) -> list:
     Returns:
         The validated operations.
     """
-    from app.server import _OPERATIONS
+    from app.tools.planning import OPERATIONS
 
-    return _OPERATIONS.validate_python(list(operations))
+    return OPERATIONS.validate_python(list(operations))
 
 def main_clips(project_id: str) -> List[dict]:
     """Read the sequence track's clips, with every field.
@@ -1189,7 +1190,7 @@ def compiled_project(planned: dict) -> str:
 
 def test_covering_picture_compiles_onto_a_track_of_its_own(planned: dict, media: Path) -> None:
     """Above the sequence, silent, and without changing how long the video runs."""
-    from app.server import propose_broll
+    from app.tools.planning import propose_broll
     from app.tools.timelines import build_semantic_timeline, query_clips
 
     quiet = import_asset(str(media / "silent.mp4"))["id"]
@@ -2351,7 +2352,7 @@ def test_how_a_beat_comes_in_and_how_a_piece_plays_reach_the_timeline(planned: d
     assert (kept.speed, kept.volume) == (1.5, 0.5)
 
 def test_a_plan_is_copied_onto_a_timeline_built_over_more_files(planned: dict, media: Path) -> None:
-    from app.server import copy_plan
+    from app.tools.planning import copy_plan
     from app.tools.timelines import build_semantic_timeline, get_semantic_clip
 
     quiet = import_asset(str(media / "silent.mp4"))["id"]
@@ -2370,7 +2371,7 @@ def test_a_plan_is_copied_onto_a_timeline_built_over_more_files(planned: dict, m
     assert copied["problems"] == []
 
 def test_a_plan_follows_its_sentences_after_the_footage_is_transcribed_again(planned: dict) -> None:
-    from app.server import copy_plan
+    from app.tools.planning import copy_plan
     from app.tools.timelines import build_semantic_timeline, get_semantic_clip
 
     asset_id = planned["clips"][0]["asset_id"]
@@ -2397,7 +2398,7 @@ def heard_again(planned: dict, third: tuple = (8.2, 10.4)) -> str:
     return build_semantic_timeline([asset_id], rebuild=True)["timeline_id"]
 
 def test_a_trim_takes_the_same_seconds_of_the_file_after_its_sentence_moved(planned: dict) -> None:
-    from app.server import copy_plan
+    from app.tools.planning import copy_plan
 
     first, third = planned["clips"][0]["clip_id"], planned["clips"][2]["clip_id"]
     amend_plan(planned["plan_id"], 1, amendments(
@@ -2411,7 +2412,7 @@ def test_a_trim_takes_the_same_seconds_of_the_file_after_its_sentence_moved(plan
     assert [match["trim"] for match in copied["matched_nearby"]] == ["head 1.5s → 1.7s", "tail 1s → 1.4s"]
 
 def test_a_trim_whose_seconds_are_no_longer_in_its_sentence_is_handed_back(planned: dict) -> None:
-    from app.server import copy_plan
+    from app.tools.planning import copy_plan
 
     third = planned["clips"][2]["clip_id"]
     amend_plan(planned["plan_id"], 1, amendments(
@@ -2602,7 +2603,8 @@ def test_evidence_outside_the_clip_or_trimmed_off_is_handed_back() -> None:
 
 def test_a_song_picked_by_ear_under_the_plan_s_music_is_written_into_its_cue(planned: dict, media: Path) -> None:
     from app.models.offer import OfferedSong
-    from app.server import offer_songs, pick_song, set_asset_library, song_trial
+    from app.tools.catalog import set_asset_library
+    from app.tools.soundtrack import offer_songs, pick_song, song_trial
 
     song = import_asset(str(media / "song.mp3"))["id"]
     jingle = import_asset(str(media / "jingle.wav"))["id"]

@@ -4,8 +4,8 @@ from pathlib import Path
 
 import pytest
 
-from app import runtime, server
-from app.tools import rendering, shared
+from app import runtime
+from app.tools import catalog, rendering, shared
 from app.engine import stills
 from app.engine.frames import extract_frame
 from helpers import build_project, clips_of, edit, insert, render, video_track
@@ -33,14 +33,14 @@ def test_a_photo_moves_the_way_it_was_told() -> None:
 
 
 def test_a_photo_is_added_as_a_photo(photo: Path) -> None:
-    added = server.import_asset(str(photo))
-    listed = next(asset for asset in server.list_assets()["assets"] if asset["id"] == added["id"])
+    added = catalog.import_asset(str(photo))
+    listed = next(asset for asset in catalog.list_assets()["assets"] if asset["id"] == added["id"])
     assert listed["photo"] is True and listed["duration"] is None
     assert runtime.repo.get_assets([added["id"]])[added["id"]].duration == stills.STILL_LONGEST
 
 
 def test_a_photo_renders_for_as_long_as_its_clip(photo: Path, tmp_path: Path) -> None:
-    asset = server.import_asset(str(photo))["id"]
+    asset = catalog.import_asset(str(photo))["id"]
     project = build_project([video_track(), insert("a", asset, 0, 3)], width=320, height=240, name="照片")
     edit(project, [{"action": "set_clip_look", "track_id": "main", "clip_id": "a", "motion": "pan_right"}])
     assert clips_of(project, "main")[0]["motion"] == "pan_right"
@@ -57,7 +57,7 @@ def test_a_photo_renders_for_as_long_as_its_clip(photo: Path, tmp_path: Path) ->
 def test_a_photo_is_looked_at_for_faces_only(photo: Path, tmp_path: Path) -> None:
     from app.engine.analysis import analyze_media
 
-    added = server.import_asset(str(photo))["id"]
+    added = catalog.import_asset(str(photo))["id"]
     asset = runtime.repo.get_assets([added])[added]
     analysis = analyze_media(asset, str(tmp_path), True, None, None, None, lambda *_: None, lambda: False, "ffmpeg")
     assert analysis.duration == stills.STILL_SECONDS
@@ -69,7 +69,7 @@ def test_a_photo_is_looked_at_for_faces_only(photo: Path, tmp_path: Path) -> Non
 
 
 def test_a_landscape_photo_in_a_vertical_video_sits_whole_over_its_blur(photo: Path, tmp_path: Path) -> None:
-    asset = server.import_asset(str(photo))["id"]
+    asset = catalog.import_asset(str(photo))["id"]
     project = build_project([video_track(), insert("a", asset, 0, 2)], width=360, height=640, name="直式照片")
     stored = runtime.repo.get_project(project)
     framing = rendering.framing_of(stored, shared.referenced_assets(stored))
@@ -84,7 +84,7 @@ def test_a_landscape_photo_in_a_vertical_video_sits_whole_over_its_blur(photo: P
 def test_the_editor_plays_a_photo_from_the_file_itself(photo: Path) -> None:
     from app.engine import playback
 
-    asset = server.import_asset(str(photo))["id"]
+    asset = catalog.import_asset(str(photo))["id"]
     project = build_project([video_track(), insert("a", asset, 0, 4)], width=320, height=240, name="播照片")
     stored = runtime.repo.get_project(project)
     assets = shared.referenced_assets(stored)

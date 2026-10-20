@@ -3,8 +3,9 @@
 from pathlib import Path
 
 from app.engine import scan
+from app.tools.catalog import import_asset
+from app.tools.looking import view_render
 from app.tools.rendering import render_project
-from app.server import import_asset, view_render
 from helpers import build_project, edit, finished, insert, video_track
 
 

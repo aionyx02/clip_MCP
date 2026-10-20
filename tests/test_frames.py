@@ -7,7 +7,8 @@ import pytest
 from PIL import Image
 
 from app.engine.frames import TILE_SIZE, _crop_to_aspect, format_timestamp, storyboard_sheet
-from app.server import import_asset, view_frames
+from app.tools.catalog import import_asset
+from app.tools.looking import view_frames
 from app.tools.shared import MAX_STORYBOARD_TILES
 
 @pytest.mark.parametrize(("seconds", "expected"), [

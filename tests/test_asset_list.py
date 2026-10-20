@@ -7,8 +7,8 @@ from pathlib import Path
 
 import pytest
 
-from app import runtime, server
-from app.tools import editing
+from app import runtime
+from app.tools import catalog, editing, planning
 from app.models.media import Asset
 
 def stored(name: str, folder: str, tmp_path: Path, seconds: float = 12.5) -> str:
@@ -28,34 +28,34 @@ def shelf(tmp_path: Path) -> dict:
     return {"folder": folder["id"], "inside": inside, "outside": outside, "name": name}
 
 def test_a_page_of_the_library_says_how_many_there_are_in_all(shelf: dict) -> None:
-    page = server.list_assets(limit=2)
+    page = catalog.list_assets(limit=2)
     assert len(page["assets"]) == 2 and page["total"] >= 4
     assert page["offset"] == 0
-    rest = server.list_assets(limit=2, offset=2)
+    rest = catalog.list_assets(limit=2, offset=2)
     assert {asset["id"] for asset in page["assets"]}.isdisjoint({asset["id"] for asset in rest["assets"]})
 
 def test_the_library_can_be_read_one_folder_at_a_time(shelf: dict) -> None:
-    found = server.list_assets(folder_id=shelf["folder"])
+    found = catalog.list_assets(folder_id=shelf["folder"])
     assert sorted(asset["id"] for asset in found["assets"]) == sorted(shelf["inside"])
     assert any(folder["id"] == shelf["folder"] for folder in found["folders"])
 
 def test_the_library_can_be_searched_by_file_name(shelf: dict) -> None:
-    assert [asset["id"] for asset in server.list_assets(text=shelf["name"])["assets"]] == [shelf["outside"]]
+    assert [asset["id"] for asset in catalog.list_assets(text=shelf["name"])["assets"]] == [shelf["outside"]]
 
 def test_each_file_is_a_short_record_with_its_length_as_a_number(shelf: dict) -> None:
-    asset = next(item for item in server.list_assets(folder_id=shelf["folder"])["assets"])
+    asset = next(item for item in catalog.list_assets(folder_id=shelf["folder"])["assets"])
     assert isinstance(asset["duration"], float) and asset["duration"] == 12.5
     assert {"id", "name", "duration", "has_video", "has_audio", "analyzed", "transcription", "stale", "library",
             "folder_id"} == set(asset)
 
 def test_seconds_leave_the_server_as_numbers(media: Path) -> None:
-    imported = server.import_asset(str(media / "wide.mp4"))
+    imported = catalog.import_asset(str(media / "wide.mp4"))
     assert isinstance(imported["duration"], float)
-    folder = server.import_folder(str(media))
+    folder = catalog.import_folder(str(media))
     assert isinstance(folder["total_duration"], float)
     assert all(isinstance(asset["duration"], (float, type(None))) for asset in folder["assets"])
     project = editing.create_project(name="數字")
-    editing.apply_edits(project["id"], project["version"], server._OPERATIONS.validate_python([
+    editing.apply_edits(project["id"], project["version"], planning.OPERATIONS.validate_python([
         {"action": "add_track", "track_id": "main", "track_type": "video"},
         {"action": "insert_clip", "track_id": "main", "clip_id": "a", "asset_id": imported["id"],
          "source_range": {"start": 0, "end": 1.5}},
@@ -65,21 +65,21 @@ def test_seconds_leave_the_server_as_numbers(media: Path) -> None:
     json.dumps(editing.get_project(project["id"]))
 
 def test_notes_on_how_a_file_may_be_used_are_read_wherever_the_file_is(shelf: dict) -> None:
-    written = server.edit_asset(shelf["outside"], "  請消音  ")
+    written = catalog.edit_asset(shelf["outside"], "  請消音  ")
     assert written["notes"] == "請消音"
-    listed = server.list_assets(text=shelf["name"])["assets"]
+    listed = catalog.list_assets(text=shelf["name"])["assets"]
     assert listed[0]["notes"] == "請消音"
     # A file without notes carries none, rather than an empty field on every line.
-    assert all("notes" not in item for item in server.list_assets(folder_id=shelf["folder"])["assets"])
-    server.edit_asset(shelf["outside"], "")
-    assert "notes" not in server.list_assets(text=shelf["name"])["assets"][0]
+    assert all("notes" not in item for item in catalog.list_assets(folder_id=shelf["folder"])["assets"])
+    catalog.edit_asset(shelf["outside"], "")
+    assert "notes" not in catalog.list_assets(text=shelf["name"])["assets"][0]
 
 def test_importing_a_file_again_keeps_its_notes(media: Path) -> None:
-    asset_id = server.import_asset(str(media / "song.mp3"))["id"]
-    server.edit_asset(asset_id, "只用前 20 秒")
-    assert server.import_asset(str(media / "song.mp3"))["id"] == asset_id
+    asset_id = catalog.import_asset(str(media / "song.mp3"))["id"]
+    catalog.edit_asset(asset_id, "只用前 20 秒")
+    assert catalog.import_asset(str(media / "song.mp3"))["id"] == asset_id
     assert runtime.repo.get_assets([asset_id])[asset_id].notes == "只用前 20 秒"
-    server.edit_asset(asset_id, "")
+    catalog.edit_asset(asset_id, "")
 
 def test_the_editor_writes_the_same_notes(shelf: dict) -> None:
     from starlette.testclient import TestClient

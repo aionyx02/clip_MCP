@@ -10,7 +10,7 @@ from fastmcp import Client
 from app.models.plan import EditPlan, short_clip_ids, with_whole_clip_ids
 from app.runtime import mcp
 from app.runtime import repo as runtime_repo
-from app.server import import_asset
+from app.tools.catalog import import_asset
 from app.tools.timelines import build_semantic_timeline, query_clips
 from test_edit_plan import FOOTAGE
 from test_semantic_timeline import analysis
@@ -102,7 +102,7 @@ def test_a_clip_is_read_by_its_short_id(timeline: dict) -> None:
 
 
 def test_reading_through_footage_carries_each_file_s_notes_once(timeline: dict) -> None:
-    from app.server import edit_asset
+    from app.tools.catalog import edit_asset
 
     edit_asset(timeline["asset_id"], "後面片段請剪除")
     try:

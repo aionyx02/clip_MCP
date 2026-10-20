@@ -15,17 +15,17 @@
 ## 架構
 
 ```
-MCP client ──stdio──> server.py ──> engine/ ──> FFmpeg
-                         │            (不依賴 MCP，可單獨使用)
-editor (ui/) ──HTTP──────┤
-                         └──> storage/  SQLite（現況） + git 歷史（dulwich，所有版本）
+MCP client ──stdio──> server.py ──> tools/ ──> engine/ ──> FFmpeg
+                      (middleware)    │        (不依賴 MCP，可單獨使用)
+editor (ui/) ──HTTP───────────────────┤
+                                      └──> storage/  SQLite（現況） + git 歷史（dulwich，所有版本）
 ```
 
 | 模組 | 職責 |
 |---|---|
-| `server.py` | MCP 工具介面與參數驗證 |
+| `server.py` | MCP server 的啟動與 middleware；工具都在 `tools/` |
 | `runtime.py` | 伺服器執行期間共用的物件：工作區、資料庫、版本歷史、工作佇列、MCP server |
-| `tools/` | 依領域分開的 MCP 工具：`examining.py`（素材分析、重聽、分析結果與歌曲聽感）、`timelines.py`（語意時間軸、片段搜尋與段落）、`editing.py`（專案與時間軸編輯）、`rendering.py`（預覽、輸出、輸出前檢查與播放用副本）、`subtitles.py`（字幕）、`versioning.py`（版本歷史、還原、分支、比較與合併）、`upkeep.py`（磁碟空間與清理）；`shared.py` 放多個領域共用的輔助函式。其餘工具之後依領域陸續從 `server.py` 搬過來（#108） |
+| `tools/` | 依領域分開的 MCP 工具：`catalog.py`（素材庫）、`examining.py`（素材分析、重聽、分析結果與歌曲聽感）、`timelines.py`（語意時間軸、片段搜尋與段落）、`looking.py`（看畫面與接點）、`editing.py`（專案與時間軸編輯）、`planning.py`（剪輯計畫）、`rendering.py`（預覽、輸出、輸出前檢查與播放用副本）、`subtitles.py`（字幕）、`delivery.py`（交付：剪輯文字稿、章節、封面、給其他剪輯軟體的時間軸）、`soundtrack.py`（配樂）、`feedback.py`（留言、試做、提問與偏好）、`versioning.py`（版本歷史、還原、分支、比較與合併）、`upkeep.py`（磁碟空間與清理）、`job_queue.py`（背景工作）；`shared.py` 放多個領域共用的輔助函式 |
 | `engine/` | 分析、語意時間軸、計畫編譯、filtergraph 建構、render、字幕、交換格式 |
 | `models/` | Pydantic 領域模型（素材、語意片段、計畫、時間軸、工作） |
 | `storage/` | SQLite 持久化、版本歷史、儲存空間管理 |

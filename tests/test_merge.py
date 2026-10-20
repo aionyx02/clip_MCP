@@ -2,8 +2,8 @@
 
 from pathlib import Path
 
-from app import runtime, server
-from app.tools import versioning
+from app import runtime
+from app.tools import catalog, versioning
 from app.engine.merge import merge, merge_plans
 from app.models.plan import Beat, EditPlan, Selection
 from helpers import build_project, edit, insert, video_track
@@ -11,8 +11,8 @@ from helpers import build_project, edit, insert, video_track
 
 def three_shots(media: Path) -> str:
     """A cut in two parts: 開場 is one shot of 4s, 主體 two shots of 3s each."""
-    shot = server.import_asset(str(media / "wide.mp4"))["id"]
-    other = server.import_asset(str(media / "tall.mp4"))["id"]
+    shot = catalog.import_asset(str(media / "wide.mp4"))["id"]
+    other = catalog.import_asset(str(media / "tall.mp4"))["id"]
     return build_project([
         video_track(), insert("a", shot, 0, 4), insert("b", other, 0, 3), insert("c", other, 3, 6),
         {"action": "set_markers", "markers": [{"id": "m1", "name": "開場", "timeline_in": 0},

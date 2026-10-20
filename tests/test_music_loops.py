@@ -2,7 +2,8 @@
 
 from pathlib import Path
 
-from app import runtime, server
+from app import runtime
+from app.tools import catalog
 from app.engine.music import BAR_BEATS, LOOP_SHORTEST_BARS, loop_span
 from app.engine.plan import music_beds, plan_pieces, turnaround
 from app.engine.semantic import CleanCuts
@@ -48,8 +49,8 @@ def test_the_plan_s_music_loops_on_the_loop_point() -> None:
 
 
 def test_fitting_the_music_loops_it_on_the_beat(media: Path) -> None:
-    video = server.import_asset(str(media / "wide.mp4"))["id"]
-    song = server.import_asset(str(media / "song.mp3"))["id"]
+    video = catalog.import_asset(str(media / "wide.mp4"))["id"]
+    song = catalog.import_asset(str(media / "song.mp3"))["id"]
     runtime.repo.save_analysis(MediaAnalysis(
         asset_id=song, duration=20.0, rhythm=Rhythm(tempo=240.0, beats=list(BEATS)),
         music=MusicSense(energy=list(ENERGY)),

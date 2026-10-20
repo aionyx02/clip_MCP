@@ -5,15 +5,15 @@ from pathlib import Path
 
 import pytest
 
-from app import runtime, server
-from app.tools import examining, rendering
+from app import runtime
+from app.tools import catalog, examining, rendering
 from app.engine import analysis
 from app.models.media import MediaAnalysis, Transcript, TranscriptSegment, TranscriptWord
 
 @pytest.fixture
 def heard(media: Path, monkeypatch: pytest.MonkeyPatch) -> dict:
     """A file with a transcript of its own, and a speech model that hears what the test says."""
-    asset = server.import_asset(str(media / "wide.mp4"))["id"]
+    asset = catalog.import_asset(str(media / "wide.mp4"))["id"]
     runtime.repo.save_analysis(MediaAnalysis(asset_id=asset, duration=10.0, transcript=Transcript(
         language="zh", model="test", segments=[TranscriptSegment(start=2.0, end=4.0, text="怎麼那麼順", words=[
             TranscriptWord(start=2.0, end=4.0, text="怎麼那麼順", probability=0.4)])],
@@ -160,7 +160,7 @@ def test_where_two_hearings_differ_the_times_of_the_words_they_agree_on_are_kept
     media: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """#87: 「四件」 against 「十件」 refused the whole stretch, and with it where 「褲子」 really ends."""
-    asset = server.import_asset(str(media / "wide.mp4"))["id"]
+    asset = catalog.import_asset(str(media / "wide.mp4"))["id"]
     runtime.repo.save_analysis(MediaAnalysis(asset_id=asset, duration=10.0, transcript=Transcript(
         language="zh", model="test", segments=[TranscriptSegment(start=2.0, end=4.4, text="四件褲子然後", words=[
             TranscriptWord(start=2.0, end=2.8, text="四件", probability=0.9),
@@ -188,7 +188,7 @@ def test_one_word_heard_unsure_keeps_its_own_time_and_not_the_whole_stretch_s(
     media: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """#98: 「錯了⟦是⟧晚餐」, heard alike, was refused whole for the one word in doubt."""
-    asset = server.import_asset(str(media / "wide.mp4"))["id"]
+    asset = catalog.import_asset(str(media / "wide.mp4"))["id"]
     runtime.repo.save_analysis(MediaAnalysis(asset_id=asset, duration=10.0, transcript=Transcript(
         language="zh", model="test", segments=[TranscriptSegment(start=2.0, end=4.0, text="錯了是晚餐", words=[
             TranscriptWord(start=2.0, end=2.8, text="錯了", probability=0.9),

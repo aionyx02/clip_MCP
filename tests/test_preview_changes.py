@@ -16,7 +16,8 @@ from PIL import Image
 
 from app.engine.listen import levels, parts_of
 from app.models.plan import Beat, EditPlan, Selection, Trim, TrimKind
-from app.server import get_plan, import_asset, preview_plan_diff, preview_sound, save_plan
+from app.tools.catalog import import_asset
+from app.tools.planning import get_plan, preview_plan_diff, preview_sound, save_plan
 from helpers import build_project, edit, insert, video_track
 from test_edit_plan import planned  # noqa: F401 — the fixture
 
