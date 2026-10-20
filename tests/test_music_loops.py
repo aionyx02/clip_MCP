@@ -11,7 +11,7 @@ from app.engine.semantic import CleanCuts
 from app.models.media import MediaAnalysis, MusicSense, Rhythm
 from app.models.plan import MusicCue, MusicPlan, Selection
 from helpers import build_project, edit, insert, layout, video_track
-from test_edit_plan import footage, plan_for, sourced, speech_of
+from edit_plan.shared import footage, plan_for, sourced, speech_of
 
 # A 20-second song at 240 beats a minute — a bar a second — with a quiet intro and a fading end.
 BEATS = tuple(round(index * 0.25, 3) for index in range(80))

@@ -12,7 +12,7 @@ from app.runtime import mcp
 from app.runtime import repo as runtime_repo
 from app.tools.catalog import import_asset
 from app.tools.timelines import build_semantic_timeline, query_clips
-from test_edit_plan import FOOTAGE
+from edit_plan.shared import FOOTAGE
 from test_semantic_timeline import analysis
 
 
