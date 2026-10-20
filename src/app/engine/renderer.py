@@ -69,7 +69,9 @@ def _fail_if_active(message: str) -> Callable[[Job], None]:
     """Build a job change that marks an unfinished job as failed for want of its worker.
 
     Every caller knows the worker is what went: it could not be started,
-    crashed, or stopped reporting.
+    crashed, or stopped reporting. A job the user had already asked to stop
+    is cancelled rather than failed: it ended as asked, and is not one to
+    run again.
 
     Args:
         message: Error message to record on the job.
@@ -79,8 +81,11 @@ def _fail_if_active(message: str) -> Callable[[Job], None]:
         have already reached a terminal state untouched.
     """
     def change(job: Job) -> None:
-        """Mark the job as failed if it is still queued or running."""
-        if job.status.is_active:
+        """Mark the job as failed, or cancelled when that was asked for, if it is still queued or running."""
+        if job.status.is_active and job.cancel_requested:
+            job.status = JobStatus.CANCELLED
+            job.failure_kind = FailureKind.CANCELLED
+        elif job.status.is_active:
             job.status = JobStatus.FAILED
             job.error_message = message
             job.failure_kind = FailureKind.WORKER

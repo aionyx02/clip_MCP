@@ -173,6 +173,15 @@ def test_a_worker_that_stopped_reporting_is_a_worker_failure(store: Repository, 
     failed = JobManager(store).get_job(job.job_id)
     assert (failed.failure_kind, failed.error_message) == (FailureKind.WORKER, renderer.ABANDONED)
 
+def test_a_job_asked_to_stop_whose_worker_then_went_is_cancelled(store: Repository, tmp_path: Path) -> None:
+    job = queued(store, tmp_path, {}, status=JobStatus.RUNNING)
+    JobManager(store).cancel_job(job.job_id, wait_seconds=0)
+    when = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat().replace("+00:00", "Z")
+    store._conn.execute("UPDATE jobs SET data = json_set(data, '$.updated_at', ?) WHERE id = ?", (when, job.job_id))
+    stopped = JobManager(store).get_job(job.job_id)
+    assert (stopped.status, stopped.failure_kind, stopped.error_message) == (
+        JobStatus.CANCELLED, FailureKind.CANCELLED, None)
+
 def test_a_worker_that_could_not_start_is_a_worker_failure(
     store: Repository, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
