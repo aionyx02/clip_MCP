@@ -161,7 +161,9 @@ def sides(project_tracks: Sequence[Track], base_clips: Sequence[Clip],
     picture track over it, and the neighbouring clip's own lead or lag, leave
     nothing there or a shorter stretch further from the join. The clip's own
     fades are taken off as well, since inside one the detector hears the voice
-    begin or end before the sound really does. A clip whose file has no sound
+    begin or end before the sound really does; a side is marked `faded` when
+    that took anything off, so that one it leaves too short, or that cannot
+    then be lined up, is put down to the fade. A clip whose file has no sound
     makes none, so it neither offers a side nor counts as other sound.
 
     Args:
@@ -174,11 +176,11 @@ def sides(project_tracks: Sequence[Track], base_clips: Sequence[Clip],
 
     Returns:
         The sides offered to the check, in timeline order with `before` before
-        `after` at one join: `{at, clip_id, side, start, end, expected}`, its
-        `expected` being that clip's voicing only; and how many sides were
-        left out, as `{not_listened, too_short}`.
+        `after` at one join: `{at, clip_id, side, start, end, faded,
+        expected}`, its `expected` being that clip's voicing only; and how many
+        sides were left out, as `{not_listened, too_short, faded}`.
     """
-    counts = {"not_listened": 0, "too_short": 0}
+    counts = {"not_listened": 0, "too_short": 0, "faded": 0}
     offered: List[dict] = []
     ordered = sorted(base_clips, key=lambda clip: clip.timeline_in)
     heard = [clip for track in project_tracks for clip in track.clips
@@ -195,15 +197,17 @@ def sides(project_tracks: Sequence[Track], base_clips: Sequence[Clip],
             others = [_sound_span(other) for other in heard if other is not clip]
             start, end = _clear_stretch(window, at, others, side)
             own_start, own_end = _sound_span(clip)
-            own_start = max(own_start, float(clip.audio_timeline_in) + float(clip.audio_fade_in))
-            own_end = min(own_end, float(clip.audio_timeline_out) - float(clip.audio_fade_out))
             start, end = max(start, own_start), min(end, own_end)
-            if end - start < MIN_SIDE_SECONDS:
-                counts["too_short"] += 1
+            # Inside a fade the voice is heard starting or stopping before it does, so a fade is not compared.
+            clear = (max(start, own_start + float(clip.audio_fade_in)), min(end, own_end - float(clip.audio_fade_out)))
+            faded = clear != (start, end)
+            if clear[1] - clear[0] < MIN_SIDE_SECONDS:
+                counts["faded" if faded and end - start >= MIN_SIDE_SECONDS else "too_short"] += 1
                 continue
+            start, end = clear
             offered.append({
                 "at": round(at, 3), "clip_id": clip.id, "side": side,
-                "start": round(start, 3), "end": round(end, 3),
+                "start": round(start, 3), "end": round(end, 3), "faded": faded,
                 "expected": [list(stretch) for stretch in expected_voicing([clip], voiced)],
             })
     return offered, counts
@@ -277,12 +281,15 @@ def check(render_path: str, offered_sides: Sequence[dict], left_out: Mapping[str
     Returns:
         `streams`, what `stream_mismatch` found or None; `joins`, `{at,
         clip_id, side, lag}` for each side that could be lined up;
-        `sides_asked`, how many sides were offered to the check; `left_out`,
-        which of them were left out and why; and `frame`, rounded to four
-        places.
+        `sides_asked`, how many sides were offered to the check; `unlined`,
+        how many of those could not be lined up, as `{faded, other}`, `faded`
+        counting the sides a fade on their clip was taken off; `left_out`,
+        how many were left out before the check and why; and `frame`, rounded
+        to four places.
     """
     streams = stream_mismatch(probe_file(render_path, ffprobe_bin), frame)
     lags: List[dict] = []
+    unlined = {"faded": 0, "other": 0}
     if offered_sides:
         samples = np.frombuffer(read_samples(render_path, ffmpeg_bin), dtype=np.float32)
         measured = voiced_stretches(samples)
@@ -290,7 +297,9 @@ def check(render_path: str, offered_sides: Sequence[dict], left_out: Mapping[str
             lag = lag_at(side["expected"], measured, float(side["start"]), float(side["end"]))
             if lag is not None:
                 lags.append({"at": side["at"], "clip_id": side["clip_id"], "side": side["side"], "lag": lag})
-    return {"streams": streams, "joins": lags, "sides_asked": len(offered_sides),
+            else:
+                unlined["faded" if side["faded"] else "other"] += 1
+    return {"streams": streams, "joins": lags, "sides_asked": len(offered_sides), "unlined": unlined,
             "left_out": dict(left_out), "frame": round(frame, 4)}
 
 def keep(work_dir: str, found: dict) -> None:

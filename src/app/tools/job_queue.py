@@ -256,9 +256,10 @@ def _sound_out_of_step(job: Job) -> Dict[str, object]:
     sides_asked = int(job.sync["sides_asked"])
     not_listened = int(job.sync["left_out"]["not_listened"])
     too_short = int(job.sync["left_out"]["too_short"])
-    unlined = sides_asked - len(joins)
-    unknown = unlined + not_listened + too_short
-    total = sides_asked + not_listened + too_short
+    faded = int(job.sync["left_out"]["faded"]) + int(job.sync["unlined"]["faded"])
+    unlined = int(job.sync["unlined"]["other"])
+    unknown = unlined + not_listened + too_short + faded
+    total = sides_asked + not_listened + too_short + int(job.sync["left_out"]["faded"])
     if unknown > 0:
         reasons: List[str] = []
         if not_listened:
@@ -266,6 +267,8 @@ def _sound_out_of_step(job: Job) -> Dict[str, object]:
         if too_short:
             reasons.append(f"{too_short} with less than {sync.MIN_SIDE_SECONDS:g}s of their own sound "
                            "clear of other sound")
+        if faded:
+            reasons.append(f"{faded} where a fade on the clip covers its voice by the join, which is not compared")
         if unlined > 0:
             reasons.append(f"{unlined} where the voice does not start or stop near the join "
                            "or did not agree well enough")
