@@ -25,7 +25,7 @@ from app.storage.repo import Repository
 from app.tools import job_queue, rendering
 from app.tools.catalog import import_asset
 from app.tools.rendering import _read_from, render_project
-from helpers import build_project, insert, video_track
+from helpers import build_project, finished, insert, video_track
 
 @pytest.fixture
 def store(tmp_path: Path) -> Repository:
@@ -192,6 +192,13 @@ def test_ffmpeg_failing_on_a_made_file_that_is_gone_is_put_down_to_it(store: Rep
     # The footage is there; the picture the cache held is not, and rendering again makes it.
     assert (job.status, job.failure_kind) == (JobStatus.FAILED, FailureKind.MADE)
 
+def test_footage_that_is_gone_outranks_a_made_file_that_is_gone(store: Repository, tmp_path: Path) -> None:
+    source, picture = tmp_path / "talk.mp4", tmp_path / "picture.mp4"
+    spec = {**render_spec(tmp_path, source), "made": [str(picture)]}
+    job = ended(store, queued(store, tmp_path, spec, kind=JobKind.RENDER))
+    # Starting it again would make the picture and still not find the footage.
+    assert (job.status, job.failure_kind) == (JobStatus.FAILED, FailureKind.INPUT)
+
 def test_a_render_is_queued_knowing_which_files_it_reads(media: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     wide = import_asset(str(media / "wide.mp4"))["id"]
     project = build_project([video_track(), insert("a", wide, 0, 1)], width=640, height=360)
@@ -201,14 +208,32 @@ def test_a_render_is_queued_knowing_which_files_it_reads(media: Path, monkeypatc
         specs.append(spec)
         return job
 
-    monkeypatch.setattr(runtime.job_manager, "start_job", queue)
     footage = runtime.repo.get_assets([wide])[wide].path
-    # Without loudness there is no mix: the footage is read by the picture's own commands.
+    # A preview made once leaves its pictures in the cache for the next one to read.
+    assert finished(render_project(project, loudness_target=None))["status"] == "completed"
+    monkeypatch.setattr(runtime.job_manager, "start_job", queue)
     render_project(project, loudness_target=None)
-    assert (specs[0]["inputs"], specs[0]["made"]) == ([footage], [])
-    pieces = specs[0]["pieces"]
-    # A preview reads the pictures it makes as they are made, so they are not read before it runs.
-    assert pieces and not {piece["path"] for piece in pieces} & set(specs[0]["inputs"] + specs[0]["made"])
+    # Without loudness there is no mix: the final command alone reads the cached picture.
+    assert specs[0]["inputs"] == [footage] and not specs[0]["pieces"]
+    assert specs[0]["made"] and all(path.startswith(runtime.WORKSPACE_DIR) for path in specs[0]["made"])
+    # A finished video has no pieces: its one command reads the footage itself.
+    render_project(project, is_preview=False, loudness_target=None)
+    assert (specs[1]["inputs"], specs[1]["made"]) == ([footage], [])
+
+def test_a_photo_only_the_preview_s_own_picture_reads_is_one_of_its_inputs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from PIL import Image
+
+    path = tmp_path / "photo.png"
+    Image.new("RGB", (320, 240), (220, 30, 30)).save(path)
+    photo = import_asset(str(path))["id"]
+    project = build_project([video_track(), insert("a", photo, 0, 2)], width=320, height=240)
+    specs: List[Dict[str, Any]] = []
+    monkeypatch.setattr(runtime.job_manager, "start_job", lambda job, spec: specs.append(spec) or job)
+    render_project(project, loudness_target=None)
+    # A photo has no sound for the final command to read: only the command making its picture opens it.
+    assert specs[0]["pieces"] and specs[0]["inputs"] == [runtime.repo.get_assets([photo])[photo].path]
 
 def test_playback_is_prepared_knowing_which_files_it_reads(media: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     wide = import_asset(str(media / "wide.mp4"))["id"]

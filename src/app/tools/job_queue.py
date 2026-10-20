@@ -47,10 +47,10 @@ def get_job(
         was gone, and the same call again makes it anew; `render`: FFmpeg
         failed with every file it was given there; `worker`: its worker
         never started, crashed or was stopped, and the same call again may
-        well work; `cancelled`;
-        left out when the cause is none of these — for a finished analysis
-        worth a second look a `note` to pass on, and for a finished render whose every frame was
-        found black, frozen or a flash somewhere, `frames`: `found`, what the
+        well work; `cancelled`; left out when the cause is none of these —
+        for a finished analysis worth a second look a `note` to pass on, and
+        for a finished render whose every frame was found black, frozen or a
+        flash somewhere, `frames`: `found`, what the
         cut did not ask for — look at them with `view_render` `at: "spots"` —
         and `meant`, inside a fade, a dip, a card or a photo; or `not_read`
         when the check could not read it, which says nothing about its frames; and a summary

@@ -674,6 +674,9 @@ def start_render(
         commands.append(spec["loudness"]["mix_command"])
     spec["inputs"], spec["made"] = _read_from(commands, (asset.path for asset in assets.values()),
                                               (path for piece in pieces for path in (piece["part"], piece["path"])))
+    # The captions and words drawn on are read through a filter rather than `-i`, and made here all the same.
+    if subtitle_path is not None:
+        spec["made"] = sorted({*spec["made"], subtitle_path})
     job = runtime.job_manager.start_job(job, spec)
     # Every clip on a picture track is one picture, the sequence's and the ones drawn over it.
     pictures = sum(len(track.clips) for track in project.video_tracks)
