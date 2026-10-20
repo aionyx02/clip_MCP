@@ -20,7 +20,7 @@ from app.models.media import Asset, MediaAnalysis
 from app.models.plan import EditPlan
 from app.models.timeline import Clip, Project, TrackType
 from app.models.job import Job, JobKind, JobStatus
-from app.engine import cards, looks, playback, resources, texts
+from app.engine import cards, looks, playback, resources, sync, texts
 from app.engine.analysis import second_listen, with_words_heard_again
 from app.engine.probe import probe_file, speech_loudness
 from app.engine.reframe import Framing, frame_project, placement_at
@@ -668,6 +668,17 @@ def start_render(
         spec["loudness"] = {
             "mix_command": runtime.renderer.build_mix(project, assets, mix_path, voices=voices, talking=talking),
             "mix_path": mix_path, "target": loudness_target,
+        }
+    if project.base_video_track is not None:
+        analyses = analyses_of(project)
+        heard = {
+            asset_id: [(span.start, span.end) for span in analysis.second_listen.voiced]
+            for asset_id, analysis in analyses.items() if analysis.second_listen is not None
+        }
+        spec["sync"] = {
+            "expected": [list(stretch) for stretch in sync.expected_voicing(project.base_video_track.clips, heard)],
+            "joins": sync.joins(project.base_video_track.clips, heard),
+            "frame": project.fps_den / project.fps_num,
         }
     job = runtime.job_manager.start_job(job, spec)
     # Every clip on a picture track is one picture, the sequence's and the ones drawn over it.

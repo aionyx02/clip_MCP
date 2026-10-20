@@ -7,7 +7,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from app.engine import loudness, machine, resources, scan, speed
+from app.engine import loudness, machine, resources, scan, speed, sync
 from app.engine.analysis import analyze_media, whisper_model_for
 from app.engine.ffmpeg import OperationCancelled, run_ffmpeg
 from app.models.job import Job, JobKind, JobStatus
@@ -505,6 +505,18 @@ def _run_render(job: Job, spec: Dict[str, Any], context: JobContext, repo: Optio
         taken["scan"] = (time.monotonic() - began, length)
     except (RuntimeError, OSError, OperationCancelled):
         pass
+    # Where the cut says talking is, checked against where the sound was heard: a stream
+    # that runs late, a join the voice sits to one side of. It has no share of the bar.
+    checking = spec.get("sync")
+    if checking:
+        context.report(start + share, "checking sound against picture")
+        try:
+            sync.keep(job.work_dir, sync.check(
+                spec["render_path"], checking["expected"], checking["joins"], checking["frame"],
+                command[0], "ffprobe",
+            ))
+        except (RuntimeError, OSError, ValueError, OperationCancelled):
+            pass
     if repo is not None:
         speed.record_render(repo, computer, job.preview, taken)
     if spec.get("deliver"):
@@ -664,6 +676,7 @@ def run_worker(repo: Repository, job_id: str) -> None:
         if job.kind == JobKind.RENDER and status == JobStatus.COMPLETED:
             # Kept on the job: a finished video's working folder is cleared away once it is saved.
             current.spots = scan.kept(job.work_dir)
+            current.sync = sync.kept(job.work_dir)
 
     repo.update_job(job_id, finish)
     # This worker's slot and its memory are free now, so hand them to whatever is waiting

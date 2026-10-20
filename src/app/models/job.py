@@ -65,6 +65,13 @@ class Job(BaseModel):
         description="Where every frame of a finished render was read and found black, frozen or a flash: "
                     "`{kind, start, end}` in seconds of the render; null when it was not read (render jobs)",
     )
+    sync: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="What a finished render's sound was found doing against its picture: `streams`, how far the "
+                    "two streams' starts and lengths differ or null when they line up; `joins`, `{at, lag}` for each "
+                    "join whose voicing could be compared, lag in seconds and positive when the sound is late; and "
+                    "`frame`, one frame of the render in seconds. Null when it was not checked (render jobs)",
+    )
     error_message: Optional[str] = None
     cancel_requested: bool = False
     memory_estimate: int = Field(default=0, ge=0, description="Peak memory the job is expected to need, in bytes")
