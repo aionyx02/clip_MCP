@@ -5,7 +5,8 @@ from pathlib import Path
 
 import pytest
 
-from app import runtime, server
+from app import runtime
+from app.tools import catalog, delivery, rendering, soundtrack, upkeep
 from app.engine import fetch
 
 
@@ -49,15 +50,19 @@ def test_a_song_is_taken_only_by_the_plan_the_user_heard(media: Path, monkeypatc
         Path(folder).mkdir(parents=True, exist_ok=True)
         return shutil.copy(media / "song.mp3", Path(folder) / f"{title}.mp3")
 
-    monkeypatch.setattr(server, "output_dir", lambda: tmp_path)
-    monkeypatch.setattr(server.fetch, "download", fake_download)
+    monkeypatch.setattr(catalog, "output_dir", lambda: tmp_path)
+    monkeypatch.setattr(delivery, "output_dir", lambda: tmp_path)
+    monkeypatch.setattr(rendering, "output_dir", lambda: tmp_path)
+    monkeypatch.setattr(soundtrack, "output_dir", lambda: tmp_path)
+    monkeypatch.setattr(upkeep, "output_dir", lambda: tmp_path)
+    monkeypatch.setattr(fetch, "download", fake_download)
     url, page = "https://incompetech.com/music/royalty-free/mp3-royaltyfree/Tone.mp3", "https://incompetech.com/x"
-    shown = server.add_music_from_url(url, page, "Tone")
+    shown = soundtrack.add_music_from_url(url, page, "Tone")
     assert shown["licence"] == "CC BY 4.0" and shown["credit"].startswith('"Tone" Kevin MacLeod')
     assert not (tmp_path / "音樂").exists()
     with pytest.raises(ValueError):
-        server.add_music_from_url(url, page, "Tone", confirm_plan="nope")
-    taken = server.add_music_from_url(url, page, "Tone", confirm_plan=shown["plan"])
+        soundtrack.add_music_from_url(url, page, "Tone", confirm_plan="nope")
+    taken = soundtrack.add_music_from_url(url, page, "Tone", confirm_plan=shown["plan"])
     asset = runtime.repo.get_assets([taken["id"]])[taken["id"]]
     assert asset.library == "music" and asset.source.licence == "CC BY 4.0"
     assert Path(taken["path"]).parent == tmp_path / "音樂"
@@ -67,9 +72,9 @@ def test_a_song_is_taken_only_by_the_plan_the_user_heard(media: Path, monkeypatc
             "source_range": {"start": 0, "end": 5}}
     project = build_project([video_track(), {"action": "add_track", "track_id": "music", "track_type": "audio"},
                              clip], name="有配樂")
-    assert server.music_credits(project)["credits"] == [taken["credit"]]
+    assert soundtrack.music_credits(project)["credits"] == [taken["credit"]]
 
 
 def test_a_page_on_another_site_is_refused() -> None:
     with pytest.raises(ValueError, match="only taken from"):
-        server.add_music_from_url("https://cdn.pixabay.com/a.mp3", "https://example.com/a", "A")
+        soundtrack.add_music_from_url("https://cdn.pixabay.com/a.mp3", "https://example.com/a", "A")

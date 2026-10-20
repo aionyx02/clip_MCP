@@ -59,6 +59,11 @@ def require_ffmpeg() -> None:
         pytest.skip("ffmpeg is not installed")
 
 @pytest.fixture(scope="session", autouse=True)
+def middleware_registered() -> None:
+    """Put the server's middleware on `mcp`, so a test file run alone calls tools as a client does."""
+    import app.server  # noqa: F401
+
+@pytest.fixture(scope="session", autouse=True)
 def workspace() -> Iterator[str]:
     """Throw the temporary workspace away once the run is over.
 
@@ -224,17 +229,17 @@ def kept_history(history_off):
 @pytest.fixture(autouse=True)
 def playback_unprepared() -> Iterator[None]:
     """Make no proxies after edits unless a test turns it on: they would take the job slots other tests use."""
-    from app import server
+    from app.tools import rendering
 
-    kept, server.PREPARE_PLAYBACK = server.PREPARE_PLAYBACK, False
+    kept, rendering.PREPARE_PLAYBACK = rendering.PREPARE_PLAYBACK, False
     yield
-    server.PREPARE_PLAYBACK = kept
+    rendering.PREPARE_PLAYBACK = kept
 
 @pytest.fixture(autouse=True)
 def music_unanalyzed() -> Iterator[None]:
     """Start no analysis when a song is added unless a test turns it on, for the same reason."""
-    from app import server
+    from app.tools import catalog
 
-    kept, server.ANALYZE_MUSIC_ON_ADD = server.ANALYZE_MUSIC_ON_ADD, False
+    kept, catalog.ANALYZE_MUSIC_ON_ADD = catalog.ANALYZE_MUSIC_ON_ADD, False
     yield
-    server.ANALYZE_MUSIC_ON_ADD = kept
+    catalog.ANALYZE_MUSIC_ON_ADD = kept

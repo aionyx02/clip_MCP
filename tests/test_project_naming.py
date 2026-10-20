@@ -3,7 +3,8 @@
 import pytest
 
 from app.models.timeline import Project
-from app.server import MAX_OUTPUT_NAME, _output_name, create_project, get_project, list_projects
+from app.tools.editing import create_project, get_project, list_projects
+from app.tools.rendering import MAX_OUTPUT_NAME, output_name
 from helpers import edit
 
 def test_a_project_can_be_named_when_it_is_created() -> None:
@@ -44,7 +45,7 @@ def named(name, kind="output"):
     Returns:
         The file name a render would be written to.
     """
-    return _output_name(Project(id="c91b0000-0000-0000-0000-000000000000", name=name, width=1080, height=1920), kind)
+    return output_name(Project(id="c91b0000-0000-0000-0000-000000000000", name=name, width=1080, height=1920), kind)
 
 
 def test_a_render_is_named_after_the_project() -> None:
@@ -73,8 +74,8 @@ def test_a_very_long_name_is_cut_to_something_a_filesystem_will_take() -> None:
 
 def test_a_render_named_apart_from_its_project_says_so() -> None:
     """#96: 「8/29 暴雨」 came out as 「8 29 暴雨」 without a word."""
-    from app.server import _renamed
+    from app.tools.rendering import renamed
 
     project = Project(id="c91b0000-0000-0000-0000-000000000000", name="8/29 暴雨", width=1080, height=1920)
-    assert "「8／29 暴雨」" in _renamed(project)["file_named"]
-    assert _renamed(project.model_copy(update={"name": "EP1 台北"})) == {}
+    assert "「8／29 暴雨」" in renamed(project)["file_named"]
+    assert renamed(project.model_copy(update={"name": "EP1 台北"})) == {}

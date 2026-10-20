@@ -5,8 +5,8 @@ from pathlib import Path
 
 import pytest
 
-from app import runtime, server
-from app.tools import shared
+from app import runtime
+from app.tools import catalog, rendering, shared
 from app.engine.frames import _crop_to_aspect
 from app.engine.reframe import Placement, crop_filter, place_clip
 from app.models.media import FaceMeasurement
@@ -68,10 +68,10 @@ def test_a_still_is_drawn_the_way_the_render_draws_it() -> None:
 def test_a_landscape_shot_in_a_vertical_video_renders_whole_over_its_blur(media: Path, tmp_path: Path) -> None:
     from app.engine.frames import extract_frame
 
-    asset = server.import_asset(str(media / "wide.mp4"))["id"]
+    asset = catalog.import_asset(str(media / "wide.mp4"))["id"]
     project = build_project([video_track(), insert("a", asset, 0, 2)], width=360, height=640, name="直式")
     stored = runtime.repo.get_project(project)
-    framing = server._framing(stored, shared.referenced_assets(stored))
+    framing = rendering.framing_of(stored, shared.referenced_assets(stored))
     assert framing["a"].whole
     render(project, tmp_path / "out.mp4", loudness_target=None, framing=framing)
     picture = extract_frame(str(tmp_path / "out.mp4"), 1.0, max_size=640).convert("L")
@@ -81,7 +81,7 @@ def test_a_landscape_shot_in_a_vertical_video_renders_whole_over_its_blur(media:
 
 
 def test_the_ai_and_the_editor_set_how_a_shot_sits(media: Path) -> None:
-    asset = server.import_asset(str(media / "wide.mp4"))["id"]
+    asset = catalog.import_asset(str(media / "wide.mp4"))["id"]
     project = build_project([video_track(), insert("a", asset, 0, 2)], width=360, height=640, name="放法")
     edit(project, [{"action": "set_clip_look", "track_id": "main", "clip_id": "a",
                     "fit": {"mode": "fill", "center_x": 0.25, "zoom": 1.5}}])

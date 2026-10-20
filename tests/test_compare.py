@@ -2,15 +2,16 @@
 
 from pathlib import Path
 
-from app import runtime, server
+from app import runtime
+from app.tools import catalog, versioning
 from app.engine.compare import compare
 from helpers import build_project, edit, insert, video_track
 
 
 def three_shots(media: Path, **settings) -> str:
     """A cut in two parts: 開場 is one shot of 4s, 主體 two shots of 3s each."""
-    shot = server.import_asset(str(media / "wide.mp4"))["id"]
-    other = server.import_asset(str(media / "tall.mp4"))["id"]
+    shot = catalog.import_asset(str(media / "wide.mp4"))["id"]
+    other = catalog.import_asset(str(media / "tall.mp4"))["id"]
     return build_project([
         video_track(), insert("a", shot, 0, 4), insert("b", other, 0, 3), insert("c", other, 3, 6),
         {"action": "set_markers", "markers": [{"id": "m1", "name": "開場", "timeline_in": 0},
@@ -53,8 +54,8 @@ def test_the_same_footage_under_new_clip_ids_is_not_a_change(media: Path) -> Non
 
 def test_the_ai_compares_a_version_with_now(media: Path, kept_history) -> None:
     project = three_shots(media)
-    first = server.project_history(project)["versions"][-1]["commit"]
+    first = versioning.project_history(project)["versions"][-1]["commit"]
     edit(project, [{"action": "delete_clip", "track_id": "main", "clip_id": "b"}])
-    compared = server.compare_versions(project, first)
+    compared = versioning.compare_versions(project, first)
     assert compared["a"]["commit"] == first and "aligned" not in compared
     assert any(change["what"].startswith("拿掉") for part in compared["parts"] for change in part["changes"])

@@ -26,13 +26,8 @@ from app.engine.semantic import build_timeline, combined_from_clips
 from app.models.media import Span
 from app.models.semantic import ClipKind, ClipLevel, SectionChoice, SemanticClip
 from app.runtime import repo as runtime_repo
-from app.server import (
-    build_semantic_timeline,
-    import_asset,
-    propose_sections,
-    query_clips,
-    set_sections,
-)
+from app.tools.catalog import import_asset
+from app.tools.timelines import build_semantic_timeline, propose_sections, query_clips, set_sections
 from test_semantic_timeline import ASSET_ID, analysis, asset
 
 TWO_SUBJECTS = dict(

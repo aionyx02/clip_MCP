@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from app.server import import_asset
+from app.tools.catalog import import_asset
 from helpers import build_project, clips_of, edit, insert, layout, video_track
 
 @pytest.fixture

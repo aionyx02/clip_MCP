@@ -9,7 +9,8 @@ order the answer comes back.
 import numpy as np
 import pytest
 
-from app import runtime, server
+from app import runtime
+from app.tools import timelines
 from app.engine import meaning
 from app.models.media import Span
 from app.models.semantic import ClipKind, ClipLevel, SemanticClip, SemanticTimeline
@@ -54,7 +55,7 @@ SAID = {
 
 def test_clips_come_back_closest_first_with_how_close(embedded: list) -> None:
     timeline = _timeline("meaning-order", SAID)
-    found = server.query_clips(timeline_id=timeline, about="電池可以充電多久")
+    found = timelines.query_clips(timeline_id=timeline, about="電池可以充電多久")
     assert [clip["text"] for clip in found["clips"]][0] == SAID["battery"]
     scores = [clip["relevance"] for clip in found["clips"]]
     assert scores == sorted(scores, reverse=True)
@@ -63,41 +64,41 @@ def test_clips_come_back_closest_first_with_how_close(embedded: list) -> None:
 
 def test_each_clip_is_embedded_once_and_again_only_when_its_words_change(embedded: list) -> None:
     timeline = _timeline("meaning-cache", SAID)
-    server.query_clips(timeline_id=timeline, about="好喝")
-    server.query_clips(timeline_id=timeline, about="歡迎")
+    timelines.query_clips(timeline_id=timeline, about="好喝")
+    timelines.query_clips(timeline_id=timeline, about="歡迎")
     assert [len(batch) for batch in embedded] == [3]
     changed = runtime.repo.get_semantic_clip(f"{timeline}:u0002").model_copy(update={"text": "夜市雞排"})
     runtime.repo.update_semantic_clips([changed])
-    server.query_clips(timeline_id=timeline, about="雞排")
+    timelines.query_clips(timeline_id=timeline, about="雞排")
     # The changed clip, and the one beside it, which is read with it.
     assert sorted(text.split("\n", 1)[0] for text in embedded[-1]) == sorted([changed.text, SAID["hello"]])
 
 def test_a_fragment_too_short_to_mean_anything_is_left_to_a_search_by_words(embedded: list) -> None:
     timeline = _timeline("meaning-short", {**SAID, "fragment": "去"})
-    found = server.query_clips(timeline_id=timeline, about="去哪裡")
+    found = timelines.query_clips(timeline_id=timeline, about="去哪裡")
     assert "去" not in [clip["text"] for clip in found["clips"]]
-    assert server.query_clips(timeline_id=timeline, text="去")["clips"]
+    assert timelines.query_clips(timeline_id=timeline, text="去")["clips"]
 
 def test_each_clip_is_read_with_the_sentences_beside_it(embedded: list) -> None:
     timeline = _timeline("meaning-context", SAID)
-    server.query_clips(timeline_id=timeline, about="好喝")
+    timelines.query_clips(timeline_id=timeline, about="好喝")
     read = {text.split("\n", 1)[0]: text for text in embedded[0]}
     assert read[SAID["hello"]] == "\n".join([SAID["hello"], SAID["battery"], SAID["food"]])
 
 def test_a_rebuild_drops_the_vectors_of_clips_it_no_longer_has(embedded: list) -> None:
     timeline = _timeline("meaning-rebuild", SAID)
-    server.query_clips(timeline_id=timeline, about="好喝")
+    timelines.query_clips(timeline_id=timeline, about="好喝")
     _timeline(timeline, {"food": SAID["food"]})
     assert set(runtime.repo.clip_vectors([f"{timeline}:u{index:04d}" for index in range(4)])) == {f"{timeline}:u0000"}
 
 def test_meaning_combines_with_the_other_conditions_and_pages(embedded: list) -> None:
     timeline = _timeline("meaning-pages", SAID)
-    first = server.query_clips(timeline_id=timeline, about="頻道", limit=1)
-    second = server.query_clips(timeline_id=timeline, about="頻道", limit=1, offset=1)
+    first = timelines.query_clips(timeline_id=timeline, about="頻道", limit=1)
+    second = timelines.query_clips(timeline_id=timeline, about="頻道", limit=1, offset=1)
     assert first["truncated"] and first["clips"][0]["clip_id"] != second["clips"][0]["clip_id"]
-    late = server.query_clips(timeline_id=timeline, about="頻道", start=10)
+    late = timelines.query_clips(timeline_id=timeline, about="頻道", start=10)
     assert {clip["clip_id"] for clip in late["clips"]} == {f"{timeline}:u0002"}
-    lines = server.query_clips(timeline_id=timeline, about="電池", brief=True)["lines"]
+    lines = timelines.query_clips(timeline_id=timeline, about="電池", brief=True)["lines"]
     assert lines[0].split(" ", 1)[0].replace(".", "").isdigit() and SAID["battery"] in lines[0]
 
 def test_the_model_is_pinned_and_kept_with_the_workspace() -> None:
@@ -112,4 +113,4 @@ def test_a_model_that_cannot_be_fetched_says_so_and_points_at_the_word_search(mo
     monkeypatch.setattr(meaning, "embed", offline)
     timeline = _timeline("meaning-offline", SAID)
     with pytest.raises(ValueError, match="Search with `text`"):
-        server.query_clips(timeline_id=timeline, about="電池")
+        timelines.query_clips(timeline_id=timeline, about="電池")

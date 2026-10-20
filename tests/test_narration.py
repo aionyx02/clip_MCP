@@ -14,7 +14,8 @@ import pytest
 from app.engine.builder import FFmpegRenderer
 from app.models.media import MediaAnalysis, Rhythm, Transcript, TranscriptSegment
 from app.runtime import repo
-from app.server import _voices, import_asset
+from app.tools.catalog import import_asset
+from app.tools.rendering import voices_of
 from app.tools.shared import referenced_assets
 from helpers import build_project, edit, insert, level, render, video_track
 
@@ -72,7 +73,7 @@ def street_and_narration(audio_media: Path, narration: Path, **track) -> str:
 
 def test_the_footage_drops_under_a_narration(audio_media: Path, narration: Path, tmp_path: Path) -> None:
     project = street_and_narration(audio_media, narration)
-    render(project, tmp_path / "out.mp4", loudness_target=None, voices=_voices(repo.get_project(project)))
+    render(project, tmp_path / "out.mp4", loudness_target=None, voices=voices_of(repo.get_project(project)))
     before = level(tmp_path / "out.mp4", 0.5, 1.0, freq=800)
     during = level(tmp_path / "out.mp4", 3.0, 1.5, freq=800)
     assert before - during > 8
@@ -81,32 +82,32 @@ def test_the_footage_drops_under_a_narration(audio_media: Path, narration: Path,
 
 def test_a_narration_is_found_without_being_labelled(audio_media: Path, narration: Path) -> None:
     project = repo.get_project(street_and_narration(audio_media, narration))
-    voices = _voices(project)
+    voices = voices_of(project)
     assert list(voices) == ["narr"]
     # Recorded about thirty decibels down, so it is brought a long way up.
     assert voices["narr"] > 5
 
 def test_saying_it_is_not_a_voice_leaves_the_footage_alone(audio_media: Path, narration: Path, tmp_path: Path) -> None:
     project = street_and_narration(audio_media, narration, voice=False)
-    assert _voices(repo.get_project(project)) == {}
-    render(project, tmp_path / "out.mp4", loudness_target=None, voices=_voices(repo.get_project(project)))
+    assert voices_of(repo.get_project(project)) == {}
+    render(project, tmp_path / "out.mp4", loudness_target=None, voices=voices_of(repo.get_project(project)))
     assert abs(level(tmp_path / "out.mp4", 0.5, 1.0, freq=800) - level(tmp_path / "out.mp4", 3.0, 1.5, freq=800)) < 2
 
 def test_a_narration_the_beat_tracker_heard_a_beat_in_is_still_a_voice(audio_media: Path, narration: Path) -> None:
     # Syllables are strong onsets: the first real narration measured 135.7 BPM.
     project = street_and_narration(audio_media, narration)
     transcribed(repo.get_project(project).tracks[1].clips[0].asset_id, tempo=135.7)
-    assert list(_voices(repo.get_project(project))) == ["narr"]
+    assert list(voices_of(repo.get_project(project))) == ["narr"]
 
 def test_a_recording_that_is_mostly_not_sentences_is_not_a_voice(audio_media: Path, narration: Path) -> None:
     # A song with one line the recogniser caught in its outro.
     project = street_and_narration(audio_media, narration)
     transcribed(repo.get_project(project).tracks[1].clips[0].asset_id, spoken_from=4.0)
-    assert _voices(repo.get_project(project)) == {}
+    assert voices_of(repo.get_project(project)) == {}
 
 def test_a_track_set_to_duck_under_speech_is_music(audio_media: Path, narration: Path) -> None:
     project = street_and_narration(audio_media, narration, duck_under_speech=True)
-    assert _voices(repo.get_project(project)) == {}
+    assert voices_of(repo.get_project(project)) == {}
 
 def test_a_track_never_transcribed_is_a_voice_only_when_said(audio_media: Path) -> None:
     music = import_asset(str(audio_media / "music.mp3"))["id"]
@@ -117,9 +118,9 @@ def test_a_track_never_transcribed_is_a_voice_only_when_said(audio_media: Path) 
         {"action": "add_track", "track_id": "bed", "track_type": "audio"},
         insert("m", music, 0, 5, track_id="bed"),
     ], width=320, height=240)
-    assert _voices(repo.get_project(project)) == {}
+    assert voices_of(repo.get_project(project)) == {}
     edit(project, [{"action": "set_track_audio", "track_id": "bed", "voice": True}])
-    assert list(_voices(repo.get_project(project))) == ["bed"]
+    assert list(voices_of(repo.get_project(project))) == ["bed"]
     edit(project, [{"action": "set_track_audio", "track_id": "bed", "voice_auto": True}])
     assert repo.get_project(project).tracks[1].voice is None
 
@@ -131,7 +132,7 @@ def test_music_ducks_under_the_narration_too(audio_media: Path, narration: Path,
         insert("m", music, 0, 5, track_id="music", volume=0.1),
     ])
     stored = repo.get_project(project)
-    render(project, tmp_path / "out.mp4", loudness_target=None, voices=_voices(stored))
+    render(project, tmp_path / "out.mp4", loudness_target=None, voices=voices_of(stored))
     # The street itself is loud enough to duck the music throughout, so the narration can
     # only add to that; what matters is that the graph with all three renders, and that the
     # music is no louder while the narration speaks.
@@ -144,7 +145,7 @@ def test_the_sound_preview_puts_the_narration_on_the_voice_side(
     voice, rest = tmp_path / "voice.wav", tmp_path / "rest.wav"
     command = FFmpegRenderer().build_sound(
         stored, referenced_assets(stored), str(tmp_path / "mix.m4a"), str(voice), str(rest),
-        loudness_target=None, voices=_voices(stored),
+        loudness_target=None, voices=voices_of(stored),
     )
     subprocess.run(command, check=True, capture_output=True)
     # Nothing on the voice side before the narration starts; the street is on the other.

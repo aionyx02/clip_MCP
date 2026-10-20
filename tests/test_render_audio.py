@@ -11,7 +11,7 @@ import pytest
 
 from app.engine.builder import DUCK_DEPTH_DB, Talking, _duck_volume
 from app.runtime import repo
-from app.server import import_asset
+from app.tools.catalog import import_asset
 from helpers import build_project, edit, insert, level, loudness, render, true_peak, video_track
 
 @pytest.fixture

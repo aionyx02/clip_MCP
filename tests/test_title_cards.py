@@ -4,8 +4,8 @@ from pathlib import Path
 
 import pytest
 
-from app import runtime, server
-from app.tools import shared
+from app import runtime
+from app.tools import catalog, delivery, shared
 from app.engine import cards
 from app.engine.frames import extract_frame
 from app.engine.subtitles import build_ass
@@ -17,7 +17,7 @@ def card(clip_id: str = "t", **fields) -> dict:
 
 
 def test_a_card_borrows_the_shot_it_leads_into(media: Path) -> None:
-    asset = server.import_asset(str(media / "wide.mp4"))["id"]
+    asset = catalog.import_asset(str(media / "wide.mp4"))["id"]
     project = build_project([video_track(), insert("a", asset, 2, 5), insert("b", asset, 6, 8)], name="卡片")
     edit(project, [card(before_clip_id="b", subtitle="開始")])
     clips = clips_of(project, "main")
@@ -32,7 +32,7 @@ def test_a_card_borrows_the_shot_it_leads_into(media: Path) -> None:
 
 
 def test_a_card_is_changed_and_stays_silent(media: Path) -> None:
-    asset = server.import_asset(str(media / "wide.mp4"))["id"]
+    asset = catalog.import_asset(str(media / "wide.mp4"))["id"]
     project = build_project([video_track(), insert("a", asset, 0, 3), card(before_clip_id="a")], name="改卡片")
     edit(project, [{"action": "set_title_card", "track_id": "main", "clip_id": "t", "title": "新標題",
                     "subtitle": "", "background": "colour", "colour": "#203040", "seconds": 4}])
@@ -46,7 +46,7 @@ def test_a_card_is_changed_and_stays_silent(media: Path) -> None:
 
 
 def test_a_card_renders_its_words_over_a_dark_blur(media: Path, tmp_path: Path) -> None:
-    asset = server.import_asset(str(media / "wide.mp4"))["id"]
+    asset = catalog.import_asset(str(media / "wide.mp4"))["id"]
     project = build_project([video_track(), insert("a", asset, 0, 2), card(before_clip_id="a", subtitle="副標")],
                             width=640, height=360, name="輸出卡片")
     stored = runtime.repo.get_project(project)
@@ -76,7 +76,7 @@ def test_a_card_needs_something_behind_it(media: Path) -> None:
 def test_the_editor_draws_a_card_as_the_render_does(media: Path) -> None:
     from app.engine import playback
 
-    asset = server.import_asset(str(media / "wide.mp4"))["id"]
+    asset = catalog.import_asset(str(media / "wide.mp4"))["id"]
     project = build_project([video_track(), insert("a", asset, 0, 2), card(before_clip_id="a")],
                             width=640, height=360, name="播卡片")
     stored = runtime.repo.get_project(project)
@@ -88,9 +88,9 @@ def test_the_editor_draws_a_card_as_the_render_does(media: Path) -> None:
 
 
 def test_a_card_goes_to_another_editor_as_a_gap(media: Path) -> None:
-    asset = server.import_asset(str(media / "wide.mp4"))["id"]
+    asset = catalog.import_asset(str(media / "wide.mp4"))["id"]
     project = build_project([video_track(), insert("a", asset, 0, 2), card(before_clip_id="a")], name="交換")
-    result = server.export_timeline(project, "otio")
+    result = delivery.export_timeline(project, "otio")
     text = Path(result["output_path"]).read_text(encoding="utf-8")
     # The shot's picture and its sound; where the card was, a gap on both.
     assert text.count('"Gap.1"') == 2 and text.count('"Clip.2"') == 2
@@ -101,7 +101,7 @@ def test_a_card_can_stand_on_a_photo(media: Path, tmp_path: Path) -> None:
     from PIL import Image
 
     Image.new("RGB", (400, 300), (20, 160, 60)).save(tmp_path / "green.png")
-    photo = server.import_asset(str(tmp_path / "green.png"))["id"]
+    photo = catalog.import_asset(str(tmp_path / "green.png"))["id"]
     project = build_project([video_track(), card(photo_asset_id=photo)], width=320, height=240, name="照片底")
     [made] = clips_of(project, "main")
     assert made["asset_id"] == photo and made["card"]["background"] == "picture"

@@ -103,7 +103,8 @@ def test_this_computer_is_named_without_looking_at_the_card() -> None:
 def test_the_reply_to_an_analysis_says_how_long_the_transcription_will_take(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from app import runtime, server
+    from app import runtime
+    from app.tools import examining
     from app.models.media import Asset
 
     monkeypatch.setattr(runtime.job_manager, "start_job", lambda job, spec: job)
@@ -112,12 +113,12 @@ def test_the_reply_to_an_analysis_says_how_long_the_transcription_will_take(
     for asset in (talk, silent):
         runtime.repo.save_asset(asset)
 
-    found = server.analyze_asset([talk.id, silent.id], again=True)["estimate"]
+    found = examining.analyze_asset([talk.id, silent.id], again=True)["estimate"]
     assert found["footage_minutes"] == 30.0  # the silent file is not transcribed
     assert found["tier"] == machine.profile().tier and found["basis"] in (speed.ROUGH, speed.MEASURED)
     assert found["speakers_minutes"] is not None
-    assert server.analyze_asset([talk.id], again=True, diarize=False)["estimate"]["speakers_minutes"] is None
-    assert "estimate" not in server.analyze_asset([talk.id], again=True, transcribe=False)
+    assert examining.analyze_asset([talk.id], again=True, diarize=False)["estimate"]["speakers_minutes"] is None
+    assert "estimate" not in examining.analyze_asset([talk.id], again=True, transcribe=False)
 
 def test_the_instructions_use_this_computers_runs_once_there_are_some(repo: Repository) -> None:
     here = computer("mid")

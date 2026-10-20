@@ -9,7 +9,7 @@ path, and nothing is copied.
 import threading
 from typing import List
 
-from app.server import MEDIA_EXTENSIONS
+from app.tools.catalog import MEDIA_EXTENSIONS
 
 # Only one dialog at a time: a second click while one is open would stack another
 # behind it, which a beginner reads as the app having frozen.

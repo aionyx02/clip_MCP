@@ -32,9 +32,9 @@ from app.models.timeline import (
     CaptionStyle, Clip, ClipLayout, Dissolve, Marker, PlacedCue, Project, SpeakerMark, TimeRange, Track, TrackType,
 )
 from app.runtime import repo
-from app.server import (
-    check_render, export_cover, export_timeline, get_chapters, import_asset, render_project,
-)
+from app.tools.catalog import import_asset
+from app.tools.delivery import export_cover, export_timeline, get_chapters
+from app.tools.rendering import check_render, render_project
 from helpers import build_project, edit, finished, insert, video_track
 
 def clip(clip_id: str, asset_id: str, start: float, end: float, at: float, **fields) -> Clip:
@@ -293,7 +293,7 @@ def test_a_close_look_shows_what_is_on_screen_either_side_of_one_moment() -> Non
     ]
 
 def test_covers_are_offered_one_part_at_a_time_with_what_the_video_is_for(media: Path) -> None:
-    from app.server import propose_covers
+    from app.tools.delivery import propose_covers
 
     asset = import_asset(str(media / "wide.mp4"))["id"]
     project = build_project([video_track(), insert("a", asset, 0, 3), insert("b", asset, 4, 8)], width=640, height=360)
@@ -728,7 +728,8 @@ def test_a_shot_darker_than_the_ones_either_side_is_offered_the_brightness_that_
 
 def test_checking_a_project_with_nothing_on_it_is_not_an_all_clear() -> None:
     """#96: a project whose compile was refused checked out `ok` with nothing in it."""
-    from app.server import check_render, create_project
+    from app.tools.editing import create_project
+    from app.tools.rendering import check_render
 
     project = create_project(name="空的", width=640, height=360)["id"]
     with pytest.raises(ValueError, match="nothing on its sequence to check"):

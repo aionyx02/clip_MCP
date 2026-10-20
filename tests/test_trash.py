@@ -8,9 +8,11 @@ from pathlib import Path
 import pytest
 from starlette.testclient import TestClient
 
-from app import runtime, server
+from app import runtime
+from app.tools import catalog, delivery, editing, rendering, soundtrack, upkeep, versioning
 from app.models.job import Job, JobKind, JobStatus
 from app.storage import housekeeping
+from app.workspace import output_dir
 from helpers import build_project, edit, insert, video_track
 
 
@@ -23,7 +25,7 @@ def client() -> TestClient:
 
 def finished(project_id: str, version: int, name: str) -> Path:
     """A finished video of one version, as a full render leaves it."""
-    path = Path(server.output_dir()) / name
+    path = Path(output_dir()) / name
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_bytes(b"finished " + name.encode("utf-8"))
     runtime.repo.add_job(Job(kind=JobKind.RENDER, project_id=project_id, project_version=version,
@@ -32,7 +34,7 @@ def finished(project_id: str, version: int, name: str) -> Path:
 
 
 def test_a_deleted_project_waits_in_the_trash_and_comes_back_where_it_was(client: TestClient) -> None:
-    project = server.create_project(name="垃圾桶裡的")["id"]
+    project = editing.create_project(name="垃圾桶裡的")["id"]
     folder = client.post("/api/folders", json={"action": "create", "kind": "projects", "name": "放回這裡"}).json()
     client.post("/api/file", json={"kind": "projects", "ids": [project], "folder_id": folder["id"]})
 
@@ -57,7 +59,7 @@ def test_the_trash_lets_go_after_thirty_days(tmp_path: Path) -> None:
 
 
 def test_other_versions_go_but_the_current_and_the_starred_stay(client: TestClient, media: Path) -> None:
-    asset = server.import_asset(str(media / "wide.mp4"))["id"]
+    asset = catalog.import_asset(str(media / "wide.mp4"))["id"]
     project = build_project([video_track(), insert("a", asset, 0, 3)], name="留下哪些")
     first = runtime.repo.get_project(project).version
     old = finished(project, first, "留下哪些 舊版.mp4")
@@ -83,12 +85,12 @@ def test_other_versions_go_but_the_current_and_the_starred_stay(client: TestClie
 
 
 def test_a_starred_version_keeps_its_finished_video(kept_history, client: TestClient, media: Path) -> None:
-    asset = server.import_asset(str(media / "wide.mp4"))["id"]
+    asset = catalog.import_asset(str(media / "wide.mp4"))["id"]
     project = build_project([video_track(), insert("a", asset, 0, 3)], name="標星號的")
-    starred = server.project_history(project)["versions"][0]["commit"]
+    starred = versioning.project_history(project)["versions"][0]["commit"]
     finished(project, runtime.repo.get_project(project).version, "標星號的 星號.mp4")
     edit(project, [insert("b", asset, 4, 6)])
-    server.mark_version(project, starred, "starred")
+    versioning.mark_version(project, starred, "starred")
     assert client.get(f"/api/projects/{project}/storage").json()["other_outputs"] == []
 
 
@@ -111,7 +113,7 @@ def test_the_ai_files_footage_in_folders_and_deletes_nothing(media: Path) -> Non
     import asyncio
     from fastmcp import Client
 
-    asset = server.import_asset(str(media / "tall.mp4"))["id"]
+    asset = catalog.import_asset(str(media / "tall.mp4"))["id"]
 
     async def call(arguments):
         async with Client(runtime.mcp) as client:
@@ -123,7 +125,7 @@ def test_the_ai_files_footage_in_folders_and_deletes_nothing(media: Path) -> Non
     assert runtime.repo.folder_of("assets")[asset] == folder["id"]
     assert "整理測試直式" in done["done"][0]
     # There is no way for it to delete a folder or a file.
-    assert not any(step for step in ("delete_folder", "delete") if step in str(server.LibraryStep))
+    assert not any(step for step in ("delete_folder", "delete") if step in str(catalog.LibraryStep))
 
 
 def test_files_move_on_disk_only_once_agreed_and_never_over_another(media: Path, tmp_path: Path) -> None:
@@ -132,14 +134,14 @@ def test_files_move_on_disk_only_once_agreed_and_never_over_another(media: Path,
     source = tmp_path / "拍攝" / "要搬的.mp4"
     source.parent.mkdir()
     shutil.copy(media / "wide.mp4", source)
-    asset = server.import_asset(str(source))["id"]
+    asset = catalog.import_asset(str(source))["id"]
     project = build_project([video_track(), insert("a", asset, 0, 2)], name="搬檔")
     target = tmp_path / "整理好"
     target.mkdir()
     (target / "要搬的.mp4").write_bytes(b"already here")
 
-    moves = [server.FileMove(asset_id=asset, to_folder=str(target))]
-    shown = server.move_files(moves)
+    moves = [catalog.FileMove(asset_id=asset, to_folder=str(target))]
+    shown = catalog.move_files(moves)
     planned = shown["planned"][0]
     # Nothing moves without agreement, and the taken name gets a number.
     assert source.exists() and planned["numbered"] and planned["to"].endswith("要搬的 (2).mp4")
@@ -147,46 +149,54 @@ def test_files_move_on_disk_only_once_agreed_and_never_over_another(media: Path,
 
     # Only the plan the user was shown is carried out.
     with pytest.raises(ValueError):
-        server.move_files(moves, confirm_plan="something else")
+        catalog.move_files(moves, confirm_plan="something else")
     assert source.exists()
-    moved = server.move_files(moves, confirm_plan=shown["plan"])["moved"][0]
+    moved = catalog.move_files(moves, confirm_plan=shown["plan"])["moved"][0]
     assert not source.exists() and (target / "要搬的.mp4").read_bytes() == b"already here"
     assert runtime.repo.get_assets([asset])[asset].path == moved["to"] == str(target / "要搬的 (2).mp4")
     # The project still plays it, from where it went.
-    assert server.playback_of(runtime.repo.get_project(project))["tracks"][0]["clips"][0]["asset_id"] == asset
+    assert rendering.playback_of(runtime.repo.get_project(project))["tracks"][0]["clips"][0]["asset_id"] == asset
 
 
 def test_a_folder_next_to_clip_mcp_s_own_is_not_taken_for_it(tmp_path: Path) -> None:
-    assert server._inside(str(tmp_path / "work" / "a"), str(tmp_path / "work"))
-    assert not server._inside(str(tmp_path / "work2"), str(tmp_path / "work"))
+    assert catalog.inside(str(tmp_path / "work" / "a"), str(tmp_path / "work"))
+    assert not catalog.inside(str(tmp_path / "work2"), str(tmp_path / "work"))
 
 
 def test_the_ai_reading_the_trash_deletes_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(server, "output_dir", lambda: tmp_path)
+    monkeypatch.setattr(catalog, "output_dir", lambda: tmp_path)
+    monkeypatch.setattr(delivery, "output_dir", lambda: tmp_path)
+    monkeypatch.setattr(rendering, "output_dir", lambda: tmp_path)
+    monkeypatch.setattr(soundtrack, "output_dir", lambda: tmp_path)
+    monkeypatch.setattr(upkeep, "output_dir", lambda: tmp_path)
     old = housekeeping.put_in_trash(str(tmp_path), "project", "b" * 36, "過期了", {"project.json": b"{}"}, [])
     meta = tmp_path / housekeeping.TRASH / old.key / "trashed.json"
     import json
     data = json.loads(meta.read_text(encoding="utf-8"))
     data["trashed_at"] = (datetime.now(timezone.utc) - timedelta(days=40)).isoformat()
     meta.write_text(json.dumps(data), encoding="utf-8")
-    assert [item["key"] for item in server.storage_usage()["trash"]] == [old.key]
+    assert [item["key"] for item in upkeep.storage_usage()["trash"]] == [old.key]
     # The editor's own look at it is what lets it go.
-    assert server.list_trash(expire=True)["items"] == []
+    assert upkeep.list_trash(expire=True)["items"] == []
 
 
 def test_a_broken_project_in_the_trash_stays_there(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(server, "output_dir", lambda: tmp_path)
+    monkeypatch.setattr(catalog, "output_dir", lambda: tmp_path)
+    monkeypatch.setattr(delivery, "output_dir", lambda: tmp_path)
+    monkeypatch.setattr(rendering, "output_dir", lambda: tmp_path)
+    monkeypatch.setattr(soundtrack, "output_dir", lambda: tmp_path)
+    monkeypatch.setattr(upkeep, "output_dir", lambda: tmp_path)
     kept = housekeeping.put_in_trash(str(tmp_path), "project", "c" * 36, "壞掉的", {"project.json": b"not json"}, [])
     with pytest.raises(ValueError):
-        server.restore_from_trash(kept.key)
+        upkeep.restore_from_trash(kept.key)
     assert [item.key for item in housekeeping.in_trash(str(tmp_path))] == [kept.key]
 
 
 def test_other_versions_of_a_video_with_no_name_are_not_let_go(media: Path) -> None:
     import uuid
 
-    named = runtime.repo.get_project(server.create_project(name="有名字")["id"])
+    named = runtime.repo.get_project(editing.create_project(name="有名字")["id"])
     nameless = named.model_copy(update={"id": str(uuid.uuid4()), "name": ""})
     runtime.repo.add_project(nameless)
     with pytest.raises(ValueError, match="name the video first"):
-        server.trim_project(nameless.id, "")
+        upkeep.trim_project(nameless.id, "")

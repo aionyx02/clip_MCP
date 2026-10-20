@@ -30,11 +30,17 @@ from starlette.responses import FileResponse, JSONResponse, Response
 from starlette.routing import Mount, Route
 from starlette.staticfiles import StaticFiles
 
-from app import clients, runtime, server
+from app import clients, runtime
+from app.tools import (
+    catalog, editing, examining, feedback, job_queue, planning, rendering, soundtrack, subtitles, upkeep,
+    versioning,
+)
 from app.models.comment import USER
 from app.engine.ffmpeg import hidden_window_flags
 from app.engine import models
 from app.engine import playback as playback_module
+from app.engine.analysis import transcription_of
+from app.engine.builder import DEFAULT_LOUDNESS_TARGET
 from app.engine.frames import extract_frame
 from app.engine.subtitles import captioned_clips, place_cues
 from app.models.timeline import Project
@@ -42,6 +48,7 @@ from app.storage import housekeeping
 from app.engine.library import FOLDER_KINDS as LIBRARY_FOLDERS, FOOTAGE, LIBRARIES, MUSIC, library_of
 from app.storage.repo import FOLDER_KINDS, FolderNotFoundError
 from app.ui import dialogs, updates
+from app.workspace import output_dir
 
 STATIC_DIR = Path(__file__).parent / "static"
 # What `/api/ping` answers, so a second start can tell this editor from anything else on the port.
@@ -84,7 +91,7 @@ def _asset_summary(asset) -> dict:
         "width": asset.width,
         "height": asset.height,
         # Shown on the file, so the user checking captions later knows to expect misheard words.
-        "fast_transcript": server.transcription_of(runtime.repo.transcript_model(asset.id)) == "fast",
+        "fast_transcript": transcription_of(runtime.repo.transcript_model(asset.id)) == "fast",
         "notes": asset.notes,
         "library": library_of(asset),
         "source": asset.source.model_dump() if asset.source is not None else None,
@@ -95,14 +102,14 @@ async def projects(request: Request) -> Response:
     if request.method == "POST":
         body = await request.json()
         try:
-            made = server.create_project(
+            made = editing.create_project(
                 name=str(body.get("name") or ""),
                 width=int(body.get("width", 1920)),
                 height=int(body.get("height", 1080)),
             )
         except (ValueError, TypeError) as error:
             return _error(str(error))
-        server.apply_edits(made["id"], made["version"], server._OPERATIONS.validate_python([
+        editing.apply_edits(made["id"], made["version"], planning.OPERATIONS.validate_python([
             {"action": "add_track", "track_id": "video", "track_type": "video"},
             {"action": "add_track", "track_id": "music", "track_type": "audio", "duck_under_speech": True},
         ]))
@@ -133,7 +140,7 @@ async def projects(request: Request) -> Response:
             "branches": branched.get(project.id, 0),
             # Shown under the project it was branched from, when that one is in the same folder.
             "under": project.branched_from.project_id if project.branched_from else None,
-            "megabytes": server.disk_of(project.id),
+            "megabytes": upkeep.disk_of(project.id),
         })
     return JSONResponse({"projects": listed})
 
@@ -160,8 +167,8 @@ async def edits(request: Request) -> Response:
     if not before:
         return _error(f"project {project_id} not found", 404)
     try:
-        operations = server._OPERATIONS.validate_python(body.get("operations", []))
-        result = server.apply_edits(project_id, int(body["expected_version"]), operations)
+        operations = planning.OPERATIONS.validate_python(body.get("operations", []))
+        result = editing.apply_edits(project_id, int(body["expected_version"]), operations)
     except (ValueError, KeyError, TypeError) as error:
         conflict = "version conflict" in str(error)
         return _error(str(error), 409 if conflict else 400)
@@ -187,7 +194,7 @@ async def undo(request: Request) -> Response:
         _, before = stack.pop()
         restored = before.model_copy(update={"version": current.version + 1})
         runtime.repo.update_project(restored, current.version)
-        server.prepare_playback(restored)
+        rendering.prepare_playback(restored)
         # The states further back now follow this version, not the one they were saved after.
         if stack:
             stack[-1] = (restored.version, stack[-1][1])
@@ -225,14 +232,14 @@ def _start_preview(project_id: str) -> dict:
     if current and current.get("job_id"):
         old = runtime.job_manager.get_job(current["job_id"])
         if old and old.status.is_active:
-            server.cancel_job(old.job_id)
+            job_queue.cancel_job(old.job_id)
     if not project.base_video_track or not project.base_video_track.clips:
         with _previews_lock:
             _previews[project_id] = {"version": project.version, "empty": True}
         return _preview_state(project_id)
     def start(captions: bool) -> dict:
-        return server._start_render(
-            project_id, True, server.DEFAULT_LOUDNESS_TARGET, captions, None, True, None, PREVIEW_SIDE,
+        return rendering.start_render(
+            project_id, True, DEFAULT_LOUDNESS_TARGET, captions, None, True, None, PREVIEW_SIDE,
         )
     try:
         started = start(bool(project.subtitles))
@@ -327,11 +334,11 @@ async def make_captions(request: Request) -> Response:
     if missing:
         # Captions here are read in Traditional Chinese, like the rest of the editor.
         started = await run_in_threadpool(
-            server.analyze_asset, [asset["id"] for asset in missing], True, None, None, "zh-TW",
+            examining.analyze_asset, [asset["id"] for asset in missing], True, None, None, "zh-TW",
         )
         return JSONResponse({"jobs": [job["job_id"] for job in started["jobs"]]})
     try:
-        made = await run_in_threadpool(server.generate_subtitles, project_id, int(body["expected_version"]))
+        made = await run_in_threadpool(subtitles.generate_subtitles, project_id, int(body["expected_version"]))
     except (ValueError, KeyError) as error:
         return _error(str(error), 409 if "version conflict" in str(error) else 400)
     return JSONResponse({"new_version": made["new_version"], "count": len(made["captions"])})
@@ -340,7 +347,7 @@ async def jobs(request: Request) -> Response:
     """How a batch of background jobs is getting on, such as the transcriptions captions wait for."""
     ids = [job_id for job_id in request.query_params.get("ids", "").split(",") if job_id]
     try:
-        return JSONResponse(server.get_job(ids))
+        return JSONResponse(job_queue.get_job(ids))
     except ValueError as error:
         return _error(str(error), 404)
 
@@ -373,7 +380,7 @@ def _jobs_to_show() -> dict:
         project = runtime.repo.get_project(project_id)
         if project is not None:
             names[project_id] = project.name or ""
-    ahead = server.queue_positions(active)
+    ahead = job_queue.queue_positions(active)
     return {
         "jobs": [_job_card(job, names, ahead.get(job.job_id, 0), now) for job in active],
         "ended": [_job_card(job, names, 0, now) for job in ended],
@@ -387,7 +394,7 @@ async def cancel_job(request: Request) -> Response:
     """Stop a job the user chose to stop; the AI sees it cancelled when it next asks."""
     body = await request.json()
     try:
-        found = await run_in_threadpool(server.cancel_job, str(body.get("job_id", "")))
+        found = await run_in_threadpool(job_queue.cancel_job, str(body.get("job_id", "")))
     except ValueError as error:
         return _error(str(error), 404)
     return JSONResponse(found)
@@ -402,8 +409,8 @@ async def assets(request: Request) -> Response:
     library = request.query_params.get("library")
     filed = {**runtime.repo.folder_of("assets"), **runtime.repo.folder_of("music")}
     listed = []
-    heard = server.song_tags() if library == MUSIC else {}
-    analyzing = server.analyzing_assets()
+    heard = examining.song_tags() if library == MUSIC else {}
+    analyzing = examining.analyzing_assets()
     for asset in runtime.repo.list_assets():
         if library in LIBRARIES and library_of(asset) != library:
             continue
@@ -412,7 +419,7 @@ async def assets(request: Request) -> Response:
             entry = {**_asset_summary(asset), "folder_id": filed.get(asset.id), "missing": not present}
             if entry["library"] == MUSIC:
                 analysis = runtime.repo.get_analysis(asset.id)
-                entry.update(server.song_details(asset, analysis, heard, analyzing))
+                entry.update(examining.song_details(asset, analysis, heard, analyzing))
                 if analysis is not None and analysis.music is not None:
                     energy = analysis.music.energy
                     # Enough points for the bar on a card, not one a second.
@@ -432,7 +439,8 @@ async def move_library(request: Request) -> Response:
     if library not in LIBRARIES:
         return _error("library is footage or music")
     try:
-        result = await run_in_threadpool(server.set_asset_library, [str(item) for item in body.get("ids", [])], library)
+        result = await run_in_threadpool(catalog.set_asset_library, [str(item) for item in body.get("ids", [])],
+                                         library)
     except ValueError as error:
         return _error(str(error), 404)
     return JSONResponse(result)
@@ -440,7 +448,7 @@ async def move_library(request: Request) -> Response:
 async def versions(request: Request) -> Response:
     """The version panel: a video's versions grouped into dots, and the branches started from it."""
     try:
-        graph = await run_in_threadpool(server.version_graph, request.path_params["project_id"])
+        graph = await run_in_threadpool(versioning.version_graph, request.path_params["project_id"])
     except ValueError as error:
         return _error(str(error), 404)
     return JSONResponse(graph)
@@ -449,7 +457,7 @@ async def restore(request: Request) -> Response:
     """Make the video what it was at one version, as a new version on top."""
     body = await request.json()
     try:
-        result = await run_in_threadpool(server.restore_version, request.path_params["project_id"],
+        result = await run_in_threadpool(versioning.restore_version, request.path_params["project_id"],
                                           str(body["commit"]), int(body["expected_version"]))
     except (ValueError, KeyError, TypeError) as error:
         return _error(str(error), 409 if "version conflict" in str(error) else 400)
@@ -459,7 +467,7 @@ async def branch(request: Request) -> Response:
     """Start a branch of the video from one of its versions."""
     body = await request.json()
     try:
-        result = await run_in_threadpool(server.branch_project, request.path_params["project_id"],
+        result = await run_in_threadpool(versioning.branch_project, request.path_params["project_id"],
                                           str(body["name"]), body.get("commit"))
     except (ValueError, KeyError, TypeError) as error:
         return _error(str(error), 400)
@@ -468,10 +476,10 @@ async def branch(request: Request) -> Response:
 async def mark(request: Request) -> Response:
     """Put a star or the published mark on a version, or take it off."""
     body = await request.json()
-    if body.get("mark") not in server.VERSION_MARKS:
+    if body.get("mark") not in versioning.VERSION_MARKS:
         return _error("a version is marked starred or published", 400)
     try:
-        result = await run_in_threadpool(server.mark_version, request.path_params["project_id"],
+        result = await run_in_threadpool(versioning.mark_version, request.path_params["project_id"],
                                           str(body["commit"]), body["mark"], bool(body.get("on", True)))
     except (ValueError, KeyError) as error:
         return _error(str(error), 400)
@@ -483,9 +491,9 @@ async def compare_versions(request: Request) -> Response:
     try:
         def compared():
             """Both versions read and compared, off the event loop."""
-            before, a = server._version_at(project_id, request.query_params.get("a"))
-            after, b = server._version_at(project_id, request.query_params.get("b"))
-            return {"a": a, "b": b, **server.compare_projects(before, after)}
+            before, a = versioning.version_at(project_id, request.query_params.get("a"))
+            after, b = versioning.version_at(project_id, request.query_params.get("b"))
+            return {"a": a, "b": b, **versioning.compare_projects(before, after)}
         return JSONResponse(await run_in_threadpool(compared))
     except ValueError as error:
         return _error(str(error), 400)
@@ -495,7 +503,7 @@ async def merge_versions(request: Request) -> Response:
     body = await request.json()
     try:
         result = await run_in_threadpool(
-            server.merge_versions, request.path_params["project_id"], str(body["a"]), body.get("b") or None,
+            versioning.merge_versions, request.path_params["project_id"], str(body["a"]), body.get("b") or None,
             {str(key): str(value) for key, value in (body.get("picks") or {}).items()}, int(body["expected_version"]))
     except (ValueError, KeyError, TypeError) as error:
         return _error(str(error), 400)
@@ -506,10 +514,10 @@ async def comments(request: Request) -> Response:
     project_id = request.path_params["project_id"]
     try:
         if request.method == "GET":
-            return JSONResponse(await run_in_threadpool(server.get_comments, project_id, True))
+            return JSONResponse(await run_in_threadpool(feedback.get_comments, project_id, True))
         body = await request.json()
         end = body.get("end")
-        made = await run_in_threadpool(server.add_comment, project_id, str(body.get("text", "")),
+        made = await run_in_threadpool(feedback.add_comment, project_id, str(body.get("text", "")),
                                        float(body["start"]), float(end) if end is not None else None)
     except (ValueError, KeyError, TypeError) as error:
         return _error(str(error), 400)
@@ -533,15 +541,15 @@ async def song(request: Request) -> Response:
     project_id, number = request.path_params["project_id"], int(request.path_params["number"])
     if request.method == "POST":
         try:
-            return JSONResponse(await run_in_threadpool(server.pick_song, project_id, number))
+            return JSONResponse(await run_in_threadpool(soundtrack.pick_song, project_id, number))
         except ValueError as error:
             return _error(str(error), 400)
     project = await run_in_threadpool(runtime.repo.get_project, project_id)
     offer = await run_in_threadpool(runtime.repo.song_offer, project_id)
     if project is None or offer is None or not 1 <= number <= len(offer.songs):
         return _error("no such song is offered", 404)
-    trial = await run_in_threadpool(server.song_trial, project, offer, number)
-    return JSONResponse(await run_in_threadpool(server.playback_of, trial))
+    trial = await run_in_threadpool(soundtrack.song_trial, project, offer, number)
+    return JSONResponse(await run_in_threadpool(rendering.playback_of, trial))
 
 async def comment(request: Request) -> Response:
     """Add to a comment, close it or open it again; or delete it, which only the user can do, here."""
@@ -555,7 +563,7 @@ async def comment(request: Request) -> Response:
         status = body.get("status")
         if status not in (None, "open", "resolved"):
             return _error("a comment is open or resolved", 400)
-        changed = await run_in_threadpool(server.change_comment, project_id, comment_id, USER,
+        changed = await run_in_threadpool(feedback.change_comment, project_id, comment_id, USER,
                                           str(body.get("reply", "")), status)
     except ValueError as error:
         return _error(str(error), 400)
@@ -570,13 +578,13 @@ async def playback(request: Request) -> Response:
     project_id = request.path_params["project_id"]
     commit = request.query_params.get("commit")
     try:
-        project = (server._project_at(project_id, commit) if commit
+        project = (versioning.project_at(project_id, commit) if commit
                    else runtime.repo.get_project(project_id))
     except ValueError as error:
         return _error(str(error), 404)
     if project is None:
         return _error(f"project {project_id} not found", 404)
-    return JSONResponse(await run_in_threadpool(server.playback_of, project))
+    return JSONResponse(await run_in_threadpool(rendering.playback_of, project))
 
 # What a cached file may be called: what the server names them, and nothing that leaves the folder.
 _CACHED_NAME = re.compile(r"^[0-9a-f-]{8,80}\.(mp4|m4a)$")
@@ -612,7 +620,7 @@ async def asset_notes(request: Request) -> Response:
     """
     body = await request.json()
     try:
-        found = await run_in_threadpool(server.edit_asset, str(body.get("asset_id", "")), str(body.get("notes", "")))
+        found = await run_in_threadpool(catalog.edit_asset, str(body.get("asset_id", "")), str(body.get("notes", "")))
     except ValueError as error:
         return _error(str(error), 404)
     return JSONResponse(found)
@@ -665,23 +673,23 @@ async def delete_projects(request: Request) -> Response:
     ids = [str(project_id) for project_id in body.get("ids", []) if project_id]
     if not ids:
         return _error("no projects chosen")
-    result = await run_in_threadpool(server.trash_projects, ids)
+    result = await run_in_threadpool(upkeep.trash_projects, ids)
     return JSONResponse(result, status_code=409 if result["busy"] else 200)
 
 async def trash(request: Request) -> Response:
     """What is in the trash (GET), or put one thing back from it (POST)."""
     if request.method == "GET":
-        return JSONResponse(await run_in_threadpool(server.list_trash, True))
+        return JSONResponse(await run_in_threadpool(upkeep.list_trash, True))
     body = await request.json()
     try:
-        return JSONResponse(await run_in_threadpool(server.restore_from_trash, str(body.get("key", ""))))
+        return JSONResponse(await run_in_threadpool(upkeep.restore_from_trash, str(body.get("key", ""))))
     except ValueError as error:
         return _error(str(error), 404)
 
 async def project_storage(request: Request) -> Response:
     """What one video takes on disk, and what deleting its other versions would give back."""
     try:
-        return JSONResponse(await run_in_threadpool(server.project_storage, request.path_params["project_id"]))
+        return JSONResponse(await run_in_threadpool(upkeep.project_storage, request.path_params["project_id"]))
     except ValueError as error:
         return _error(str(error), 404)
 
@@ -689,7 +697,7 @@ async def trim(request: Request) -> Response:
     """Delete a video's other versions, once the user has typed its name."""
     body = await request.json()
     try:
-        return JSONResponse(await run_in_threadpool(server.trim_project, request.path_params["project_id"],
+        return JSONResponse(await run_in_threadpool(upkeep.trim_project, request.path_params["project_id"],
                                                     str(body.get("name", ""))))
     except ValueError as error:
         return _error(str(error), 400)
@@ -825,7 +833,7 @@ async def check(request: Request) -> Response:
     """What the finished file would show that the user should hear about before it is made."""
     frame, captions = _export_settings(request.query_params)
     try:
-        return JSONResponse(await run_in_threadpool(server.check_render, request.path_params["project_id"], frame, captions))
+        return JSONResponse(await run_in_threadpool(rendering.check_render, request.path_params["project_id"], frame, captions))
     except ValueError as error:
         return _error(str(error), 404)
 
@@ -855,8 +863,8 @@ async def export(request: Request) -> Response:
     try:
         started = await run_in_threadpool(
             # The user exporting by hand has watched the cut here; only the AI is held to a preview first.
-            server._start_render, project_id, False, server.DEFAULT_LOUDNESS_TARGET, captions, frame, True,
-            body.get("allow") or None, server.PREVIEW_SHORT_SIDE,
+            rendering.start_render, project_id, False, DEFAULT_LOUDNESS_TARGET, captions, frame, True,
+            body.get("allow") or None, rendering.PREVIEW_SHORT_SIDE,
         )
     except ValueError as error:
         return _error(str(error))
@@ -891,7 +899,7 @@ async def reveal(request: Request) -> Response:
 async def job(request: Request) -> Response:
     """How a render is getting on."""
     try:
-        found = server.get_job([request.path_params["job_id"]])["jobs"][0]
+        found = job_queue.get_job([request.path_params["job_id"]])["jobs"][0]
     except ValueError as error:
         return _error(str(error), 404)
     if found.get("output_path") and found["status"] == "completed":
@@ -916,19 +924,19 @@ async def pick(request: Request) -> Response:
     for path in chosen:
         try:
             if kind == "folder":
-                result = server.import_folder(path)
+                result = catalog.import_folder(path)
                 imported += len(result["assets"])
                 ids += [item["id"] for item in result["assets"]]
                 failed += [os.path.basename(item["path"]) for item in result["skipped"]]
             else:
-                ids.append(server.register_asset(path, library).id)
+                ids.append(catalog.register_asset(path, library).id)
                 imported += 1
         except (FileNotFoundError, ValueError, RuntimeError):
             failed.append(os.path.basename(path))
     if library and kind == "folder" and ids:
         # A folder is listened to file by file; added on the music page, its songs are music all the same.
-        server.set_asset_library([asset_id for asset_id, asset in runtime.repo.get_assets(ids).items()
-                                  if not asset.has_video], library)
+        catalog.set_asset_library([asset_id for asset_id, asset in runtime.repo.get_assets(ids).items()
+                                   if not asset.has_video], library)
     found = runtime.repo.get_assets(ids)
     music = [asset_id for asset_id in ids if asset_id in found and library_of(found[asset_id]) == MUSIC]
     # Chosen with one of the library's folders open: filed there, where the user is looking.
@@ -948,12 +956,12 @@ async def storage(request: Request) -> Response:
     if request.method == "POST":
         body = await request.json()
         kinds = [kind for kind in body.get("kinds", []) if kind in ("previews", "thumbnails", "playback", "work")]
-        return JSONResponse(server.clean_storage(kinds))
-    return JSONResponse(server.storage_usage())
+        return JSONResponse(upkeep.clean_storage(kinds))
+    return JSONResponse(upkeep.storage_usage())
 
 def _openable() -> Dict[str, str]:
     """The folders the page may open, by name: never a path the page made up."""
-    folders = {"outputs": str(server.output_dir())}
+    folders = {"outputs": str(output_dir())}
     folders.update({item.key: item.path for item in housekeeping.usage(runtime.WORKSPACE_DIR, folders["outputs"])})
     return folders
 

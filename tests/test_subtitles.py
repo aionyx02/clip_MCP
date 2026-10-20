@@ -22,7 +22,10 @@ from app.models.timeline import (
     SpeakerMark, SubtitleCue, apply_operation, retimed_words,
 )
 from app.runtime import repo
-from app.server import apply_edits, generate_subtitles, get_project, get_subtitles, import_asset, render_project
+from app.tools.catalog import import_asset
+from app.tools.editing import apply_edits, get_project
+from app.tools.rendering import render_project
+from app.tools.subtitles import generate_subtitles, get_subtitles
 from helpers import caption, build_project, edit, insert, render, video_track
 
 def words(*pairs) -> list:
@@ -995,7 +998,7 @@ def test_a_word_the_cut_takes_off_is_not_captioned(media: Path) -> None:
     assert [cue["text"] for cue in caption(project)["cues"]] == ["我到高鐵"]
 
 def test_the_cut_read_back_says_the_words_as_the_glossary_corrects_them(spoken: str) -> None:
-    from app.server import read_cut
+    from app.tools.delivery import read_cut
 
     project = build_project([video_track(), insert("a", spoken, 0.0, 9.0)])
     caption(project, fix_words={"句": "局"})
@@ -1004,7 +1007,7 @@ def test_the_cut_read_back_says_the_words_as_the_glossary_corrects_them(spoken: 
 def test_the_cut_read_back_puts_each_shot_in_its_part_and_only_its_own_captions_beside_it(spoken: str) -> None:
     """#80: a shot starting a hair before its part's marker was put in the part before, and a
     caption starting where a shot ends was listed beside it."""
-    from app.server import read_cut
+    from app.tools.delivery import read_cut
 
     project = build_project([
         video_track(), insert("a", spoken, 0.0, 4.02), insert("b", spoken, 4.02, 10.0),

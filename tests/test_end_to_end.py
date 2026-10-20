@@ -14,10 +14,11 @@ import pytest
 
 from app.models.media import MediaAnalysis, Transcript, TranscriptSegment, TranscriptWord
 from app.runtime import repo
-from app.server import (
-    generate_subtitles, get_job, get_project, get_subtitles,
-    import_folder, preview_project, render_project,
-)
+from app.tools.catalog import import_folder
+from app.tools.editing import get_project
+from app.tools.job_queue import get_job
+from app.tools.rendering import preview_project, render_project
+from app.tools.subtitles import generate_subtitles, get_subtitles
 from helpers import caption, build_project, edit, loudness, render
 
 @pytest.fixture

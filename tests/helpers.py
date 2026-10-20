@@ -12,7 +12,9 @@ from app.engine import loudness as levelling
 from app.engine.builder import DEFAULT_LOUDNESS_TARGET, FFmpegRenderer
 from app.models.timeline import Clip, EditOperation
 from app.runtime import repo
-from app.server import apply_edits, create_project, generate_subtitles, get_job, get_project
+from app.tools.editing import apply_edits, create_project, get_project
+from app.tools.job_queue import get_job
+from app.tools.subtitles import generate_subtitles
 from app.tools.shared import referenced_assets
 
 _OPERATIONS = TypeAdapter(List[EditOperation])

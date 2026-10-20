@@ -13,7 +13,8 @@ import pytest
 
 from app.engine.builder import FFmpegRenderer
 from app.runtime import repo
-from app.server import _preview_sized, import_asset, render_project
+from app.tools.catalog import import_asset
+from app.tools.rendering import preview_sized, render_project
 from app.tools.shared import referenced_assets
 from helpers import build_project, edit, insert, level, video_track
 
@@ -28,7 +29,7 @@ def preview(project_id: str, cache: Path, out: Path) -> int:
     Returns:
         How many pictures had to be rendered into the cache first.
     """
-    project = _preview_sized(repo.get_project(project_id))
+    project = preview_sized(repo.get_project(project_id))
     command, pieces = FFmpegRenderer().build_incremental(
         project, referenced_assets(project), str(out), str(cache), loudness_target=None,
     )
@@ -95,10 +96,10 @@ def test_the_sound_of_a_cached_preview_is_still_where_it_belongs(three_clips: st
 def test_a_preview_is_rendered_small_from_the_start() -> None:
     from app.models.timeline import Project
 
-    assert (_preview_sized(Project(id="p", width=1080, height=1920)).width,
-            _preview_sized(Project(id="p", width=1080, height=1920)).height) == (480, 854)
+    assert (preview_sized(Project(id="p", width=1080, height=1920)).width,
+            preview_sized(Project(id="p", width=1080, height=1920)).height) == (480, 854)
     small = Project(id="p", width=320, height=240)
-    assert _preview_sized(small) is small
+    assert preview_sized(small) is small
 
 def test_the_preview_tool_says_how_much_it_reused(three_clips: str) -> None:
     first = render_project(three_clips, is_preview=True)
