@@ -22,7 +22,7 @@ from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 from app.engine.builder import DUCK_DEPTH_DB, Talking
 from app.engine.continuity import Shot, stray_runs
 from app.engine.looks import alike
-from app.engine.plan import LENGTH_TOLERANCE
+from app.engine.plan.checks import LENGTH_TOLERANCE
 from app.engine.library import MUSIC, library_of
 from app.engine.semantic import (
     EDGE_TOLERANCE_SECONDS, clean_cuts, combined_over, join_voices, share_covered, was_audible, was_made_up,
