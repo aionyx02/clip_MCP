@@ -6,8 +6,6 @@ from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
 from fastmcp.tools import ToolResult
 from mcp.types import TextContent
 from app.models.plan import short_clip_ids
-from app.models.offer import TRIAL_VOLUME
-from app.engine.plan.pieces import BROLL_TRACK_ID, MUSIC_TRACK_ID, VIDEO_TRACK_ID
 from app import runtime
 # By name, unlike everything else from runtime: every tool is registered with it, and it is never swapped out.
 from app.runtime import mcp
