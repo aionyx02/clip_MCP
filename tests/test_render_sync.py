@@ -13,7 +13,7 @@ import pytest
 from app import runtime
 from app.engine import renderer, sync
 from app.models.job import Job, JobKind, JobStatus
-from app.models.timeline import Clip, TimeRange, TitleCard
+from app.models.timeline.parts import Clip, TimeRange, TitleCard
 from app.runtime import repo
 from app.storage.repo import Repository
 from app.tools import rendering

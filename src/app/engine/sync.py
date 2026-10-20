@@ -20,7 +20,7 @@ import numpy as np
 from app.engine.diarize import read_samples
 from app.engine.probe import probe_file
 from app.engine.relisten import voiced_stretches
-from app.models.timeline import Clip
+from app.models.timeline.parts import Clip
 
 SYNC_FILE_NAME = "sync.json"
 # How far, in seconds either side of a join, the sound is compared. Provisional.
