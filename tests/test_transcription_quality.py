@@ -115,6 +115,8 @@ def test_the_editor_marks_a_fast_transcript(talk: Asset) -> None:
 def test_the_job_runs_the_model_that_was_chosen(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     store = Repository(str(tmp_path / "runs.db"))
     asset = Asset(id="quality-run", path=str(tmp_path / "talk.mp4"), duration=60, has_video=True, has_audio=True)
+    # The analysis reads the file first; analyze_media is stood in for, so any bytes will do.
+    (tmp_path / "talk.mp4").write_bytes(b"\0")
     store.save_asset(asset)
     seen = {}
 

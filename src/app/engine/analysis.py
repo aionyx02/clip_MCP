@@ -19,7 +19,7 @@ from app.engine.diarize import (
     find_speakers,
     speaker_model_name,
 )
-from app.engine.ffmpeg import OperationCancelled, escape_filter_path, hidden_window_flags, run_ffmpeg
+from app.engine.ffmpeg import FFmpegFailed, OperationCancelled, escape_filter_path, hidden_window_flags, run_ffmpeg
 from app.engine import relisten
 from app.engine.relisten import Listener
 from app.engine.rhythm import measure_rhythm, rhythm_model_name
@@ -706,7 +706,8 @@ def scan_photo(
         creationflags=hidden_window_flags(),
     )
     if result.returncode != 0:
-        raise RuntimeError(f"could not read the photo: {result.stderr.decode('utf-8', errors='replace').strip()[-300:]}")
+        said = result.stderr.decode('utf-8', errors='replace').strip()[-300:]
+        raise FFmpegFailed(f"could not read the photo: {said}")
     shown = {"end": float(stills.STILL_LONGEST)}
     shots = _shot_measurements([Span(start=0.0, end=1.0)], _frame_records(os.path.join(work_dir, PICTURE_FILE_NAME)), [])
     found = faces.detect_faces(work_dir, 1.0, on_progress, is_cancelled)
@@ -1380,7 +1381,7 @@ def refine_unsure_lines(
             creationflags=hidden_window_flags(),
         )
         if cut.returncode != 0:
-            raise RuntimeError(f"could not read the sound at {start:.2f}s: {cut.stderr.strip()[-300:]}")
+            raise FFmpegFailed(f"could not read the sound at {start:.2f}s: {cut.stderr.strip()[-300:]}")
         try:
             heard = on_whisper_device(lambda device: _run_whisper(
                 device, piece, end - start, transcript.language, prompt, lambda fraction: None, is_cancelled,

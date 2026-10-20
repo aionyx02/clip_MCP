@@ -669,6 +669,10 @@ def start_render(
             "mix_command": runtime.renderer.build_mix(project, assets, mix_path, voices=voices, talking=talking),
             "mix_path": mix_path, "target": loudness_target,
         }
+    commands = [command, *(piece["command"] for piece in pieces)]
+    if loudness_target is not None:
+        commands.append(spec["loudness"]["mix_command"])
+    spec["inputs"] = _read_from(commands, assets)
     job = runtime.job_manager.start_job(job, spec)
     # Every clip on a picture track is one picture, the sequence's and the ones drawn over it.
     pictures = sum(len(track.clips) for track in project.video_tracks)
@@ -966,15 +970,30 @@ def _frame_rate(asset: Asset) -> float:
                 return 0.0
     return 0.0
 
-def _start_preparing(steps: List[dict], urgent: bool, asset_id: Optional[str] = None,
+def _read_from(commands: Sequence[List[str]], assets: Mapping[str, Asset]) -> List[str]:
+    """The library's files a job's FFmpeg commands open, so a failure while one cannot be read is put down to it.
+
+    Args:
+        commands: The commands, each starting with the executable.
+        assets: The assets they may read from.
+
+    Returns:
+        The paths of the assets some command opens with `-i`. A picture taken
+        from the cache instead is not one of them.
+    """
+    opened = {command[index + 1] for command in commands
+              for index in range(len(command) - 1) if command[index] == "-i"}
+    return sorted({asset.path for asset in assets.values()} & opened)
+
+def _start_preparing(steps: List[dict], urgent: bool, inputs: List[str], asset_id: Optional[str] = None,
                      project_id: Optional[str] = None) -> Optional[str]:
-    """Queue one preparation job over its steps; returns its ID, or None when there was nothing to do."""
+    """Queue one preparation job over its steps, which read `inputs`; its ID, or None with nothing to do."""
     if not steps:
         return None
     job = Job(kind=JobKind.PREPARE, asset_id=asset_id, project_id=project_id, priority=-1 if urgent else 1,
               memory_estimate=PREPARE_MEMORY_BYTES)
     job.work_dir = os.path.join(runtime.WORKSPACE_DIR, "jobs", job.job_id)
-    return runtime.job_manager.start_job(job, {"steps": steps}).job_id
+    return runtime.job_manager.start_job(job, {"steps": steps, "inputs": sorted(set(inputs))}).job_id
 
 def prepare_playback(project: Project, urgent: bool = False) -> List[str]:
     """Start making what the browser still needs to play a cut: proxies, repaired sound, its loudness.
@@ -1004,7 +1023,7 @@ def prepare_playback(project: Project, urgent: bool = False) -> List[str]:
             continue
         step = {"command": playback.proxy_command(asset, path + ".part", _frame_rate(asset)), "part": path + ".part",
                 "path": path, "seconds": float(asset.duration or 1), "stage": "making a copy to play from"}
-        started.append(_start_preparing([step], urgent, asset_id=asset_id))
+        started.append(_start_preparing([step], urgent, [asset.path], asset_id=asset_id))
     sound = playback.sound_dir(runtime.WORKSPACE_DIR)
     steps = []
     for track in project.tracks:
@@ -1023,7 +1042,8 @@ def prepare_playback(project: Project, urgent: bool = False) -> List[str]:
         steps.append({"command": runtime.renderer.build_mix(project, assets, mix, voices, talking_of(project, voices)),
                       "part": mix, "path": gain, "seconds": float(project.duration), "measure": True,
                       "target": playback.LOUDNESS_TARGET, "stage": "measuring loudness"})
-    started.append(_start_preparing(steps, urgent, project_id=project.id))
+    started.append(_start_preparing(steps, urgent, _read_from([step["command"] for step in steps], assets),
+                                    project_id=project.id))
     return [job_id for job_id in started if job_id]
 
 def playback_of(project: Project, urgent: bool = True) -> dict:
