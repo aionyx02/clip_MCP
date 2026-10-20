@@ -961,6 +961,32 @@ class CleanCuts:
                     or this[:1].isspace() or earlier[-1:].isspace())
         return False
 
+    def heard_from(self, index: int) -> float:
+        """Say where a word is first heard, which is where a cut opening on it belongs.
+
+        The transcriber often stretches a word back over the pause before it,
+        so a quiet stretch inside the word nearer its start than its end, or
+        one it starts in, is passed.
+
+        Args:
+            index: The word, by its place in `words`.
+
+        Returns:
+            Seconds into the file: the word's own start, or the end of the quiet it starts in.
+        """
+        start, end = self.words[index]
+        quiet = self._quiet_stretches
+        at = bisect.bisect_left(quiet, (start, start))
+        if at > 0 and quiet[at - 1][1] > start:
+            at -= 1
+        heard = start
+        while at < len(quiet) and quiet[at][0] <= end:
+            stops, resumes = quiet[at]
+            if resumes < end and stops - start <= end - resumes:
+                heard = max(heard, resumes)
+            at += 1
+        return heard
+
     @cached_property
     def _quiet_stretches(self) -> Tuple[Tuple[float, float], ...]:
         """Every stretch long enough to begin a phrase after, in time order: a measured
