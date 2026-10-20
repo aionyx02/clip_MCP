@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 from app import runtime, server
-from app.tools import rendering
+from app.tools import rendering, versioning
 from app.engine import playback, renderer
 from app.models.job import Job, JobKind, JobStatus
 from helpers import build_project, edit, insert, video_track
@@ -131,10 +131,10 @@ def test_going_back_to_a_version_gets_it_ready_to_play(media: Path, monkeypatch:
     asked = []
     project = build_project([video_track(), insert("a", server.import_asset(str(media / "wide.mp4"))["id"], 0, 4)],
                             name="準備好")
-    first = server.project_history(project)["versions"][0]["commit"]
+    first = versioning.project_history(project)["versions"][0]["commit"]
     edit(project, [{"action": "delete_clip", "track_id": "main", "clip_id": "a"}])
     monkeypatch.setattr(rendering, "prepare_playback", lambda cut, urgent=False: asked.append((cut.id, urgent)))
-    server.restore_version(project, first, runtime.repo.get_project(project).version)
+    versioning.restore_version(project, first, runtime.repo.get_project(project).version)
     assert asked == [(project, False)]
 
 

@@ -7,6 +7,7 @@ from pathlib import Path
 from fastmcp import Client
 
 from app import runtime, server
+from app.tools import editing, versioning
 from app.storage.history import History, canonical, describe_project
 from helpers import build_project, edit, insert, video_track
 
@@ -74,7 +75,7 @@ def test_going_back_is_one_more_version_and_can_be_undone(kept_history, media: P
     project = build_project([video_track(), insert("a", asset, 0, 3)], name="回到舊版")
     first = call("project_history", {"project_id": project})["versions"][0]["commit"]
     edit(project, [insert("b", asset, 4, 6)])
-    current = server.get_project(project)["version"]
+    current = editing.get_project(project)["version"]
     restored = call("restore_version", {"project_id": project, "commit": first, "expected_version": current})
     assert [clip.id for clip in runtime.repo.get_project(project).tracks[0].clips] == ["a"]
     assert restored["plan_copied"] is False
@@ -127,8 +128,8 @@ from test_edit_plan import planned  # noqa: E402,F401,F811  (the fixture, used b
 def test_going_back_leaves_another_video_compiled_from_the_same_plan_alone(kept_history, planned: dict) -> None:  # noqa: F811
     from app.models.plan import EditPlan
 
-    portrait = server.create_project("直式版", width=1080, height=1920)["id"]
-    landscape = server.create_project("橫式版")["id"]
+    portrait = editing.create_project("直式版", width=1080, height=1920)["id"]
+    landscape = editing.create_project("橫式版")["id"]
     server.compile_plan(portrait, 1, planned["plan_id"])
     server.compile_plan(landscape, 1, planned["plan_id"])
     first = call("project_history", {"project_id": portrait})["versions"][0]["commit"]
@@ -156,7 +157,7 @@ def test_the_version_panel_folds_one_sitting_into_one_dot(kept_history, media: P
     project = build_project([video_track(), insert("a", asset, 0, 3)], name="版本面板")
     for name in ("第二版", "第三版"):
         edit(project, [{"action": "rename_project", "name": name}])
-    nodes = server.version_graph(project)["nodes"]
+    nodes = versioning.version_graph(project)["nodes"]
     # Creating it and every change after by the same AI, nothing rendered between: one dot.
     assert len(nodes) == 1 and len(nodes[0]["versions"]) > 3
     assert nodes[0]["thumb"]["asset_id"] == asset
@@ -168,7 +169,7 @@ def test_the_version_panel_folds_one_sitting_into_one_dot(kept_history, media: P
     runtime.repo.add_job(Job(kind=JobKind.RENDER, project_id=project, project_version=rendered,
                              status=JobStatus.COMPLETED, output_path=str(finished)))
     edit(project, [{"action": "rename_project", "name": "第四版"}])
-    nodes = server.version_graph(project)["nodes"]
+    nodes = versioning.version_graph(project)["nodes"]
     assert [node["marks"] for node in nodes] == [[], ["exported"]]
     listed = call("project_history", {"project_id": project})["versions"]
     assert [version["marks"] for version in listed[:len(nodes[0]["versions"]) + 1]][-1] == ["exported"]
@@ -177,16 +178,16 @@ def test_the_version_panel_folds_one_sitting_into_one_dot(kept_history, media: P
     starred = call("mark_version", {"project_id": project, "commit": nodes[1]["commit"][:10], "mark": "starred"})
     assert starred["marks"] == ["exported", "starred"]
     # A starred version is its own dot, not the head of the edits before it.
-    marked = server.version_graph(project)["nodes"][1]
+    marked = versioning.version_graph(project)["nodes"][1]
     assert marked["versions"] == marked["versions"][:1] and marked["outputs"][0]["name"] == "版本面板.mp4"
     # Its finished video gone, it says so rather than going quiet.
     finished.unlink()
-    assert "removed" in server.version_graph(project)["nodes"][1]["marks"]
+    assert "removed" in versioning.version_graph(project)["nodes"][1]["marks"]
     branch = call("branch_project", {"project_id": project, "name": "版本面板短版", "commit": nodes[1]["commit"]})
-    graph = server.version_graph(project)
+    graph = versioning.version_graph(project)
     assert graph["branches"][0]["project_id"] == branch["project_id"]
     assert graph["branches"][0]["from"] == nodes[1]["commit"]
-    assert server.version_graph(branch["project_id"])["branched_from"]["name"] == "第四版"
+    assert versioning.version_graph(branch["project_id"])["branched_from"]["name"] == "第四版"
     # The editor's list folds the branch under the project it came from.
     from starlette.testclient import TestClient
 

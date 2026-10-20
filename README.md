@@ -25,7 +25,7 @@ editor (ui/) ──HTTP──────┤
 |---|---|
 | `server.py` | MCP 工具介面與參數驗證 |
 | `runtime.py` | 伺服器執行期間共用的物件：工作區、資料庫、版本歷史、工作佇列、MCP server |
-| `tools/` | 依領域分開的 MCP 工具：`examining.py`（素材分析、重聽、分析結果與歌曲聽感）、`rendering.py`（預覽、輸出、輸出前檢查與播放用副本）；`shared.py` 放多個領域共用的輔助函式。其餘工具之後依領域陸續從 `server.py` 搬過來（#108） |
+| `tools/` | 依領域分開的 MCP 工具：`examining.py`（素材分析、重聽、分析結果與歌曲聽感）、`timelines.py`（語意時間軸、片段搜尋與段落）、`editing.py`（專案與時間軸編輯）、`rendering.py`（預覽、輸出、輸出前檢查與播放用副本）、`subtitles.py`（字幕）、`versioning.py`（版本歷史、還原、分支、比較與合併）、`upkeep.py`（磁碟空間與清理）；`shared.py` 放多個領域共用的輔助函式。其餘工具之後依領域陸續從 `server.py` 搬過來（#108） |
 | `engine/` | 分析、語意時間軸、計畫編譯、filtergraph 建構、render、字幕、交換格式 |
 | `models/` | Pydantic 領域模型（素材、語意片段、計畫、時間軸、工作） |
 | `storage/` | SQLite 持久化、版本歷史、儲存空間管理 |

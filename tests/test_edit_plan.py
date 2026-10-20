@@ -53,18 +53,8 @@ from app.models.plan import (
 from app.models.semantic import SectionChoice, SemanticClip, SemanticTimeline
 from app.models.timeline import Clip, Marker, Project, Track
 from app.runtime import repo as runtime_repo
-from app.server import (
-    amend_plan,
-    apply_edits,
-    compile_plan,
-    create_project,
-    diff_plan,
-    get_plan,
-    get_project,
-    import_asset,
-    save_plan,
-    validate_plan,
-)
+from app.tools.editing import apply_edits, create_project, get_project
+from app.server import amend_plan, compile_plan, diff_plan, get_plan, import_asset, save_plan, validate_plan
 from helpers import video_track
 from test_semantic_timeline import ASSET_ID, analysis, asset, spans
 
@@ -1053,7 +1043,7 @@ def planned(media: Path) -> dict:
     Returns:
         A dictionary with the `plan_id`, `timeline_id` and the chosen clips.
     """
-    from app.server import build_semantic_timeline, query_clips
+    from app.tools.timelines import build_semantic_timeline, query_clips
 
     asset_id = import_asset(str(media / "wide.mp4"))["id"]
     runtime_repo.save_analysis(analysis(asset_id=asset_id, **FOOTAGE))
@@ -1199,7 +1189,8 @@ def compiled_project(planned: dict) -> str:
 
 def test_covering_picture_compiles_onto_a_track_of_its_own(planned: dict, media: Path) -> None:
     """Above the sequence, silent, and without changing how long the video runs."""
-    from app.server import build_semantic_timeline, propose_broll, query_clips
+    from app.server import propose_broll
+    from app.tools.timelines import build_semantic_timeline, query_clips
 
     quiet = import_asset(str(media / "silent.mp4"))["id"]
     runtime_repo.save_analysis(analysis(duration=4.0, scenes=[(0.0, 4.0)], asset_id=quiet))
@@ -2360,7 +2351,8 @@ def test_how_a_beat_comes_in_and_how_a_piece_plays_reach_the_timeline(planned: d
     assert (kept.speed, kept.volume) == (1.5, 0.5)
 
 def test_a_plan_is_copied_onto_a_timeline_built_over_more_files(planned: dict, media: Path) -> None:
-    from app.server import build_semantic_timeline, copy_plan, get_semantic_clip
+    from app.server import copy_plan
+    from app.tools.timelines import build_semantic_timeline, get_semantic_clip
 
     quiet = import_asset(str(media / "silent.mp4"))["id"]
     runtime_repo.save_analysis(analysis(duration=4.0, scenes=[(0.0, 4.0)], asset_id=quiet))
@@ -2378,7 +2370,8 @@ def test_a_plan_is_copied_onto_a_timeline_built_over_more_files(planned: dict, m
     assert copied["problems"] == []
 
 def test_a_plan_follows_its_sentences_after_the_footage_is_transcribed_again(planned: dict) -> None:
-    from app.server import build_semantic_timeline, copy_plan, get_semantic_clip
+    from app.server import copy_plan
+    from app.tools.timelines import build_semantic_timeline, get_semantic_clip
 
     asset_id = planned["clips"][0]["asset_id"]
     # The second listen puts every sentence edge a little elsewhere.
@@ -2395,7 +2388,7 @@ def test_a_plan_follows_its_sentences_after_the_footage_is_transcribed_again(pla
 
 def heard_again(planned: dict, third: tuple = (8.2, 10.4)) -> str:
     """Transcribe the planned footage again so every sentence edge moves, and build a timeline over it."""
-    from app.server import build_semantic_timeline
+    from app.tools.timelines import build_semantic_timeline
 
     asset_id = planned["clips"][0]["asset_id"]
     runtime_repo.save_analysis(analysis(asset_id=asset_id, duration=20.0, segments=[

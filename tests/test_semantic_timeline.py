@@ -27,12 +27,12 @@ from app.models.media import (
 )
 from app.models.semantic import ClipDescription, ClipKind, ClipLevel
 from app.runtime import repo as runtime_repo
-from app.server import (
+from app.server import import_asset
+from app.tools.timelines import (
     CLIP_SUMMARY_CHARACTERS,
     build_semantic_timeline,
     frames_for_clips,
     get_semantic_clip,
-    import_asset,
     query_clips,
     set_clip_tags,
 )
@@ -561,7 +561,8 @@ def test_asking_for_more_frames_than_a_sheet_holds_is_refused(analyzed: str) -> 
         frames_for_clips([])
 
 def test_footage_can_be_read_through_one_line_a_clip(media: Path) -> None:
-    from app.server import build_semantic_timeline, import_asset, query_clips
+    from app.server import import_asset
+    from app.tools.timelines import build_semantic_timeline, query_clips
     from app.runtime import repo as runtime_repo
 
     asset_id = import_asset(str(media / "wide.mp4"))["id"]
@@ -605,7 +606,8 @@ def test_a_database_an_older_release_set_back_still_opens(tmp_path: Path) -> Non
 def test_old_timelines_are_listed_and_cleared_unless_a_plan_is_built_on_them(
     stored: Repository, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from app import runtime, server
+    from app import runtime
+    from app.tools import timelines
     from app.models.plan import Beat, EditPlan
 
     monkeypatch.setattr(runtime, "repo", stored)
@@ -613,11 +615,11 @@ def test_old_timelines_are_listed_and_cleared_unless_a_plan_is_built_on_them(
     other, clips = build_timeline({"b": asset("b")}, {"b": analysis(5.0, segments=[(1.0, 2.0, "另一批")])})
     stored.save_semantic_timeline(other, clips)
     plan = stored.save_plan(EditPlan(timeline_id=planned, timeline_input_hash="hash", beats=[Beat(id="b1", name="主體")]))
-    listed = {timeline["timeline_id"]: timeline for timeline in server.list_timelines()["timelines"]}
+    listed = {timeline["timeline_id"]: timeline for timeline in timelines.list_timelines()["timelines"]}
     assert listed[planned]["plans"] == [plan.id] and listed[other.id]["plans"] == []
     assert listed[other.id]["clips"] == len(clips)
     with pytest.raises(ValueError, match=f"nothing deleted: {planned} has {plan.id} built on it"):
-        server.delete_timelines([other.id, planned])
+        timelines.delete_timelines([other.id, planned])
     assert stored.get_semantic_timeline(other.id) is not None
-    assert server.delete_timelines([other.id]) == {"deleted": [other.id]}
+    assert timelines.delete_timelines([other.id]) == {"deleted": [other.id]}
     assert stored.get_semantic_timeline(other.id) is None and stored.query_semantic_clips(other.id) == []

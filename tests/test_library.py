@@ -6,7 +6,7 @@ import pytest
 from starlette.testclient import TestClient
 
 from app import runtime, server
-from app.tools import examining
+from app.tools import editing, examining
 from app.engine import library
 from app.engine.analysis import analyze_media
 from app.models.media import Asset
@@ -109,7 +109,7 @@ def test_music_laid_by_hand_that_stops_early_is_said(media: Path) -> None:
                               "duck_under_speech": True},
                              {"action": "insert_clip", "track_id": "music", "clip_id": "m", "asset_id": song,
                               "source_range": {"start": 0, "end": 4}}], name="音樂太短")
-    assert "stops at 4.0s" in server._music_ends_early(runtime.repo.get_project(project))
+    assert "stops at 4.0s" in editing.music_ends_early(runtime.repo.get_project(project))
 
 
 def test_analyzing_again_measures_only_what_would_come_out_different(media: Path, tmp_path: Path,

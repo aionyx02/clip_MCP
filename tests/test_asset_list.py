@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from app import runtime, server
+from app.tools import editing
 from app.models.media import Asset
 
 def stored(name: str, folder: str, tmp_path: Path, seconds: float = 12.5) -> str:
@@ -53,15 +54,15 @@ def test_seconds_leave_the_server_as_numbers(media: Path) -> None:
     folder = server.import_folder(str(media))
     assert isinstance(folder["total_duration"], float)
     assert all(isinstance(asset["duration"], (float, type(None))) for asset in folder["assets"])
-    project = server.create_project(name="數字")
-    server.apply_edits(project["id"], project["version"], server._OPERATIONS.validate_python([
+    project = editing.create_project(name="數字")
+    editing.apply_edits(project["id"], project["version"], server._OPERATIONS.validate_python([
         {"action": "add_track", "track_id": "main", "track_type": "video"},
         {"action": "insert_clip", "track_id": "main", "clip_id": "a", "asset_id": imported["id"],
          "source_range": {"start": 0, "end": 1.5}},
     ]))
-    clip = server.get_project(project["id"])["tracks"][0]["clips"][0]
+    clip = editing.get_project(project["id"])["tracks"][0]["clips"][0]
     assert isinstance(clip["source_range"]["end"], float) and isinstance(clip["timeline_in"], float)
-    json.dumps(server.get_project(project["id"]))
+    json.dumps(editing.get_project(project["id"]))
 
 def test_notes_on_how_a_file_may_be_used_are_read_wherever_the_file_is(shelf: dict) -> None:
     written = server.edit_asset(shelf["outside"], "  請消音  ")
