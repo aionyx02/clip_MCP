@@ -8,7 +8,8 @@ from typing import Annotated, Dict, Iterable, List, Literal, Mapping, Optional, 
 from pydantic import Field
 
 from app.models.plan import EditPlan
-from app.models.timeline import BranchPoint, Project, validate_project
+from app.models.timeline.parts import BranchPoint, Project
+from app.models.timeline.validate import validate_project
 from app.models.job import Job
 from app.engine.semantic import was_made_up
 from app.engine.compare import compare

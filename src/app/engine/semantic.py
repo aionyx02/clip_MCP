@@ -18,11 +18,13 @@ model to decide which candidate boundaries are real ones, and thresholds
 that cannot be picked honestly without a corpus to pick them against.
 """
 
+import bisect
 import hashlib
 import json
 import math
 import re
 from dataclasses import dataclass
+from functools import cached_property
 from typing import Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from app.models.media import SILENCE_DB, Asset, MediaAnalysis, Measured, Span, SpeakerTurn, TranscriptSegment
@@ -39,6 +41,16 @@ MIN_UTTERANCE_SECONDS = 0.4
 # Silence edges and transcript boundaries are both rounded to milliseconds, so a
 # boundary can land a hair outside the silence it was snapped to.
 EDGE_TOLERANCE_SECONDS = 0.02
+# A cut is clean where the speaker stopped: between two words at least this far apart.
+# Shorter gaps are the spaces inside a phrase, and a cut there sounds like a word bitten
+# off. Provisional.
+CLEAN_GAP_SECONDS = 0.2
+# A cut inside a measured silence at least this long is clean whatever the word timings
+# say: the transcriber runs a word on across a pause often enough that taking its word
+# for it refused cuts made in the middle of real silence. Provisional.
+CLEAN_SILENCE_SECONDS = 0.3
+# What a word ends on when the transcriber heard the phrase end there.
+PHRASE_END_PUNCTUATION = "。！？!?…，,、；;：:"
 # The transcriber places a word's start late, or its end early, often enough to cut a
 # syllable off: the first edit made with the server lost the 「抽」 of 「抽杯」, which began
 # 0.39s before the next word the transcript knew of. Sound this long between a measured
@@ -856,6 +868,10 @@ class CleanCuts:
         sentences: Every transcribed sentence the same way.
         said: What each of those sentences says, in the same order, for
             telling two takes of one line apart.
+        spoken: What each word says, in the order of `words`.
+        voices: Who says each word, in the order of `words`, as the speaker
+            split labelled them within this file; None for a word no voice was
+            told apart in, and empty when nobody split them.
         pauses: Every measured silence, which is where the dead air is.
         bad_picture: Every stretch the viewer should not be shown a frame of:
             black and frozen picture, merged into one list because a cut point
@@ -888,6 +904,8 @@ class CleanCuts:
     words: Tuple[Tuple[float, float], ...] = ()
     sentences: Tuple[Tuple[float, float], ...] = ()
     said: Tuple[str, ...] = ()
+    spoken: Tuple[str, ...] = ()
+    voices: Tuple[Optional[str], ...] = ()
     pauses: Tuple[Tuple[float, float], ...] = ()
     bad_picture: Tuple[Tuple[float, float], ...] = ()
     transcribed: bool = False
@@ -898,6 +916,66 @@ class CleanCuts:
     heard: Tuple[Tuple[float, float, str], ...] = ()
     listened: bool = False
     duration: Optional[float] = None
+
+    def begins_phrase(self, index: int) -> bool:
+        """Say whether a word is the first of a phrase: what somebody says between two stops.
+
+        A transcriber's sentence is not always a sentence. Without punctuation
+        to go on it runs several together, half a minute of them at a time, so
+        where the speaker stopped is read off the words themselves: a pause
+        long enough to cut in, a measured silence or a stretch the second
+        listen heard nobody in between them however the word timings run,
+        punctuation, a space the transcriber put between them, or the start
+        of one of its sentences.
+
+        Args:
+            index: The word, by its place in `words`.
+
+        Returns:
+            True when a phrase begins on it. A file whose words carry no text
+            answers on the timings alone.
+        """
+        if index <= 0:
+            return True
+        (earlier_start, before), (start, end) = self.words[index - 1], self.words[index]
+        if start - before >= CLEAN_GAP_SECONDS:
+            return True
+        # The transcriber often lays words end to end and stretches one over the pause before it.
+        # A stretch inside the earlier word belongs to whichever of its ends it lies nearer: nearer
+        # its start, it was a pause before that word, not after it.
+        quiet = self._quiet_stretches
+        at = bisect.bisect_left(quiet, (earlier_start, earlier_start))
+        while at < len(quiet) and quiet[at][0] <= end:
+            stops, resumes = quiet[at]
+            if resumes <= end and (resumes >= before - EDGE_TOLERANCE_SECONDS
+                                   or stops - earlier_start > before - resumes):
+                return True
+            at += 1
+        opens = self._sentence_starts
+        at = bisect.bisect_left(opens, before - EDGE_TOLERANCE_SECONDS)
+        if at < len(opens) and opens[at] <= start + EDGE_TOLERANCE_SECONDS:
+            return True
+        if len(self.spoken) == len(self.words):
+            earlier, this = self.spoken[index - 1], self.spoken[index]
+            return (earlier.rstrip().endswith(tuple(PHRASE_END_PUNCTUATION))
+                    or this[:1].isspace() or earlier[-1:].isspace())
+        return False
+
+    @cached_property
+    def _quiet_stretches(self) -> Tuple[Tuple[float, float], ...]:
+        """Every stretch long enough to begin a phrase after, in time order: a measured
+        silence of `CLEAN_SILENCE_SECONDS`, or a gap of `CLEAN_GAP_SECONDS` between two
+        stretches the second listen heard somebody in."""
+        talking = sorted(self.voiced)
+        return tuple(sorted(
+            [(start, end) for start, end in self.pauses if end - start >= CLEAN_SILENCE_SECONDS]
+            + [(stops, resumes) for (_, stops), (resumes, _) in zip(talking, talking[1:])
+               if resumes - stops >= CLEAN_GAP_SECONDS]))
+
+    @cached_property
+    def _sentence_starts(self) -> Tuple[float, ...]:
+        """Where the transcriber's sentences start, in time order."""
+        return tuple(sorted(opens for opens, _ in self.sentences))
 
     def word_split_at(self, seconds: float) -> Optional[Tuple[float, float]]:
         """Find the word a cut here would land inside, as `(start, end)`; None when it lands in none."""
@@ -1471,6 +1549,33 @@ class CleanCuts:
         inside = [closed for opened, closed in self.words if opened >= start and closed <= end]
         return max(inside) if inside else None
 
+def _voices(moments: Sequence[float], turns: Sequence[SpeakerTurn]) -> Tuple[Optional[str], ...]:
+    """Say who is speaking at each moment, by the file's speaker turns.
+
+    An hour of talk is thousands of words and turns, so each moment looks only
+    at the turns that started late enough to still be running, rather than at
+    all of them.
+
+    Args:
+        moments: Seconds into the file, one per word.
+        turns: The file's speaker turns, in any order, possibly overlapping.
+
+    Returns:
+        A voice per moment, None where no turn covers it; empty when there are no turns.
+    """
+    if not turns:
+        return ()
+    ordered = sorted(turns, key=lambda turn: turn.start)
+    starts = [turn.start for turn in ordered]
+    longest = max(turn.end - turn.start for turn in ordered)
+    voices: List[Optional[str]] = []
+    for moment in moments:
+        at = bisect.bisect_right(starts, moment) - 1
+        while at >= 0 and starts[at] > moment - longest and moment >= ordered[at].end:
+            at -= 1
+        voices.append(ordered[at].speaker if at >= 0 and moment < ordered[at].end else None)
+    return tuple(voices)
+
 def _joined(spans: Sequence[Span]) -> Tuple[Tuple[float, float], ...]:
     """Merge overlapping stretches into one list, in order.
 
@@ -1523,6 +1628,9 @@ def clean_cuts(analysis: MediaAnalysis) -> CleanCuts:
         ),
         sentences=tuple((segment.start, segment.end) for segment in segments),
         said=tuple(segment.text for segment in segments),
+        spoken=tuple(word.text for segment in segments for word in segment.words),
+        voices=_voices([(word.start + word.end) / 2 for segment in segments for word in segment.words],
+                       analysis.speakers),
         pauses=tuple((span.start, span.end) for span in analysis.silences),
         bad_picture=_joined([*analysis.black_frames, *analysis.frozen_frames]),
         transcribed=transcript is not None,

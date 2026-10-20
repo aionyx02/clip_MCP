@@ -5,7 +5,8 @@ from pathlib import Path
 from app import runtime
 from app.tools import catalog
 from app.engine.music import BAR_BEATS, LOOP_SHORTEST_BARS, loop_span
-from app.engine.plan import music_beds, plan_pieces, turnaround
+from app.engine.plan.beats import plan_pieces, turnaround
+from app.engine.plan.music import music_beds
 from app.engine.semantic import CleanCuts
 from app.models.media import MediaAnalysis, MusicSense, Rhythm
 from app.models.plan import MusicCue, MusicPlan, Selection
@@ -74,7 +75,8 @@ def test_the_start_the_loop_note_says_plays_the_song_through_once() -> None:
     end; the note says the latest start that does not, on the beat the cue would move to."""
     import re
 
-    from app.engine.plan import compiled_duration, music_fit_notes
+    from app.engine.plan.music import music_fit_notes
+    from app.engine.plan.pieces import compiled_duration
 
     by_id, children, assets, clips = footage()
     assets = {**assets, "song": sourced("song", seconds=20.0).model_copy(update={"has_video": False})}

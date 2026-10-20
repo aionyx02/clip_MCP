@@ -7,7 +7,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import List, Literal
 
-from app.models.timeline import Project
+from app.models.timeline.parts import Project
 from app.storage import housekeeping
 from app.workspace import output_dir
 from app import runtime

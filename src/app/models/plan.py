@@ -20,7 +20,7 @@ from typing import Annotated, Any, Dict, List, Literal, Optional, Tuple, Union
 
 from pydantic import BaseModel, Field, model_validator
 
-from app.models.timeline import (
+from app.models.timeline.parts import (
     COLOUR, TITLE_CARD_LONGEST, TITLE_CARD_SECONDS, TITLE_CARD_SHORTEST, CardBackground, TextStyle,
 )
 
@@ -377,6 +377,12 @@ class Selection(BaseModel):
         description="Why this piece is here although it was shot at another time, or is about another topic, "
                     "than the pieces either side of it — a flash-forward, a callback, a comparison. Only needed "
                     "when validation names it; a piece dropped in by mistake should be moved instead",
+    )
+    edge_reason: Optional[str] = Field(
+        default=None,
+        description="Why the video may end where this piece ends, or this piece may open on the words it "
+                    "opens on, although validation says it leans on something cut or stops short. Only "
+                    "needed when validation names it; an edge that does not hold should be moved instead",
     )
     speed: Optional[float] = Field(
         default=None,

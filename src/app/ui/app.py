@@ -43,7 +43,7 @@ from app.engine.analysis import transcription_of
 from app.engine.builder import DEFAULT_LOUDNESS_TARGET
 from app.engine.frames import extract_frame
 from app.engine.subtitles import captioned_clips, place_cues
-from app.models.timeline import Project
+from app.models.timeline.parts import Project
 from app.storage import housekeeping
 from app.engine.library import FOLDER_KINDS as LIBRARY_FOLDERS, FOOTAGE, LIBRARIES, MUSIC, library_of
 from app.storage.repo import FOLDER_KINDS, FolderNotFoundError

@@ -24,7 +24,7 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
 from app.engine.ffmpeg import hidden_window_flags
-from app.models.timeline import Project
+from app.models.timeline.parts import Project
 
 # Levels are read in windows this long: short enough to see a word, long enough not to
 # see every syllable.

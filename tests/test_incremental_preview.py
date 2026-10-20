@@ -94,7 +94,7 @@ def test_the_sound_of_a_cached_preview_is_still_where_it_belongs(three_clips: st
     assert level(out, 2.5, 1.0, freq=800) > level(out, 4.5, 1.0, freq=800) + 20
 
 def test_a_preview_is_rendered_small_from_the_start() -> None:
-    from app.models.timeline import Project
+    from app.models.timeline.parts import Project
 
     assert (preview_sized(Project(id="p", width=1080, height=1920)).width,
             preview_sized(Project(id="p", width=1080, height=1920)).height) == (480, 854)

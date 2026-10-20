@@ -17,7 +17,7 @@ from typing import List, Optional, Tuple
 from app.engine.subtitles import (
     CAPTION_LINE_HEIGHT, DEFAULT_FONT, caption_geometry, escape_ass_text, format_ass_time, text_width, wrap_caption,
 )
-from app.models.timeline import CaptionStyle, Clip, Project, TextLayer
+from app.models.timeline.parts import CaptionStyle, Clip, Project, TextLayer
 
 # Provisional (roadmap §13): each kind's size, as a share of the frame's short side.
 SIZES = {"name": 0.05, "place": 0.042, "headline": 0.085, "free": 0.06}

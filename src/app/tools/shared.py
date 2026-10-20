@@ -11,7 +11,7 @@ from typing import Dict, List, Mapping, Optional, Sequence
 from app import runtime
 from app.engine.probe import picture_size, probe_file, recorded_at
 from app.models.media import Asset, Measured
-from app.models.timeline import Project
+from app.models.timeline.parts import Project
 from app.storage.history import current_batch
 
 MAX_STORYBOARD_TILES = 36

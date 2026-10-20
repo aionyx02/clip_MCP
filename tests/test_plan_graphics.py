@@ -4,9 +4,11 @@ from typing import List
 
 from pydantic import TypeAdapter
 
-from app.engine.plan import compile_operations
+from app.engine.plan.compile import compile_operations
 from app.models.plan import Beat, PlanText, PlanTitleCard, Selection, SetBeatTitleOp, SetSelectionTextsOp, apply_amendment
-from app.models.timeline import EditOperation, Project, apply_operation
+from app.models.timeline.apply import apply_operation
+from app.models.timeline.operations import EditOperation
+from app.models.timeline.parts import Project
 from test_edit_plan import beats_plan, footage, speech_of
 
 OPERATIONS = TypeAdapter(List[EditOperation])

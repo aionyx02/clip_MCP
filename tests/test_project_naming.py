@@ -2,7 +2,7 @@
 
 import pytest
 
-from app.models.timeline import Project
+from app.models.timeline.parts import Project
 from app.tools.editing import create_project, get_project, list_projects
 from app.tools.rendering import MAX_OUTPUT_NAME, output_name
 from helpers import edit

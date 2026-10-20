@@ -8,7 +8,7 @@ from fastmcp.tools import ToolResult
 from fastmcp.utilities.types import Image
 from pydantic import Field
 
-from app.models.timeline import Project
+from app.models.timeline.parts import Project
 from app.models.job import Job
 from app.engine.delivery import Finding
 from app.engine.joins import HeardWord, Join, joins_in, pause_across, words_heard

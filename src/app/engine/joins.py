@@ -19,7 +19,7 @@ from typing import List, Mapping, Optional, Sequence, Tuple
 from app.engine.delivery import _said
 from app.engine.subtitles import captioned_clips
 from app.models.media import MediaAnalysis
-from app.models.timeline import Clip, Project
+from app.models.timeline.parts import Clip, Project
 
 
 @dataclass(frozen=True)

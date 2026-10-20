@@ -13,12 +13,16 @@ from app.models.plan import (
     EditPlan, PlanAmendment, Trim, TrimKind, apply_amendment, describe_amendment, with_whole_clip_ids,
 )
 from app.models.semantic import SemanticClip
-from app.models.timeline import EditOperation, Project
+from app.models.timeline.operations import EditOperation
+from app.models.timeline.parts import Project
 from app.engine import loudness
-from app.engine.plan import (
-    COMPILED_TRACKS, Note, as_left, broll_covers, broll_slots, check_plan, check_recompile, compile_operations,
-    compiled_duration, diff_plans, music_beds, note_record, piece_changes, plan_pieces,
-)
+from app.engine.plan.beats import plan_pieces
+from app.engine.plan.broll import broll_covers, broll_slots
+from app.engine.plan.checks import COMPILED_TRACKS, as_left, check_plan, check_recompile
+from app.engine.plan.compile import compile_operations
+from app.engine.plan.diff import diff_plans, piece_changes
+from app.engine.plan.music import music_beds
+from app.engine.plan.pieces import Note, compiled_duration, note_record
 from app.engine.semantic import clean_cuts
 from app.engine.ffmpeg import graph_from_file, hidden_window_flags
 from app.engine.builder import DEFAULT_LOUDNESS_TARGET
