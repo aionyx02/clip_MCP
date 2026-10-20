@@ -13,7 +13,7 @@ the result to say; this only knows where the voice is, not why.
 
 import json
 import os
-from typing import Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Collection, Dict, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 
@@ -32,9 +32,11 @@ MIN_SIDE_SECONDS = 0.5
 MAX_LAG_SECONDS = 0.5
 # The grid voicing is compared on, in seconds.
 LAG_STEP_SECONDS = 0.01
-# The voice detector decides in steps of this many seconds (512 samples at 16 kHz), so a lag
-# smaller than one says nothing, whatever the frame rate.
+# The voice detector decides in steps of this many seconds (512 samples at 16 kHz).
 VOICE_STEP_SECONDS = 0.032
+# How far one edge of the voice was seen to move between a file and its render with nothing out of step:
+# two of the voice detector's steps. A lag no larger says nothing. Provisional.
+EDGE_SLACK_SECONDS = 2 * VOICE_STEP_SECONDS
 # The share of the voice in the window that must line up at the best lag for it to be believed. Provisional.
 MIN_AGREEMENT = 0.8
 
@@ -149,14 +151,18 @@ def _clear_stretch(window: Tuple[float, float], at: float, others: Sequence[Tupl
     return max(at, start), min(end, clear)
 
 def sides(project_tracks: Sequence[Track], base_clips: Sequence[Clip],
-          voiced: Mapping[str, Sequence[Tuple[float, float]]]) -> Tuple[List[dict], Dict[str, int]]:
+          voiced: Mapping[str, Sequence[Tuple[float, float]]],
+          sounding: Collection[str]) -> Tuple[List[dict], Dict[str, int]]:
     """Say which sides of which joins have a stretch of their own sound to line up.
 
     A join has two sides, the clip before it and the clip after it. Each side
     is compared over `JOIN_WINDOW_SECONDS` on its own side of the join, cut
     down to where that clip is the only sound playing: music or another
     picture track over it, and the neighbouring clip's own lead or lag, leave
-    nothing there or a shorter stretch further from the join.
+    nothing there or a shorter stretch further from the join. The clip's own
+    fades are taken off as well, since inside one the detector hears the voice
+    begin or end before the sound really does. A clip whose file has no sound
+    makes none, so it neither offers a side nor counts as other sound.
 
     Args:
         project_tracks: Every track of the project, so that sound from a
@@ -164,6 +170,7 @@ def sides(project_tracks: Sequence[Track], base_clips: Sequence[Clip],
         base_clips: The base video track's clips, which meet at the joins.
         voiced: Per asset ID, the source file's voiced stretches, as for
             `expected_voicing`.
+        sounding: The asset IDs whose files have sound.
 
     Returns:
         The sides offered to the check, in timeline order with `before` before
@@ -174,11 +181,12 @@ def sides(project_tracks: Sequence[Track], base_clips: Sequence[Clip],
     counts = {"not_listened": 0, "too_short": 0}
     offered: List[dict] = []
     ordered = sorted(base_clips, key=lambda clip: clip.timeline_in)
-    heard = [clip for track in project_tracks for clip in track.clips if clip.volume > 0 and clip.card is None]
+    heard = [clip for track in project_tracks for clip in track.clips
+             if clip.volume > 0 and clip.card is None and clip.asset_id in sounding]
     for before, after in zip(ordered, ordered[1:]):
         at = float(after.timeline_in)
         for side, clip in (("before", before), ("after", after)):
-            if clip.volume <= 0 or clip.card is not None:
+            if clip.volume <= 0 or clip.card is not None or clip.asset_id not in sounding:
                 continue
             if clip.asset_id not in voiced:
                 counts["not_listened"] += 1
@@ -187,6 +195,8 @@ def sides(project_tracks: Sequence[Track], base_clips: Sequence[Clip],
             others = [_sound_span(other) for other in heard if other is not clip]
             start, end = _clear_stretch(window, at, others, side)
             own_start, own_end = _sound_span(clip)
+            own_start = max(own_start, float(clip.audio_timeline_in) + float(clip.audio_fade_in))
+            own_end = min(own_end, float(clip.audio_timeline_out) - float(clip.audio_fade_out))
             start, end = max(start, own_start), min(end, own_end)
             if end - start < MIN_SIDE_SECONDS:
                 counts["too_short"] += 1

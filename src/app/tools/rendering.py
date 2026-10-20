@@ -675,7 +675,8 @@ def start_render(
             asset_id: [(span.start, span.end) for span in analysis.second_listen.voiced]
             for asset_id, analysis in analyses.items() if analysis.second_listen is not None
         }
-        offered, left_out = sync.sides(project.tracks, project.base_video_track.clips, heard)
+        sounding = {asset_id for asset_id, asset in assets.items() if asset.has_audio}
+        offered, left_out = sync.sides(project.tracks, project.base_video_track.clips, heard, sounding)
         spec["sync"] = {
             "sides": offered,
             "left_out": left_out,

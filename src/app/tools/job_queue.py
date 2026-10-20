@@ -213,7 +213,7 @@ def _sound_out_of_step(job: Job) -> Dict[str, object]:
     Returns:
         `out_of_step`, a line each for a stream that starts or runs elsewhere
         than the picture, and for a side of a join where the voice is heard
-        more than a frame or the voice detector's own step early or late,
+        more than a frame or two of the voice detector's steps early or late,
         naming the clip and which side of the join it is; and `not_compared`
         when some sides of joins could not be lined up, saying how many and
         why. Empty when every side that was compared lines up and none were
@@ -222,7 +222,7 @@ def _sound_out_of_step(job: Job) -> Dict[str, object]:
     if job.sync is None:
         return {}
     frame = float(job.sync["frame"])
-    threshold = max(frame, sync.VOICE_STEP_SECONDS)
+    threshold = max(frame, sync.EDGE_SLACK_SECONDS)
     lines: List[str] = []
     streams = job.sync["streams"]
     if streams:
