@@ -10,6 +10,7 @@ on 「接下來」 may start the next subject or close this one, which only its
 meaning says, so it is pointed out instead.
 """
 
+import re
 from typing import List, Optional, Sequence, Tuple, Union
 
 from app.engine.plan import check_plan
@@ -589,16 +590,52 @@ def test_a_join_partway_through_a_leaning_line_is_not_offered_its_start() -> Non
     ])
     assert any("partway" in problem and "5.00s" in problem and "8.00s" not in problem for problem in problems)
 
-def test_the_start_offered_is_where_the_word_is_heard_not_where_the_transcriber_put_it() -> None:
-    # 「首先」 was given 3.5s to 4.6s, but nobody speaks from 3.6s until 4.4s: it is said from 4.4s.
-    stretch = [("首先", 3.5, 4.6), ("呢", 4.6, 4.8), ("先把它關機。", 4.8, 6.0)]
-    problems, _ = checked([(0.1, 0.4, "出發。"), (1.0, 3.0, "天還沒亮。"), stretch, (12.0, 14.0, "真的很值得。")],
-                          lambda spoken: [
-        Selection(clip_id=spoken[0].id, beat_id="b1"),
-        Selection(clip_id=spoken[2].id, beat_id="b1", trim=Trim(kind=TrimKind.TAIL, seconds=1.2)),
-        Selection(clip_id=spoken[3].id, beat_id="b1"),
-    ], voiced=[(0.1, 0.4), (1.0, 3.0), (3.5, 3.6), (4.4, 6.0), (12.0, 14.0)])
-    assert any("partway" in problem and "4.40s" in problem for problem in problems)
-
 def test_a_word_that_only_starts_with_a_particle_may_open_a_video() -> None:
     assert opening_on("吧台在那邊。") == []
+
+def opened_at(stretch: Words, at: float, **given) -> List[str]:
+    """Check a cut that joins into `stretch` at `at` seconds of the file and plays it to its end.
+
+    A line from earlier in the file comes first, and one after it is skipped, so the join is not
+    straight on.
+
+    Args:
+        stretch: The stretch joined into, its words as `(text, start, end)`.
+        at: Where in the file the join opens.
+        **given: Passed on to `checked`.
+
+    Returns:
+        The problems about where a piece after a join opens.
+    """
+    def choose(spoken: List[SemanticClip]) -> List[Selection]:
+        joined = spoken[2].source_range
+        return [
+            Selection(clip_id=spoken[0].id, beat_id="b1"),
+            Selection(clip_id=spoken[2].id, beat_id="b1", trim=Trim(
+                kind=TrimKind.RANGE, from_seconds=round(at - joined.start, 3),
+                to_seconds=round(joined.end - joined.start, 3))),
+            Selection(clip_id=spoken[3].id, beat_id="b1"),
+        ]
+
+    problems, _ = checked([(0.1, 0.4, "出發。"), (1.0, 2.0, "天還沒亮。"), stretch, (12.0, 14.0, "真的很值得。")],
+                          choose, **given)
+    return [problem for problem in problems if "after a join" in problem]
+
+def follows(stretch: Words, at: float, **given) -> None:
+    """Assert a join at `at` is refused, and that starting where the refusal offers is not."""
+    refused = opened_at(stretch, at, **given)
+    assert len(refused) == 1, refused
+    offered = re.search(r"start on [^,]*?, at (\d+\.\d+)s", refused[0])
+    assert offered is not None, refused[0]
+    assert opened_at(stretch, float(offered.group(1)), **given) == [], refused[0]
+
+def test_the_start_offered_past_a_pause_the_word_was_stretched_over_can_be_cut_at() -> None:
+    follows([("首先", 3.5, 4.6), ("呢", 4.6, 4.8), ("先把它關機。", 4.8, 6.0)], 4.8,
+            voiced=[(0.1, 0.4), (1.0, 2.0), (3.5, 3.6), (4.4, 6.0), (12.0, 14.0)])
+
+def test_the_phrase_offered_before_a_leaning_one_is_never_a_lone_particle() -> None:
+    follows([("首先", 3.0, 3.6), ("呢", 4.0, 4.3), ("所以", 4.8, 5.3), ("把它關機。", 5.3, 6.0)], 4.8)
+
+def test_the_phrase_offered_before_a_leaning_one_does_not_lean_itself() -> None:
+    follows([("我們吃完早餐。", 3.0, 4.5), ("所以先檢查。", 5.0, 7.0), ("所以", 8.0, 8.4), ("我們就出發了。", 8.4, 10.0)],
+            8.4)

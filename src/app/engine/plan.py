@@ -2185,15 +2185,21 @@ def _opening_problem(piece: Piece, word: int, known: CleanCuts, first: bool) -> 
     while worded and not _past_fillers(phrase) and closes + 1 < len(known.words):
         _, closes, more = _phrase(known, closes + 1)
         phrase += more
+    def stands(start: int) -> bool:
+        """Whether a phrase could be opened on without this check refusing it in turn."""
+        said = _phrase(known, start)[2]
+        return not _says_nothing(said) and _leans(_past_fillers(said), first) is None
+
+    # Offered starts are word starts, the places the compiler cuts at as asked.
     earlier = unstripped
     while worded and earlier > 0:
         earlier = _phrase(known, earlier - 1)[0]
-        if _past_fillers(_phrase(known, earlier)[2]):
+        if stands(earlier):
             break
-    # Nothing said before it in the file means nothing to start from instead.
-    instead = (f"start on the phrase before it in the file, at {known.heard_from(earlier):.2f}s"
-               if earlier < unstripped and _past_fillers(_phrase(known, earlier)[2])
-               else "nothing is said before it in the file, so open on another piece")
+    # Nothing said before it in the file that can be opened on means nothing to start from instead.
+    instead = (f"start on the phrase before it in the file, at {known.words[earlier][0]:.2f}s"
+               if worded and earlier < unstripped and stands(earlier)
+               else "nothing is said before it in the file that can open, so open on another piece")
     bitten = known.words[word][0] < piece.start - EDGE_TOLERANCE_SECONDS and not _quiet(known, piece.start)
     if opens != word or bitten:
         # Where the phrase can be opened on: past any particle or filler on its front, which
@@ -2201,7 +2207,7 @@ def _opening_problem(piece: Piece, word: int, known: CleanCuts, first: bool) -> 
         clean = (next((index for index in range(opens, word) if not _says_nothing(known.spoken[index])), word)
                  if worded else opens)
         way = (instead if _leans(_past_fillers("".join(known.spoken[clean:closes + 1])), first) is not None
-               else f"start on its first word, at {known.heard_from(clean):.2f}s of the file")
+               else f"start on its first word, at {known.words[clean][0]:.2f}s of the file")
         return (f"{where}, starts partway through 「{phrase}」: {way}, or give `edge_reason` on that selection if it "
                 "should open there")
     opening = _past_fillers(phrase)
