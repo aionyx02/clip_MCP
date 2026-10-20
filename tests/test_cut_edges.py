@@ -14,7 +14,7 @@ import re
 from typing import List, Optional, Sequence, Tuple, Union
 
 from app.engine.plan.checks import check_plan
-from app.engine.semantic import build_timeline, clean_cuts
+from app.engine.semantic import CleanCuts, build_timeline, clean_cuts
 from app.models.media import SecondListen, Span, SpeakerTurn, TranscriptWord
 from app.models.plan import Selection, Trim, TrimKind
 from app.models.semantic import SemanticClip
@@ -411,6 +411,25 @@ def test_a_space_the_transcriber_put_between_words_ends_a_phrase() -> None:
 def test_a_measured_silence_the_word_timings_run_over_ends_a_phrase() -> None:
     assert joined_at([[("今天我們一路走", 1.0, 3.0), ("走得很累", 3.0, 4.0), ("後來我們到了山頂。", 4.0, 6.0)]],
                      quiet=[(3.6, 4.0)]) == []
+
+def test_a_silence_that_began_before_the_earlier_word_and_runs_to_the_next_ends_a_phrase() -> None:
+    assert joined_at([[("今天我們一路走", 1.0, 3.0), ("走得很累", 3.0, 4.0), ("後來我們到了山頂。", 4.0, 6.0)]],
+                     quiet=[(2.9, 4.0)]) == []
+
+def test_a_gap_between_two_listens_is_not_lost_behind_a_shorter_pause_inside_it() -> None:
+    # Asked of the cuts directly: through a plan, the shorter pause also splits the transcriber's line,
+    # and the window then opens elsewhere without ever asking about the word at 4.0.
+    cuts = CleanCuts(words=((1.0, 3.0), (3.0, 4.0), (4.0, 6.0)), voiced=((0.0, 2.5), (4.0, 10.0)),
+                     pauses=((2.9, 3.4),), transcribed=True, listened=True)
+    assert cuts.begins_phrase(2)
+
+def test_a_long_pause_is_not_lost_behind_a_shorter_one_nested_in_it() -> None:
+    assert joined_at([[("今天我們一路走", 1.0, 3.0), ("走得很累", 3.0, 4.0), ("後來我們到了山頂。", 4.0, 6.0)]],
+                     quiet=[(2.0, 4.0), (2.5, 3.5)]) == []
+
+def test_a_silence_ending_just_inside_the_earlier_word_s_start_is_a_pause_before_it() -> None:
+    assert any("partway" in problem for problem in joined_at(
+        [[("今天我們一路走", 1.0, 3.0), ("走得很累", 3.0, 4.0), ("後來我們到了山頂。", 4.0, 6.0)]], quiet=[(2.5, 3.2)]))
 
 def test_a_sentence_the_transcriber_started_starts_a_phrase() -> None:
     assert joined_at([[("今天我們一路走", 1.0, 3.0), ("走得很累", 3.0, 4.0)], [("後來我們到了山頂", 4.0, 6.0)]]) == []

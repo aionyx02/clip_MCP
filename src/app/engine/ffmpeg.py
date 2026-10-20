@@ -12,6 +12,9 @@ TERMINATE_GRACE_SECONDS = 3.0
 class OperationCancelled(Exception):
     """Raised when a long-running operation stops because cancellation was requested."""
 
+class FFmpegFailed(RuntimeError):
+    """Raised when FFmpeg exits with an error; the message holds what it said."""
+
 def hidden_window_flags() -> int:
     """Return `subprocess` creation flags that hide console windows on Windows.
 
@@ -159,7 +162,7 @@ def run_ffmpeg(
 
     Raises:
         OperationCancelled: If FFmpeg was stopped because of cancellation.
-        RuntimeError: If FFmpeg exits with an error. The message holds the end
+        FFmpegFailed: If FFmpeg exits with an error. The message holds the end
             of its log.
     """
     command = graph_from_file(command, f"{os.path.splitext(log_path)[0]}.graph.txt")
@@ -213,4 +216,4 @@ def _run(
     if terminated_at is not None:
         raise OperationCancelled()
     if return_code != 0:
-        raise RuntimeError(read_tail(log_path) or f"ffmpeg exited with code {return_code}")
+        raise FFmpegFailed(read_tail(log_path) or f"ffmpeg exited with code {return_code}")

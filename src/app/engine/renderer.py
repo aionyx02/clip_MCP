@@ -9,8 +9,8 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from app.engine import loudness, machine, resources, scan, speed, sync
 from app.engine.analysis import analyze_media, whisper_model_for
-from app.engine.ffmpeg import OperationCancelled, run_ffmpeg
-from app.models.job import Job, JobKind, JobStatus
+from app.engine.ffmpeg import FFmpegFailed, OperationCancelled, run_ffmpeg
+from app.models.job import FailureKind, Job, JobKind, JobStatus
 from app.storage import housekeeping
 from app.storage.repo import Repository
 
@@ -66,7 +66,12 @@ def _abandoned(job: Job, now: datetime) -> bool:
     return started and now - job.updated_at > STALE_AFTER
 
 def _fail_if_active(message: str) -> Callable[[Job], None]:
-    """Build a job change that marks an unfinished job as failed.
+    """Build a job change that marks an unfinished job as failed for want of its worker.
+
+    Every caller knows the worker is what went: it could not be started,
+    crashed, or stopped reporting. A job the user had already asked to stop
+    is cancelled rather than failed: it ended as asked, and is not one to
+    run again.
 
     Args:
         message: Error message to record on the job.
@@ -76,11 +81,35 @@ def _fail_if_active(message: str) -> Callable[[Job], None]:
         have already reached a terminal state untouched.
     """
     def change(job: Job) -> None:
-        """Mark the job as failed if it is still queued or running."""
-        if job.status.is_active:
+        """Mark the job as failed, or cancelled when that was asked for, if it is still queued or running."""
+        if job.status.is_active and job.cancel_requested:
+            job.status = JobStatus.CANCELLED
+            job.failure_kind = FailureKind.CANCELLED
+        elif job.status.is_active:
             job.status = JobStatus.FAILED
             job.error_message = message
+            job.failure_kind = FailureKind.WORKER
     return change
+
+class InputUnavailable(Exception):
+    """Raised when a file a job reads is missing or cannot be opened."""
+
+def _unreadable(paths: List[str]) -> Optional[str]:
+    """Say which of a job's files cannot be opened for reading, if any.
+
+    Args:
+        paths: The files the job reads.
+
+    Returns:
+        Why the first one that cannot be read cannot, or None when all can.
+    """
+    for path in paths:
+        try:
+            with open(path, "rb"):
+                pass
+        except OSError as exc:
+            return f"could not read {path}: {exc.strerror or exc}"
+    return None
 
 class JobManager:
     """Admits background jobs into detached worker processes and reports their state.
@@ -311,6 +340,7 @@ class JobManager:
             """Cancel a queued job or flag a running one."""
             if job.status == JobStatus.QUEUED:
                 job.status = JobStatus.CANCELLED
+                job.failure_kind = FailureKind.CANCELLED
             elif job.status == JobStatus.RUNNING:
                 job.cancel_requested = True
 
@@ -583,12 +613,16 @@ def _run_analysis(repo: Repository, job: Job, spec: Dict[str, Any], context: Job
 
     Raises:
         OperationCancelled: If cancellation was requested.
-        ValueError: If the asset no longer exists.
+        InputUnavailable: If the asset no longer exists, or its file cannot
+            be read.
         RuntimeError: If FFmpeg or speech recognition fails.
     """
     asset = repo.get_assets([job.asset_id]).get(job.asset_id)
     if asset is None:
-        raise ValueError(f"asset {job.asset_id} not found")
+        raise InputUnavailable(f"asset {job.asset_id} not found")
+    unreadable = _unreadable([asset.path])
+    if unreadable:
+        raise InputUnavailable(unreadable)
     runs: List[speed.Measured] = []
     analysis = analyze_media(
         asset,
@@ -609,11 +643,29 @@ def _run_analysis(repo: Repository, job: Job, spec: Dict[str, Any], context: Job
     # Only once the analysis is kept: a cancelled or failed run says nothing about the next.
     speed.record(repo, runs, float(asset.duration or 0), machine.identity())
 
+def _inputs(repo: Repository, job: Job, spec: Dict[str, Any]) -> List[str]:
+    """The files a job reads: an analysis's file where the library has it now, otherwise its specification's `inputs`.
+
+    Args:
+        repo: Repository holding the assets.
+        job: The job.
+        spec: Its specification.
+
+    Returns:
+        The paths.
+    """
+    if job.kind == JobKind.ANALYZE:
+        asset = repo.get_assets([job.asset_id]).get(job.asset_id)
+        return [asset.path] if asset is not None else []
+    return spec.get("inputs", [])
+
 def run_worker(repo: Repository, job_id: str) -> None:
     """Run a queued job to completion and record its outcome.
 
     Returns without doing anything if the job is missing or no longer queued.
     A render that fails or is cancelled has its partial output file deleted.
+    A job that ends without completing has its `failure_kind` recorded from
+    what stopped it, never from its error's words.
     Whatever queued job the freed memory allows is started before returning.
 
     Args:
@@ -639,7 +691,7 @@ def run_worker(repo: Repository, job_id: str) -> None:
     if not started:
         return
 
-    status, error_message = JobStatus.COMPLETED, None
+    status, error_message, failure = JobStatus.COMPLETED, None, None
     with JobContext(repo, job_id) as context:
         try:
             if job.kind == JobKind.RENDER:
@@ -649,9 +701,20 @@ def run_worker(repo: Repository, job_id: str) -> None:
             else:
                 _run_analysis(repo, job, spec, context)
         except OperationCancelled:
-            status = JobStatus.CANCELLED
+            status, failure = JobStatus.CANCELLED, FailureKind.CANCELLED
+        except InputUnavailable as exc:
+            status, error_message, failure = JobStatus.FAILED, str(exc), FailureKind.INPUT
         except Exception as exc:
             status, error_message = JobStatus.FAILED, str(exc) or type(exc).__name__
+            # A file the job reads that is gone or locked now is enough to have failed it,
+            # whatever the error said. Otherwise only FFmpeg's own failure has a kind; any
+            # other error's cause is not known here, and it is left without one.
+            if _unreadable(_inputs(repo, job, spec)):
+                failure = FailureKind.INPUT
+            elif _unreadable(spec.get("made", [])):
+                failure = FailureKind.MADE
+            elif isinstance(exc, FFmpegFailed):
+                failure = FailureKind.RENDER
 
     partial = spec.get("render_path") or job.output_path
     if job.kind == JobKind.RENDER and status != JobStatus.COMPLETED and partial:
@@ -669,6 +732,7 @@ def run_worker(repo: Repository, job_id: str) -> None:
         """Record the job's final status."""
         current.status = status
         current.error_message = error_message
+        current.failure_kind = failure
         current.stage = None
         if status == JobStatus.COMPLETED:
             current.progress = 1.0

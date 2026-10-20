@@ -40,6 +40,25 @@ class JobStatus(str, Enum):
         """
         return self in (JobStatus.QUEUED, JobStatus.RUNNING)
 
+class FailureKind(str, Enum):
+    """What kind of thing ended a job that did not complete, decided where the cause was known.
+
+    There is no kind for a plan that does not hold: the plan, the project and
+    the check are refused by the tool that would start a job, before any job
+    exists.
+    """
+
+    # A file of the library the job reads was missing or could not be opened.
+    INPUT = "input"
+    # A file the server made for the job — a picture from the cache, the chapters, the words
+    # drawn on — was missing; starting the job again makes it anew.
+    MADE = "made"
+    # FFmpeg ran and failed, with every file it reads there to be read.
+    RENDER = "render"
+    # The worker never started, crashed, or stopped reporting.
+    WORKER = "worker"
+    CANCELLED = "cancelled"
+
 class Job(BaseModel):
     """A background job, such as a render or a media analysis, and its most recently recorded state."""
 
@@ -75,6 +94,11 @@ class Job(BaseModel):
                     "`frame`, one frame of the render in seconds. Null when it was not checked (render jobs)",
     )
     error_message: Optional[str] = None
+    failure_kind: Optional[FailureKind] = Field(
+        default=None,
+        description="What ended a failed or cancelled job; null when it did not end that way, or when a "
+                    "failure's cause is none of the kinds",
+    )
     cancel_requested: bool = False
     memory_estimate: int = Field(default=0, ge=0, description="Peak memory the job is expected to need, in bytes")
     priority: int = Field(
