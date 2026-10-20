@@ -278,6 +278,8 @@ def test_a_photo_only_the_preview_s_own_picture_reads_is_one_of_its_inputs(
     render_project(project, loudness_target=None)
     # A photo has no sound for the final command to read: only the command making its picture opens it.
     assert specs[0]["pieces"] and specs[0]["inputs"] == [runtime.repo.get_assets([photo])[photo].path]
+    # And the picture it is about to make is not a made file it reads: that one is not there yet.
+    assert specs[0]["made"] == []
 
 def test_playback_is_prepared_knowing_which_files_it_reads(media: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     wide = import_asset(str(media / "wide.mp4"))["id"]
