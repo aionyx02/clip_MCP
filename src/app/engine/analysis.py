@@ -688,7 +688,7 @@ def scan_photo(
 
     Raises:
         OperationCancelled: If cancellation was requested.
-        RuntimeError: If FFmpeg cannot read the picture.
+        FFmpegFailed: If FFmpeg cannot read the picture.
     """
     os.makedirs(faces.frames_dir(work_dir), exist_ok=True)
     picture = escape_filter_path(os.path.join(work_dir, PICTURE_FILE_NAME))

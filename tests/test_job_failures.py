@@ -90,6 +90,40 @@ def test_a_file_taken_away_while_the_job_reads_it_is_put_down_to_the_file(
     job = ended(store, queued(store, tmp_path, render_spec(tmp_path, source)))
     assert (job.failure_kind, job.error_message) == (FailureKind.INPUT, "the program reading it stopped")
 
+def test_an_analysis_whose_file_is_taken_away_while_it_runs_is_put_down_to_the_file(
+    store: Repository, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source = tmp_path / "talk.mp4"
+    source.write_bytes(b"\0")
+    store.save_asset(Asset(id="talk", path=str(source), duration=10, has_video=True, has_audio=True))
+
+    def taken(*args, **kwargs):
+        source.unlink()
+        raise RuntimeError("the program reading it stopped")
+
+    monkeypatch.setattr(renderer, "analyze_media", taken)
+    job = ended(store, queued(store, tmp_path, {"transcribe": False}, kind=JobKind.ANALYZE, asset_id="talk"))
+    # It was there when the analysis began; what the library holds now is what was looked at.
+    assert (job.failure_kind, job.error_message) == (FailureKind.INPUT, "the program reading it stopped")
+
+def test_ffmpeg_failing_to_read_a_photo_a_mix_or_a_stretch_of_sound_says_so(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.engine import analysis, loudness
+    from app.models.media import Transcript
+
+    broken = tmp_path / "broken.png"
+    broken.write_bytes(b"not a picture")
+    with pytest.raises(FFmpegFailed):
+        loudness.measure(str(broken))
+    asset = Asset(id="photo", path=str(broken), has_video=True, has_audio=False)
+    with pytest.raises(FFmpegFailed):
+        analysis.scan_photo(asset, str(tmp_path / "work"), lambda *_: None, lambda: False)
+    monkeypatch.setattr(analysis, "_unsure_stretches", lambda segments, duration: [(0.0, 1.0)])
+    with pytest.raises(FFmpegFailed):
+        analysis.refine_unsure_lines(str(broken), Transcript(language="zh", model="small"), 1.0, None, [], "large",
+                                     lambda *_: None, lambda: False, str(tmp_path / "refine"))
+
 def test_an_analysis_of_a_file_that_is_gone_is_an_input_failure(store: Repository, tmp_path: Path) -> None:
     store.save_asset(Asset(id="gone", path=str(tmp_path / "gone.mp4"), duration=10, has_video=True, has_audio=True))
     job = ended(store, queued(store, tmp_path, {"transcribe": False}, kind=JobKind.ANALYZE, asset_id="gone"))
@@ -219,6 +253,16 @@ def test_a_render_is_queued_knowing_which_files_it_reads(media: Path, monkeypatc
     # A finished video has no pieces: its one command reads the footage itself.
     render_project(project, is_preview=False, loudness_target=None)
     assert (specs[1]["inputs"], specs[1]["made"]) == ([footage], [])
+
+def test_the_words_drawn_on_are_a_made_file_the_render_reads(media: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    wide = import_asset(str(media / "wide.mp4"))["id"]
+    card = {"action": "add_title_card", "track_id": "main", "clip_id": "t", "title": "第一章", "before_clip_id": "a"}
+    project = build_project([video_track(), insert("a", wide, 0, 1), card], width=640, height=360)
+    specs: List[Dict[str, Any]] = []
+    monkeypatch.setattr(runtime.job_manager, "start_job", lambda job, spec: specs.append(spec) or job)
+    render_project(project, loudness_target=None)
+    # Read through a filter rather than `-i`, so only the render knows to list it.
+    assert "subtitles.ass" in [os.path.basename(path) for path in specs[0]["made"]]
 
 def test_a_photo_only_the_preview_s_own_picture_reads_is_one_of_its_inputs(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,

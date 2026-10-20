@@ -50,10 +50,10 @@ class FailureKind(str, Enum):
 
     # A file of the library the job reads was missing or could not be opened.
     INPUT = "input"
-    # A file the server made for the job — a picture from the cache, the chapters — was
-    # missing; starting the job again makes it anew.
+    # A file the server made for the job — a picture from the cache, the chapters, the words
+    # drawn on — was missing; starting the job again makes it anew.
     MADE = "made"
-    # FFmpeg ran and failed, with every file it was given with `-i` there to be read.
+    # FFmpeg ran and failed, with every file it reads there to be read.
     RENDER = "render"
     # The worker never started, crashed, or stopped reporting.
     WORKER = "worker"

@@ -43,9 +43,9 @@ def get_job(
         `error_message`, for a failed or cancelled job its `failure_kind` —
         `input`: a file of the library it reads is missing or cannot be
         opened, and the same call fails again until it can; `made`: a file
-        the server made for it, a picture from the cache or the chapters,
-        was gone, and the same call again makes it anew; `render`: FFmpeg
-        failed with every file it was given there; `worker`: its worker
+        the server made for it, a picture from the cache, the chapters or
+        the words drawn on, was gone, and the same call again makes it anew; `render`: FFmpeg
+        failed with every file it reads there; `worker`: its worker
         never started, crashed or was stopped, and the same call again may
         well work; `cancelled`; left out when the cause is none of these —
         for a finished analysis worth a second look a `note` to pass on, and

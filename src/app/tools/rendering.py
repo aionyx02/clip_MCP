@@ -981,7 +981,8 @@ def _read_from(commands: Sequence[List[str]], library: Iterable[str],
     The user's footage and what the server made for the job are told apart:
     footage that is gone stays gone until the user puts it back, while a
     picture from the cache or the chapters, removed after the job was queued,
-    is made anew by starting the job again.
+    is made anew by starting the job again. The words drawn on are read
+    through a filter rather than `-i`, so the render adds them itself.
 
     Args:
         commands: The commands, each starting with the executable.
