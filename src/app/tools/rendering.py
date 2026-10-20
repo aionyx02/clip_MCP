@@ -18,7 +18,7 @@ from pydantic import Field
 
 from app.models.media import Asset, MediaAnalysis
 from app.models.plan import EditPlan
-from app.models.timeline import Clip, Project, TrackType
+from app.models.timeline.parts import Clip, Project, TrackType
 from app.models.job import Job, JobKind, JobStatus
 from app.engine import cards, looks, playback, resources, sync, texts
 from app.engine.analysis import second_listen, with_words_heard_again

@@ -10,7 +10,7 @@ from app.tools import catalog, rendering, shared
 from app.engine.frames import _crop_to_aspect
 from app.engine.reframe import Placement, crop_filter, place_clip
 from app.models.media import FaceMeasurement
-from app.models.timeline import Clip, ClipFit, TimeRange
+from app.models.timeline.parts import Clip, ClipFit, TimeRange
 from helpers import build_project, clips_of, edit, insert, render, video_track
 
 WIDE, TALL = (1920, 1080), (1080, 1920)

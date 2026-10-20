@@ -13,7 +13,7 @@ meaning says, so it is pointed out instead.
 import re
 from typing import List, Optional, Sequence, Tuple, Union
 
-from app.engine.plan import check_plan
+from app.engine.plan.checks import check_plan
 from app.engine.semantic import build_timeline, clean_cuts
 from app.models.media import SecondListen, Span, SpeakerTurn, TranscriptWord
 from app.models.plan import Selection, Trim, TrimKind

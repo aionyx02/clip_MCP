@@ -10,7 +10,7 @@ from pydantic import Field
 
 from app.models.media import Source
 from app.models.plan import EditPlan, MusicCue, SetMusicCueOp
-from app.models.timeline import Clip, Project, TimeRange, Track, TrackType
+from app.models.timeline.parts import Clip, Project, TimeRange, Track, TrackType
 from app.models.offer import OfferedSong, SongOffer
 from app.engine import clap, fetch
 from app.engine.probe import probe_file, rights_tags

@@ -7,7 +7,7 @@ the same comment always give the same place.
 from typing import Optional, Tuple
 
 from app.models.comment import Anchor, Comment
-from app.models.timeline import TOUCHING_SECONDS, Clip, Project
+from app.models.timeline.parts import TOUCHING_SECONDS, Clip, Project
 
 TOUCHING = float(TOUCHING_SECONDS)
 

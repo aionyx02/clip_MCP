@@ -5,7 +5,9 @@ from typing import Annotated, Dict, List, Mapping, Optional, Sequence, Tuple
 from pydantic import Field
 
 from app.models.media import MediaAnalysis, Span, SpeakerTurn
-from app.models.timeline import Project, SetSubtitlesOp, SubtitleCue, mostly_over, retimed_words
+from app.models.timeline.apply import mostly_over, retimed_words
+from app.models.timeline.operations import SetSubtitlesOp
+from app.models.timeline.parts import Project, SubtitleCue
 from app.engine.analysis import marked_words, unsure_words
 from app.engine.semantic import join_voices
 from app.engine.frames import format_timestamp

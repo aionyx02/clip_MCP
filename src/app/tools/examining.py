@@ -14,7 +14,7 @@ from typing import Annotated, Dict, Iterable, List, Literal, Mapping, Optional, 
 from pydantic import Field
 
 from app.models.media import Asset, HeardAgain, MediaAnalysis, Transcript, TranscriptWord
-from app.models.timeline import Project, TrackType
+from app.models.timeline.parts import Project, TrackType
 from app.models.job import Job, JobKind
 from app.engine import clap, machine, resources, speed
 from app.engine.analysis import listen_again as listen_again_in_file

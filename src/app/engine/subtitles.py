@@ -10,19 +10,16 @@ from typing import Callable, Dict, Iterator, List, Mapping, Optional, Sequence, 
 
 from app.engine.semantic import share_covered, speaker_at, was_audible, was_made_up
 from app.models.media import Span, SpeakerTurn, Transcript, TranscriptSegment, TranscriptWord
-from app.models.timeline import (
+from app.models.timeline.apply import CueOrder, cue_order, number_cues, words_as_written
+from app.models.timeline.parts import (
     CaptionStyle,
     Clip,
-    CueOrder,
     CueWord,
     PlacedCue,
     Project,
     SpeakerMark,
     SubtitleCue,
     TrackType,
-    cue_order,
-    number_cues,
-    words_as_written,
 )
 
 # Where captions sit when the style names no platform to keep clear of. Phones cover

@@ -23,7 +23,7 @@ from app.engine.reframe import (
     frame_clip,
 )
 from app.models.media import FaceMeasurement, MediaAnalysis
-from app.models.timeline import Clip, TimeRange
+from app.models.timeline.parts import Clip, TimeRange
 from app.runtime import repo
 from app.tools.catalog import import_asset
 from app.tools.rendering import framing_of, reshaped
@@ -198,7 +198,7 @@ def test_a_portrait_render_cuts_to_the_face_when_it_moves(tmp_path: Path) -> Non
     assert brightness(out, 6.0) > 20
 
 def test_the_shapes_keep_the_short_side() -> None:
-    from app.models.timeline import Project
+    from app.models.timeline.parts import Project
 
     wide = Project(id="p", width=1920, height=1080)
     assert (reshaped(wide, "portrait").width, reshaped(wide, "portrait").height) == (1080, 1920)

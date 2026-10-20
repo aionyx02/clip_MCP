@@ -6,7 +6,7 @@ from typing import Annotated, Dict, List, Optional, Sequence
 
 from pydantic import Field
 
-from app.models.timeline import Clip
+from app.models.timeline.parts import Clip
 from app.models.job import Job, JobKind, JobStatus
 from app.engine import stills, sync
 from app import runtime

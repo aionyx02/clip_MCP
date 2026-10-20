@@ -20,7 +20,7 @@ from typing import Annotated, Any, Dict, List, Literal, Optional, Tuple, Union
 
 from pydantic import BaseModel, Field, model_validator
 
-from app.models.timeline import (
+from app.models.timeline.parts import (
     COLOUR, TITLE_CARD_LONGEST, TITLE_CARD_SECONDS, TITLE_CARD_SHORTEST, CardBackground, TextStyle,
 )
 
