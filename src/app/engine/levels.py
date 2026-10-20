@@ -33,7 +33,7 @@ from app.engine.builder import Talking
 from app.engine.delivery import _on_timeline
 from app.engine.ffmpeg import hidden_window_flags
 from app.models.media import Asset, MediaAnalysis
-from app.models.timeline import Clip, Project, TrackType
+from app.models.timeline.parts import Clip, Project, TrackType
 
 # The per-second measurements count digital silence as -120; anything this quiet is not
 # part of what anybody hears as the level of the talking or of a song.

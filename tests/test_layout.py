@@ -6,7 +6,7 @@ from fractions import Fraction
 import pytest
 
 from app.engine.builder import _layout
-from app.models.timeline import Clip, TimeRange
+from app.models.timeline.parts import Clip, TimeRange
 
 
 def clip(clip_id: str, start: str, end: str, at: str, speed: float = 1.0) -> Clip:
@@ -34,7 +34,8 @@ def test_a_cut_kept_to_the_millisecond_still_passes_its_own_checks() -> None:
     # starting at 2.493; the last ends at 2.042s of a file that is 2.0416s long; and a dissolve
     # joins two clips that touch to within half a millisecond.
     from app.models.media import Asset
-    from app.models.timeline import Dissolve, Project, Track, TrackType, validate_project
+    from app.models.timeline.parts import Dissolve, Project, Track, TrackType
+    from app.models.timeline.validate import validate_project
 
     first = clip("a", "0", "2.7428", "0", speed=1.1)
     second = clip("b", "0", "2", "2.493")

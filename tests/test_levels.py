@@ -8,7 +8,7 @@ from app.engine.builder import Talking
 from app.engine.delivery import check_delivery
 from app.engine.levels import AMBIENCE_UNDER_TALK_DB, LEVEL_RANGE_DB, TALK_DB, talking_in
 from app.models.media import Asset, MediaAnalysis, SoundMeasurement, Transcript, TranscriptSegment
-from app.models.timeline import Clip, Project, Track
+from app.models.timeline.parts import Clip, Project, Track
 
 def sound(level: float, seconds: int = 10) -> list:
     """One measurement a second, all at one level."""

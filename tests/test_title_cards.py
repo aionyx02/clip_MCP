@@ -114,7 +114,7 @@ def test_a_card_can_stand_on_a_photo(media: Path, tmp_path: Path) -> None:
 
 def test_a_card_on_a_named_colour_is_drawn_in_it() -> None:
     from app.engine.cards import backdrop_filter
-    from app.models.timeline import TitleCard
+    from app.models.timeline.parts import TitleCard
     card = TitleCard(title="x", background="colour", colour="black")
     assert "color=black@1" in backdrop_filter(card, 1920, 1080)
     card = TitleCard(title="x", background="colour", colour="#102030")

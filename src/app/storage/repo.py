@@ -14,7 +14,7 @@ from app.models.offer import SongOffer
 from app.models.plan import EditPlan
 from app.models.semantic import ClipKind, ClipLevel, SemanticClip, SemanticTimeline
 from app.models.trial import Trial
-from app.models.timeline import Project, SubtitleCue
+from app.models.timeline.parts import Project, SubtitleCue
 from app.storage.history import History, canonical, describe_project, file_stem, fingerprint
 
 # Each entry upgrades the schema by one version; PRAGMA user_version records how many have been applied.

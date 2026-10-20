@@ -28,7 +28,7 @@ from app.engine.delivery import (
 from app.engine.interchange import left_behind, write_edl, write_fcpxml, write_otio, write_srt
 from app.engine.subtitles import build_ass, caption_overflow
 from app.models.media import Asset, FaceMeasurement, MediaAnalysis, ShotMeasurement, SoundMeasurement, Span
-from app.models.timeline import (
+from app.models.timeline.parts import (
     CaptionStyle, Clip, ClipLayout, Dissolve, Marker, PlacedCue, Project, SpeakerMark, TimeRange, Track, TrackType,
 )
 from app.runtime import repo
@@ -422,7 +422,7 @@ def test_otio_carries_speed_transitions_and_the_files_own_timecode() -> None:
     assert (dissolve["in_offset"]["value"], dissolve["out_offset"]["value"]) == (15, 0)
 
 def test_otio_says_what_a_wipe_was_when_it_cannot_say_it_as_one() -> None:
-    from app.models.timeline import Wipe
+    from app.models.timeline.parts import Wipe
 
     project = project_of(clip("p1", "x", 1, 3, 0), clip("p2", "x", 10, 12, 2, transition_in=Wipe(
         kind="wipe", seconds=Decimal("0.6"), direction="left")))
@@ -599,7 +599,7 @@ def test_a_clip_from_the_afternoon_between_two_from_the_morning_is_found() -> No
 
 def cue(cue_id: str, start: float, end: float, text: str = "晚安"):
     """A caption on file `x`, as stored."""
-    from app.models.timeline import SubtitleCue
+    from app.models.timeline.parts import SubtitleCue
 
     return SubtitleCue(id=cue_id, asset_id="x", source_start=start, source_end=end, text=text)
 
@@ -664,13 +664,13 @@ def test_two_files_that_look_alike_apart_in_the_cut_are_found() -> None:
     assert alike({}) == [] and alike({"a": same, "c": other}) == []
 
     # Marked off by a transition into it, the second is told apart; so would a card just before it be.
-    from app.models.timeline import Dissolve
+    from app.models.timeline.parts import Dissolve
     project.tracks[0].clips[2].transition_in = Dissolve(kind="dissolve", seconds=Decimal("0.5"))
     assert [message[:15] for message in alike({"a": same, "b": same, "c": same, "d": same})] == ["clips b (at 0:0"]
 
 def test_only_a_clip_nothing_is_said_or_written_over_is_told_apart_by_its_look() -> None:
     from app.models.media import Transcript, TranscriptSegment
-    from app.models.timeline import TextLayer
+    from app.models.timeline.parts import TextLayer
 
     spoken = MediaAnalysis(asset_id="x", duration=10.0, transcript=Transcript(language="zh", model="test", segments=[
         TranscriptSegment(start=1.0, end=2.0, text="成功了")]))
@@ -697,7 +697,7 @@ def test_a_render_is_checked_for_two_files_that_look_alike(media: Path, tmp_path
 
 
 def test_a_shot_darker_than_the_ones_either_side_is_offered_the_brightness_that_evens_it_out() -> None:
-    from app.models.timeline import ColorAdjust
+    from app.models.timeline.parts import ColorAdjust
 
     def lit(asset_id: str, exposure: float, warmth=None) -> MediaAnalysis:
         return MediaAnalysis(asset_id=asset_id, duration=10.0, shots=[

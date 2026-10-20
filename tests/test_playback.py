@@ -154,7 +154,7 @@ def test_captions_break_in_the_editor_where_they_break_in_a_render() -> None:
     from decimal import Decimal
 
     from app.engine.subtitles import build_ass, drawn_captions
-    from app.models.timeline import CaptionStyle, CueWord, PlacedCue
+    from app.models.timeline.parts import CaptionStyle, CueWord, PlacedCue
 
     words = [CueWord(start=Decimal(index) / 2, end=Decimal(index) / 2 + Decimal("0.4"), text=text)
              for index, text in enumerate(["今天", "我們", "來看", "這台", "抽杯架", "怎麼", "裝"])]

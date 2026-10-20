@@ -22,7 +22,7 @@ from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 from app.engine.builder import DUCK_DEPTH_DB, Talking
 from app.engine.continuity import Shot, stray_runs
 from app.engine.looks import alike
-from app.engine.plan import LENGTH_TOLERANCE
+from app.engine.plan.checks import LENGTH_TOLERANCE
 from app.engine.library import MUSIC, library_of
 from app.engine.semantic import (
     CLEAN_GAP_SECONDS, CLEAN_SILENCE_SECONDS, EDGE_TOLERANCE_SECONDS, clean_cuts, combined_over, join_voices,
@@ -30,7 +30,7 @@ from app.engine.semantic import (
 )
 from app.engine.subtitles import caption_overflow, captioned_clips
 from app.models.media import Asset, MediaAnalysis
-from app.models.timeline import CaptionStyle, Clip, Marker, PlacedCue, Project, TrackType
+from app.models.timeline.parts import CaptionStyle, Clip, Marker, PlacedCue, Project, TrackType
 
 # YouTube's rules for chapters written into a description: the first at 0:00, at least
 # three of them, each at least ten seconds long. The platform's rules, not a taste, and

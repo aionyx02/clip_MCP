@@ -27,7 +27,7 @@ from app.engine import cards, stills, texts
 from app.engine.reframe import Framing
 from app.engine.subtitles import drawn_captions, place_cues
 from app.models.media import Asset
-from app.models.timeline import Clip, Project, TrackType
+from app.models.timeline.parts import Clip, Project, TrackType
 from app.storage.history import fingerprint
 
 # Provisional (roadmap §13): a proxy's short side, in pixels. The editor's player is a few

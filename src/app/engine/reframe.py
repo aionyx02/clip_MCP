@@ -25,7 +25,7 @@ from fractions import Fraction
 from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 
 from app.models.media import Asset, FaceMeasurement
-from app.models.timeline import Clip, Project
+from app.models.timeline.parts import Clip, Project
 
 # How near the edge of the crop a face may sit before it counts as leaving: the outer
 # quarter of the window either side of centre. Provisional until there is a corpus.

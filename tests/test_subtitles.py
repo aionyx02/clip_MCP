@@ -17,9 +17,10 @@ from app.engine.subtitles import (
 from app.models.media import (
     MediaAnalysis, Span, SpeakerTurn, Transcript, TranscriptSegment, TranscriptWord, Voice,
 )
-from app.models.timeline import (
-    CAPTION_PRESETS, AddSubtitleOp, CaptionStyle, CueWord, EditSubtitleOp, PlacedCue, Project, SetCaptionStyleOp,
-    SpeakerMark, SubtitleCue, apply_operation, retimed_words,
+from app.models.timeline.apply import apply_operation, retimed_words
+from app.models.timeline.operations import AddSubtitleOp, EditSubtitleOp, SetCaptionStyleOp
+from app.models.timeline.parts import (
+    CAPTION_PRESETS, CaptionStyle, CueWord, PlacedCue, Project, SpeakerMark, SubtitleCue,
 )
 from app.runtime import repo
 from app.tools.catalog import import_asset

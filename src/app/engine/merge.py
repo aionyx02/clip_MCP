@@ -13,7 +13,7 @@ from typing import Dict, List, Mapping, Optional, Tuple
 
 from app.engine.compare import Part, clips_in, match_clips, parts_of
 from app.models.plan import EditPlan
-from app.models.timeline import TOUCHING_SECONDS, Clip, Marker, Project, Track, TrackType
+from app.models.timeline.parts import TOUCHING_SECONDS, Clip, Marker, Project, Track, TrackType
 
 # What can be picked for the video as a whole, besides its parts.
 WHOLE_PICKS = ("music", "captions", "caption_style", "frame")
