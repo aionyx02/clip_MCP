@@ -6,14 +6,14 @@ import subprocess
 import types
 from decimal import Decimal
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 import pytest
 
 from app import runtime
 from app.engine import renderer, sync
 from app.models.job import Job, JobKind, JobStatus
-from app.models.timeline.parts import Clip, TimeRange, TitleCard
+from app.models.timeline.parts import Clip, TimeRange, TitleCard, Track, TrackType
 from app.runtime import repo
 from app.storage.repo import Repository
 from app.tools import rendering
@@ -26,7 +26,7 @@ FRAME = 1 / 30
 
 def make_clip(clip_id: str = "a", asset_id: str = "asset", source_start: float = 0, source_end: float = 2,
               timeline_in: float = 0, volume: float = 1.0, speed: float = 1.0, audio_lead: float = 0,
-              card: Optional[TitleCard] = None) -> Clip:
+              audio_lag: float = 0, card: Optional[TitleCard] = None) -> Clip:
     """Build a clip of the base video track.
 
     Args:
@@ -38,6 +38,7 @@ def make_clip(clip_id: str = "a", asset_id: str = "asset", source_start: float =
         volume: How loud its sound plays.
         speed: How fast it plays.
         audio_lead: How far its sound starts before its picture.
+        audio_lag: How far its sound runs on after its picture.
         card: The title card it is, if any.
 
     Returns:
@@ -51,8 +52,28 @@ def make_clip(clip_id: str = "a", asset_id: str = "asset", source_start: float =
         volume=volume,
         speed=speed,
         audio_lead=Decimal(str(audio_lead)),
+        audio_lag=Decimal(str(audio_lag)),
         card=card,
     )
+
+def video_tracks(*clips: Clip, above: Optional[List[Clip]] = None) -> List[Track]:
+    """Build the project's tracks around one base video track.
+
+    Args:
+        *clips: The base video track's clips.
+        above: Clips on a second video track drawn over the base, if any.
+
+    Returns:
+        The tracks, the base first.
+    """
+    tracks = [Track(id="main", track_type=TrackType.VIDEO, clips=list(clips))]
+    if above:
+        tracks.append(Track(id="over", track_type=TrackType.VIDEO, clips=list(above)))
+    return tracks
+
+def audio_tracks(*clips: Clip) -> List[Track]:
+    """Build one audio track holding these clips."""
+    return [Track(id="music", track_type=TrackType.AUDIO, clips=list(clips))]
 
 def test_streams_that_line_up_are_not_reported() -> None:
     probed = {"streams": [
@@ -112,61 +133,161 @@ def test_touching_voicing_from_two_clips_is_merged() -> None:
     second = make_clip("b", "two", source_start=0, source_end=2, timeline_in=2)
     assert sync.expected_voicing([first, second], {"one": [(0.0, 2.0)], "two": [(0.0, 2.0)]}) == [(0.0, 4.0)]
 
-def test_a_join_next_to_a_muted_clip_is_left_out() -> None:
+def test_a_join_next_to_a_muted_clip_skips_only_that_side() -> None:
     first = make_clip("a", "asset", source_start=0, source_end=2, timeline_in=0)
     muted = make_clip("b", "asset", source_start=2, source_end=4, timeline_in=2, volume=0)
     last = make_clip("c", "asset", source_start=4, source_end=6, timeline_in=4)
-    assert sync.joins([first, muted, last], {"asset": [(0.0, 6.0)]}) == []
+    offered, left_out = sync.sides(video_tracks(first, muted, last), [first, muted, last],
+                                   {"asset": [(0.0, 6.0)]})
+    assert [(side["clip_id"], side["side"]) for side in offered] == [("a", "before"), ("c", "after")]
+    assert left_out == {"not_listened": 0, "too_short": 0}
 
-def test_a_join_into_a_title_card_is_left_out() -> None:
+def test_a_join_into_a_title_card_skips_the_card_side() -> None:
     first = make_clip("a", "asset", source_start=0, source_end=2, timeline_in=0)
     card = make_clip("b", "asset", source_start=2, source_end=4, timeline_in=2, card=TitleCard(title="開場"))
-    assert sync.joins([first, card], {"asset": [(0.0, 4.0)]}) == []
+    offered, left_out = sync.sides(video_tracks(first, card), [first, card], {"asset": [(0.0, 4.0)]})
+    assert [(side["clip_id"], side["side"]) for side in offered] == [("a", "before")]
+    assert left_out == {"not_listened": 0, "too_short": 0}
 
-def test_a_join_near_a_file_nobody_listened_to_for_voicing_is_left_out() -> None:
-    # Its talking would be silence to the cut and read as a voice out of place.
+def test_a_file_nobody_listened_to_for_voicing_is_counted_and_its_neighbour_still_offered() -> None:
+    # Its talking would be silence to the cut; that is said, not hidden as a missing join.
     first = make_clip("a", "heard", source_start=0, source_end=2, timeline_in=0)
     second = make_clip("b", "heard", source_start=2, source_end=4, timeline_in=2)
     third = make_clip("c", "unheard", source_start=0, source_end=2, timeline_in=4.6)
     fourth = make_clip("d", "heard", source_start=4, source_end=10, timeline_in=6.6)
-    # The joins into and out of it are left out; the one before it, out of reach, is not.
-    assert sync.joins([first, second, third, fourth], {"heard": [(0.0, 10.0)]}) == [2.0]
+    offered, left_out = sync.sides(video_tracks(first, second, third, fourth), [first, second, third, fourth],
+                                   {"heard": [(0.0, 10.0)]})
+    assert [(side["clip_id"], side["side"]) for side in offered] == [
+        ("a", "before"), ("b", "after"), ("b", "before"), ("d", "after")]
+    assert left_out == {"not_listened": 2, "too_short": 0}
 
-def test_a_join_is_left_out_when_an_unlistened_clip_starts_just_after_it() -> None:
+def test_an_unlistened_clip_is_counted_even_when_it_starts_just_after_the_join() -> None:
     first = make_clip("a", "heard", source_start=0, source_end=2, timeline_in=0)
     second = make_clip("b", "heard", source_start=0, source_end=1, timeline_in=2)
     later = make_clip("c", "unheard", source_start=0, source_end=2, timeline_in=4.3)
-    assert sync.joins([first, second, later], {"heard": [(0.0, 10.0)]}) == []
+    offered, left_out = sync.sides(video_tracks(first, second, later), [first, second, later],
+                                   {"heard": [(0.0, 10.0)]})
+    assert [(side["clip_id"], side["side"]) for side in offered] == [
+        ("a", "before"), ("b", "after"), ("b", "before")]
+    assert left_out == {"not_listened": 1, "too_short": 0}
+
+def test_another_picture_tracks_sound_trims_the_side_it_runs_over() -> None:
+    before = make_clip("a", "asset", source_start=0, source_end=4, timeline_in=0)
+    after = make_clip("b", "asset", source_start=0, source_end=4, timeline_in=4)
+    overlay = make_clip("c", "asset", source_start=0, source_end=1, timeline_in=4.2)
+    offered, left_out = sync.sides(video_tracks(before, after, above=[overlay]), [before, after],
+                                   {"asset": [(0.0, 4.0)]})
+    assert [(side["clip_id"], side["side"]) for side in offered] == [("a", "before")]
+    assert left_out == {"not_listened": 0, "too_short": 1}
+
+def test_a_muted_picture_track_leaves_the_side_alone() -> None:
+    before = make_clip("a", "asset", source_start=0, source_end=4, timeline_in=0)
+    after = make_clip("b", "asset", source_start=0, source_end=4, timeline_in=4)
+    overlay = make_clip("c", "asset", source_start=0, source_end=1, timeline_in=4.2, volume=0)
+    offered, left_out = sync.sides(video_tracks(before, after, above=[overlay]), [before, after],
+                                   {"asset": [(0.0, 4.0)]})
+    assert [(side["clip_id"], side["side"]) for side in offered] == [("a", "before"), ("b", "after")]
+    assert left_out == {"not_listened": 0, "too_short": 0}
+
+def test_sound_from_an_audio_track_over_the_join_leaves_both_sides_out() -> None:
+    before = make_clip("a", "asset", source_start=0, source_end=2, timeline_in=0)
+    after = make_clip("b", "asset", source_start=0, source_end=2, timeline_in=2)
+    music = make_clip("m", "asset", source_start=0, source_end=4, timeline_in=0)
+    offered, left_out = sync.sides(video_tracks(before, after) + audio_tracks(music), [before, after],
+                                   {"asset": [(0.0, 4.0)]})
+    assert offered == []
+    assert left_out == {"not_listened": 0, "too_short": 2}
+
+def test_a_clip_too_short_to_line_up_is_counted_on_its_side_of_the_join() -> None:
+    # Nothing else plays before the join; the first clip's own sound is only 0.3s of it.
+    short = make_clip("a", "asset", source_start=0, source_end=0.3, timeline_in=0)
+    last = make_clip("b", "asset", source_start=2, source_end=4, timeline_in=0.3)
+    offered, left_out = sync.sides(video_tracks(short, last), [short, last], {"asset": [(0.0, 4.0)]})
+    assert [(side["clip_id"], side["side"]) for side in offered] == [("b", "after")]
+    assert left_out == {"not_listened": 0, "too_short": 1}
+
+def test_a_clip_nobody_listened_to_is_counted_and_the_other_side_is_offered() -> None:
+    heard = make_clip("a", "heard", source_start=0, source_end=2, timeline_in=0)
+    unheard = make_clip("b", "unheard", source_start=0, source_end=2, timeline_in=2)
+    offered, left_out = sync.sides(video_tracks(heard, unheard), [heard, unheard], {"heard": [(0.0, 2.0)]})
+    assert [(side["clip_id"], side["side"]) for side in offered] == [("a", "before")]
+    assert left_out == {"not_listened": 1, "too_short": 0}
+
+def test_a_lag_on_the_clip_before_gives_the_after_side_the_windows_rest() -> None:
+    before = make_clip("a", "asset", source_start=0, source_end=2, timeline_in=0, audio_lag=1.0)
+    after = make_clip("b", "asset", source_start=0, source_end=2, timeline_in=2)
+    offered, _ = sync.sides(video_tracks(before, after), [before, after], {"asset": [(0.0, 3.0)]})
+    before_side = next(side for side in offered if side["clip_id"] == "a")
+    after_side = next(side for side in offered if side["clip_id"] == "b")
+    # The lagged tail is part of the before clip's voicing, and its sound covers the start of the after side.
+    assert before_side["expected"] == [[0.0, 3.0]]
+    assert after_side["start"] == 3.0
+
+def test_a_lead_on_the_clip_after_ends_the_before_side_where_its_sound_starts() -> None:
+    before = make_clip("a", "asset", source_start=0, source_end=2, timeline_in=0)
+    after = make_clip("b", "asset", source_start=0, source_end=2, timeline_in=2, audio_lead=1.0)
+    offered, _ = sync.sides(video_tracks(before, after), [before, after], {"asset": [(0.0, 3.0)]})
+    before_side = next(side for side in offered if side["clip_id"] == "a")
+    assert before_side["end"] == 1.0
 
 def test_identical_voicing_has_no_lag() -> None:
-    assert sync.lag_at([(1.0, 2.0)], [(1.0, 2.0)], 2.0) == 0.0
+    assert sync.lag_at([(1.0, 2.0)], [(1.0, 2.0)], 0.0, 4.0) == 0.0
 
 def test_sound_heard_later_than_the_cut_says_has_a_positive_lag() -> None:
-    assert sync.lag_at([(1.0, 2.0)], [(1.12, 2.12)], 2.0) == 0.12
+    assert sync.lag_at([(1.0, 2.0)], [(1.12, 2.12)], 0.0, 4.0) == 0.12
 
 def test_sound_heard_sooner_than_the_cut_says_has_a_negative_lag() -> None:
-    assert sync.lag_at([(1.0, 2.0)], [(0.88, 1.88)], 2.0) == -0.12
+    assert sync.lag_at([(1.0, 2.0)], [(0.88, 1.88)], 0.0, 4.0) == -0.12
 
 def test_a_window_with_nothing_changing_has_nothing_to_line_up() -> None:
-    assert sync.lag_at([(1.0, 2.0)], [(0.0, 4.0)], 8.0) is None
+    assert sync.lag_at([(1.0, 2.0)], [(0.0, 4.0)], 6.0, 10.0) is None
 
 def test_unrelated_voicing_does_not_agree_enough_to_be_believed() -> None:
-    assert sync.lag_at([(1.0, 2.0)], [(3.0, 4.0)], 2.0) is None
+    assert sync.lag_at([(1.0, 2.0)], [(3.0, 4.0)], 0.0, 4.0) is None
 
 def test_a_short_sound_beside_a_short_word_does_not_give_a_lag() -> None:
-    assert sync.lag_at([(1.0, 1.5)], [(2.0, 2.4)], 2.0) is None
+    assert sync.lag_at([(1.0, 1.5)], [(2.0, 2.4)], 0.0, 4.0) is None
 
 def test_a_lag_past_the_edge_of_the_search_is_not_reported() -> None:
-    assert sync.lag_at([(1.0, 2.0)], [(1.6, 2.6)], 2.0) is None
+    assert sync.lag_at([(1.0, 2.0)], [(1.6, 2.6)], 0.0, 4.0) is None
 
 def test_agreeing_equally_well_at_several_lags_takes_the_smallest_move() -> None:
-    assert sync.lag_at([(0.0, 3.5)], [(-1.0, 10.0)], 2.0) == 0.0
+    assert sync.lag_at([(0.0, 3.5)], [(-1.0, 10.0)], 0.0, 4.0) == 0.0
 
 def test_agreeing_equally_either_way_at_one_size_takes_the_negative_lag() -> None:
     # Each shift covers the same stretch of the short blocks either side of the join.
     expected = [(0.0, 0.2), (0.4, 3.6), (3.8, 4.0)]
     measured = [(0.2, 3.8)]
-    assert sync.lag_at(expected, measured, 2.0) == -0.2
+    assert sync.lag_at(expected, measured, 0.0, 4.0) == -0.2
+
+def test_agreement_is_intersection_over_union_not_share_of_the_expected_voice() -> None:
+    # Recall of the short word alone would be 1.0, but the measured sound runs on
+    # into the quiet around it, so the union is far larger than the agreement.
+    assert sync.lag_at([(1.0, 1.6)], [(0.98, 2.2)], 0.0, 4.0) is None
+
+def test_a_stretch_just_past_the_window_is_still_searched() -> None:
+    # The voice is heard 0.4s late: the measured sound starts after the window
+    # ends and must be kept by the prefilter to be found.
+    assert sync.lag_at([(3.7, 4.0)], [(4.1, 4.4)], 0.0, 4.0) == 0.4
+
+def plain_render(tmp_path: Path) -> Path:
+    """Write a short file with picture and sound for the check to read.
+
+    Args:
+        tmp_path: The test's temporary folder.
+
+    Returns:
+        The file.
+    """
+    path = tmp_path / "plain.mp4"
+    subprocess.run([
+        FFMPEG, "-y", "-loglevel", "error",
+        "-f", "lavfi", "-i", "testsrc=size=320x240:rate=30:duration=3",
+        "-f", "lavfi", "-i", "sine=frequency=440:duration=3",
+        "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
+        "-c:a", "aac", "-shortest", str(path),
+    ], check=True)
+    return path
 
 def test_check_compares_a_real_file_and_reports_its_streams(tmp_path: Path) -> None:
     path = tmp_path / "late.mp4"
@@ -183,43 +304,62 @@ def test_check_compares_a_real_file_and_reports_its_streams(tmp_path: Path) -> N
 
     with pytest.MonkeyPatch.context() as patched:
         patched.setattr(sync, "read_samples", refuse)
-        found = sync.check(str(path), [], [], FRAME, FFMPEG, "ffprobe")
+        found = sync.check(str(path), [], {}, FRAME, FFMPEG, "ffprobe")
     assert found["streams"] is not None
-    assert found["joins_asked"] == 0
+    assert found["sides_asked"] == 0
+    assert found["left_out"] == {}
     assert found["frame"] == round(FRAME, 4)
 
-def test_check_does_not_decode_when_there_are_no_joins(tmp_path: Path) -> None:
-    path = tmp_path / "plain.mp4"
-    subprocess.run([
-        FFMPEG, "-y", "-loglevel", "error",
-        "-f", "lavfi", "-i", "testsrc=size=320x240:rate=30:duration=3",
-        "-f", "lavfi", "-i", "sine=frequency=440:duration=3",
-        "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
-        "-c:a", "aac", "-shortest", str(path),
-    ], check=True)
+def test_check_does_not_decode_when_there_are_no_sides(tmp_path: Path) -> None:
+    path = plain_render(tmp_path)
 
     def refuse(*args, **kwargs):
-        raise AssertionError("the sound was decoded though no join was asked about")
+        raise AssertionError("the sound was decoded though no side was asked about")
 
     with pytest.MonkeyPatch.context() as patched:
         patched.setattr(sync, "read_samples", refuse)
-        found = sync.check(str(path), [[1.0, 2.0]], [], FRAME, FFMPEG, "ffprobe")
+        found = sync.check(str(path), [], {"not_listened": 1, "too_short": 0}, FRAME, FFMPEG, "ffprobe")
     assert found["joins"] == []
-    assert found["joins_asked"] == 0
+    assert found["sides_asked"] == 0
+    assert found["left_out"] == {"not_listened": 1, "too_short": 0}
 
 def test_check_lines_the_heard_voice_up_with_the_cut(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    path = tmp_path / "plain.mp4"
-    subprocess.run([
-        FFMPEG, "-y", "-loglevel", "error",
-        "-f", "lavfi", "-i", "testsrc=size=320x240:rate=30:duration=3",
-        "-f", "lavfi", "-i", "sine=frequency=440:duration=3",
-        "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
-        "-c:a", "aac", "-shortest", str(path),
-    ], check=True)
+    path = plain_render(tmp_path)
+    side = {"at": 2.0, "clip_id": "a", "side": "before", "start": 0.0, "end": 2.0, "expected": [[1.0, 2.0]]}
     monkeypatch.setattr(sync, "voiced_stretches", lambda samples: [(1.12, 2.12)])
-    found = sync.check(str(path), [[1.0, 2.0]], [2.0], FRAME, FFMPEG, "ffprobe")
-    assert found["joins"] == [{"at": 2.0, "lag": 0.12}]
-    assert found["joins_asked"] == 1
+    found = sync.check(str(path), [side], {"not_listened": 0, "too_short": 0}, FRAME, FFMPEG, "ffprobe")
+    assert found["joins"] == [{"at": 2.0, "clip_id": "a", "side": "before", "lag": 0.12}]
+    assert found["sides_asked"] == 1
+
+def test_check_lines_up_each_side_of_a_join_on_its_own(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    path = plain_render(tmp_path)
+    before = make_clip("a", "asset", source_start=0, source_end=2, timeline_in=2.0)
+    after = make_clip("b", "asset", source_start=0, source_end=2, timeline_in=4.0)
+    offered, left_out = sync.sides(video_tracks(before, after), [before, after], {"asset": [(0.5, 1.5)]})
+    monkeypatch.setattr(sync, "read_samples", lambda *args: b"")
+    monkeypatch.setattr(sync, "voiced_stretches", lambda samples: [(2.5, 3.5), (4.6, 5.6)])
+    found = sync.check(str(path), offered, left_out, FRAME, FFMPEG, "ffprobe")
+    assert found["joins"] == [
+        {"at": 4.0, "clip_id": "a", "side": "before", "lag": 0.0},
+        {"at": 4.0, "clip_id": "b", "side": "after", "lag": 0.1},
+    ]
+    assert found["sides_asked"] == 2
+
+def test_check_reports_how_many_sides_were_asked_and_what_was_left_out(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    path = plain_render(tmp_path)
+    offered = [
+        {"at": 2.0, "clip_id": "a", "side": "before", "start": 0.0, "end": 2.0, "expected": [[1.0, 2.0]]},
+        {"at": 6.0, "clip_id": "b", "side": "before", "start": 4.0, "end": 6.0, "expected": [[5.0, 6.0]]},
+        {"at": 10.0, "clip_id": "c", "side": "before", "start": 8.0, "end": 10.0, "expected": [[9.0, 10.0]]},
+    ]
+    monkeypatch.setattr(sync, "read_samples", lambda *args: b"")
+    monkeypatch.setattr(sync, "voiced_stretches", lambda samples: [(1.0, 2.0)])
+    left_out = {"not_listened": 1, "too_short": 0}
+    found = sync.check(str(path), offered, left_out, FRAME, FFMPEG, "ffprobe")
+    assert found["sides_asked"] == 3
+    assert found["left_out"] == left_out
+    assert found["joins"] == [{"at": 2.0, "clip_id": "a", "side": "before", "lag": 0.0}]
 
 def test_a_finished_render_keeps_what_its_sound_check_found(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     store = Repository(str(tmp_path / "jobs.db"))
@@ -246,19 +386,27 @@ def make_finished_job(project_id: str, sync_data: Optional[dict]) -> Job:
     repo.add_job(job)
     return job
 
-def test_get_job_names_the_clip_whose_voice_is_heard_late(media: Path) -> None:
+def test_get_job_names_the_clip_and_the_side_whose_voice_is_heard_late(media: Path) -> None:
     wide = import_asset(str(media / "wide.mp4"))["id"]
     project = build_project([video_track(), insert("a", wide, 0, 2), insert("b", wide, 2, 4)],
                             width=640, height=360)
-    job = make_finished_job(project, {"streams": None, "joins": [{"at": 2.0, "lag": 0.12}], "frame": FRAME})
+    job = make_finished_job(project, {
+        "streams": None, "joins": [{"at": 2.0, "clip_id": "b", "side": "after", "lag": 0.12}],
+        "sides_asked": 1, "left_out": {"not_listened": 0, "too_short": 0}, "frame": FRAME,
+    })
     entry = get_job([job.job_id])["jobs"][0]
-    assert entry["sound"] == {"out_of_step": ["at 2.00s, clip b: the voice is heard 0.12s late"]}
+    assert entry["sound"] == {
+        "out_of_step": ["at 2.00s, clip b, after the join: the voice is heard 0.12s late"]
+    }
 
 def test_get_job_says_nothing_about_sound_within_a_frame(media: Path) -> None:
     wide = import_asset(str(media / "wide.mp4"))["id"]
     project = build_project([video_track(), insert("a", wide, 0, 2), insert("b", wide, 2, 4)],
                             width=640, height=360)
-    job = make_finished_job(project, {"streams": None, "joins": [{"at": 2.0, "lag": 0.02}], "frame": FRAME})
+    job = make_finished_job(project, {
+        "streams": None, "joins": [{"at": 2.0, "clip_id": "b", "side": "after", "lag": 0.02}],
+        "sides_asked": 1, "left_out": {"not_listened": 0, "too_short": 0}, "frame": FRAME,
+    })
     entry = get_job([job.job_id])["jobs"][0]
     assert "sound" not in entry
 
@@ -266,7 +414,8 @@ def test_get_job_says_where_each_stream_starts_and_ends(media: Path) -> None:
     wide = import_asset(str(media / "wide.mp4"))["id"]
     project = build_project([video_track(), insert("a", wide, 0, 2)], width=640, height=360)
     streams = {"video_start": 0.0, "audio_start": 0.3, "video_length": 3.0, "audio_length": 2.7}
-    job = make_finished_job(project, {"streams": streams, "joins": [], "frame": FRAME})
+    job = make_finished_job(project, {"streams": streams, "joins": [], "sides_asked": 0,
+                                      "left_out": {"not_listened": 0, "too_short": 0}, "frame": FRAME})
     entry = get_job([job.job_id])["jobs"][0]
     assert entry["sound"] == {"out_of_step": ["the sound runs 0.30s to 3.00s while the picture runs 0.00s to 3.00s"]}
 
@@ -274,8 +423,10 @@ def test_get_job_ignores_a_lag_smaller_than_the_voice_detectors_step(media: Path
     wide = import_asset(str(media / "wide.mp4"))["id"]
     project = build_project([video_track(), insert("a", wide, 0, 2), insert("b", wide, 2, 4)],
                             width=640, height=360)
-    job = make_finished_job(project, {"streams": None, "joins": [{"at": 2.0, "lag": 0.03}],
-                                      "joins_asked": 1, "frame": 1 / 60})
+    job = make_finished_job(project, {
+        "streams": None, "joins": [{"at": 2.0, "clip_id": "b", "side": "after", "lag": 0.03}],
+        "sides_asked": 1, "left_out": {"not_listened": 0, "too_short": 0}, "frame": 1 / 60,
+    })
     entry = get_job([job.job_id])["jobs"][0]
     assert "sound" not in entry
 
@@ -285,19 +436,64 @@ def test_get_job_says_when_the_sound_was_not_checked(media: Path) -> None:
     job = make_finished_job(project, None)
     entry = get_job([job.job_id])["jobs"][0]
     assert entry["sound"] == {
-        "not_checked": "the sound was not checked against the picture — the check failed or was stopped — "
-                       "so whether it lines up is not known"
+        "not_checked": "the sound was not checked against the picture, so whether it lines up is not known"
     }
 
-def test_get_job_says_when_no_join_could_be_compared(media: Path) -> None:
+def test_get_job_says_when_no_side_could_be_compared(media: Path) -> None:
     wide = import_asset(str(media / "wide.mp4"))["id"]
     project = build_project([video_track(), insert("a", wide, 0, 2)], width=640, height=360)
-    job = make_finished_job(project, {"streams": None, "joins": [], "joins_asked": 3, "frame": FRAME})
+    job = make_finished_job(project, {
+        "streams": None, "joins": [], "sides_asked": 3,
+        "left_out": {"not_listened": 0, "too_short": 0}, "frame": FRAME,
+    })
     entry = get_job([job.job_id])["jobs"][0]
     assert entry["sound"] == {
-        "not_compared": "none of the 3 joins could be lined up — the voice does not start or stop near them, "
-                        "or did not agree well enough — so whether they are in step is not known"
+        "not_compared": "3 of the 3 sides of joins could not be lined up — 3 where the voice does not start or "
+                        "stop near the join or did not agree well enough — so whether they are in step is not known"
     }
+
+def test_get_job_lists_only_the_reasons_that_left_sides_out(media: Path) -> None:
+    wide = import_asset(str(media / "wide.mp4"))["id"]
+    project = build_project([video_track(), insert("a", wide, 0, 2)], width=640, height=360)
+    job = make_finished_job(project, {
+        "streams": None,
+        "joins": [{"at": 2.0, "clip_id": "b", "side": "after", "lag": 0.0}],
+        "sides_asked": 3, "left_out": {"not_listened": 0, "too_short": 2}, "frame": FRAME,
+    })
+    entry = get_job([job.job_id])["jobs"][0]
+    assert entry["sound"] == {
+        "not_compared": "4 of the 5 sides of joins could not be lined up — "
+                        "2 with less than 0.5s of their own sound clear of other sound, "
+                        "2 where the voice does not start or stop near the join or did not agree well enough — "
+                        "so whether they are in step is not known"
+    }
+
+def test_get_job_says_what_was_not_compared_when_some_sides_were_lined_up(media: Path) -> None:
+    wide = import_asset(str(media / "wide.mp4"))["id"]
+    project = build_project([video_track(), insert("a", wide, 0, 2)], width=640, height=360)
+    job = make_finished_job(project, {
+        "streams": None,
+        "joins": [{"at": 2.0, "clip_id": "b", "side": "after", "lag": 0.0},
+                  {"at": 4.0, "clip_id": "c", "side": "after", "lag": 0.0}],
+        "sides_asked": 3, "left_out": {"not_listened": 0, "too_short": 0}, "frame": FRAME,
+    })
+    entry = get_job([job.job_id])["jobs"][0]
+    assert entry["sound"] == {
+        "not_compared": "1 of the 3 sides of joins could not be lined up — 1 where the voice does not start or "
+                        "stop near the join or did not agree well enough — so whether they are in step is not known"
+    }
+
+def test_get_job_says_nothing_when_every_side_was_in_step(media: Path) -> None:
+    wide = import_asset(str(media / "wide.mp4"))["id"]
+    project = build_project([video_track(), insert("a", wide, 0, 2)], width=640, height=360)
+    job = make_finished_job(project, {
+        "streams": None,
+        "joins": [{"at": 2.0, "clip_id": "b", "side": "after", "lag": 0.0},
+                  {"at": 4.0, "clip_id": "c", "side": "after", "lag": 0.0}],
+        "sides_asked": 2, "left_out": {"not_listened": 0, "too_short": 0}, "frame": FRAME,
+    })
+    entry = get_job([job.job_id])["jobs"][0]
+    assert "sound" not in entry
 
 def test_render_project_asks_for_the_sound_check(media: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     wide = import_asset(str(media / "wide.mp4"))["id"]
@@ -311,7 +507,15 @@ def test_render_project_asks_for_the_sound_check(media: Path, monkeypatch: pytes
     monkeypatch.setattr(rendering, "talking_of", lambda project, voices: None)
     monkeypatch.setattr(rendering, "check_findings", lambda project, burn: [])
     rendering.render_project(project)
-    assert started[-1]["sync"] == {"expected": [[0.0, 2.0]], "joins": [2.0], "frame": FRAME}
+    assert started[-1]["sync"] == {
+        "sides": [
+            {"at": 2.0, "clip_id": "a", "side": "before", "start": 0.0, "end": 2.0,
+             "expected": [[0.0, 2.0]]},
+            {"at": 2.0, "clip_id": "b", "side": "after", "start": 2.0, "end": 4.0, "expected": []},
+        ],
+        "left_out": {"not_listened": 0, "too_short": 0},
+        "frame": FRAME,
+    }
 
 def sync_spec(work_dir: Path) -> dict:
     """Build the job specification a sound-check test needs, with no pieces to render.
@@ -327,7 +531,12 @@ def sync_spec(work_dir: Path) -> dict:
         "duration_seconds": 5.0,
         "command": ["ffmpeg"],
         "render_path": str(work_dir / "out.mp4"),
-        "sync": {"expected": [[1.0, 2.0]], "joins": [2.0], "frame": FRAME},
+        "sync": {
+            "sides": [{"at": 2.0, "clip_id": "b", "side": "after", "start": 2.0, "end": 4.0,
+                       "expected": [[2.0, 4.0]]}],
+            "left_out": {"not_listened": 0, "too_short": 0},
+            "frame": FRAME,
+        },
     }
 
 def run_render(monkeypatch: pytest.MonkeyPatch, work_dir: Path, spec: dict) -> None:
@@ -360,10 +569,12 @@ def test_a_sound_check_that_breaks_leaves_the_render_unchecked(tmp_path: Path, m
     assert sync.kept(str(tmp_path)) is None
 
 def test_a_render_runs_the_sound_check_the_spec_asked_for(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    found = {"streams": None, "joins": [], "joins_asked": 1, "frame": round(FRAME, 4)}
+    found = {"streams": None, "joins": [], "sides_asked": 1,
+             "left_out": {"not_listened": 0, "too_short": 0}, "frame": round(FRAME, 4)}
     asked = []
     monkeypatch.setattr(sync, "check", lambda *args: asked.append(args) or found)
     spec = sync_spec(tmp_path)
     run_render(monkeypatch, tmp_path, spec)
-    assert asked == [(spec["render_path"], [[1.0, 2.0]], [2.0], FRAME, "ffmpeg", "ffprobe")]
+    assert asked == [(spec["render_path"], spec["sync"]["sides"], spec["sync"]["left_out"],
+                      FRAME, "ffmpeg", "ffprobe")]
     assert sync.kept(str(tmp_path)) == found

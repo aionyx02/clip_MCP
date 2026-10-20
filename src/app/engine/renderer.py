@@ -513,7 +513,7 @@ def _run_render(job: Job, spec: Dict[str, Any], context: JobContext, repo: Optio
         # The video is made, and a check that breaks leaves it unchecked, never lost.
         try:
             sync.keep(job.work_dir, sync.check(
-                spec["render_path"], checking["expected"], checking["joins"], checking["frame"],
+                spec["render_path"], checking["sides"], checking["left_out"], checking["frame"],
                 command[0], "ffprobe",
             ))
         except Exception:

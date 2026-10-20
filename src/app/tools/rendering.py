@@ -675,9 +675,10 @@ def start_render(
             asset_id: [(span.start, span.end) for span in analysis.second_listen.voiced]
             for asset_id, analysis in analyses.items() if analysis.second_listen is not None
         }
+        offered, left_out = sync.sides(project.tracks, project.base_video_track.clips, heard)
         spec["sync"] = {
-            "expected": [list(stretch) for stretch in sync.expected_voicing(project.base_video_track.clips, heard)],
-            "joins": sync.joins(project.base_video_track.clips, heard),
+            "sides": offered,
+            "left_out": left_out,
             "frame": project.fps_den / project.fps_num,
         }
     job = runtime.job_manager.start_job(job, spec)

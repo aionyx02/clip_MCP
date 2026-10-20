@@ -47,10 +47,10 @@ def get_job(
         and `meant`, inside a fade, a dip, a card or a photo; or `not_read`
         when the check could not read it, which says nothing about its frames; for a finished
         render whose sound does not line up with its picture, `sound`: `out_of_step`, a line
-        each for a stream that starts or runs elsewhere than the picture and for a join where
-        the voice is heard early or late; `not_compared` when joins were offered but none could
-        be lined up; or `not_checked` when the check could not be run, which says nothing about
-        the sound; and a summary
+        each for a stream that starts or runs elsewhere than the picture and for a side of a
+        join where the voice is heard early or late, naming the clip and the side; `not_compared`
+        when some sides of joins could not be lined up, saying how many and why; or `not_checked`
+        when the check could not be run, which says nothing about the sound; and a summary
         over all of them: `finished` and
         `total` counts, `failed` counting those that failed or were
         cancelled, and `progress`, the average.
@@ -130,8 +130,8 @@ def _job_states(job_ids: List[str]) -> List[dict]:
             elif job.spots:
                 entry["frames"] = _frame_spots(job)
             if job.sync is None:
-                entry["sound"] = {"not_checked": "the sound was not checked against the picture — the check "
-                                                "failed or was stopped — so whether it lines up is not known"}
+                entry["sound"] = {"not_checked": "the sound was not checked against the picture, "
+                                                "so whether it lines up is not known"}
             else:
                 sound = _sound_out_of_step(job)
                 if sound:
@@ -212,44 +212,56 @@ def _sound_out_of_step(job: Job) -> Dict[str, object]:
 
     Returns:
         `out_of_step`, a line each for a stream that starts or runs elsewhere
-        than the picture, and for a join where the voice is heard more than a
-        frame or the voice detector's own step early or late, naming the clip
-        that starts there; and `not_compared` when joins were offered but none
-        could be lined up. Empty when the sound lines up.
+        than the picture, and for a side of a join where the voice is heard
+        more than a frame or the voice detector's own step early or late,
+        naming the clip and which side of the join it is; and `not_compared`
+        when some sides of joins could not be lined up, saying how many and
+        why. Empty when every side that was compared lines up and none were
+        left out.
     """
     if job.sync is None:
         return {}
-    frame = float(job.sync.get("frame", 0.0))
+    frame = float(job.sync["frame"])
     threshold = max(frame, sync.VOICE_STEP_SECONDS)
     lines: List[str] = []
-    streams = job.sync.get("streams")
+    streams = job.sync["streams"]
     if streams:
         lines.append(
             f"the sound runs {streams['audio_start']:.2f}s to {streams['audio_start'] + streams['audio_length']:.2f}s "
             f"while the picture runs {streams['video_start']:.2f}s to "
             f"{streams['video_start'] + streams['video_length']:.2f}s"
         )
-    joins = job.sync.get("joins", [])
+    joins = job.sync["joins"]
     over = [join for join in joins if abs(float(join["lag"])) > threshold]
-    if over:
-        project, _ = looking.project_as_rendered(job)
-        clips = sorted(project.base_video_track.clips, key=lambda clip: clip.timeline_in) if (
-            project is not None and project.base_video_track is not None) else []
-        slack = 1 / (project.fps_num / project.fps_den) if project is not None else 0.04
-        for join in over:
-            lag = float(join["lag"])
-            at = float(join["at"])
-            clip = next((item for item in clips if abs(float(item.timeline_in) - at) <= slack), None)
-            where = f"clip {clip.id}" if clip is not None else "the cut"
-            lines.append(f"at {at:.2f}s, {where}: the voice is heard {abs(lag):.2f}s {'late' if lag > 0 else 'early'}")
+    for join in over:
+        lag = float(join["lag"])
+        at = float(join["at"])
+        lines.append(
+            f"at {at:.2f}s, clip {join['clip_id']}, {join['side']} the join: "
+            f"the voice is heard {abs(lag):.2f}s {'late' if lag > 0 else 'early'}"
+        )
     found: Dict[str, object] = {}
     if lines:
         found["out_of_step"] = lines
-    asked = int(job.sync.get("joins_asked") or 0)
-    if asked > 0 and not joins:
+    sides_asked = int(job.sync["sides_asked"])
+    not_listened = int(job.sync["left_out"]["not_listened"])
+    too_short = int(job.sync["left_out"]["too_short"])
+    unlined = sides_asked - len(joins)
+    unknown = unlined + not_listened + too_short
+    total = sides_asked + not_listened + too_short
+    if unknown > 0:
+        reasons: List[str] = []
+        if not_listened:
+            reasons.append(f"{not_listened} not listened to for voicing")
+        if too_short:
+            reasons.append(f"{too_short} with less than {sync.MIN_SIDE_SECONDS:g}s of their own sound "
+                           "clear of other sound")
+        if unlined > 0:
+            reasons.append(f"{unlined} where the voice does not start or stop near the join "
+                           "or did not agree well enough")
         found["not_compared"] = (
-            f"none of the {asked} joins could be lined up — the voice does not start or stop near them, "
-            "or did not agree well enough — so whether they are in step is not known"
+            f"{unknown} of the {total} sides of joins could not be lined up — " + ", ".join(reasons)
+            + " — so whether they are in step is not known"
         )
     return found
 

@@ -68,9 +68,10 @@ class Job(BaseModel):
     sync: Optional[Dict[str, Any]] = Field(
         default=None,
         description="What a finished render's sound was found doing against its picture: `streams`, how far the "
-                    "two streams' starts and lengths differ or null when they line up; `joins`, `{at, lag}` for each "
-                    "join whose voicing could be compared, lag in seconds and positive when the sound is late; "
-                    "`joins_asked`, how many joins were offered to the check; and "
+                    "two streams' starts and lengths differ or null when they line up; `joins`, "
+                    "`{at, clip_id, side, lag}` for each side of a join whose voicing could be lined up, lag in "
+                    "seconds and positive when the sound is late; `sides_asked`, how many sides were offered to "
+                    "the check; `left_out`, how many were left out, as `{not_listened, too_short}`; and "
                     "`frame`, one frame of the render in seconds. Null when it was not checked (render jobs)",
     )
     error_message: Optional[str] = None
