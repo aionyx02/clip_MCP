@@ -1,7 +1,7 @@
 """The windows a plan's selections become, and the passes that clean them: retakes, pauses, trimmed ends, bad frames."""
 
 import math
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from difflib import SequenceMatcher
 from typing import Iterable, List, Mapping, Optional, Sequence, Tuple
 
@@ -141,8 +141,13 @@ def first_clips(pieces: Iterable["Piece"]) -> List[str]:
     return [piece.from_clip_ids[0] for piece in pieces if piece.from_clip_ids]
 
 def edge_of(piece: "Piece", side: str, seconds: float) -> str:
-    """Say where one edge of a window is: `u0410 starts at 2.23s of its file`."""
-    return f"{(piece.from_clip_ids or (piece.asset_id,))[0]} {side} at {seconds:.2f}s of its file"
+    """Say where one edge of a window is: `u0410 starts at 2.23s of its file`.
+
+    A window merged from several clips starts on its first and ends on its last,
+    so that is the one named, and the one whose selection is to be changed.
+    """
+    named = piece.from_clip_ids or (piece.asset_id,)
+    return f"{named[-1] if side == 'ends' else named[0]} {side} at {seconds:.2f}s of its file"
 
 @dataclass(frozen=True)
 class Piece:
@@ -177,6 +182,10 @@ class Piece:
             made by hand, or the plan's and changed by hand — the plan it came
             from, if any, and whether it is pinned; None for one the plan
             makes now.
+        excused: Per clip in `from_clip_ids`, whether its selection gave an
+            `edge_reason`, so a reason on one of two selections of the same
+            clip stays with that one. Left out of comparing windows: it says
+            what may be heard at an edge, not what plays.
     """
 
     asset_id: str
@@ -192,6 +201,7 @@ class Piece:
     sound_lead: float = 0.0
     card: Optional[TitleCard] = None
     card_from: Optional[Tuple[Optional[str], bool]] = None
+    excused: Tuple[bool, ...] = field(default=(), compare=False)
 
     @property
     def duration(self) -> float:
@@ -392,6 +402,7 @@ def merge_pieces(pieces: Sequence[Piece]) -> List[Piece]:
             # marker inside a shot would say a new part starts partway through it.
             merged[-1] = replace(
                 last, end=max(last.end, piece.end), from_clip_ids=(*last.from_clip_ids, *piece.from_clip_ids),
+                excused=(*last.excused, *piece.excused),
             )
         else:
             merged.append(piece)
@@ -451,6 +462,7 @@ def selected_pieces(
                 own_speed=selection.speed is not None,
                 gain=1.0 if selection.volume is None else selection.volume,
                 keep_level=selection.keep_level,
+                excused=(bool(selection.edge_reason),),
             )
             for piece in _selection_pieces(
                 selection, clip, children.get(clip.id, []), asset,

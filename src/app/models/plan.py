@@ -378,6 +378,12 @@ class Selection(BaseModel):
                     "than the pieces either side of it — a flash-forward, a callback, a comparison. Only needed "
                     "when validation names it; a piece dropped in by mistake should be moved instead",
     )
+    edge_reason: Optional[str] = Field(
+        default=None,
+        description="Why the video may end where this piece ends, or this piece may open on the words it "
+                    "opens on, although validation says it leans on something cut or stops short. Only "
+                    "needed when validation names it; an edge that does not hold should be moved instead",
+    )
     speed: Optional[float] = Field(
         default=None,
         ge=0.25,

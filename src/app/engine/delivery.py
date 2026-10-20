@@ -25,7 +25,8 @@ from app.engine.looks import alike
 from app.engine.plan.checks import LENGTH_TOLERANCE
 from app.engine.library import MUSIC, library_of
 from app.engine.semantic import (
-    EDGE_TOLERANCE_SECONDS, clean_cuts, combined_over, join_voices, share_covered, was_audible, was_made_up,
+    CLEAN_GAP_SECONDS, CLEAN_SILENCE_SECONDS, EDGE_TOLERANCE_SECONDS, clean_cuts, combined_over, join_voices,
+    share_covered, was_audible, was_made_up,
 )
 from app.engine.subtitles import caption_overflow, captioned_clips
 from app.models.media import Asset, MediaAnalysis
@@ -50,16 +51,8 @@ CHECKS = (
 # competes with the words: the first edits made with the server had music two decibels
 # under the voice, and it was the first thing anybody listening mentioned. Provisional.
 MUSIC_UNDER_TALKING_DB = 12.0
-# A cut is clean where the speaker stopped: between two words at least this far apart.
-# Shorter gaps are the spaces inside a phrase, and a cut there sounds like a word bitten
-# off. Provisional.
-CLEAN_GAP_SECONDS = 0.2
 # How far either side of a cut to look for a clean one to offer instead. Provisional.
 CLEAN_SEARCH_SECONDS = 3.0
-# A cut inside a measured silence at least this long is clean whatever the word timings
-# say: the transcriber runs a word on across a pause often enough that taking its word
-# for it refused cuts made in the middle of real silence. Provisional.
-CLEAN_SILENCE_SECONDS = 0.3
 # How much of the same stretch of a file has to come back before it is the same shot shown
 # twice rather than two neighbouring moments. Provisional.
 REPEAT_SECONDS = 1.0
