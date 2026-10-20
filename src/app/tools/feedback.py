@@ -10,7 +10,7 @@ from fastmcp.tools import ToolResult
 from fastmcp.utilities.types import Image
 from pydantic import Field
 
-from app.models.timeline import Project
+from app.models.timeline.parts import Project
 from app.models.comment import Comment, Preference, Question, Reply
 from app.models.trial import Trial, Verdict
 from app.engine.probe import probe_file

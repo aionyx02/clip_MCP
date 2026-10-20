@@ -10,7 +10,8 @@ from typing import List
 import pytest
 from pydantic import TypeAdapter
 
-from app.engine.plan import compiled_duration, plan_pieces
+from app.engine.plan.beats import plan_pieces
+from app.engine.plan.pieces import compiled_duration
 from app.models.plan import (
     Beat, BrollShot, DropBeatOp, EditPlan, MusicCue, MusicPlan, Pacing, PlanAmendment, PlanTarget, Selection,
     SetMusicLevelOp, SetPacingOp, SetTargetOp, apply_amendment,

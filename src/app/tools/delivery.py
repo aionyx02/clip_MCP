@@ -9,7 +9,7 @@ from fastmcp.utilities.types import Image
 from pydantic import Field
 
 from app.models.media import Asset
-from app.models.timeline import Clip
+from app.models.timeline.parts import Clip
 from app.engine import cards
 from app.engine.probe import probe_file, timecode_start
 from app.engine.reframe import placement_at

@@ -26,7 +26,7 @@ from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 from xml.sax.saxutils import quoteattr
 
 from app.models.media import Asset
-from app.models.timeline import Clip, PlacedCue, Project, TrackType
+from app.models.timeline.parts import Clip, PlacedCue, Project, TrackType
 
 FORMATS = ("edl", "otio", "fcpxml", "srt")
 

@@ -5,7 +5,7 @@ from pathlib import Path
 
 from app.engine.delivery import rights_facts
 from app.models.media import Asset, FaceMeasurement, MediaAnalysis, Source, Transcript, TranscriptSegment
-from app.models.timeline import Clip, Project, TimeRange, Track, TrackType
+from app.models.timeline.parts import Clip, Project, TimeRange, Track, TrackType
 from app.runtime import repo
 from app.tools.catalog import import_asset, set_asset_library
 from app.tools.soundtrack import export_notices

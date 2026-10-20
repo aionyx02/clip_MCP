@@ -108,7 +108,7 @@ def test_a_title_card_keeps_its_own_words(media: Path) -> None:
 
 
 def test_a_moved_name_keeps_its_box_and_the_safe_area(media: Path) -> None:
-    from app.models.timeline import CaptionStyle, TextLayer
+    from app.models.timeline.parts import CaptionStyle, TextLayer
     style = CaptionStyle()
     layer = lambda **fields: texts.placed(  # noqa: E731
         TextLayer(id="t", text="王小明", style="name", start=0, end=4, **fields), 1080, 1920, style)
@@ -133,7 +133,7 @@ def test_a_new_style_puts_moved_words_where_it_goes(media: Path) -> None:
 
 def test_moved_words_stay_whole_inside_the_frame() -> None:
     from app.engine.subtitles import caption_geometry, text_width
-    from app.models.timeline import CaptionStyle, TextLayer
+    from app.models.timeline.parts import CaptionStyle, TextLayer
     style = CaptionStyle()
     margin = caption_geometry(1080, 1920, style).margin_h
     for kind in ("name", "place", "headline", "free"):
@@ -149,7 +149,7 @@ def test_moved_words_stay_whole_inside_the_frame() -> None:
 
 def test_where_words_are_drawn_puts_them_there_again() -> None:
     from app.engine.subtitles import CAPTION_LINE_HEIGHT
-    from app.models.timeline import CaptionStyle, TextLayer
+    from app.models.timeline.parts import CaptionStyle, TextLayer
     style = CaptionStyle()
     for kind in ("name", "place", "headline"):
         layer = TextLayer(id="t", text="王小明", second="店長", style=kind, start=0, end=4, y=0.99)

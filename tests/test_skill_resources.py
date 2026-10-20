@@ -15,7 +15,7 @@ import pytest
 from fastmcp import Client
 
 from app.models.plan import PlanAmendment
-from app.models.timeline import EditOperation
+from app.models.timeline.operations import EditOperation
 import app.server  # noqa: F401 — registers every tool on mcp
 from app.runtime import SKILLS_DIR, mcp
 
