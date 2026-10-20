@@ -90,6 +90,21 @@ def forget_reviewed_captions() -> Iterator[None]:
         conn.execute("DELETE FROM glossary")
     yield
 
+@pytest.fixture(scope="module", autouse=True)
+def forget_analyses() -> Iterator[None]:
+    """Start every test file with no analysis stored for any file.
+
+    The same few media files come back under the same asset IDs, so an analysis
+    a test wrote by hand for one of them (a made-up transcript, say) would be
+    read by the next file that imports it and expects the file as it is. Per
+    file, not per test: some files write one in a module-scoped fixture.
+    """
+    from app.runtime import repo
+
+    with repo._transaction() as conn:
+        conn.execute("DELETE FROM analyses")
+    yield
+
 @pytest.fixture(scope="session")
 def media(tmp_path_factory: pytest.TempPathFactory) -> Path:
     """Create the media files the tests import.
