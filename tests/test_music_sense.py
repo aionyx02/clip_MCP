@@ -43,7 +43,7 @@ def test_a_song_is_heard_and_can_be_found_by_description(media: Path, tmp_path: 
 
 
 def test_a_plan_is_told_when_its_song_loops_or_is_cut_off(monkeypatch: pytest.MonkeyPatch) -> None:
-    from app.engine import plan as compiler
+    from app.engine.plan import music as compiler
 
     song = Asset(id="song", path="song.mp3", duration=30, has_video=False, has_audio=True, library="music")
     energy = tuple([0.2] * 10 + [1.0] * 10 + [0.6] * 10)
@@ -66,7 +66,7 @@ def test_a_song_started_where_the_plan_is_told_ends_with_the_cut_rather_than_loo
 ) -> None:
     import re
 
-    from app.engine import plan as compiler
+    from app.engine.plan import music as compiler
 
     # 58.74s of cut: rounded to 58.7 first, the start said was 191.3 and the song ran 0.04s short.
     song = Asset(id="song", path="song.mp3", duration=250, has_video=False, has_audio=True, library="music")
@@ -85,7 +85,7 @@ def test_a_song_started_where_the_plan_is_told_ends_with_the_cut_rather_than_loo
 def test_only_the_song_playing_at_the_payoff_is_told_where_to_start(monkeypatch: pytest.MonkeyPatch) -> None:
     from types import SimpleNamespace
 
-    from app.engine import plan as compiler
+    from app.engine.plan import music as compiler
     from app.models.plan import Beat, BeatRole, MusicCue, MusicPlan
 
     # The first song hands over at the payoff, so its fullest part can never land there; told to
@@ -116,7 +116,7 @@ def test_the_song_fading_out_as_the_payoff_begins_is_not_told_to_land_its_peak_t
 ) -> None:
     from types import SimpleNamespace
 
-    from app.engine import plan as compiler
+    from app.engine.plan import music as compiler
     from app.models.plan import Beat, BeatRole, MusicCue, MusicPlan
 
     # 0.1 + 0.7 adds up to a hair under the 0.8 the cue's stretch is rounded to, so the payoff
@@ -144,7 +144,7 @@ def test_the_song_fading_out_as_the_payoff_begins_is_not_told_to_land_its_peak_t
 def test_landing_the_peak_and_ending_with_the_song_are_said_to_be_a_choice(monkeypatch: pytest.MonkeyPatch) -> None:
     from types import SimpleNamespace
 
-    from app.engine import plan as compiler
+    from app.engine.plan import music as compiler
     from app.models.plan import Beat, BeatRole, MusicCue, MusicPlan
 
     # Going all the way through, its fullest part 120s in: started to land that on the payoff at

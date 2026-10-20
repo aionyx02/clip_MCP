@@ -16,28 +16,21 @@ from typing import Dict, List, Optional
 import pytest
 from pydantic import TypeAdapter
 
-from app.engine.plan import (
-    _story_problems,
-    as_left,
-    plan_markers,
+from app.engine.plan.beats import BEAT_SNAP_SECONDS, compile_pieces, plan_pieces
+from app.engine.plan.broll import broll_covers, broll_slots
+from app.engine.plan.checks import _story_problems, as_left, check_plan, check_recompile
+from app.engine.plan.compile import compile_operations
+from app.engine.plan.diff import diff_plans
+from app.engine.plan.music import music_beds, plan_markers
+from app.engine.plan.pieces import (
     BREATH_SECONDS,
-    broll_covers,
-    broll_slots,
-    Piece,
     MERGE_GAP_SECONDS,
     PAUSE_SECONDS,
     SNAP_SECONDS,
     TAIL_TRIM_SECONDS,
-    BEAT_SNAP_SECONDS,
-    check_plan,
-    check_recompile,
-    compile_operations,
-    compile_pieces,
+    Piece,
     compiled_duration,
-    diff_plans,
-    music_beds,
     note_record,
-    plan_pieces,
 )
 from app.engine.sections import build_sections
 from app.engine.semantic import CleanCuts, build_timeline, clean_cuts, join_voices
@@ -1460,7 +1453,7 @@ def test_two_markers_cannot_share_a_name_on_the_timeline() -> None:
 def test_a_pause_the_merge_would_put_back_is_not_taken_out_or_claimed() -> None:
     """Both new edges settle inward, closing the gap to under the merge gap.
 
-    The stage would split, `_merge` would join the halves straight back, and the
+    The stage would split, `merge_pieces` would join the halves straight back, and the
     note would report seconds that stayed in the cut. A report that is wrong is
     worse than a pause that stayed.
     """
@@ -2287,7 +2280,7 @@ def test_a_transition_with_no_picture_before_its_shot_is_refused_with_the_ways_t
     assert "from_seconds" in refused[0] and "0.5" in refused[0]
     assert "dip" in refused[0] and "set_beat_join" in refused[0]
     # When the shot before is what is too short, moving this one later would not help: say so.
-    from app.engine import plan as compiler
+    from app.engine.plan import checks as compiler
 
     short, _ = compiler._unfit_transitions(plan, [
         Piece(asset_id="x", start=0.0, end=0.03, from_clip_ids=("a",), beat_id="b1"),
@@ -2483,7 +2476,7 @@ def test_a_part_that_opens_later_and_goes_back_in_time_is_handed_back() -> None:
     assert not any(problem.startswith("continuity:") for problem in problems)
 
 def test_files_numbered_by_hand_played_out_of_their_order_are_noted() -> None:
-    from app.engine.plan import file_number
+    from app.engine.plan.checks import file_number
 
     assert [file_number(name) for name in ("1-開場.mp4", "01_a.mp4", "3.mov", "12 b.mp4", "2、c.mp4", "(4) d.mp4",
                                            "IMG_0001.mp4", "20260829_1.mp4", "v2.mp4")] == [1, 1, 3, 12, 2, 4,
@@ -2640,7 +2633,7 @@ def test_a_beat_can_open_on_a_moment_of_quiet() -> None:
     assert any("0.3s of quiet rather than 0.8s" in note for note in notes)
 
 def test_a_pause_never_opens_a_shot_onto_the_line_before() -> None:
-    from app.engine.plan import _joined_beats
+    from app.engine.plan.beats import _joined_beats
 
     plan = plan_for([]).model_copy(update={"beats": [Beat(id="b1", name="講"), Beat(id="b2", name="走", pause_before=1.0)]})
     pieces = [Piece(asset_id="a", start=0.0, end=2.0, from_clip_ids=("u1",), beat_id="b1"),
@@ -2653,7 +2646,7 @@ def test_a_pause_never_opens_a_shot_onto_the_line_before() -> None:
 def test_a_pause_its_shot_cannot_give_is_borrowed_from_the_shot_going_out() -> None:
     """#76: a shot cut into mid-sentence has no quiet before it, but the one before it has
     seconds of room after its last word."""
-    from app.engine.plan import _joined_beats
+    from app.engine.plan.beats import _joined_beats
 
     plan = plan_for([]).model_copy(update={"beats": [Beat(id="b1", name="講"), Beat(id="b2", name="走", pause_before=0.4)]})
     pieces = [Piece(asset_id="a", start=2.2, end=9.39, from_clip_ids=("u1",), beat_id="b1"),
@@ -2672,7 +2665,7 @@ def test_a_pause_its_shot_cannot_give_is_borrowed_from_the_shot_going_out() -> N
 
 def test_a_pause_a_millisecond_short_is_not_reported_as_shortened() -> None:
     """#89: 「0.399s of quiet rather than 0.4s」 was worth a look."""
-    from app.engine.plan import _joined_beats
+    from app.engine.plan.beats import _joined_beats
 
     plan = plan_for([]).model_copy(update={"beats": [Beat(id="b1", name="講"), Beat(id="b2", name="走", pause_before=0.4)]})
     pieces = [Piece(asset_id="a", start=0.0, end=2.0, from_clip_ids=("u1",), beat_id="b1"),
@@ -2682,7 +2675,7 @@ def test_a_pause_a_millisecond_short_is_not_reported_as_shortened() -> None:
 
 def test_a_pause_given_in_full_is_not_reported_as_shortened() -> None:
     """#76: a pause asked for at a speed that does not divide it evenly is still all there."""
-    from app.engine.plan import _joined_beats
+    from app.engine.plan.beats import _joined_beats
 
     plan = plan_for([]).model_copy(update={"beats": [Beat(id="b1", name="講"), Beat(id="b2", name="走", pause_before=0.4)]})
     pieces = [Piece(asset_id="a", start=0.0, end=2.0, from_clip_ids=("u1",), beat_id="b1"),
@@ -2692,7 +2685,7 @@ def test_a_pause_given_in_full_is_not_reported_as_shortened() -> None:
     assert notes == []
 
 def test_a_pause_never_opens_a_shot_onto_what_the_cut_already_played_of_its_take() -> None:
-    from app.engine.plan import _joined_beats
+    from app.engine.plan.beats import _joined_beats
 
     plan = plan_for([]).model_copy(update={"beats": [Beat(id="b1", name="講"), Beat(id="b2", name="走", pause_before=1.0)]})
     pieces = [Piece(asset_id="a", start=0.0, end=4.7, from_clip_ids=("u1",), beat_id="b1"),
@@ -2701,7 +2694,7 @@ def test_a_pause_never_opens_a_shot_onto_what_the_cut_already_played_of_its_take
     assert out[1].start == pytest.approx(4.7)
 
 def test_a_pause_never_opens_onto_talking_only_the_second_listen_heard() -> None:
-    from app.engine.plan import _joined_beats
+    from app.engine.plan.beats import _joined_beats
 
     plan = plan_for([]).model_copy(update={"beats": [Beat(id="b1", name="講"), Beat(id="b2", name="走", pause_before=1.0)]})
     pieces = [Piece(asset_id="a", start=0.0, end=2.0, from_clip_ids=("u1",), beat_id="b1"),
@@ -2715,13 +2708,14 @@ def test_a_pause_never_opens_onto_talking_only_the_second_listen_heard() -> None
 def test_two_windows_of_one_file_played_out_of_order_stay_two() -> None:
     """#91: 10.17–17.66 then 0–8.92 of one file, next to each other, were joined into one window
     and the second was lost without a word."""
-    from app.engine.plan import _left_out, _merge
+    from app.engine.plan.beats import _left_out
+    from app.engine.plan.pieces import merge_pieces
 
     later = Piece(asset_id="a", start=9.98, end=18.49, from_clip_ids=("u0004",), beat_id="hook")
     earlier = Piece(asset_id="a", start=0.0, end=9.0, from_clip_ids=("u0002",), beat_id="setup")
-    assert _merge([later, earlier]) == [later, earlier]
+    assert merge_pieces([later, earlier]) == [later, earlier]
     # In order, they still join.
-    assert len(_merge([earlier, replace(later, start=9.1)])) == 1
+    assert len(merge_pieces([earlier, replace(later, start=9.1)])) == 1
     # And a window lost anyway is said.
     [lost] = _left_out([later, earlier], [later], [])
     assert lost.kind == "selections_lost" and lost.clip_ids == ("u0002",) and lost.look
@@ -2730,7 +2724,7 @@ def test_two_windows_of_one_file_played_out_of_order_stay_two() -> None:
 def test_a_beat_s_pause_leaves_its_transition_the_picture_it_runs_in_from() -> None:
     """#95: the pause opened the shot onto its file's first frame, and the dissolve was then
     refused for having no picture before it."""
-    from app.engine.plan import _joined_beats
+    from app.engine.plan.beats import _joined_beats
 
     plan = plan_for([]).model_copy(update={"beats": [
         Beat(id="b1", name="講"),
