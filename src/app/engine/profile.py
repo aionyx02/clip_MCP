@@ -1,0 +1,352 @@
+"""How long each stage of a job took, and how much memory the machine had in use during it.
+
+A job reports the stage it is in while it runs. This times each of those
+stages and, alongside it, samples the machine's memory and the NVIDIA card's
+memory so that a stage can be read as a cost rather than only as a wait: the
+transcription of an hour of talk is slow and takes several gigabytes, while
+the same hour's scene detection is quick and takes almost nothing.
+
+What it measures is the machine as a whole, not this process. Memory in use
+is total minus available, so it includes FFmpeg and every other child process
+a stage starts, and it also includes whatever else the person has open — a
+browser, another editor, the rest of their day. A rise is therefore an upper
+bound on what the stage itself took, useful for comparing stages with each
+other and not for saying what one of them would need on an idle computer.
+
+The numbers are sampled rather than tracked: memory is read every
+`PROFILE_SAMPLE_SECONDS`, so a stage shorter than that can finish without a
+reading of its own and show a rise of zero. The card is read less often, every
+`GPU_SAMPLE_SECONDS`, because each reading starts nvidia-smi, which takes a
+quarter of a second here: read as often as memory, it would keep a process
+running for the whole job it is measuring. A stage shorter than that may show
+no rise on the card. Nothing here decides anything
+about a job; it only records what was seen.
+"""
+
+import re
+import threading
+import time
+from statistics import median
+from typing import Any, Callable, Dict, List, Optional
+
+from app.engine import machine, resources
+from app.models.job import Job, JobKind, JobStatus
+from app.models.media import Asset
+
+MEGABYTE = 1024 * 1024
+# Provisional: how often memory is read while a stage runs. A stage shorter than this
+# may show no rise, since it can begin and end between two readings.
+PROFILE_SAMPLE_SECONDS = 0.25
+# Provisional: how often the card's memory is read. Each reading starts nvidia-smi, about
+# 0.25 s on the machine this was written on, so this keeps it to about a tenth of the time.
+GPU_SAMPLE_SECONDS = 2.0
+
+def _machine_in_use() -> Optional[int]:
+    """Read how much of this computer's physical memory is in use.
+
+    Machine-wide, so it includes FFmpeg and other child processes, and also
+    everything else running on the computer at that moment.
+
+    Returns:
+        Bytes in use, or None when this machine's memory cannot be measured.
+    """
+    status = resources.memory_status()
+    if status is None:
+        return None
+    available, total = status
+    return max(0, total - available)
+
+def _gpu_in_use() -> Optional[int]:
+    """Read how much memory the first NVIDIA card has in use.
+
+    Returns:
+        Bytes in use, or None when there is no NVIDIA driver tool or it says
+        nothing.
+    """
+    listed = machine._nvidia_smi("memory.used")
+    if listed is None:
+        return None
+    text = listed.strip()
+    if not text.isdigit():
+        return None
+    return int(text) * MEGABYTE
+
+class StageClock:
+    """Times the stages of one job and keeps the peak memory seen in each.
+
+    A sampler thread reads the machine's memory and the card's memory every
+    `sample_seconds` while the clock runs. `mark` is called from the job's own
+    thread as it moves between stages, so it may run while the sampler does;
+    both take the same lock.
+
+    The clock can be given fake readers and a fake clock, which is how it is
+    tested without a machine or a real thread.
+    """
+
+    def __init__(
+        self,
+        sample_seconds: float = PROFILE_SAMPLE_SECONDS,
+        gpu_seconds: float = GPU_SAMPLE_SECONDS,
+        clock: Callable[[], float] = time.monotonic,
+        memory: Callable[[], Optional[int]] = _machine_in_use,
+        gpu: Callable[[], Optional[int]] = _gpu_in_use,
+    ):
+        """Initialize the clock without starting it.
+
+        Args:
+            sample_seconds: How often the sampler reads memory while running.
+            gpu_seconds: How often it reads the card, rounded to a whole number
+                of memory readings.
+            clock: Reads the current time in seconds; `time.monotonic` unless
+                a test says otherwise.
+            memory: Reads the machine's memory in use, in bytes, or None.
+            gpu: Reads the card's memory in use, in bytes, or None.
+        """
+        self._sample_seconds = sample_seconds
+        self._gpu_every = max(1, int(round(gpu_seconds / sample_seconds)))
+        self._clock = clock
+        self._memory = memory
+        self._gpu = gpu
+        self._lock = threading.Lock()
+        self._entries: List[Dict[str, Any]] = []
+        self._stage: Optional[str] = None
+        self._stage_started = 0.0
+        self._baseline_memory: Optional[int] = None
+        self._baseline_gpu: Optional[int] = None
+        self._peak_memory: Optional[int] = None
+        self._peak_gpu: Optional[int] = None
+        self._gpu_readable = True
+        self._running = False
+        self._stop = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+
+    def start(self) -> None:
+        """Read the baseline, then sample memory in the background until `stop`."""
+        if self._running:
+            return
+        self._baseline_memory = self._memory()
+        self._baseline_gpu = self._gpu()
+        # A machine with no card is not asked again, so it does not spawn a process per sample.
+        self._gpu_readable = self._baseline_gpu is not None
+        self._peak_memory = self._baseline_memory
+        self._peak_gpu = self._baseline_gpu
+        self._entries = []
+        self._stage = None
+        self._running = True
+        self._stop.clear()
+        self._thread = threading.Thread(target=self._sample_forever, daemon=True)
+        self._thread.start()
+
+    def mark(self, stage: str) -> None:
+        """Close the stage in progress, if any, and begin `stage`.
+
+        A stage reported twice in a row stays one entry. A stage reported
+        again after another stage has run is a new entry.
+
+        Args:
+            stage: What the job is doing now.
+        """
+        # Read before taking the lock, so the job's thread never waits on the sampler's reading.
+        # Memory only: the card's reading starts a process, and the sampler takes it soon enough.
+        memory = self._memory()
+        with self._lock:
+            if not self._running:
+                return
+            if stage == self._stage:
+                return
+            now = self._clock()
+            self._close(now)
+            self._stage = stage
+            self._stage_started = now
+            self._peak_memory = self._baseline_memory
+            self._peak_gpu = self._baseline_gpu
+            # One reading at the change, so a stage always has at least one.
+            self._fold(memory, None)
+
+    def stop(self) -> List[Dict[str, Any]]:
+        """Close the last stage, stop the sampler, and return what each stage cost.
+
+        Returns:
+            One entry per stage, in order, each `{stage, seconds,
+            memory_rise_mb, gpu_rise_mb}`. A rise is the stage's peak minus
+            the baseline taken at `start`, never below zero, in MiB; None
+            when that reading is not available on this machine.
+        """
+        if not self._running:
+            return [dict(entry) for entry in self._entries]
+        self._stop.set()
+        thread = self._thread
+        if thread is not None and thread is not threading.current_thread():
+            thread.join()
+        with self._lock:
+            self._close(self._clock())
+            self._running = False
+        return [dict(entry) for entry in self._entries]
+
+    def _sample(self, card: bool = True) -> None:
+        """Take one reading of memory, and of the card when asked, and fold it into the current stage.
+
+        The readings are taken outside the lock, so a slow one never holds up `mark`.
+
+        Args:
+            card: Whether to read the card as well.
+        """
+        memory = self._memory()
+        gpu = self._gpu() if card and self._gpu_readable else None
+        with self._lock:
+            if not self._running:
+                return
+            if card and self._gpu_readable and gpu is None:
+                # A card that could not be read once is not asked again.
+                self._gpu_readable = False
+            self._fold(memory, gpu)
+
+    def _sample_forever(self) -> None:
+        """Read memory every `sample_seconds`, and the card every `gpu_seconds`, until the clock is stopped."""
+        ticks = 0
+        while not self._stop.wait(self._sample_seconds):
+            ticks += 1
+            self._sample(card=ticks % self._gpu_every == 0)
+            if not self._running:
+                return
+
+    def _fold(self, memory: Optional[int], gpu: Optional[int]) -> None:
+        """Fold readings into the current stage's peaks; caller holds the lock.
+
+        Args:
+            memory: The machine's memory in use, or None when not read.
+            gpu: The card's memory in use, or None when not read.
+        """
+        if memory is not None:
+            self._peak_memory = memory if self._peak_memory is None else max(self._peak_memory, memory)
+        if gpu is not None:
+            self._peak_gpu = gpu if self._peak_gpu is None else max(self._peak_gpu, gpu)
+
+    def _close(self, now: float) -> None:
+        """Record the stage in progress and clear it; caller holds the lock."""
+        if self._stage is None:
+            return
+        self._entries.append({
+            "stage": self._stage,
+            "seconds": round(now - self._stage_started, 3),
+            "memory_rise_mb": _rise(self._peak_memory, self._baseline_memory),
+            "gpu_rise_mb": _rise(self._peak_gpu, self._baseline_gpu),
+        })
+        self._stage = None
+
+def _rise(peak: Optional[int], baseline: Optional[int]) -> Optional[int]:
+    """How far above the baseline a peak sits, in whole MiB, never below zero.
+
+    Args:
+        peak: The highest reading seen during the stage.
+        baseline: The reading taken when the clock started.
+
+    Returns:
+        The rise in MiB, or None when either reading is not available.
+    """
+    if peak is None or baseline is None:
+        return None
+    return max(0, int(round((peak - baseline) / MEGABYTE)))
+
+def stage_key(stage: str) -> str:
+    """Group stages that differ only by a counter, such as one picture of twelve.
+
+    Args:
+        stage: The stage as the job reported it.
+
+    Returns:
+        The stage with every run of digits replaced by `#`.
+    """
+    return re.sub(r"\d+", "#", stage)
+
+_KIND_ORDER = (JobKind.ANALYZE, JobKind.RENDER, JobKind.PREPARE)
+
+def summarise(jobs: List[Job], assets: Dict[str, Asset]) -> str:
+    """Summarise how long each stage took across completed jobs, one block per job kind.
+
+    Only jobs that completed and carry a profile are read. Within a block,
+    stages are grouped by `stage_key` and listed by total time, largest first.
+
+    Args:
+        jobs: The jobs to summarise.
+        assets: The library's assets, by ID, for the length of the footage an
+            analyze job was given.
+
+    Returns:
+        A plain-text table, or a sentence when no completed job has a profile.
+    """
+    done = [job for job in jobs if job.status == JobStatus.COMPLETED and job.profile]
+    if not done:
+        return "No completed job has a profile yet."
+    present = {job.kind for job in done}
+    kinds = [kind for kind in _KIND_ORDER if kind in present]
+    kinds += sorted((kind for kind in present if kind not in _KIND_ORDER), key=lambda kind: kind.value)
+    blocks = [_block(kind, [job for job in done if job.kind == kind], assets) for kind in kinds]
+    return "\n\n".join(blocks)
+
+def _block(kind: JobKind, jobs: List[Job], assets: Dict[str, Asset]) -> str:
+    """Build the table for one kind of job.
+
+    Args:
+        kind: The kind of job the block is about.
+        jobs: Completed jobs of that kind, each with a profile.
+        assets: The library's assets, by ID.
+
+    Returns:
+        The block's lines, joined.
+    """
+    stages: Dict[str, Dict[str, Any]] = {}
+    for job in jobs:
+        seen = set()
+        for entry in job.profile or []:
+            key = stage_key(str(entry.get("stage", "")))
+            row = stages.setdefault(key, {"jobs": 0, "seconds": 0.0, "times": [], "memory": None, "gpu": None})
+            seconds = float(entry.get("seconds") or 0.0)
+            row["seconds"] += seconds
+            row["times"].append(seconds)
+            if key not in seen:
+                row["jobs"] += 1
+                seen.add(key)
+            memory = entry.get("memory_rise_mb")
+            if memory is not None:
+                row["memory"] = memory if row["memory"] is None else max(row["memory"], memory)
+            gpu = entry.get("gpu_rise_mb")
+            if gpu is not None:
+                row["gpu"] = gpu if row["gpu"] is None else max(row["gpu"], gpu)
+    total = sum(row["seconds"] for row in stages.values())
+    lines = [f"{kind.value}: {len(jobs)} completed job{'' if len(jobs) == 1 else 's'}"]
+    lines.append(f"  {'stage':<32} {'jobs':>5} {'total s':>10} {'share':>7} {'median s':>10} "
+                 f"{'mem MB':>8} {'gpu MB':>8}")
+    for key, row in sorted(stages.items(), key=lambda item: (-item[1]["seconds"], item[0])):
+        share = f"{100 * row['seconds'] / total:.1f}%" if total else "-"
+        memory = "-" if row["memory"] is None else str(int(row["memory"]))
+        gpu = "-" if row["gpu"] is None else str(int(row["gpu"]))
+        lines.append(f"  {key:<32} {row['jobs']:>5} {row['seconds']:>10.3f} {share:>7} "
+                     f"{median(row['times']):>10.3f} {memory:>8} {gpu:>8}")
+    if kind == JobKind.ANALYZE:
+        lines.append(_real_time(jobs, assets))
+    return "\n".join(lines)
+
+def _real_time(jobs: List[Job], assets: Dict[str, Asset]) -> str:
+    """Say how long analyzing took against the footage's own length.
+
+    Args:
+        jobs: Completed analyze jobs.
+        assets: The library's assets, by ID.
+
+    Returns:
+        A line with the real-time factor and how many jobs it covers; a line
+        saying it cannot be worked out when no asset has a duration.
+    """
+    seconds, footage, covered = 0.0, 0.0, 0
+    for job in jobs:
+        asset = assets.get(job.asset_id) if job.asset_id else None
+        if asset is None or asset.duration is None:
+            continue
+        seconds += sum(float(entry.get("seconds") or 0.0) for entry in job.profile or [])
+        footage += float(asset.duration)
+        covered += 1
+    if not covered or footage <= 0:
+        return "  real-time factor: - (no analyzed asset has a duration)"
+    return (f"  real-time factor: {seconds / footage:.2f}x "
+            f"({covered} job{'' if covered == 1 else 's'}, {footage:.1f} s of footage)")

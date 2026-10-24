@@ -252,6 +252,31 @@ def uninstall(dry_run: bool, delete_data: bool) -> int:
         print("Last, remove the program itself: uv tool uninstall clip-mcp")
     return 1 if failed else 0
 
+def profile(days: int) -> int:
+    """Print how long each stage of recent jobs took, and the most memory it had in use.
+
+    Args:
+        days: How far back to read jobs that have ended.
+
+    Returns:
+        The exit status: always 0.
+    """
+    import os
+    from datetime import datetime, timedelta, timezone
+
+    from app.engine.profile import summarise
+    from app.models.job import JobKind
+    from app.storage.repo import Repository
+
+    repo = Repository(os.path.join(workspace.workspace_dir(), "clip_mcp.db"))
+    active, ended = repo.jobs_to_show(datetime.now(timezone.utc) - timedelta(days=days))
+    jobs = active + ended
+    assets = repo.get_assets(
+        [job.asset_id for job in jobs if job.kind == JobKind.ANALYZE and job.asset_id],
+    )
+    print(summarise(jobs, assets))
+    return 0
+
 def main(argv: Optional[List[str]] = None) -> None:
     """Run the command.
 
@@ -281,6 +306,8 @@ def main(argv: Optional[List[str]] = None) -> None:
     remove.add_argument("--no-prompt", action="store_true", help="never ask; answer no to anything not given")
     editor = commands.add_parser("ui", help="open the editor in the browser, to check and adjust a cut by hand")
     editor.add_argument("--no-browser", action="store_true", help="serve it without opening a window")
+    profiler = commands.add_parser("profile", help="show how long each stage of recent jobs took, and its memory")
+    profiler.add_argument("--days", type=int, default=30, help="how far back to read ended jobs (default 30)")
     arguments = parser.parse_args(argv)
     workspace.use_installed_ffmpeg()
     global NO_PROMPT
@@ -298,6 +325,8 @@ def main(argv: Optional[List[str]] = None) -> None:
 
         run(not arguments.no_browser)
         return
+    if arguments.command == "profile":
+        sys.exit(profile(arguments.days))
     from app.server import main as serve
 
     serve()

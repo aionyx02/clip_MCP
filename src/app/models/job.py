@@ -85,6 +85,13 @@ class Job(BaseModel):
                     "`{kind, start, end}` in seconds of the render; null when it was not read (render jobs)",
     )
     error_message: Optional[str] = None
+    profile: Optional[List[Dict[str, Any]]] = Field(
+        default=None,
+        description="How long each stage took and the most memory the machine had in use during it, in "
+                    "order: `{stage, seconds, memory_rise_mb, gpu_rise_mb}`. A rise is in MiB, never below "
+                    "zero; null when the reading is not available on this machine. Null when the job ran "
+                    "before this was recorded, or the clock failed",
+    )
     failure_kind: Optional[FailureKind] = Field(
         default=None,
         description="What ended a failed or cancelled job; null when it did not end that way, or when a "
