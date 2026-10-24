@@ -57,7 +57,8 @@ def chain(target: float, gain: str) -> str:
     return (
         f"loudnorm=I={target:g}:TP={TRUE_PEAK_DB:g}:LRA={LOUDNESS_RANGE:g},"
         f"volume={gain}dB,aresample=192000,"
-        f"alimiter=limit={10 ** (CEILING_DB / 20):.4f}:attack=1:release=60:level=false,aresample=48000"
+        # Its 1 ms look-ahead is compensated so the sound stays on the picture (#144).
+        f"alimiter=limit={10 ** (CEILING_DB / 20):.4f}:attack=1:release=60:level=false:latency=1,aresample=48000"
     )
 
 def measure(path: str, filters: str = "", ffmpeg_bin: str = "ffmpeg") -> Tuple[float, float]:
