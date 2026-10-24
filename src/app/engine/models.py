@@ -128,6 +128,17 @@ def keep_speech_model() -> None:
     global _keep_speech_model
     _keep_speech_model = True
 
+def release_speech_model() -> None:
+    """Let go of the speech model kept, if any.
+
+    A worker does this before an analysis that does not transcribe, whose
+    memory estimate does not count a model.
+    """
+    global _speech_model, _speech_model_key
+    with _speech_model_lock:
+        _speech_model = None
+        _speech_model_key = None
+
 def speech_model(
     name: str, device: str, download_root: str, before_build: Optional[Callable[[], None]] = None,
 ) -> Any:

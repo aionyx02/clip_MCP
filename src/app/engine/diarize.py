@@ -86,6 +86,12 @@ def read_samples(path: str, ffmpeg_bin: str = "ffmpeg") -> array.array:
     samples.frombytes(result.stdout)
     return samples
 
+def release_engine() -> None:
+    """Let go of the diarization engine kept, if any, before an analysis that does not use it."""
+    global _engine_cache
+    with _engine_lock:
+        _engine_cache = None
+
 def _engine(speakers: Optional[int]):
     """Build the diarization engine, downloading its models on first use.
 

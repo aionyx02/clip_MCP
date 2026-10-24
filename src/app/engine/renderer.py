@@ -7,7 +7,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from app.engine import loudness, machine, models, resources, scan, speed, sync
+from app.engine import diarize, loudness, machine, models, resources, scan, speed, sync
 from app.engine.analysis import analyze_media, whisper_model_for
 from app.engine.ffmpeg import FFmpegFailed, OperationCancelled, run_ffmpeg
 from app.models.job import FailureKind, Job, JobKind, JobStatus
@@ -636,6 +636,10 @@ def _run_analysis(repo: Repository, job: Job, spec: Dict[str, Any], context: Job
     unreadable = _unreadable([asset.path])
     if unreadable:
         raise InputUnavailable(unreadable)
+    if not spec["transcribe"]:
+        # Its memory estimate counts no speech model, so the one a previous analysis left must go.
+        models.release_speech_model()
+        diarize.release_engine()
     runs: List[speed.Measured] = []
     analysis = analyze_media(
         asset,

@@ -16,9 +16,10 @@ from typing import Any, Dict, List
 
 import pytest
 
-from app.engine import analysis, diarize, models, renderer, resources
+from app.engine import analysis, diarize, models, relisten, renderer, resources
 from app.engine.renderer import SPEC_FILE_NAME, JobManager, run_worker
 from app.models.job import FailureKind, Job, JobKind, JobStatus
+from app.models.media import Asset
 from app.storage.repo import Repository
 
 
@@ -343,9 +344,10 @@ def test_before_build_runs_only_when_a_model_is_built(monkeypatch: pytest.Monkey
 
 def test_a_kept_analysis_cancelled_before_it_starts_ends_the_chain(tmp_path: Path) -> None:
     repo = store(tmp_path)
-    kept = queued(repo, tmp_path, admitted_at=datetime.now(timezone.utc), cancel_requested=True)
+    kept = queued(repo, tmp_path, admitted_at=datetime.now(timezone.utc))
+    assert JobManager(repo).cancel_job(kept.job_id, wait_seconds=0).status == JobStatus.CANCELLED
     assert run_worker(repo, kept.job_id) is None
-    assert repo.get_job(kept.job_id).status == JobStatus.QUEUED
+    assert repo.get_job(kept.job_id).status == JobStatus.CANCELLED
 
 
 def test_a_kept_analysis_whose_worker_died_is_failed_as_abandoned(tmp_path: Path) -> None:
@@ -358,3 +360,95 @@ def test_a_kept_analysis_whose_worker_died_is_failed_as_abandoned(tmp_path: Path
     assert (failed.status, failed.failure_kind, failed.error_message) == (
         JobStatus.FAILED, FailureKind.WORKER, renderer.ABANDONED,
     )
+
+
+def test_only_the_first_admitted_analysis_is_kept(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    repo = store(tmp_path)
+    first, second, third = (queued(repo, tmp_path) for _ in range(3))
+    monkeypatch.setattr(renderer, "_run_analysis", lambda *args, **kwargs: None)
+    launched: List[str] = []
+    monkeypatch.setattr(JobManager, "_launch_worker", lambda self, job: launched.append(job.job_id))
+    room_for(monkeypatch)
+
+    assert run_worker(repo, first.job_id) == second.job_id
+    assert launched == [third.job_id]
+
+
+def test_hearing_a_file_again_uses_the_model_the_worker_holds(monkeypatch: pytest.MonkeyPatch) -> None:
+    asked: List[str] = []
+
+    class Heard:
+        """A model that hears nothing."""
+
+        def transcribe(self, samples, **kwargs):
+            return [], None
+
+    def speech_model(name, device, download_root, before_build=None):
+        asked.append(name)
+        return Heard()
+
+    monkeypatch.setattr(models, "speech_model", speech_model)
+    monkeypatch.setattr(relisten, "read_samples", lambda path, ffmpeg_bin="ffmpeg": bytes(4 * 16000))
+    monkeypatch.setattr(relisten, "stretches_to_transcribe", lambda voiced, duration: [(0.0, 1.0)])
+    listener = relisten.Listener(name="large-v3-turbo", device="cpu", download_root="models")
+    relisten.listen_again("speech.wav", "zh", listener, lambda fraction: None, lambda: False)
+    assert asked == ["large-v3-turbo"]
+
+
+def test_on_the_card_free_system_memory_is_not_checked(monkeypatch: pytest.MonkeyPatch) -> None:
+    built = fake_whisper(monkeypatch, [100 * resources.MEGABYTE])
+    analysis._run_whisper("cuda", "speech.wav", 10.0, None, None, lambda fraction: None, lambda: False,
+                          model_name="large-v3-turbo")
+    assert built == ["large-v3-turbo"]
+
+
+def test_a_transcribing_analysis_counts_the_speech_model_on_top_of_its_other_stages() -> None:
+    whisper = resources.whisper_memory_bytes("large-v3-turbo")
+    diarizing = resources.DIARIZATION_BYTES + int(3600 * resources.DIARIZATION_BYTES_PER_SECOND)
+    assert resources.analysis_memory_bytes(True, "large-v3-turbo", 3600.0, diarize=True) == whisper + diarizing
+    assert resources.analysis_memory_bytes(True, "large-v3-turbo") == whisper + resources.DETECTION_BYTES
+    assert resources.analysis_memory_bytes(False, "large-v3-turbo", 3600.0) == resources.DETECTION_BYTES
+
+
+@pytest.mark.parametrize("transcribe", [False, True])
+def test_an_analysis_that_does_not_transcribe_lets_the_held_models_go(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, transcribe: bool,
+) -> None:
+    repo = store(tmp_path)
+    media = tmp_path / "song.mp3"
+    media.write_bytes(b"")
+    repo.save_asset(Asset(id="song", path=str(media), duration=10, has_video=False, has_audio=True))
+    job = queued(repo, tmp_path, asset_id="song")
+    held, engine = object(), object()
+    monkeypatch.setattr(models, "_speech_model", held)
+    monkeypatch.setattr(models, "_speech_model_key", ("large-v3-turbo", "cpu", "models"))
+    monkeypatch.setattr(diarize, "_engine_cache", (None, engine))
+    seen = []
+
+    class Stop(Exception):
+        """Ends the run once the analysis would start."""
+
+    def analyze_media(*args, **kwargs):
+        seen.append((models._speech_model, diarize._engine_cache))
+        raise Stop()
+
+    monkeypatch.setattr(renderer, "analyze_media", analyze_media)
+    context = types.SimpleNamespace(report=lambda fraction, stage=None: None, is_cancelled=lambda: False)
+    with pytest.raises(Stop):
+        renderer._run_analysis(repo, job, {"transcribe": transcribe}, context)
+    assert seen == ([(held, (None, engine))] if transcribe else [(None, None)])
+
+
+@pytest.mark.parametrize("has_video, expected", [(False, False), (True, True)])
+def test_an_analysis_specification_says_whether_it_will_transcribe(
+    monkeypatch: pytest.MonkeyPatch, has_video: bool, expected: bool,
+) -> None:
+    # A song is never transcribed, whatever was asked; the worker reads this to let a held model go.
+    from app import runtime
+    from app.tools import examining
+
+    specs: List[Dict[str, Any]] = []
+    monkeypatch.setattr(runtime.job_manager, "start_job", lambda job, spec: specs.append(spec) or job)
+    asset = Asset(id="a", path="a.mp4", duration=10, has_video=has_video, has_audio=True)
+    examining.start_analysis(asset, True, "accurate")
+    assert specs[0]["transcribe"] is expected
