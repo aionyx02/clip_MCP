@@ -25,7 +25,7 @@ from typing import Callable, List, Optional, Tuple
 
 import numpy as np
 
-from app.engine.ffmpeg import OperationCancelled, hidden_window_flags
+from app.engine.ffmpeg import FFmpegFailed, OperationCancelled, hidden_window_flags
 from app.models.media import Rhythm
 
 SAMPLE_RATE = 11025
@@ -95,7 +95,7 @@ def _decode(path: str, ffmpeg_bin: str) -> np.ndarray:
         The samples as 32-bit floats at `SAMPLE_RATE`.
 
     Raises:
-        RuntimeError: If FFmpeg cannot decode the file.
+        FFmpegFailed: If FFmpeg cannot decode the file.
     """
     result = subprocess.run(
         [ffmpeg_bin, "-hide_banner", "-nostdin", "-v", "error", "-i", path,
@@ -105,7 +105,7 @@ def _decode(path: str, ffmpeg_bin: str) -> np.ndarray:
         creationflags=hidden_window_flags(),
     )
     if result.returncode != 0:
-        raise RuntimeError(
+        raise FFmpegFailed(
             result.stderr.decode("utf-8", errors="replace").strip()[-500:] or "ffmpeg could not read the sound"
         )
     return np.frombuffer(result.stdout, dtype=np.float32)

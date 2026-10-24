@@ -24,9 +24,9 @@ def probe_file(filepath: str, ffprobe_bin: str = "ffprobe") -> Dict[str, Any]:
 
     Raises:
         FileNotFoundError: If `filepath` does not exist.
-        RuntimeError: If ffprobe exits with a non-zero status.
+        FFmpegFailed: If ffprobe exits with a non-zero status.
     """
-    from app.engine.ffmpeg import hidden_window_flags
+    from app.engine.ffmpeg import FFmpegFailed, hidden_window_flags
 
     if not os.path.isfile(filepath):
         raise FileNotFoundError(f"media file {filepath} not found")
@@ -40,7 +40,7 @@ def probe_file(filepath: str, ffprobe_bin: str = "ffprobe") -> Dict[str, Any]:
         creationflags=hidden_window_flags(),
     )
     if result.returncode != 0:
-        raise RuntimeError(f"ffprobe failed: {result.stderr.decode('utf-8', errors='replace').strip()}")
+        raise FFmpegFailed(f"ffprobe failed: {result.stderr.decode('utf-8', errors='replace').strip()}")
     return json.loads(result.stdout)
 
 # The metadata a file carries about who made it and on what terms, in the order worth

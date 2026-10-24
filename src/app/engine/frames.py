@@ -8,7 +8,7 @@ from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageFont
 
 from app.engine import cards, resources, stills
 from app.engine.builder import WHOLE_DIM
-from app.engine.ffmpeg import hidden_window_flags
+from app.engine.ffmpeg import FFmpegFailed, hidden_window_flags
 from app.engine.reframe import Placement
 
 TILE_SIZE = 320
@@ -82,7 +82,8 @@ def extract_frame(path: str, seconds: float, max_size: int = TILE_SIZE, ffmpeg_b
         The frame as an RGB image.
 
     Raises:
-        RuntimeError: If FFmpeg cannot decode a frame at that time.
+        FFmpegFailed: If FFmpeg exits with an error decoding a frame at that time.
+        RuntimeError: If FFmpeg exits cleanly but writes no picture.
     """
     # A photo is the same picture at every moment, and seeking into one finds nothing.
     seek = [] if stills.is_image(path) else ["-ss", f"{max(seconds, 0):.3f}"]
@@ -101,8 +102,16 @@ def extract_frame(path: str, seconds: float, max_size: int = TILE_SIZE, ffmpeg_b
             capture_output=True,
             creationflags=hidden_window_flags(),
         )
-    if result.returncode != 0 or not result.stdout:
-        raise RuntimeError(f"could not read a frame at {seconds:.3f}s: {result.stderr.decode('utf-8', errors='replace').strip()[-300:]}")
+    message = (
+        f"could not read a frame at {seconds:.3f}s: "
+        f"{result.stderr.decode('utf-8', errors='replace').strip()[-300:]}"
+    )
+    if result.returncode != 0:
+        raise FFmpegFailed(message)
+    # A clean exit with nothing on the pipe is not FFmpeg failing: it ran and found no
+    # picture at that time. Only a non-zero exit says the process itself went wrong.
+    if not result.stdout:
+        raise RuntimeError(message)
     return Image.open(io.BytesIO(result.stdout)).convert("RGB")
 
 def _crop_to_aspect(frame: Image.Image, aspect: float, placed: Optional[Placement] = None) -> Image.Image:
