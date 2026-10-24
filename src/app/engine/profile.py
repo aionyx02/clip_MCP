@@ -197,6 +197,8 @@ class StageClock:
         """
         if not self._running:
             return [dict(entry) for entry in self._entries]
+        # The last stage ends now, not after the wait for the sampler below.
+        now = self._clock()
         self._stop.set()
         thread = self._thread
         if thread is not None and thread is not threading.current_thread():
@@ -204,7 +206,7 @@ class StageClock:
             # a daemon, so the job does not wait for it beyond this.
             thread.join(timeout=STOP_WAIT_SECONDS)
         with self._lock:
-            self._close(self._clock())
+            self._close(now)
             self._running = False
         return [dict(entry) for entry in self._entries]
 

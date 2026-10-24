@@ -26,13 +26,14 @@ def stage_clock(
     memory=lambda: None,
     gpu=lambda: None,
 ) -> StageClock:
-    """A clock with a fake time and fake readers.
+    """A clock with a fake time and fake readers, and no sampler of its own.
 
-    Its sampler takes one reading as it starts, for the card's baseline, then
-    none for an hour; tests that count readings or need the baseline in place
-    take their own with `_sample`.
+    Its sampler thread would take a reading as it starts, at the same moment as
+    the test; the tests take every reading themselves with `_sample` instead.
     """
-    return StageClock(sample_seconds=3600.0, clock=lambda: now[0], memory=memory, gpu=gpu)
+    clock = StageClock(sample_seconds=3600.0, clock=lambda: now[0], memory=memory, gpu=gpu)
+    clock._sample_forever = lambda stop: None
+    return clock
 
 def entry(stage: str, seconds: float, memory: Optional[int] = None, gpu: Optional[int] = None) -> Dict[str, Any]:
     """One profile entry as a job stores it."""
@@ -601,3 +602,45 @@ def test_stages_of_the_same_total_are_listed_by_name() -> None:
     jobs = [finished(JobKind.RENDER, [entry("b stage", 5.0), entry("a stage", 5.0)])]
     text = summarise(jobs, {})
     assert text.index("a stage") < text.index("b stage")
+
+def test_the_last_stage_ends_when_stop_is_called_not_after_its_wait() -> None:
+    now = [0.0]
+    clock = stage_clock(now)
+    clock.start()
+    clock.mark("checking sync")
+    now[0] = 0.05
+
+    def slow_join(timeout=None) -> None:
+        now[0] = 0.85
+
+    clock._thread.join = slow_join
+    entries = clock.stop()
+    assert entries[0]["seconds"] == pytest.approx(0.05)
+
+def test_a_stage_median_is_not_its_mean() -> None:
+    jobs = [finished(JobKind.RENDER, [entry("encoding", seconds)]) for seconds in (1.0, 2.0, 9.0)]
+    fields = row(summarise(jobs, {}), "encoding")
+    assert fields[4] == "2.000"
+
+def test_an_analysis_without_a_duration_adds_no_seconds_to_the_real_time_factor() -> None:
+    jobs = [
+        finished(JobKind.ANALYZE, [entry("transcription", 10.0)], asset_id="a"),
+        finished(JobKind.ANALYZE, [entry("transcription", 500.0)], asset_id="b"),
+    ]
+    text = summarise(jobs, {"a": asset("a", Decimal("100")), "b": asset("b", None)})
+    assert "real-time factor: 0.10x (1 job, 100.0 s of footage)" in text
+
+def test_stages_that_took_no_time_have_no_share() -> None:
+    jobs = [finished(JobKind.RENDER, [entry("checking", 0.0)])]
+    fields = row(summarise(jobs, {}), "checking")
+    assert fields[3] == "-"
+
+def test_the_card_is_read_at_least_every_sample() -> None:
+    clock = StageClock(sample_seconds=1.0, gpu_seconds=0.1)
+    assert clock._gpu_every == 1
+
+@pytest.mark.parametrize("days", [" 5 ", "1_0", "+5"])
+def test_the_profile_command_reads_days_as_plain_digits_only(days: str) -> None:
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["profile", "--days", days])
+    assert caught.value.code == 2

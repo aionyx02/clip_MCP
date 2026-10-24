@@ -267,10 +267,7 @@ def _days(text: str) -> int:
     Raises:
         argparse.ArgumentTypeError: For anything else, saying what is accepted.
     """
-    try:
-        days = int(text)
-    except ValueError:
-        days = 0
+    days = int(text) if text.isascii() and text.isdigit() else 0
     if not 1 <= days <= MOST_DAYS:
         raise argparse.ArgumentTypeError(f"a whole number of days from 1 to {MOST_DAYS}, not {text!r}")
     return days
