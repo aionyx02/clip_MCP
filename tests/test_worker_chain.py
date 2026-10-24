@@ -437,10 +437,15 @@ def test_an_analysis_lets_go_of_the_held_models_it_will_not_use(
         raise Stop()
 
     monkeypatch.setattr(renderer, "analyze_media", analyze_media)
-    context = types.SimpleNamespace(report=lambda fraction, stage=None: None, is_cancelled=lambda: False)
-    with pytest.raises(Stop):
-        renderer._run_analysis(repo, job, {"transcribe": transcribe, "diarize": diarizing}, context)
-    assert seen == [(held if kept[0] else None, (None, engine) if kept[1] else None)]
+    with open(os.path.join(job.work_dir, SPEC_FILE_NAME), "w", encoding="utf-8") as handle:
+        json.dump({"transcribe": transcribe, "diarize": diarizing}, handle)
+    clocked = []
+    monkeypatch.setattr(renderer.StageClock, "start",
+                        lambda self: clocked.append((models._speech_model, diarize._engine_cache)))
+    run_worker(repo, job.job_id)
+    # Let go before the clock reads its baseline, not only before the analysis.
+    after = (held if kept[0] else None, (None, engine) if kept[1] else None)
+    assert clocked == [after] and seen == [after]
 
 
 @pytest.mark.parametrize("has_video, expected", [(False, False), (True, True)])

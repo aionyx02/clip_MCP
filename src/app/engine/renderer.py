@@ -671,11 +671,6 @@ def _run_analysis(repo: Repository, job: Job, spec: Dict[str, Any], context: Job
     unreadable = _unreadable([asset.path])
     if unreadable:
         raise InputUnavailable(unreadable)
-    # Its memory estimate counts no model it will not use, so one a previous analysis left must go.
-    if not spec["transcribe"]:
-        models.release_speech_model()
-    if not (spec["transcribe"] and spec.get("diarize", True)):
-        diarize.release_engine()
     runs: List[speed.Measured] = []
     analysis = analyze_media(
         asset,
@@ -711,6 +706,26 @@ def _inputs(repo: Repository, job: Job, spec: Dict[str, Any]) -> List[str]:
         asset = repo.get_assets([job.asset_id]).get(job.asset_id)
         return [asset.path] if asset is not None else []
     return spec.get("inputs", [])
+
+def _let_go_of_unused_models(spec: Dict[str, Any]) -> None:
+    """Let go of a model the previous analysis in this worker left that this one will not use.
+
+    Its memory estimate counts no such model. Done before the job's clock
+    starts (`JobContext`), so the stage profile's baseline does not include a
+    model that is about to go, which would put the stages below it.
+
+    A held speech model of another name, such as the large one before a fast
+    analysis, is kept until the transcription builds the one it needs: the
+    estimate counts a model there, and the snapshot of free memory already
+    counts the one held.
+
+    Args:
+        spec: The analysis's specification.
+    """
+    if not spec["transcribe"]:
+        models.release_speech_model()
+    if not (spec["transcribe"] and spec.get("diarize", True)):
+        diarize.release_engine()
 
 def run_worker(repo: Repository, job_id: str) -> Optional[str]:
     """Run a queued job to completion and record its outcome.
@@ -749,6 +764,8 @@ def run_worker(repo: Repository, job_id: str) -> Optional[str]:
     repo.update_job(job_id, start)
     if not started:
         return None
+    if job.kind == JobKind.ANALYZE:
+        _let_go_of_unused_models(spec)
 
     status, error_message, failure = JobStatus.COMPLETED, None, None
     with JobContext(repo, job_id) as context:
