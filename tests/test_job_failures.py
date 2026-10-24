@@ -65,8 +65,8 @@ def ended(store: Repository, job: Job) -> Job:
     return store.get_job(job.job_id)
 
 def without_the_address(message: str) -> str:
-    """FFmpeg's message with the input's address taken out, which changes on every run."""
-    return re.sub(r"@ [0-9a-fA-F]+", "@ <address>", message)
+    """FFmpeg's message with the input's address taken out, which changes on every run (`0x…` on Linux)."""
+    return re.sub(r"@ (0x)?[0-9a-fA-F]+", "@ <address>", message)
 
 def read_the_voices(path: str, folder: Path) -> None:
     """Read a file's sound for the voices, the way an analysis does."""
