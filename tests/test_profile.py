@@ -156,6 +156,9 @@ class _StopAfter:
     def set(self) -> None:
         self._left = 0
 
+    def is_set(self) -> bool:
+        return False
+
 def test_the_card_is_read_every_gpu_seconds() -> None:
     reads = {"memory": 0, "card": 0}
 
@@ -169,8 +172,9 @@ def test_the_card_is_read_every_gpu_seconds() -> None:
 
     clock = StageClock(sample_seconds=0.25, gpu_seconds=1.0, memory=memory, gpu=card)
     clock._running = True
-    clock._stop = _StopAfter(12)
-    clock._sample_forever()
+    # The clock's own event would stop at once: the sampler goes by the event it was handed.
+    clock._stop = _StopAfter(0)
+    clock._sample_forever(_StopAfter(12))
     # One reading of each as the sampler starts, the card's baseline among them, then memory every tick
     # and the card every fourth.
     assert reads["memory"] == 13
@@ -207,15 +211,87 @@ def test_a_stage_shorter_than_a_sample_still_has_the_reading_taken_as_it_began()
     entries = clock.stop()
     assert entries[0]["memory_rise_mb"] == 500
 
-def test_a_restarted_clock_does_not_revive_a_sampler_stop_gave_up_on() -> None:
+def test_a_restarted_clock_does_not_revive_a_sampler_stop_gave_up_on(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(profile, "STOP_WAIT_SECONDS", 0.05)
+    hung, release = threading.Event(), threading.Event()
+    reads = {"old": 0, "new": 0}
+    run = ["old"]
+
+    def card() -> Optional[int]:
+        reads[run[0]] += 1
+        if run[0] == "old":
+            hung.set()
+            release.wait(5)
+            # The old run's card reading fails late; the new run must not stop reading its card over it.
+            return None
+        return 100 * MIB
+
+    clock = StageClock(sample_seconds=0.01, gpu_seconds=0.01, memory=lambda: 100 * MIB, gpu=card)
+    clock.start()
+    assert hung.wait(5)
+    old = clock._thread
+    clock.stop()
+    run[0] = "new"
+    clock.start()
+    release.set()
+    old.join(5)
+    assert not old.is_alive()
+    assert reads["old"] == 1
+    assert clock._baseline_gpu == 100 * MIB
+    assert clock._gpu_readable
+    clock.stop()
+
+def test_a_first_card_reading_across_the_first_stage_change_is_still_the_baseline() -> None:
+    now = [0.0]
+    clock = stage_clock(now, lambda: 100 * MIB)
+
+    changes = [0]
+
+    def card_read_across_a_change() -> int:
+        # Every reading spans a change of stage, as the first one in a real job usually does.
+        changes[0] += 1
+        clock.mark(f"stage {changes[0]}")
+        return 300 * MIB
+
+    clock._gpu = card_read_across_a_change
+    clock.start()
+    clock._sample()
+    assert clock._baseline_gpu == 300 * MIB
+    clock.stop()
+
+def test_a_stage_reported_again_reads_no_memory() -> None:
+    reads = [0]
+
+    def memory() -> int:
+        reads[0] += 1
+        return 100 * MIB
+
+    clock = stage_clock([0.0], memory)
+    clock.start()
+    clock.mark("transcribing")
+    before = reads[0]
+    clock.mark("transcribing")
+    assert reads[0] == before
+    clock.stop()
+
+def test_a_stopped_clock_takes_no_more_stages() -> None:
+    now = [0.0]
+    clock = stage_clock(now)
+    clock.start()
+    clock.mark("a")
+    now[0] = 1.0
+    entries = clock.stop()
+    clock.mark("b")
+    assert clock._stage is None
+    assert [item["stage"] for item in clock.stop()] == [item["stage"] for item in entries] == ["a"]
+
+def test_a_restarted_clock_starts_with_no_stages() -> None:
     clock = stage_clock([0.0])
     clock.start()
-    old = clock._stop
+    clock.mark("a")
     clock.stop()
     clock.start()
-    assert old.is_set()
-    assert clock._stop is not old
-    clock.stop()
+    assert clock.stop() == []
 
 def test_a_card_rise_is_none_for_a_stage_the_card_was_not_read_in() -> None:
     now = [0.0]

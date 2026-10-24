@@ -44,7 +44,7 @@ PROFILE_SAMPLE_SECONDS = 0.25
 # Provisional: how often the card's memory is read. Each reading starts nvidia-smi, about
 # 0.25 s on the machine this was written on, so this keeps it to about a tenth of the time.
 GPU_SAMPLE_SECONDS = 2.0
-# How long `stop` waits for the sampler to end. A card reading in progress can take up to
+# Provisional: how long `stop` waits for the sampler to end. A card reading in progress can take up to
 # nvidia-smi's own 10 s timeout, and the job is not kept waiting for it: the thread is a
 # daemon, so it is abandoned and ends with the process.
 STOP_WAIT_SECONDS = 1.0
@@ -153,7 +153,7 @@ class StageClock:
         # A new event rather than clearing the old one: a sampler `stop` stopped waiting for keeps
         # the old one, already set, and ends when its reading returns instead of running again.
         self._stop = threading.Event()
-        self._thread = threading.Thread(target=self._sample_forever, daemon=True)
+        self._thread = threading.Thread(target=self._sample_forever, args=(self._stop,), daemon=True)
         self._thread.start()
 
     def mark(self, stage: str) -> None:
@@ -208,7 +208,7 @@ class StageClock:
             self._running = False
         return [dict(entry) for entry in self._entries]
 
-    def _sample(self, card: bool = True) -> None:
+    def _sample(self, card: bool = True, stop: Optional[threading.Event] = None) -> None:
         """Take one reading of memory, and of the card when asked, and fold it into the current stage.
 
         The readings are taken outside the lock, so a slow one never holds up `mark`.
@@ -218,12 +218,15 @@ class StageClock:
 
         Args:
             card: Whether to read the card as well.
+            stop: The stop event of the sampler taking the reading. Once it is
+                set, the reading is dropped: it is from a run already stopped,
+                even if the clock has been started again since.
         """
         begun = self._stages_begun
         memory = self._memory()
         gpu = self._gpu() if card and self._gpu_readable else None
         with self._lock:
-            if not self._running:
+            if not self._running or (stop is not None and stop.is_set()):
                 return
             if card and self._gpu_readable and gpu is None:
                 # A card that could not be read once is not asked again.
@@ -237,15 +240,21 @@ class StageClock:
                 self._gpu_read_in_stage = True
             self._fold(memory, gpu)
 
-    def _sample_forever(self) -> None:
-        """Read memory every `sample_seconds`, and the card every `gpu_seconds`, until the clock is stopped."""
+    def _sample_forever(self, stop: threading.Event) -> None:
+        """Read memory every `sample_seconds`, and the card every `gpu_seconds`, until `stop` is set.
+
+        Args:
+            stop: This sampler's own stop event, kept rather than read off the
+                clock, so a sampler `stop` gave up waiting for ends when its
+                reading returns instead of carrying on into the next run.
+        """
         # The card's baseline is read here, as soon as the thread starts, rather than at the first scheduled
         # reading, by when the job may already have put a model on the card.
-        self._sample(card=True)
+        self._sample(card=True, stop=stop)
         ticks = 0
-        while not self._stop.wait(self._sample_seconds):
+        while not stop.wait(self._sample_seconds):
             ticks += 1
-            self._sample(card=ticks % self._gpu_every == 0)
+            self._sample(card=ticks % self._gpu_every == 0, stop=stop)
             if not self._running:
                 return
 
