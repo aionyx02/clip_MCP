@@ -13,6 +13,21 @@ footage. Nor is a cut that lands inside a word told apart from one that lands
 in a pause: that needs the transcript, which these functions do not read. So
 neither is guessed at; both are left to be read from the footage.
 
+Only the cut is compared: the clips on the base video track, and the
+captions. Music, B-roll and anything else beside the cut are not counted.
+Footage is matched by what it shows, not by its clip ID: a recompile names
+every clip after its place, and a split leaves two clips where one was. So a
+move along the timeline and a change of speed are not counted — only which
+footage is shown. A restore or an undo is a new version like any other, so
+what it puts back is counted again, under whoever restored it. A branch keeps
+its own history, so hand edits made on a branch before the branch's first AI
+version with clips in it are not counted.
+
+A version that cannot be read as a project is not compared at all: the
+comparison runs from the last version that could be read to the next one that
+could, and the ones skipped are counted as `unreadable`. Nothing about them
+is guessed at.
+
 Reading the history lives in `main`, which imports the workspace only when it
 is called, so importing this module stays light and pure.
 """
@@ -21,8 +36,12 @@ import argparse
 import json
 import statistics
 import unicodedata
-from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
+from pydantic import ValidationError
+
+from app.engine.compare import match_clips, shown
+from app.models.timeline.parts import TOUCHING_SECONDS, Clip, Project, SubtitleCue, TimeRange
 from app.storage.history import Version
 
 # Who the editor app writes as. Said here rather than imported from the UI, which
@@ -53,16 +72,25 @@ CAUSE_LABELS = {
     "wrong_piece": "選錯片段",
 }
 
-def _clips_of(project: Optional[Mapping]) -> List[Mapping]:
-    """Every clip in a project, from every track.
+def _readable(project: Optional[Mapping]) -> Optional[Project]:
+    """A stored project as a model, or None when it cannot be read as one."""
+    if project is None:
+        return None
+    try:
+        return Project.model_validate(project)
+    except ValidationError:
+        return None
 
-    Args:
-        project: The project as its file holds it, or None.
+def _read(versions: List[Tuple[Version, Optional[dict]]]) -> List[Tuple[Version, Optional[Project]]]:
+    """Each version with its project read as a model, None where it cannot be."""
+    return [(version, _readable(project)) for version, project in versions]
 
-    Returns:
-        The clips, in the order the tracks and their clips are stored.
-    """
-    return [clip for track in (project or {}).get("tracks", []) for clip in track.get("clips", [])]
+def _first(read: List[Tuple[Version, Optional[Project]]]) -> Optional[int]:
+    """The index of the first AI version whose cut has clips in it, or None."""
+    for index, (version, project) in enumerate(read):
+        if version.author.startswith("AI") and project is not None and shown(project):
+            return index
+    return None
 
 def first_cut(versions: List[Tuple[Version, Optional[dict]]]) -> Optional[int]:
     """The first version the AI made a cut in.
@@ -73,52 +101,102 @@ def first_cut(versions: List[Tuple[Version, Optional[dict]]]) -> Optional[int]:
 
     Returns:
         The index of the first version written by an AI author whose project
-        has at least one clip, or None when there is no such version.
+        can be read and has at least one clip in its cut (the base video
+        track), or None when there is no such version.
     """
-    for index, (version, project) in enumerate(versions):
-        if version.author.startswith("AI") and _clips_of(project):
-            return index
-    return None
+    return _first(_read(versions))
 
-def _seconds(value: Any) -> float:
-    """A stored time as a float, or 0 when it is missing or unreadable."""
-    try:
-        return float(value)
-    except (TypeError, ValueError):
+def _continues(one: Clip, other: Clip) -> bool:
+    """Whether a clip picks up exactly where the one before it left off, in its file and on the timeline."""
+    return (one.card is None and other.card is None and one.asset_id == other.asset_id
+            and one.speed == other.speed
+            and abs(other.source_range.start - one.source_range.end) <= TOUCHING_SECONDS
+            and abs(other.timeline_in - one.timeline_out) <= TOUCHING_SECONDS)
+
+def _joined(clips: List[Clip]) -> List[Clip]:
+    """The cut's clips with each unbroken run of one file joined into one clip.
+
+    A split leaves two clips that together show what the one did; joined, a
+    split compares as no change at all.
+
+    Args:
+        clips: The base track's clips, in timeline order.
+
+    Returns:
+        The clips, each run that `_continues` joined made into one.
+    """
+    runs: List[Clip] = []
+    for clip in clips:
+        if runs and _continues(runs[-1], clip):
+            last = runs[-1]
+            runs[-1] = last.model_copy(update={
+                "source_range": TimeRange(start=last.source_range.start, end=clip.source_range.end),
+            })
+        else:
+            runs.append(clip)
+    return runs
+
+def _pairs(count: int, other_count: int, shared: Callable[[int, int], float]) -> List[Tuple[int, int]]:
+    """Pair two lists greedily, most shared first, each item in at most one pair; nothing shared, no pair.
+
+    Args:
+        count: How many items the first list has.
+        other_count: How many the second has.
+        shared: How much an item of the first shares with one of the second.
+
+    Returns:
+        `(index, other_index)` pairs.
+    """
+    candidates = sorted(
+        ((shared(index, other_index), index, other_index)
+         for index in range(count) for other_index in range(other_count)),
+        key=lambda item: -item[0],
+    )
+    used, other_used, pairs = set(), set(), []
+    for amount, index, other_index in candidates:
+        if amount <= 0:
+            break
+        if index in used or other_index in other_used:
+            continue
+        used.add(index)
+        other_used.add(other_index)
+        pairs.append((index, other_index))
+    return pairs
+
+def _on_timeline_together(one: Clip, other: Clip) -> float:
+    """How many seconds of the timeline two clips both cover."""
+    return max(0.0, float(min(one.timeline_out, other.timeline_out) - max(one.timeline_in, other.timeline_in)))
+
+def _same_words(one: SubtitleCue, other: SubtitleCue) -> float:
+    """How many seconds of the same file two captions both cover."""
+    if one.asset_id != other.asset_id:
         return 0.0
+    return max(0.0, float(min(one.source_end, other.source_end) - max(one.source_start, other.source_start)))
 
-def _edges(clip: Mapping) -> Tuple[float, float]:
-    """The two source edges of a clip, start and end."""
-    source = clip.get("source_range") or {}
-    return _seconds(source.get("start")), _seconds(source.get("end"))
-
-def _clip_map(project: Optional[Mapping]) -> Dict[str, Mapping]:
-    """A project's clips by their ID."""
-    return {str(clip.get("id")): clip for clip in _clips_of(project)}
-
-def _cue_map(project: Optional[Mapping]) -> Dict[str, Mapping]:
-    """A project's captions by their ID."""
-    return {str(cue.get("id", "")): cue for cue in (project or {}).get("subtitles", [])}
-
-def _tight(text: Any) -> str:
+def _tight(text: str) -> str:
     """Text with every space, tab and line break taken out, for comparing what was said."""
-    return "".join(str(text or "").split())
+    return "".join(text.split())
 
-def _times(cue: Mapping) -> Tuple[float, float]:
-    """The source stretch a caption covers."""
-    return _seconds(cue.get("source_start")), _seconds(cue.get("source_end"))
-
-def compare(before: Optional[Mapping], after: Optional[Mapping]) -> Dict[str, Any]:
+def compare(before: Project, after: Project) -> Dict[str, Any]:
     """What changed between two versions of a project, counted.
 
-    Clips are matched by their ID. A clip with the same ID but another file is
-    replaced; one that is only in one version was removed or added; for the
-    rest, every source edge that moved is listed by how far it moved.
+    Only the cut is compared: the clips on the base video track. Music beds,
+    B-roll and anything else above or beside it are not corrections to the
+    cut and are not counted. Clips are matched by the footage they show, not
+    by their ID, which a recompile renames: first each unbroken run of one
+    file is joined (see `_joined`), so a split counts as nothing; then the
+    clips are paired by `compare.match_clips`. A pair's source edges that
+    moved are listed by how far each moved. A clip left unpaired before and
+    one left unpaired after that cover the same stretch of the timeline count
+    once, as replaced; the rest were removed or added. Moving a clip along the
+    timeline or changing its speed is not counted: only which footage is shown.
 
-    Captions are matched by their ID. A caption whose words changed is
-    rewritten, or only re-broken when nothing but its whitespace and line
-    breaks changed; one whose words are the same but whose times moved is
-    retimed.
+    Captions are paired by what they say where: the most shared seconds of
+    the same file first, each caption in at most one pair, which survives
+    captions being made again and renumbered. A paired caption whose words
+    changed is rewritten, or only re-broken when nothing but its whitespace
+    and line breaks changed; one whose words are the same but whose times
+    moved is retimed. Unpaired ones were removed or added.
 
     Args:
         before: The project as it was.
@@ -129,41 +207,36 @@ def compare(before: Optional[Mapping], after: Optional[Mapping]) -> Dict[str, An
         absolute moves of changed source edges, in seconds), and `captions`
         with `retimed`, `rewritten`, `rebroken`, `added` and `removed`.
     """
+    old, new = _joined(shown(before)), _joined(shown(after))
     clips: Dict[str, Any] = {"removed": 0, "added": 0, "replaced": 0, "edges_moved": []}
-    old, new = _clip_map(before), _clip_map(after)
-    for clip_id, clip in old.items():
-        if clip_id not in new:
-            clips["removed"] += 1
-            continue
-        other = new[clip_id]
-        if clip.get("asset_id") != other.get("asset_id"):
-            clips["replaced"] += 1
-            continue
-        for was, now in zip(_edges(clip), _edges(other)):
-            if abs(now - was) > 1e-9:
-                clips["edges_moved"].append(round(abs(now - was), 3))
-    for clip_id in new:
-        if clip_id not in old:
-            clips["added"] += 1
+    paired = match_clips(old, new)
+    for clip, other in paired:
+        for was, now in ((clip.source_range.start, other.source_range.start),
+                         (clip.source_range.end, other.source_range.end)):
+            if was != now:
+                clips["edges_moved"].append(round(abs(float(now - was)), 3))
+    gone = [clip for clip in old if all(clip is not one for one, _ in paired)]
+    come = [clip for clip in new if all(clip is not other for _, other in paired)]
+    swapped = _pairs(len(gone), len(come), lambda index, other: _on_timeline_together(gone[index], come[other]))
+    clips["replaced"] = len(swapped)
+    clips["removed"] = len(gone) - len(swapped)
+    clips["added"] = len(come) - len(swapped)
 
     captions: Dict[str, int] = {"retimed": 0, "rewritten": 0, "rebroken": 0, "added": 0, "removed": 0}
-    before_cues, after_cues = _cue_map(before), _cue_map(after)
-    for cue_id, cue in before_cues.items():
-        if cue_id not in after_cues:
-            captions["removed"] += 1
-            continue
-        other = after_cues[cue_id]
-        was, now = str(cue.get("text") or ""), str(other.get("text") or "")
-        if was != now:
-            if _tight(was) == _tight(now):
+    was_said, now_said = before.subtitles, after.subtitles
+    matched = _pairs(len(was_said), len(now_said),
+                     lambda index, other: _same_words(was_said[index], now_said[other]))
+    for index, other_index in matched:
+        cue, other = was_said[index], now_said[other_index]
+        if cue.text != other.text:
+            if _tight(cue.text) == _tight(other.text):
                 captions["rebroken"] += 1
             else:
                 captions["rewritten"] += 1
-        elif _times(cue) != _times(other):
+        elif (cue.source_start, cue.source_end) != (other.source_start, other.source_end):
             captions["retimed"] += 1
-    for cue_id in after_cues:
-        if cue_id not in before_cues:
-            captions["added"] += 1
+    captions["removed"] = len(was_said) - len(matched)
+    captions["added"] = len(now_said) - len(matched)
 
     return {"clips": clips, "captions": captions}
 
@@ -256,35 +329,45 @@ def _hand_minutes(versions: List[Version]) -> float:
 
 def _changes_since_first_cut(
     versions: List[Tuple[Version, Optional[dict]]],
-) -> Optional[Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Version]]]:
+) -> Optional[Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Version], int]]:
     """Compare every version after the AI's first cut with the one before it.
+
+    A version that cannot be read as a project is skipped: the next one that
+    can is compared with the last one that could.
 
     Args:
         versions: A project's versions, oldest first.
 
     Returns:
-        The compared changes made by hand, those made by the AI, and the
-        versions made by hand — or None when the project has no first cut.
-        The AI's are every AI version after the first cut: those the person
-        asked for, and those the AI went on to make by itself (captions,
-        fixes the checks asked for), which the history does not tell apart.
-        Versions written by the server itself are neither.
+        The compared changes made by hand, those made by the AI, the versions
+        made by hand, and how many versions after the first cut could not be
+        read — or None when the project has no first cut. The AI's are every
+        AI version after the first cut: those the person asked for, and those
+        the AI went on to make by itself (captions, fixes the checks asked
+        for), which the history does not tell apart. Versions written by the
+        server itself are neither, but the next version is compared with them.
     """
-    start = first_cut(versions)
+    read = _read(versions)
+    start = _first(read)
     if start is None:
         return None
     by_hand: List[Dict[str, Any]] = []
     by_ai: List[Dict[str, Any]] = []
     hand_versions: List[Version] = []
-    for index in range(start + 1, len(versions)):
-        version, project = versions[index]
-        change = compare(versions[index - 1][1] or {}, project or {})
+    unreadable = 0
+    previous = read[start][1]
+    for version, project in read[start + 1:]:
+        if project is None:
+            unreadable += 1
+            continue
+        change = compare(previous, project)
+        previous = project
         if version.author == EDITOR_AUTHOR:
             by_hand.append(change)
             hand_versions.append(version)
         elif version.author.startswith("AI"):
             by_ai.append(change)
-    return by_hand, by_ai, hand_versions
+    return by_hand, by_ai, hand_versions, unreadable
 
 def _name_of(versions: List[Tuple[Version, Optional[dict]]]) -> str:
     """The last name a project was given, or an empty string."""
@@ -298,11 +381,13 @@ def _project_result(
     by_hand: List[Dict[str, Any]],
     by_ai: List[Dict[str, Any]],
     hand_versions: List[Version],
+    unreadable: int,
 ) -> Dict[str, Any]:
     """One project's summary from its compared changes."""
     combined = _summarise_changes([*by_hand, *by_ai])
     return {
         "name": _name_of(versions),
+        "unreadable": unreadable,
         "by_hand": _summarise_changes(by_hand),
         "by_ai": _summarise_changes(by_ai),
         "causes": combined["causes"],
@@ -320,8 +405,10 @@ def summarise_project(versions: List[Tuple[Version, Optional[dict]]]) -> Optiona
     Returns:
         `name`, `by_hand` and `by_ai` (each the counts from
         `_summarise_changes`), the two together as `causes` and `edge_moves`,
-        and `hand_minutes` — an estimate from the versions' timestamps, not a
-        measurement; None when the project has no first cut.
+        `hand_minutes` — an estimate from the versions' timestamps, not a
+        measurement — and `unreadable`, how many versions after the first cut
+        could not be read and were skipped; None when the project has no
+        first cut.
     """
     changes = _changes_since_first_cut(versions)
     if changes is None:
@@ -329,9 +416,8 @@ def summarise_project(versions: List[Tuple[Version, Optional[dict]]]) -> Optiona
     return _project_result(versions, *changes)
 
 def _kinds_of(versions: List[Tuple[Version, Optional[dict]]], kinds: Mapping[str, List[str]]) -> List[str]:
-    """The footage kinds a project was cut from, by its clips' assets."""
-    assets = {str(clip.get("asset_id")) for _, project in versions for clip in _clips_of(project)
-              if clip.get("asset_id")}
+    """The footage kinds a project was cut from, by the files of the clips in its cut."""
+    assets = {clip.asset_id for _, project in _read(versions) if project is not None for clip in shown(project)}
     found = {kind for asset_id in assets for kind in kinds.get(asset_id, [])}
     return sorted(found)
 
@@ -376,8 +462,8 @@ def summarise(
         if changes is None:
             results[project_id] = None
             continue
-        by_hand, by_ai, hands = changes
-        results[project_id] = _project_result(versions, by_hand, by_ai, hands)
+        by_hand, by_ai, hands, unreadable = changes
+        results[project_id] = _project_result(versions, by_hand, by_ai, hands, unreadable)
         all_by_hand.extend(by_hand)
         all_by_ai.extend(by_ai)
         all_hands.extend(hands)
@@ -438,7 +524,8 @@ def report(summary: Mapping[str, Any]) -> str:
         The table: per project and in total, versions by hand and by
         the AI, the counts by cause, edge-move median and largest, and the
         estimated minutes spent editing by hand. Causes are ordered by their
-        total count, largest first.
+        total count, largest first. A line follows for each project that had
+        versions that could not be read.
     """
     totals = summary.get("totals") or {}
     causes = sorted(CAUSES, key=lambda cause: -int((totals.get("causes") or {}).get(cause, 0)))
@@ -451,10 +538,13 @@ def report(summary: Mapping[str, Any]) -> str:
             continue
         rows.append(_row(one.get("name") or project_id, one, causes))
     rows.append(_row("合計", totals, causes))
+    skipped = [f"{one.get('name') or project_id}：{one['unreadable']} 個版本讀不出來，跳過沒有比較。"
+               for project_id, one in projects.items() if one is not None and one.get("unreadable")]
     return "\n".join([
         "AI 第一次剪完之後改了什麼：手動的與 AI 的版本都算（依規則計數，沒有模型在裡面）",
         _table(headers, rows),
         "手動分鐘是從版本的時間戳推算的估計，不是量出來的；節奏與剪在字中間無法用這些規則分辨。",
+        *skipped,
     ])
 
 def main(argv: Optional[List[str]] = None) -> None:
@@ -481,9 +571,13 @@ def main(argv: Optional[List[str]] = None) -> None:
     projects: Dict[str, List[Tuple[Version, Optional[dict]]]] = {}
     for project_id in project_ids:
         newest_first = runtime.history.versions_of("projects/", f"{project_id}.json", VERSION_LIMIT)
-        projects[project_id] = [
-            (version, project_json_at(project_id, version.commit)) for version in reversed(newest_first)
-        ]
+        projects[project_id] = []
+        for version in reversed(newest_first):
+            try:
+                stored = project_json_at(project_id, version.commit)
+            except ValueError:
+                stored = None  # Not even JSON: counted as unreadable, like a project that fails to validate.
+            projects[project_id].append((version, stored))
     summary = summarise(projects)
     if arguments.json:
         print(json.dumps(summary, ensure_ascii=False, indent=2))
