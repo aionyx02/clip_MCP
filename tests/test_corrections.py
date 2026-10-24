@@ -47,6 +47,10 @@ def project(*clips: dict, cues: tuple = ()) -> dict:
             "subtitles": list(cues)}
 
 
+# A clip showing the first ten seconds of file `a`, so captions there are in the cut.
+SHOWN = {"id": "shown", "asset_id": "a", "source_range": {"start": 0, "end": 10}, "timeline_in": 0}
+
+
 def compared(before: dict, after: dict) -> dict:
     """What `compare` counts between two projects as their files hold them."""
     return corrections.compare(Project.model_validate(before), Project.model_validate(after))
@@ -87,14 +91,14 @@ def test_compare_counts_removed_added_replaced_and_both_edge_moves() -> None:
 
 
 def test_compare_counts_each_kind_of_caption_change() -> None:
-    before = project(cues=(
+    before = project(SHOWN, cues=(
         cue("c1", "你好世界", 0.0, 1.0),
         cue("c2", "再見", 1.0, 2.0),
         cue("c3", "刪掉", 2.0, 3.0),
         cue("c4", "換行", 3.0, 4.0),
         cue("c5", "沒變", 4.0, 5.0),
     ))
-    after = project(cues=(
+    after = project(SHOWN, cues=(
         cue("c1", "你好世界", 0.5, 1.5),
         cue("c2", "珍重", 1.0, 2.0),
         cue("c4", "換\n行", 3.0, 4.0),
@@ -107,16 +111,16 @@ def test_compare_counts_each_kind_of_caption_change() -> None:
 
 
 def test_captions_are_paired_by_what_they_say_where_not_by_their_id() -> None:
-    before = project(cues=(cue("c1", "一", 0.0, 1.0), cue("c2", "二", 1.0, 2.0), cue("c3", "三", 2.0, 3.0)))
-    after = project(cues=(cue("c1", "二", 1.0, 2.0), cue("c2", "三", 2.0, 3.0)))
+    before = project(SHOWN, cues=(cue("c1", "一", 0.0, 1.0), cue("c2", "二", 1.0, 2.0), cue("c3", "三", 2.0, 3.0)))
+    after = project(SHOWN, cues=(cue("c1", "二", 1.0, 2.0), cue("c2", "三", 2.0, 3.0)))
     assert compared(before, after)["captions"] == {
         "retimed": 0, "rewritten": 0, "rebroken": 0, "added": 0, "removed": 1,
     }
 
 
 def test_a_caption_whose_words_and_times_both_change_counts_once_as_rewritten() -> None:
-    before = project(cues=(cue("c1", "你好", 0.0, 1.0),))
-    after = project(cues=(cue("c1", "妳好", 0.2, 1.2),))
+    before = project(SHOWN, cues=(cue("c1", "你好", 0.0, 1.0),))
+    after = project(SHOWN, cues=(cue("c1", "妳好", 0.2, 1.2),))
     assert compared(before, after)["captions"] == {
         "retimed": 0, "rewritten": 1, "rebroken": 0, "added": 0, "removed": 0,
     }
@@ -294,7 +298,7 @@ def test_a_music_bed_lengthened_counts_nothing(kept_history, media: Path, capsys
     assert one["causes"] == {cause: 0 for cause in corrections.CAUSES}
 
 
-def test_captions_made_again_after_a_line_left_the_cut_count_one_removal(
+def test_captions_made_again_after_a_line_left_the_cut_count_nothing(
     kept_history, media: Path, capsys,
 ) -> None:
     asset = catalog.import_asset(str(media / "wide.mp4"))["id"]
@@ -314,9 +318,10 @@ def test_captions_made_again_after_a_line_left_the_cut_count_one_removal(
     assert [cue.text for cue in repo.get_project(project_id).subtitles] == ["第二句", "第三句"]
 
     one = summary_of(capsys, "--project", project_id)["projects"][project_id]
-    both = {key: one["by_hand"]["captions"][key] + one["by_ai"]["captions"][key]
-            for key in one["by_ai"]["captions"]}
-    assert both == {"retimed": 0, "rewritten": 0, "rebroken": 0, "added": 3, "removed": 1}
+    # The first captions are not corrections, and the line that left went with its footage.
+    assert one["by_ai"]["versions"] == 2
+    assert one["causes"]["misheard"] == 0
+    assert one["by_ai"]["captions"] == {"retimed": 0, "rewritten": 0, "rebroken": 0, "added": 0, "removed": 0}
 
 
 def _plan(media: Path, picks: tuple) -> tuple:
@@ -369,3 +374,129 @@ def test_a_stored_version_that_is_not_even_json_is_skipped(kept_history, media: 
     assert one["unreadable"] == 1
     assert one["by_hand"]["versions"] == 1
     assert one["by_hand"]["causes"]["wrong_piece"] == 1
+
+
+NO_CAPTION_CHANGE = {"retimed": 0, "rewritten": 0, "rebroken": 0, "added": 0, "removed": 0}
+NO_CLIP_CHANGE = {"removed": 0, "added": 0, "replaced": 0, "edges_moved": []}
+
+
+def test_cutting_a_pause_out_of_a_shot_moves_one_cut_point(kept_history, media: Path, capsys) -> None:
+    asset = catalog.import_asset(str(media / "wide.mp4"))["id"]
+    with kept_history.step(AI):
+        project_id = build_project([video_track(), insert("a", asset, 0, 6)])
+    with kept_history.step(corrections.EDITOR_AUTHOR):
+        edit(project_id, [
+            {"action": "split_clip", "track_id": "main", "clip_id": "a", "new_clip_id": "a2", "at": 2},
+            {"action": "trim_clip", "track_id": "main", "clip_id": "a2", "new_source_range": {"start": 2.5, "end": 6}},
+        ])
+
+    one = summary_of(capsys, "--project", project_id)["projects"][project_id]
+    assert one["by_hand"]["causes"] == {**{cause: 0 for cause in corrections.CAUSES}, "cut_point": 1}
+    assert one["by_hand"]["edge_moves"] == {"count": 1, "median": 0.5, "largest": 0.5}
+
+
+def test_a_speed_change_after_a_split_counts_nothing(kept_history, media: Path, capsys) -> None:
+    asset = catalog.import_asset(str(media / "wide.mp4"))["id"]
+    with kept_history.step(AI):
+        project_id = build_project([video_track(), insert("a", asset, 0, 6)])
+    with kept_history.step(corrections.EDITOR_AUTHOR):
+        edit(project_id, [
+            {"action": "split_clip", "track_id": "main", "clip_id": "a", "new_clip_id": "a2", "at": 2},
+            {"action": "set_clip_speed", "track_id": "main", "clip_id": "a2", "speed": 2.0},
+        ])
+
+    one = summary_of(capsys, "--project", project_id)["projects"][project_id]
+    assert one["by_hand"]["versions"] == 1
+    assert one["causes"] == {cause: 0 for cause in corrections.CAUSES}
+
+
+def test_two_shots_of_one_file_swapped_count_nothing() -> None:
+    before = project(clip("x", start=0, end=2, timeline_in=0), clip("y", start=2, end=4, timeline_in=2))
+    after = project(clip("y", start=2, end=4, timeline_in=0), clip("x", start=0, end=2, timeline_in=2))
+    assert compared(before, after)["clips"] == NO_CLIP_CHANGE
+
+
+def test_shots_of_one_file_far_apart_on_the_timeline_are_compared_as_what_they_show() -> None:
+    # Touching in the file, with another file between them on the timeline: still one stretch of `a`.
+    before = project(clip("x", start=0, end=2, timeline_in=0), clip("o", asset="other", timeline_in=2),
+                     clip("y", start=2, end=4, timeline_in=3))
+    after = project(clip("x", start=0, end=2, timeline_in=0), clip("o", asset="other", timeline_in=2),
+                    clip("y", start=2.4, end=4, timeline_in=3))
+    assert compared(before, after)["clips"] == {**NO_CLIP_CHANGE, "edges_moved": [0.4]}
+
+
+def test_a_title_card_renamed_by_a_recompile_is_not_counted() -> None:
+    card = {"title": "第一天"}
+    before = project(clip("t1", asset="a", end=2, timeline_in=0) | {"card": card}, clip("p001", start=5, end=6,
+                                                                                         timeline_in=2))
+    after = project(clip("p001", asset="a", end=2, timeline_in=0) | {"card": card}, clip("p002", start=5, end=6,
+                                                                                           timeline_in=2))
+    assert compared(before, after)["clips"] == NO_CLIP_CHANGE
+
+
+def test_a_cut_of_only_a_title_card_is_not_the_first_cut() -> None:
+    versions = [
+        version(AI, at(1), project(clip("t1", end=2) | {"card": {"title": "片頭"}})),
+        version("編輯器", at(2), project(clip("a", end=2))),
+    ]
+    assert corrections.first_cut(versions) is None
+
+
+def test_a_caption_deleted_from_footage_still_in_the_cut_counts_as_misheard() -> None:
+    before = project(SHOWN, cues=(cue("c1", "真的有說", 0, 1), cue("c2", "沒有人說過", 2, 3)))
+    after = project(SHOWN, cues=(cue("c1", "真的有說", 0, 1),))
+    changed = compared(before, after)
+    assert changed["captions"] == {**NO_CAPTION_CHANGE, "removed": 1}
+    assert corrections.classify(changed)["misheard"] == 1
+
+
+def test_a_caption_that_leaves_with_its_footage_is_not_counted() -> None:
+    before = project(SHOWN, clip("b", start=20, end=22, timeline_in=10),
+                     cues=(cue("c1", "留下", 0, 1), cue("c2", "跟著走", 20, 21)))
+    after = project(SHOWN, cues=(cue("c1", "留下", 0, 1),))
+    assert compared(before, after)["captions"] == NO_CAPTION_CHANGE
+
+
+def test_the_first_captions_and_captions_for_new_footage_are_not_corrections() -> None:
+    first = compared(project(SHOWN), project(SHOWN, cues=(cue("c1", "第一句", 0, 1),)))
+    assert first["captions"] == NO_CAPTION_CHANGE
+    longer = compared(project(SHOWN, cues=(cue("c1", "第一句", 0, 1),)),
+                      project(SHOWN, clip("b", start=20, end=22, timeline_in=10),
+                              cues=(cue("c1", "第一句", 0, 1), cue("c2", "新的", 20, 21))))
+    assert longer["captions"] == NO_CAPTION_CHANGE
+
+
+def test_a_missed_line_added_to_captioned_footage_counts_as_misheard() -> None:
+    before = project(SHOWN, cues=(cue("c1", "第一句", 0, 1),))
+    after = project(SHOWN, cues=(cue("c1", "第一句", 0, 1), cue("c2", "漏掉的", 3, 4)))
+    assert compared(before, after)["captions"] == {**NO_CAPTION_CHANGE, "added": 1}
+
+
+def test_a_caption_moved_further_than_its_length_is_retimed() -> None:
+    before = project(SHOWN, cues=(cue("c1", "晚一點", 1, 2),))
+    after = project(SHOWN, cues=(cue("c1", "晚一點", 5, 6),))
+    assert compared(before, after)["captions"] == {**NO_CAPTION_CHANGE, "retimed": 1}
+
+
+def test_a_caption_split_in_two_or_two_joined_is_re_broken_once() -> None:
+    whole = cue("c1", "我們今天去海邊", 0, 4)
+    halves = (cue("c1", "我們今天", 0, 2), cue("c2", "去海邊", 2, 4))
+    assert compared(project(SHOWN, cues=(whole,)), project(SHOWN, cues=halves))["captions"] == {
+        **NO_CAPTION_CHANGE, "rebroken": 1}
+    assert compared(project(SHOWN, cues=halves), project(SHOWN, cues=(whole,)))["captions"] == {
+        **NO_CAPTION_CHANGE, "rebroken": 1}
+
+
+def test_captions_of_different_files_at_the_same_seconds_are_not_paired() -> None:
+    other = {"id": "o", "asset_id": "b", "source_range": {"start": 0, "end": 10}, "timeline_in": 10}
+    before = project(SHOWN, other, cues=(cue("c1", "甲說的", 0, 1, asset="a"),))
+    after = project(SHOWN, other, cues=(cue("c1", "乙說的", 0, 1, asset="b"),))
+    assert compared(before, after)["captions"] == {**NO_CAPTION_CHANGE, "added": 1, "removed": 1}
+
+
+def test_a_renamed_project_is_reported_by_its_newest_name() -> None:
+    renamed = project(clip("a"))
+    renamed["name"] = "新名字"
+    summary = corrections.summarise_project([version(AI, at(1), project(clip("a"))),
+                                             version("編輯器", at(2), renamed)])
+    assert summary is not None and summary["name"] == "新名字"

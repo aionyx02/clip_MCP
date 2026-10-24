@@ -1,7 +1,7 @@
 """What people corrected after the AI's first cut, counted by rule.
 
 Every version of a project is compared with the one before it, once the AI
-has made a first cut that has clips in it. A change is counted against the
+has made a first cut that shows footage. A change is counted against the
 piece of the cut it touched: a caption heard wrong, a line broken in another
 place, a caption put at another time, a cut point nudged, or a different
 stretch of footage chosen.
@@ -13,15 +13,18 @@ footage. Nor is a cut that lands inside a word told apart from one that lands
 in a pause: that needs the transcript, which these functions do not read. So
 neither is guessed at; both are left to be read from the footage.
 
-Only the cut is compared: the clips on the base video track, and the
-captions. Music, B-roll and anything else beside the cut are not counted.
-Footage is matched by what it shows, not by its clip ID: a recompile names
-every clip after its place, and a split leaves two clips where one was. So a
-move along the timeline and a change of speed are not counted — only which
-footage is shown. A restore or an undo is a new version like any other, so
-what it puts back is counted again, under whoever restored it. A branch keeps
-its own history, so hand edits made on a branch before the branch's first AI
-version with clips in it are not counted.
+Only the cut is compared: the footage the base video track shows, and the
+captions. Title cards, music, B-roll and anything else beside the cut are not
+counted. Footage is compared by which stretches of each file are shown, never
+by clip: a recompile names every clip after its place, and a split leaves two
+clips where one was. So a split, a swap, a move along the timeline and a
+change of speed are not counted, and footage shown twice counts once — only
+which footage is shown. Captions are matched by what they say where, and a
+caption that comes or goes with its footage is not a correction. A restore or
+an undo is a new version like any other, so what it puts back is counted
+again, under whoever restored it. A branch keeps its own history, so hand
+edits made on a branch before the branch's first AI version with footage in
+it are not counted.
 
 A version that cannot be read as a project is not compared at all: the
 comparison runs from the last version that could be read to the next one that
@@ -36,17 +39,20 @@ import argparse
 import json
 import statistics
 import unicodedata
+from dataclasses import dataclass
 from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from pydantic import ValidationError
 
-from app.engine.compare import match_clips, shown
-from app.models.timeline.parts import TOUCHING_SECONDS, Clip, Project, SubtitleCue, TimeRange
+from app.engine.compare import shown
+from app.models.timeline.parts import TOUCHING_SECONDS, Clip, Project, SubtitleCue
 from app.storage.history import Version
 
 # Who the editor app writes as. Said here rather than imported from the UI, which
 # would drag the web app into a command that only reads the history.
 EDITOR_AUTHOR = "編輯器"
+# Two stretches of a file this close are one: the server's own tolerance for touching.
+TOUCHING = float(TOUCHING_SECONDS)
 # Provisional: a source edge that moves no more than this is a nudge of the same cut
 # point, not a different stretch of the file. It separates `cut_point` from
 # `wrong_piece`; below it a trim looks like the same shot, above it like another take.
@@ -85,10 +91,14 @@ def _read(versions: List[Tuple[Version, Optional[dict]]]) -> List[Tuple[Version,
     """Each version with its project read as a model, None where it cannot be."""
     return [(version, _readable(project)) for version, project in versions]
 
+def _footage_clips(project: Project) -> List[Clip]:
+    """The clips of the cut that show footage: the base video track's, title cards left out."""
+    return [clip for clip in shown(project) if clip.card is None]
+
 def _first(read: List[Tuple[Version, Optional[Project]]]) -> Optional[int]:
-    """The index of the first AI version whose cut has clips in it, or None."""
+    """The index of the first AI version whose cut shows footage, or None."""
     for index, (version, project) in enumerate(read):
-        if version.author.startswith("AI") and project is not None and shown(project):
+        if version.author.startswith("AI") and project is not None and _footage_clips(project):
             return index
     return None
 
@@ -101,40 +111,80 @@ def first_cut(versions: List[Tuple[Version, Optional[dict]]]) -> Optional[int]:
 
     Returns:
         The index of the first version written by an AI author whose project
-        can be read and has at least one clip in its cut (the base video
-        track), or None when there is no such version.
+        can be read and whose cut (the base video track) shows footage — a
+        title card alone is not a cut — or None when there is no such version.
     """
     return _first(_read(versions))
 
-def _continues(one: Clip, other: Clip) -> bool:
-    """Whether a clip picks up exactly where the one before it left off, in its file and on the timeline."""
-    return (one.card is None and other.card is None and one.asset_id == other.asset_id
-            and one.speed == other.speed
-            and abs(other.source_range.start - one.source_range.end) <= TOUCHING_SECONDS
-            and abs(other.timeline_in - one.timeline_out) <= TOUCHING_SECONDS)
+@dataclass
+class Stretch:
+    """A stretch of one file the cut shows, and the stretch of the timeline it is shown over.
 
-def _joined(clips: List[Clip]) -> List[Clip]:
-    """The cut's clips with each unbroken run of one file joined into one clip.
+    Attributes:
+        start: Where it starts in the file, in seconds.
+        end: Where it ends in the file.
+        timeline_in: Where the first clip showing it starts on the timeline.
+        timeline_out: Where the last clip showing it ends.
+    """
 
-    A split leaves two clips that together show what the one did; joined, a
-    split compares as no change at all.
+    start: float
+    end: float
+    timeline_in: float
+    timeline_out: float
+
+def _footage(project: Project) -> Dict[str, List[Stretch]]:
+    """What the cut shows of each file, as stretches that neither overlap nor touch.
+
+    Clips that show touching or overlapping stretches of a file are one
+    stretch, whatever their order, speed or place on the timeline.
 
     Args:
-        clips: The base track's clips, in timeline order.
+        project: The project.
 
     Returns:
-        The clips, each run that `_continues` joined made into one.
+        Each file's stretches, in the order they come in the file.
     """
-    runs: List[Clip] = []
-    for clip in clips:
-        if runs and _continues(runs[-1], clip):
-            last = runs[-1]
-            runs[-1] = last.model_copy(update={
-                "source_range": TimeRange(start=last.source_range.start, end=clip.source_range.end),
-            })
-        else:
-            runs.append(clip)
-    return runs
+    found: Dict[str, List[Stretch]] = {}
+    for clip in _footage_clips(project):
+        found.setdefault(clip.asset_id, []).append(Stretch(
+            float(clip.source_range.start), float(clip.source_range.end),
+            float(clip.timeline_in), float(clip.timeline_out),
+        ))
+    merged: Dict[str, List[Stretch]] = {}
+    for asset_id, stretches in found.items():
+        joined: List[Stretch] = []
+        for stretch in sorted(stretches, key=lambda one: one.start):
+            last = joined[-1] if joined else None
+            if last is not None and stretch.start <= last.end + TOUCHING:
+                joined[-1] = Stretch(last.start, max(last.end, stretch.end), min(last.timeline_in, stretch.timeline_in),
+                                     max(last.timeline_out, stretch.timeline_out))
+            else:
+                joined.append(stretch)
+        merged[asset_id] = joined
+    return merged
+
+def _left_over(stretch: Stretch, others: List[Stretch]) -> Optional[List[float]]:
+    """The lengths of the pieces of a stretch that none of the others cover.
+
+    Args:
+        stretch: The stretch.
+        others: The other version's stretches of the same file.
+
+    Returns:
+        Each uncovered piece's length, in the order they come; None when the
+        others cover none of it, so the whole stretch is gone or new.
+    """
+    covering = [other for other in others if min(stretch.end, other.end) - max(stretch.start, other.start) > TOUCHING]
+    if not covering:
+        return None
+    pieces, at = [], stretch.start
+    for other in covering:
+        if other.start - at > TOUCHING:
+            pieces.append(round(other.start - at, 3))
+        at = max(at, other.end)
+    if stretch.end - at > TOUCHING:
+        pieces.append(round(stretch.end - at, 3))
+    return pieces
 
 def _pairs(count: int, other_count: int, shared: Callable[[int, int], float]) -> List[Tuple[int, int]]:
     """Pair two lists greedily, most shared first, each item in at most one pair; nothing shared, no pair.
@@ -163,9 +213,46 @@ def _pairs(count: int, other_count: int, shared: Callable[[int, int], float]) ->
         pairs.append((index, other_index))
     return pairs
 
-def _on_timeline_together(one: Clip, other: Clip) -> float:
-    """How many seconds of the timeline two clips both cover."""
-    return max(0.0, float(min(one.timeline_out, other.timeline_out) - max(one.timeline_in, other.timeline_in)))
+def _on_timeline_together(one: Stretch, other: Stretch) -> float:
+    """How many seconds of the timeline two stretches are both shown over."""
+    return max(0.0, min(one.timeline_out, other.timeline_out) - max(one.timeline_in, other.timeline_in))
+
+def _clip_changes(before: Project, after: Project) -> Dict[str, Any]:
+    """How the footage the cut shows changed, by what is shown rather than by clip.
+
+    Each version's footage is reduced to the stretches of each file it shows
+    (`_footage`). A stretch shown in both versions, but longer or shorter in
+    one, moved edges: each piece one version shows and the other does not,
+    next to footage both show, is an edge moved by that piece's length — a
+    trimmed end, or a pause cut out of the middle of a shot. A stretch the
+    other version shows none of was removed or added; a removed one and an
+    added one shown over the same stretch of the timeline count once, as
+    replaced. Which clips show a stretch, in what order, at what speed and
+    where on the timeline is not counted.
+
+    Args:
+        before: The project as it was.
+        after: The project as it is.
+
+    Returns:
+        `removed`, `added`, `replaced` and `edges_moved`, the length of each
+        piece added to or taken from a stretch both show, in seconds.
+    """
+    old, new = _footage(before), _footage(after)
+    edges: List[float] = []
+    gone: List[Stretch] = []
+    come: List[Stretch] = []
+    for ours, theirs, whole in ((old, new, gone), (new, old, come)):
+        for asset_id, stretches in ours.items():
+            for stretch in stretches:
+                pieces = _left_over(stretch, theirs.get(asset_id, []))
+                if pieces is None:
+                    whole.append(stretch)
+                else:
+                    edges.extend(pieces)
+    swapped = _pairs(len(gone), len(come), lambda index, other: _on_timeline_together(gone[index], come[other]))
+    return {"removed": len(gone) - len(swapped), "added": len(come) - len(swapped), "replaced": len(swapped),
+            "edges_moved": edges}
 
 def _same_words(one: SubtitleCue, other: SubtitleCue) -> float:
     """How many seconds of the same file two captions both cover."""
@@ -173,30 +260,106 @@ def _same_words(one: SubtitleCue, other: SubtitleCue) -> float:
         return 0.0
     return max(0.0, float(min(one.source_end, other.source_end) - max(one.source_start, other.source_start)))
 
+def _within(part: SubtitleCue, whole: SubtitleCue) -> bool:
+    """Whether a caption's middle falls inside another's stretch of the same file."""
+    middle = (part.source_start + part.source_end) / 2
+    return part.asset_id == whole.asset_id and whole.source_start <= middle <= whole.source_end
+
+def _in_cut(cue: SubtitleCue, footage: Dict[str, List[Stretch]]) -> bool:
+    """Whether the cut shows any of the words a caption is for."""
+    return any(min(float(cue.source_end), stretch.end) - max(float(cue.source_start), stretch.start) > TOUCHING
+               for stretch in footage.get(cue.asset_id, []))
+
 def _tight(text: str) -> str:
     """Text with every space, tab and line break taken out, for comparing what was said."""
     return "".join(text.split())
 
+def _broken_differently(ones: List[SubtitleCue], others: List[SubtitleCue], left: set, other_left: set) -> int:
+    """Find each caption split into several, or several joined into one, with the same words.
+
+    Every caption found is taken out of `left` and `other_left`.
+
+    Args:
+        ones: The captions on one side.
+        others: The captions on the other side.
+        left: Indexes of `ones` not yet accounted for.
+        other_left: Indexes of `others` not yet accounted for.
+
+    Returns:
+        How many captions of `ones` were broken into several of `others`.
+    """
+    found = 0
+    for index in sorted(left):
+        whole = ones[index]
+        parts = sorted((other for other in other_left if _within(others[other], whole)),
+                       key=lambda other: others[other].source_start)
+        if len(parts) > 1 and "".join(_tight(others[part].text) for part in parts) == _tight(whole.text):
+            found += 1
+            left.discard(index)
+            other_left.difference_update(parts)
+    return found
+
+def _caption_changes(before: Project, after: Project) -> Dict[str, int]:
+    """How the captions changed, matched by what they say where rather than by ID.
+
+    A caption split into several with the same words, or several joined into
+    one, is re-broken, once. The rest are paired by the most shared seconds of
+    the same file, each in at most one pair, which survives captions being
+    made again and renumbered. A paired caption whose words changed is
+    rewritten, or only re-broken when nothing but its spaces and line breaks
+    changed; one whose words are the same but whose times moved is retimed.
+    An unpaired caption with exactly the words of an unpaired one on the other
+    side, from the same file, was moved: retimed.
+
+    What is left over counts only where it corrects the captions of footage
+    the cut kept: a caption removed while the cut still shows its words (a
+    line that was never said), and a caption added for words the cut already
+    showed while it already had captions (a line that was missed). A caption
+    that comes or goes with its footage, and the first captions a cut is
+    given, are not corrections and are not counted.
+
+    Args:
+        before: The project as it was.
+        after: The project as it is.
+
+    Returns:
+        `retimed`, `rewritten`, `rebroken`, `added` and `removed`.
+    """
+    old, new = list(before.subtitles), list(after.subtitles)
+    counts = {"retimed": 0, "rewritten": 0, "rebroken": 0, "added": 0, "removed": 0}
+    old_left, new_left = set(range(len(old))), set(range(len(new)))
+    counts["rebroken"] += _broken_differently(old, new, old_left, new_left)
+    counts["rebroken"] += _broken_differently(new, old, new_left, old_left)
+    olds, news = sorted(old_left), sorted(new_left)
+    for index, other_index in _pairs(len(olds), len(news),
+                                     lambda one, other: _same_words(old[olds[one]], new[news[other]])):
+        cue, other = old[olds[index]], new[news[other_index]]
+        old_left.discard(olds[index])
+        new_left.discard(news[other_index])
+        if cue.text != other.text:
+            counts["rebroken" if _tight(cue.text) == _tight(other.text) else "rewritten"] += 1
+        elif (cue.source_start, cue.source_end) != (other.source_start, other.source_end):
+            counts["retimed"] += 1
+    for index in sorted(old_left):
+        moved = next((other for other in sorted(new_left) if new[other].asset_id == old[index].asset_id
+                      and _tight(new[other].text) == _tight(old[index].text)), None)
+        if moved is not None:
+            counts["retimed"] += 1
+            old_left.discard(index)
+            new_left.discard(moved)
+    was_shown, now_shown = _footage(before), _footage(after)
+    counts["removed"] = sum(1 for index in old_left if _in_cut(old[index], now_shown))
+    if old:
+        counts["added"] = sum(1 for index in new_left if _in_cut(new[index], was_shown))
+    return counts
+
 def compare(before: Project, after: Project) -> Dict[str, Any]:
     """What changed between two versions of a project, counted.
 
-    Only the cut is compared: the clips on the base video track. Music beds,
-    B-roll and anything else above or beside it are not corrections to the
-    cut and are not counted. Clips are matched by the footage they show, not
-    by their ID, which a recompile renames: first each unbroken run of one
-    file is joined (see `_joined`), so a split counts as nothing; then the
-    clips are paired by `compare.match_clips`. A pair's source edges that
-    moved are listed by how far each moved. A clip left unpaired before and
-    one left unpaired after that cover the same stretch of the timeline count
-    once, as replaced; the rest were removed or added. Moving a clip along the
-    timeline or changing its speed is not counted: only which footage is shown.
-
-    Captions are paired by what they say where: the most shared seconds of
-    the same file first, each caption in at most one pair, which survives
-    captions being made again and renumbered. A paired caption whose words
-    changed is rewritten, or only re-broken when nothing but its whitespace
-    and line breaks changed; one whose words are the same but whose times
-    moved is retimed. Unpaired ones were removed or added.
+    Only the cut is compared: the footage the base video track shows, and the
+    captions. Title cards, music beds, B-roll and anything else beside the cut
+    are not counted. See `_clip_changes` and `_caption_changes` for how each
+    is matched.
 
     Args:
         before: The project as it was.
@@ -204,41 +367,11 @@ def compare(before: Project, after: Project) -> Dict[str, Any]:
 
     Returns:
         `clips` with `removed`, `added`, `replaced` and `edges_moved` (the
-        absolute moves of changed source edges, in seconds), and `captions`
-        with `retimed`, `rewritten`, `rebroken`, `added` and `removed`.
+        lengths of footage added to or taken from a stretch both versions
+        show, in seconds), and `captions` with `retimed`, `rewritten`,
+        `rebroken`, `added` and `removed`.
     """
-    old, new = _joined(shown(before)), _joined(shown(after))
-    clips: Dict[str, Any] = {"removed": 0, "added": 0, "replaced": 0, "edges_moved": []}
-    paired = match_clips(old, new)
-    for clip, other in paired:
-        for was, now in ((clip.source_range.start, other.source_range.start),
-                         (clip.source_range.end, other.source_range.end)):
-            if was != now:
-                clips["edges_moved"].append(round(abs(float(now - was)), 3))
-    gone = [clip for clip in old if all(clip is not one for one, _ in paired)]
-    come = [clip for clip in new if all(clip is not other for _, other in paired)]
-    swapped = _pairs(len(gone), len(come), lambda index, other: _on_timeline_together(gone[index], come[other]))
-    clips["replaced"] = len(swapped)
-    clips["removed"] = len(gone) - len(swapped)
-    clips["added"] = len(come) - len(swapped)
-
-    captions: Dict[str, int] = {"retimed": 0, "rewritten": 0, "rebroken": 0, "added": 0, "removed": 0}
-    was_said, now_said = before.subtitles, after.subtitles
-    matched = _pairs(len(was_said), len(now_said),
-                     lambda index, other: _same_words(was_said[index], now_said[other]))
-    for index, other_index in matched:
-        cue, other = was_said[index], now_said[other_index]
-        if cue.text != other.text:
-            if _tight(cue.text) == _tight(other.text):
-                captions["rebroken"] += 1
-            else:
-                captions["rewritten"] += 1
-        elif (cue.source_start, cue.source_end) != (other.source_start, other.source_end):
-            captions["retimed"] += 1
-    captions["removed"] = len(was_said) - len(matched)
-    captions["added"] = len(now_said) - len(matched)
-
-    return {"clips": clips, "captions": captions}
+    return {"clips": _clip_changes(before, after), "captions": _caption_changes(before, after)}
 
 def classify(change: Mapping) -> Dict[str, int]:
     """Count a change by cause, by rule.
@@ -248,9 +381,11 @@ def classify(change: Mapping) -> Dict[str, int]:
 
     Returns:
         `misheard`, `line_breaks`, `caption_timing`, `cut_point` and
-        `wrong_piece`, each a count. `cut_point` is an edge moved by at most
-        `SMALL_EDGE_SECONDS`; `wrong_piece` is a clip replaced, removed or
-        added, or an edge moved further than that.
+        `wrong_piece`, each a count. `misheard` is a caption rewritten, or
+        one removed or added while its footage stayed in the cut; `cut_point`
+        is an edge moved by at most `SMALL_EDGE_SECONDS`; `wrong_piece` is
+        footage replaced, removed or added, or an edge moved further than
+        that.
     """
     clips = change.get("clips") or {}
     captions = change.get("captions") or {}
@@ -258,7 +393,8 @@ def classify(change: Mapping) -> Dict[str, int]:
     small = sum(1 for move in moves if move <= SMALL_EDGE_SECONDS)
     large = len(moves) - small
     return {
-        "misheard": int(captions.get("rewritten", 0)),
+        "misheard": (int(captions.get("rewritten", 0)) + int(captions.get("removed", 0))
+                     + int(captions.get("added", 0))),
         "line_breaks": int(captions.get("rebroken", 0)),
         "caption_timing": int(captions.get("retimed", 0)),
         "cut_point": small,
@@ -416,8 +552,9 @@ def summarise_project(versions: List[Tuple[Version, Optional[dict]]]) -> Optiona
     return _project_result(versions, *changes)
 
 def _kinds_of(versions: List[Tuple[Version, Optional[dict]]], kinds: Mapping[str, List[str]]) -> List[str]:
-    """The footage kinds a project was cut from, by the files of the clips in its cut."""
-    assets = {clip.asset_id for _, project in _read(versions) if project is not None for clip in shown(project)}
+    """The footage kinds a project was cut from, by the files its cut shows."""
+    assets = {clip.asset_id for _, project in _read(versions) if project is not None
+              for clip in _footage_clips(project)}
     found = {kind for asset_id in assets for kind in kinds.get(asset_id, [])}
     return sorted(found)
 
@@ -544,6 +681,7 @@ def report(summary: Mapping[str, Any]) -> str:
         "AI 第一次剪完之後改了什麼：手動的與 AI 的版本都算（依規則計數，沒有模型在裡面）",
         _table(headers, rows),
         "手動分鐘是從版本的時間戳推算的估計，不是量出來的；節奏與剪在字中間無法用這些規則分辨。",
+        "只比較主軌畫面用了檔案的哪幾段與字幕：標題卡、音樂、B-roll 不算；字幕跟著畫面一起進出不算修正。",
         *skipped,
     ])
 
