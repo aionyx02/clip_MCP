@@ -114,6 +114,23 @@ def test_streams_whose_length_nothing_says_are_not_compared() -> None:
                           {"codec_type": "audio", "start_time": "0.300000"}], "format": {}}
     assert sync.stream_mismatch(probed, FRAME) is None
 
+def test_an_audio_stream_one_and_a_half_frames_longer_is_reported() -> None:
+    frame = 1 / 30
+    probed = {"streams": [
+        {"codec_type": "video", "start_time": "0.000000", "duration": "10.000000"},
+        {"codec_type": "audio", "start_time": "0.000000", "duration": f"{10 + 1.5 * frame:.6f}"},
+    ], "format": {"duration": "10.000000"}}
+    found = sync.stream_mismatch(probed, frame)
+    assert found is not None and found["audio_length"] == round(10 + 1.5 * frame, 3)
+
+def test_an_audio_stream_half_a_frame_longer_is_not_reported() -> None:
+    frame = 1 / 30
+    probed = {"streams": [
+        {"codec_type": "video", "start_time": "0.000000", "duration": "10.000000"},
+        {"codec_type": "audio", "start_time": "0.000000", "duration": f"{10 + 0.5 * frame:.6f}"},
+    ], "format": {"duration": "10.000000"}}
+    assert sync.stream_mismatch(probed, frame) is None
+
 def test_a_join_next_to_a_muted_clip_skips_only_that_side() -> None:
     first = make_clip("a", "asset", source_start=0, source_end=2, timeline_in=0)
     muted = make_clip("b", "asset", source_start=2, source_end=4, timeline_in=2, volume=0)
@@ -136,8 +153,11 @@ def test_another_picture_tracks_sound_trims_the_side_it_runs_over() -> None:
     overlay = make_clip("c", "asset", source_start=0, source_end=1, timeline_in=4.2)
     offered, left_out = sync.sides(video_tracks(before, after, above=[overlay]), [before, after],
                                    {"asset": "asset.wav"})
-    assert [(side["clip_id"], side["side"]) for side in offered] == [("a", "before")]
-    assert left_out == {"too_short": 1, "faded": 0}
+    assert [(side["clip_id"], side["side"]) for side in offered] == [("a", "before"), ("b", "after")]
+    after_side = next(side for side in offered if side["clip_id"] == "b")
+    # The overlay cuts the first 0.2s out of the after side, so the 0.8s past it is compared instead.
+    assert (after_side["start"], after_side["end"]) == (5.2, 6.0)
+    assert left_out == {"too_short": 0, "faded": 0}
 
 def test_a_muted_picture_track_leaves_the_side_alone() -> None:
     before = make_clip("a", "asset", source_start=0, source_end=4, timeline_in=0)
@@ -255,6 +275,16 @@ def test_other_sound_that_ends_before_the_join_still_trims_the_before_side() -> 
     before_side = next(side for side in offered if side["clip_id"] == "a")
     assert (before_side["start"], before_side["end"]) == (3.0, 4.0)
 
+def test_a_short_clear_piece_next_to_the_join_gives_way_to_a_longer_one_further_out() -> None:
+    before = make_clip("a", "asset", source_start=0, source_end=4, timeline_in=0)
+    after = make_clip("b", "asset", source_start=4, source_end=8, timeline_in=4)
+    broll = make_clip("c", "asset", source_start=0, source_end=0.8, timeline_in=3.0)
+    offered, left_out = sync.sides(video_tracks(before, after, above=[broll]), [before, after],
+                                   {"asset": "asset.wav"})
+    before_side = next(side for side in offered if side["clip_id"] == "a")
+    assert (before_side["start"], before_side["end"]) == (2.0, 3.0)
+    assert left_out == {"too_short": 0, "faded": 0}
+
 def test_a_long_side_is_compared_over_exactly_the_join_window() -> None:
     before = make_clip("a", "asset", source_start=0, source_end=6, timeline_in=0)
     after = make_clip("b", "asset", source_start=6, source_end=8, timeline_in=6)
@@ -335,6 +365,29 @@ def side_of(start: float = 0.0, end: float = 4.0, source_start: float = 0.0, spe
     """Build the side `lag_at` compares, with no file behind it."""
     return {"start": start, "end": end, "source_start": source_start, "speed": speed}
 
+def periodic_envelope(values: List[int], seconds: float = 4.0, shift: int = 0) -> np.ndarray:
+    """Build sound whose loudness repeats exactly every `len(values)` grid steps.
+
+    Each grid step is filled with one constant, so its measured loudness is
+    that constant and correlations between shifted copies come out exactly
+    equal rather than differing by rounding.
+
+    Args:
+        values: The loudness of each step of the period, in order.
+        seconds: How long the sound is.
+        shift: How many steps later the period starts, to move the sound on.
+
+    Returns:
+        The samples, mono at `sync.SAMPLE_RATE`.
+    """
+    width = int(round(sync.LAG_STEP_SECONDS * sync.SAMPLE_RATE))
+    blocks = int(round(seconds / sync.LAG_STEP_SECONDS))
+    pattern = np.array(values, dtype=np.float32)
+    samples = np.empty(blocks * width, dtype=np.float32)
+    for block in range(blocks):
+        samples[block * width:(block + 1) * width] = pattern[(block - shift) % len(pattern)]
+    return samples
+
 def test_identical_sound_has_no_lag() -> None:
     sound = make_sound()
     assert sync.lag_at(sound, 0.0, sound, side_of()) == 0.0
@@ -366,6 +419,50 @@ def test_unrelated_sound_does_not_follow_closely_enough_to_be_believed() -> None
 def test_a_lag_past_the_edge_of_the_search_is_not_reported() -> None:
     sound = make_sound()
     assert sync.lag_at(shifted(sound, 0.6), 0.0, sound, side_of()) is None
+
+def test_a_lag_exactly_at_the_edge_of_the_search_is_not_reported() -> None:
+    sound = make_sound()
+    assert sync.lag_at(shifted(sound, sync.MAX_LAG_SECONDS), 0.0, sound, side_of()) is None
+
+def test_a_short_side_does_not_report_an_offset_past_its_own_reach_as_a_smaller_one() -> None:
+    # A side of 0.6s can only be moved 0.1s and still keep 0.5s compared. A best lag at the end of
+    # that reach may be a bigger offset cut short, so it comes back unknown, as at the search's edge.
+    sound = make_sound()
+    assert sync.lag_at(shifted(sound, 0.1), 0.0, sound, side_of(1.0, 1.6, 1.0), source_origin=0.0) is None
+    assert sync.lag_at(shifted(sound, 0.3), 0.0, sound, side_of(1.0, 1.6, 1.0), source_origin=0.0) is None
+    assert sync.lag_at(shifted(sound, 0.05), 0.0, sound, side_of(1.0, 1.6, 1.0), source_origin=0.0) == 0.05
+
+def test_a_render_with_nothing_varying_has_nothing_to_line_up() -> None:
+    sound = make_sound()
+    silence = np.zeros(6 * sync.SAMPLE_RATE, dtype=np.float32)
+    assert sync.lag_at(silence, 0.0, sound, side_of()) is None
+
+def test_a_periodic_envelope_in_step_keeps_the_zero_lag() -> None:
+    pattern = list(range(1, 21))
+    sound = periodic_envelope(pattern)
+    assert sync.lag_at(sound, 0.0, sound, side_of()) == 0.0
+
+def test_a_periodic_envelope_heard_a_tenth_early_prefers_the_negative_lag() -> None:
+    pattern = list(range(1, 21))
+    sound = periodic_envelope(pattern)
+    early = periodic_envelope(pattern, shift=10)
+    assert sync.lag_at(early, 0.0, sound, side_of()) == -0.1
+
+def test_an_after_side_heard_early_is_measured_only_inside_the_side() -> None:
+    a = make_sound(seconds=3.0, seed=3, bursts=((0.1, 0.5), (0.9, 1.3), (1.8, 2.2), (2.6, 2.9)))
+    b = make_sound(seconds=3.0, seed=11, bursts=((0.05, 0.4), (0.7, 1.1), (1.5, 1.9), (2.4, 2.8)))
+    # B is heard 0.2s early: at the join it has already played 0.2s, while A is still what plays before it.
+    render = np.concatenate((a[:int(2.0 * sync.SAMPLE_RATE)],
+                             b[int(0.2 * sync.SAMPLE_RATE):int(1.2 * sync.SAMPLE_RATE)]))
+    assert sync.lag_at(render, 0.0, b[:int(1.0 * sync.SAMPLE_RATE)], side_of(2.0, 3.0)) == -0.2
+
+def test_a_before_side_heard_late_is_measured_only_inside_the_side() -> None:
+    a = make_sound(seconds=3.0, seed=3, bursts=((0.1, 0.5), (0.9, 1.3), (1.8, 2.2), (2.6, 2.9)))
+    b = make_sound(seconds=3.0, seed=11, bursts=((0.05, 0.4), (0.7, 1.1), (1.5, 1.9), (2.4, 2.8)))
+    # A is heard 0.2s late, so its first 0.8s runs from 0.2s and the after clip's sound takes the join.
+    render = np.concatenate((np.zeros(int(0.2 * sync.SAMPLE_RATE), dtype=np.float32),
+                             a[:int(0.8 * sync.SAMPLE_RATE)], b[:int(0.2 * sync.SAMPLE_RATE)]))
+    assert sync.lag_at(render, 0.0, a[:int(1.0 * sync.SAMPLE_RATE)], side_of(0.0, 1.0)) == 0.2
 
 def plain_render(tmp_path: Path) -> Path:
     """Write a short file with picture and sound for the check to read.
@@ -608,6 +705,18 @@ def test_get_job_reports_a_lag_beyond_two_envelope_steps(media: Path) -> None:
         "out_of_step": ["at 2.00s, clip b, after the join: the sound is heard 0.03s late"]
     }
 
+def test_get_job_keeps_a_lag_under_one_frame_at_25_fps(media: Path) -> None:
+    wide = import_asset(str(media / "wide.mp4"))["id"]
+    project = build_project([video_track(), insert("a", wide, 0, 2), insert("b", wide, 2, 4)],
+                            width=640, height=360, fps_num=25, fps_den=1)
+    job = make_finished_job(project, {
+        "streams": None, "joins": [{"at": 2.0, "clip_id": "b", "side": "after", "lag": 0.035}],
+        "sides_asked": 1, "unlined": 0,
+        "left_out": {"too_short": 0, "faded": 0}, "frame": 1 / 25,
+    })
+    entry = get_job([job.job_id])["jobs"][0]
+    assert "sound" not in entry
+
 def test_get_job_keeps_a_lag_under_one_frame_at_a_slower_frame_rate(media: Path) -> None:
     wide = import_asset(str(media / "wide.mp4"))["id"]
     project = build_project([video_track(), insert("a", wide, 0, 2), insert("b", wide, 2, 4)],
@@ -725,6 +834,20 @@ def test_render_project_asks_for_the_sound_check(media: Path, monkeypatch: pytes
         "left_out": {"too_short": 0, "faded": 0},
         "frame": FRAME,
     }
+
+def test_render_project_asks_for_the_sound_check_at_the_project_frame_rate(
+        media: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    wide_asset = import_asset(str(media / "wide.mp4"))
+    project = build_project([video_track(), insert("a", wide_asset["id"], 0, 2),
+                             insert("b", wide_asset["id"], 2, 4)], width=640, height=360,
+                            fps_num=25, fps_den=1)
+    started = []
+    monkeypatch.setattr(runtime.job_manager, "start_job", lambda job, spec: started.append(spec) or job)
+    monkeypatch.setattr(rendering, "analyses_of", lambda project, listened=False: {})
+    monkeypatch.setattr(rendering, "talking_of", lambda project, voices: None)
+    monkeypatch.setattr(rendering, "check_findings", lambda project, burn: [])
+    rendering.render_project(project)
+    assert started[-1]["sync"]["frame"] == 1 / 25
 
 def test_render_project_leaves_files_without_sound_out_of_the_sound_check(
         media: Path, monkeypatch: pytest.MonkeyPatch) -> None:

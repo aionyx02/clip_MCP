@@ -7,9 +7,11 @@ side of the sound it should land on. Neither shows up in a look at a frame,
 and a viewer hears the second one as a cut that feels off without being able
 to say why. Each side of a join is compared with the same stretch of its own
 source file, by how its loudness rises and falls: a shape that survives
-whatever is being said. What was meant — a J cut, a line carried across a
-cut, a pause — is for whoever reads the result to say; this only says how far
-the sound has moved.
+whatever is being said. Only the moments that stay inside the side are
+compared at each lag, so a lag never reaches across the join into the other
+clip's sound. What was meant — a J cut, a line carried across a cut, a pause —
+is for whoever reads the result to say; this only says how far the sound has
+moved.
 """
 
 import json
@@ -38,9 +40,6 @@ SAMPLE_RATE = 16000
 # How closely the render's loudness must follow the file's at the best lag for it to be believed:
 # a correlation, 1 being the same shape. Provisional.
 MIN_CORRELATION = 0.8
-# Loudness that varies less than this (as a standard deviation of RMS on a -1..1 scale) holds nothing to line up:
-# digital silence. Provisional.
-MIN_VARIATION = 1e-4
 # How far short of a stretch its file is sought before decoding, so the seek never lands at the file's very
 # start; the rest is cut by timestamp.
 SEEK_SHORT_SECONDS = 1.0
@@ -94,13 +93,16 @@ def _sound_span(clip: Clip) -> Tuple[float, float]:
     return float(clip.audio_timeline_in), float(clip.audio_timeline_out)
 
 def _clear_stretch(window: Tuple[float, float], at: float, others: Sequence[Tuple[float, float]],
-                   side: str) -> Tuple[float, float]:
-    """Find the part of a side's window nearest the join that holds none of the other sound.
+                   side: str) -> List[Tuple[float, float]]:
+    """Find the parts of a side's window that hold none of the other sound, nearest the join first.
 
-    Sound reaching over the join from the other side pulls the clear stretch
-    back to its boundary: a lead on the next clip leaves the rest of the
-    before side to compare, and a lag on the last one leaves the rest of the
-    after side. Other sound that covers the whole side leaves nothing.
+    Sound reaching over the join from the other side still ends the side where
+    it starts: a lead on the next clip leaves the rest of the before side to
+    compare, and a lag on the last one leaves the rest of the after side.
+    Other sound inside the window cuts a piece out of it, and the pieces either
+    side of that cut are both offered, so a short piece next to the join does
+    not hide a longer one further out. Other sound that covers the whole side
+    leaves nothing.
 
     Args:
         window: The side's window, `(start, end)` on the timeline.
@@ -109,21 +111,25 @@ def _clear_stretch(window: Tuple[float, float], at: float, others: Sequence[Tupl
         side: `"before"` or `"after"`.
 
     Returns:
-        `(start, end)` of the clear stretch, empty when there is none.
+        The clear stretches, `(start, end)` each, nearest the join first; empty
+        when the other sound covers the whole side.
     """
-    start, end = window
-    others = _merged(others)
+    pieces = [window]
+    for low, high in _merged(others):
+        remaining: List[Tuple[float, float]] = []
+        for piece_start, piece_end in pieces:
+            if high <= piece_start or low >= piece_end:
+                remaining.append((piece_start, piece_end))
+                continue
+            if low > piece_start:
+                remaining.append((piece_start, min(low, piece_end)))
+            if high < piece_end:
+                remaining.append((max(high, piece_start), piece_end))
+        pieces = remaining
+    pieces = [(low, high) for low, high in pieces if high - low > 0]
     if side == "before":
-        for low, high in others:
-            if low < at < high:
-                end = min(end, low)
-        clear = max((high for low, high in others if high <= end), default=start)
-        return max(start, clear), min(at, end)
-    for low, high in others:
-        if low < at < high:
-            start = max(start, high)
-    clear = min((low for low, high in others if low >= start), default=end)
-    return max(at, start), min(end, clear)
+        return sorted(pieces, key=lambda piece: at - piece[1])
+    return sorted(pieces, key=lambda piece: piece[0] - at)
 
 def sides(project_tracks: Sequence[Track], base_clips: Sequence[Clip],
           sources: Mapping[str, str]) -> Tuple[List[dict], Dict[str, int]]:
@@ -132,11 +138,11 @@ def sides(project_tracks: Sequence[Track], base_clips: Sequence[Clip],
     A join has two sides, the clip before it and the clip after it. Each side
     is compared over `JOIN_WINDOW_SECONDS` on its own side of the join, cut
     down to where that clip is the only sound playing: music or another
-    picture track over it, and the neighbouring clip's own lead or lag, leave
-    nothing there or a shorter stretch further from the join. The clip's own
-    fades are taken off as well, since a fade changes the loudness's shape, so
-    it is not compared. A clip whose asset has no sound makes none, so it
-    neither offers a side nor counts as other sound.
+    picture track over it, and the neighbouring clip's own lead or lag, cut
+    the window into pieces, and the nearest piece long enough is used. The
+    clip's own fades are taken off as well, since a fade changes the
+    loudness's shape, so it is not compared. A clip whose asset has no sound
+    makes none, so it neither offers a side nor counts as other sound.
 
     Args:
         project_tracks: Every track of the project, so that sound from a
@@ -163,15 +169,24 @@ def sides(project_tracks: Sequence[Track], base_clips: Sequence[Clip],
                 continue
             window = (at - JOIN_WINDOW_SECONDS, at) if side == "before" else (at, at + JOIN_WINDOW_SECONDS)
             others = [_sound_span(other) for other in heard if other is not clip]
-            start, end = _clear_stretch(window, at, others, side)
+            pieces = _clear_stretch(window, at, others, side)
             own_start, own_end = _sound_span(clip)
-            start, end = max(start, own_start), min(end, own_end)
-            # Inside a fade the loudness is a ramp rather than the file's own, so a fade is not compared.
-            clear = (max(start, own_start + float(clip.audio_fade_in)), min(end, own_end - float(clip.audio_fade_out)))
-            if clear[1] - clear[0] < MIN_SIDE_SECONDS:
-                counts["faded" if end - start >= MIN_SIDE_SECONDS else "too_short"] += 1
+            fade_in, fade_out = float(clip.audio_fade_in), float(clip.audio_fade_out)
+            chosen: Optional[Tuple[float, float]] = None
+            without_fades: Optional[Tuple[float, float]] = None
+            for piece_start, piece_end in pieces:
+                start, end = max(piece_start, own_start), min(piece_end, own_end)
+                if end - start >= MIN_SIDE_SECONDS and without_fades is None:
+                    without_fades = (start, end)
+                # Inside a fade the loudness is a ramp rather than the file's own, so a fade is not compared.
+                clear = (max(start, own_start + fade_in), min(end, own_end - fade_out))
+                if clear[1] - clear[0] >= MIN_SIDE_SECONDS:
+                    chosen = clear
+                    break
+            if chosen is None:
+                counts["faded" if without_fades is not None else "too_short"] += 1
                 continue
-            start, end = clear
+            start, end = chosen
             source_start = float(clip.audio_source_start) + (start - float(clip.audio_timeline_in)) * float(clip.speed)
             offered.append({
                 "at": round(at, 3), "clip_id": clip.id, "side": side, "start": round(start, 3),
@@ -233,8 +248,9 @@ def _loudness(samples: np.ndarray, origin: float, times: Sequence[float],
               window: float = LAG_STEP_SECONDS) -> np.ndarray:
     """Measure the RMS of the samples in a window starting at each of several moments.
 
-    Sample `i` is at `origin + i / SAMPLE_RATE`. A window that reaches outside
-    the samples has an RMS of 0.
+    Sample `i` is at `origin + i / SAMPLE_RATE`. A window with no samples
+    inside the sound has an RMS of 0; one reaching past either end is measured
+    over the part that is there, against the whole window.
 
     Args:
         samples: The sound.
@@ -273,10 +289,13 @@ def lag_at(render: np.ndarray, render_origin: float, source: np.ndarray, side: M
     """Say how far the sound on one side of a join is heard from where the cut put it.
 
     The file's loudness is measured on a grid over the side, and the render's
-    at each lag tried on that grid, and the two shapes correlated. A lag at
-    the edge of the search may be a real offset larger than the search, so it
-    is not reported. The render is held at its sounds, not at any voice in
-    them, so a side of room tone lines up as well as one of talking.
+    at the same moments, and the two shapes correlated at each lag. Only the
+    grid times whose whole render window stays inside the side are compared at
+    a lag, so the search never reaches across the join into the other clip's
+    sound. A lag at the edge of the search may be a real offset larger than
+    the search, so it is not reported. The render is held at its sounds, not at
+    any voice in them, so a side of room tone lines up as well as one of
+    talking.
 
     Args:
         render: The render's samples, sample 0 at `render_origin` on the timeline.
@@ -289,9 +308,9 @@ def lag_at(render: np.ndarray, render_origin: float, source: np.ndarray, side: M
 
     Returns:
         The lag in seconds whose loudness follows the file's best, rounded to
-        two places; positive when the sound is heard late. None when the file
-        holds nothing varying to line up, no lag follows closely enough, or
-        the best lag is at the edge of what was searched.
+        two places; positive when the sound is heard late. None when no lag
+        follows closely enough (a file stretch that never varies follows
+        nothing) or the best lag is at the edge of what was searched.
     """
     start, end = float(side["start"]), float(side["end"])
     speed = float(side["speed"])
@@ -301,24 +320,26 @@ def lag_at(render: np.ndarray, render_origin: float, source: np.ndarray, side: M
     origin = file_start if source_origin is None else float(source_origin)
     offsets = (file_start - origin) + (times - start) * speed
     from_file = _loudness(source, 0.0, offsets, LAG_STEP_SECONDS * speed)
-    if float(np.std(from_file)) < MIN_VARIATION:
-        return None
-    limit = int(round(MAX_LAG_SECONDS / LAG_STEP_SECONDS))
-    # The render's loudness is measured once over everything the search reaches; each lag is then a shift along it.
-    heard = _loudness(render, render_origin,
-                      start + np.arange(-limit, steps + limit, dtype=np.float64) * LAG_STEP_SECONDS)
-    lag, correlation = 0.0, _correlation(from_file, heard[limit:limit + steps])
+    # The render's loudness is measured once over the side; each lag is then a pair of slices of the two.
+    heard = _loudness(render, render_origin, times)
+    least = int(round(MIN_SIDE_SECONDS / LAG_STEP_SECONDS))
+    # A lag must leave `MIN_SIDE_SECONDS` of the side compared, so a short side searches less far.
+    limit = min(int(round(MAX_LAG_SECONDS / LAG_STEP_SECONDS)), max(0, steps - least))
+    lag, correlation = 0.0, _correlation(from_file, heard)
     # In order of the smaller move, and a negative one before a positive, so
     # that equal correlations keep the lag preferred by the tie-break.
     moves = sorted((number for number in range(-limit, limit + 1) if number != 0),
                    key=lambda number: (abs(number), number))
     for number in moves:
-        shape = _correlation(from_file, heard[limit + number:limit + number + steps])
+        count = steps - abs(number)
+        file_low = max(0, -number)
+        heard_low = max(0, number)
+        shape = _correlation(from_file[file_low:file_low + count], heard[heard_low:heard_low + count])
         if shape > correlation:
             lag, correlation = number * LAG_STEP_SECONDS, shape
     if correlation < MIN_CORRELATION:
         return None
-    if abs(lag) >= MAX_LAG_SECONDS - LAG_STEP_SECONDS / 2:
+    if limit == 0 or abs(lag) >= (limit - 0.5) * LAG_STEP_SECONDS:
         return None
     return round(lag, 2)
 
@@ -349,8 +370,8 @@ def check(render_path: str, offered_sides: Sequence[dict], left_out: Mapping[str
         render = _read_stretch(render_path, 0.0, None, ffmpeg_bin)
         for side in offered_sides:
             speed = float(side["speed"])
-            read_start = float(side["source_start"]) - MAX_LAG_SECONDS * speed
-            length = (float(side["end"]) - float(side["start"]) + 2 * MAX_LAG_SECONDS) * speed
+            read_start = float(side["source_start"])
+            length = (float(side["end"]) - float(side["start"])) * speed + LAG_STEP_SECONDS * speed
             try:
                 source = _read_stretch(side["path"], read_start, length, ffmpeg_bin)
             except (FFmpegFailed, OSError):
