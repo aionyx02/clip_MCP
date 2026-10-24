@@ -1,5 +1,6 @@
 """Tests for where a clip's source is read from: a seek near the start of an AAC file, and the cut after it."""
 
+import re
 import subprocess
 from decimal import Decimal
 from fractions import Fraction
@@ -239,7 +240,26 @@ def test_a_leading_overlay_cuts_its_sound_where_its_input_was_read(
     project = repo.get_project(project_id)
     command = FFmpegRenderer().build_command(project, referenced_assets(project), str(tmp_path / "out.mp4"))
     chains = command[command.index("-filter_complex") + 1].split(";")
-    sound = next(chain for chain in chains if "atrim=start=" in chain)
-    picture = next(chain for chain in chains if "trim=start=0.500000" in chain)
-    assert "atrim=start=0.500000" in sound, sound
-    assert "trim=start=0.500000" in picture, picture
+    sound = next(chain for chain in chains if "atrim=start=0.500000" in chain)
+    # `(?<!a)` keeps `atrim=start=0.500000` from being mistaken for the picture's cut.
+    picture_cut = re.compile(r"(?<!a)trim=start=0\.500000")
+    picture = next(chain for chain in chains if picture_cut.search(chain))
+    assert sound.split("]", 1)[1].startswith("atrim=start=0.500000,"), sound
+    assert picture_cut.search(picture), picture
+
+
+def test_the_music_is_cut_where_its_input_was_read(media: Path, tmp_path: Path) -> None:
+    """A song whose clip starts 0.5 s in is cut at the front of its own chain, where its input began."""
+    picture = import_asset(str(media / "wide.mp4"))["id"]
+    song = import_asset(str(media / "song.mp3"))["id"]
+    project_id = build_project([
+        video_track(),
+        insert("base", picture, 0, 2),
+        {"action": "add_track", "track_id": "music", "track_type": "audio"},
+        insert("song", song, 0.5, 2.5, track_id="music"),
+    ], width=320, height=240)
+    project = repo.get_project(project_id)
+    command = FFmpegRenderer().build_command(project, referenced_assets(project), str(tmp_path / "out.mp4"))
+    chains = command[command.index("-filter_complex") + 1].split(";")
+    sound = next(chain for chain in chains if "atrim=start=0.500000" in chain)
+    assert sound.split("]", 1)[1].startswith("atrim=start=0.500000,"), sound

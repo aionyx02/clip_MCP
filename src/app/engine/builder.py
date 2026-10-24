@@ -271,7 +271,7 @@ def _format_seconds(value: Fraction) -> str:
     """
     return f"{float(value):.6f}"
 
-def _read_from(clip_start: Decimal) -> Tuple[Optional[str], Optional[str]]:
+def _seek_or_cut(clip_start: Decimal) -> Tuple[Optional[str], Optional[str]]:
     """Choose how a clip's source is read: seek into it, or read from its start and cut to the point.
 
     A seek that lands within the first moments of an AAC file drops one more
@@ -357,7 +357,7 @@ def _input_args(clip: Clip, asset: Asset, frames: int, fps: Fraction) -> List[st
         point unless a transition runs it in, in which case it is that much
         earlier. A read starting close to the beginning of the file has no
         `-ss` and is that much longer instead; its chain cuts the beginning
-        off (see `_read_from`). The length is in source seconds, so a clip
+        off (see `_seek_or_cut`). The length is in source seconds, so a clip
         running at double speed reads twice as much of the file as it
         occupies on the timeline. A photo is one picture, read whole; its
         chain makes the frames.
@@ -367,7 +367,7 @@ def _input_args(clip: Clip, asset: Asset, frames: int, fps: Fraction) -> List[st
     if clip.card is not None:
         # A card holds one frame of its file: read a sliver from there, not the rest of the file.
         return ["-ss", _format_seconds(Fraction(clip.card.at)), "-t", "0.2", "-i", asset.path]
-    seek, _cut = _read_from(clip.video_source_start)
+    seek, _cut = _seek_or_cut(clip.video_source_start)
     length = Fraction(frames + 1) * Fraction(str(clip.speed)) / fps
     if seek is None:
         return ["-t", _format_seconds(length + Fraction(clip.video_source_start)), "-i", asset.path]
@@ -376,10 +376,12 @@ def _input_args(clip: Clip, asset: Asset, frames: int, fps: Fraction) -> List[st
 def _audio_input_args(clip: Clip, asset: Asset, fps: Fraction) -> List[str]:
     """Build the FFmpeg input options that read a clip's sound on its own.
 
-    A clip whose sound leads its picture needs audio from before the point the
-    picture input is seeked to, so it gets an input of its own rather than the
-    picture's being moved — moving it would shift every frame. Only clips that
-    actually lead or lag pay for the extra input.
+    A clip gets an input of its own for its sound when the picture's input
+    cannot carry it: its sound leads or lags its picture, its picture input
+    starts early for a transition's run-up, or its picture comes from the
+    cache and has no sound in it. Moving the picture's input instead would
+    shift every frame. Every other clip plays its sound from the picture's own
+    input and pays for nothing extra.
 
     Args:
         clip: Clip whose sound is read.
@@ -391,10 +393,10 @@ def _audio_input_args(clip: Clip, asset: Asset, fps: Fraction) -> List[str]:
         The `-ss` (when there is one), `-t`, and `-i` options for the input. A
         read starting close to the beginning of the file has no `-ss` and is
         that much longer instead; its chain cuts the beginning off (see
-        `_read_from`).
+        `_seek_or_cut`).
     """
     start = Fraction(clip.audio_source_range.start)
-    seek, _cut = _read_from(clip.audio_source_range.start)
+    seek, _cut = _seek_or_cut(clip.audio_source_range.start)
     length = Fraction(clip.audio_source_range.duration) + Fraction(1) / fps
     if seek is None:
         return ["-t", _format_seconds(length + start), "-i", asset.path]
@@ -590,7 +592,7 @@ def _picture_chain(
     clip on an upper track plays at its speed and wears its look exactly the
     way one on the sequence does. A source read from the start of its file
     rather than seeked to the clip's in point is cut to that point first, by
-    timestamp (see `_read_from`).
+    timestamp (see `_seek_or_cut`).
 
     Args:
         clip: The clip.
@@ -624,8 +626,8 @@ def _picture_chain(
             f"{_clip_video_filter(clip, frames, fps)}"
         )
     # A read that began at the start of the file rather than at the clip's in point is cut here,
-    # by timestamp, before anything rebases it (see `_read_from`).
-    _seek, cut = _read_from(clip.video_source_start)
+    # by timestamp, before anything rebases it (see `_seek_or_cut`).
+    _seek, cut = _seek_or_cut(clip.video_source_start)
     head = f"trim=start={cut}," if cut else ""
     return (
         f"{head}setpts=PTS-STARTPTS{_speed_video_filter(clip)},fps={rate},"
@@ -698,7 +700,7 @@ def _clip_audio_filter(
     """Build the filter chain that turns a clip's source audio into its output audio.
 
     A source read from the start of its file rather than seeked to the point it
-    is wanted from is cut there first, by timestamp (see `_read_from`). The cut
+    is wanted from is cut there first, by timestamp (see `_seek_or_cut`). The cut
     follows the input the chain is given, not the clip's own sound: an input of
     its own begins at `audio_source_range.start`, while one shared with the
     picture begins at `video_source_start`. The audio is then resampled to
@@ -719,8 +721,8 @@ def _clip_audio_filter(
         The filter chain.
     """
     # A read that began at the start of the file rather than at the point it is wanted from is cut
-    # here, by timestamp, before anything rebases it (see `_read_from`).
-    _seek, cut = _read_from(read_start)
+    # here, by timestamp, before anything rebases it (see `_seek_or_cut`).
+    _seek, cut = _seek_or_cut(read_start)
     cut_filter = [f"atrim=start={cut}"] if cut else []
     chain = [
         *cut_filter,
