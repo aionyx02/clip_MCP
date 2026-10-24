@@ -126,6 +126,8 @@ class StageClock:
         self._gpu_readable = True
         self._gpu_read_in_stage = False
         self._running = False
+        # How many stages have begun, so a reading that was in progress across a change can be told apart.
+        self._stages_begun = 0
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
 
@@ -148,7 +150,9 @@ class StageClock:
         self._entries = []
         self._stage = None
         self._running = True
-        self._stop.clear()
+        # A new event rather than clearing the old one: a sampler `stop` stopped waiting for keeps
+        # the old one, already set, and ends when its reading returns instead of running again.
+        self._stop = threading.Event()
         self._thread = threading.Thread(target=self._sample_forever, daemon=True)
         self._thread.start()
 
@@ -161,6 +165,8 @@ class StageClock:
         Args:
             stage: What the job is doing now.
         """
+        if stage == self._stage:
+            return
         # Read before taking the lock, so the job's thread never waits on the sampler's reading.
         # Memory only: the card's reading starts a process, and the sampler takes it soon enough.
         memory = self._memory()
@@ -172,6 +178,7 @@ class StageClock:
             now = self._clock()
             self._close(now)
             self._stage = stage
+            self._stages_begun += 1
             self._stage_started = now
             self._peak_memory = self._baseline_memory
             self._peak_gpu = self._baseline_gpu
@@ -205,10 +212,14 @@ class StageClock:
         """Take one reading of memory, and of the card when asked, and fold it into the current stage.
 
         The readings are taken outside the lock, so a slow one never holds up `mark`.
+        A reading during which a new stage began belongs to neither stage for
+        sure, so it is not folded into either; a card reading still serves as
+        the baseline when there is none yet.
 
         Args:
             card: Whether to read the card as well.
         """
+        begun = self._stages_begun
         memory = self._memory()
         gpu = self._gpu() if card and self._gpu_readable else None
         with self._lock:
@@ -220,6 +231,8 @@ class StageClock:
             if gpu is not None and self._baseline_gpu is None:
                 # The first card reading is the baseline every later rise is measured from.
                 self._baseline_gpu = gpu
+            if begun != self._stages_begun:
+                return
             if gpu is not None and self._stage is not None:
                 self._gpu_read_in_stage = True
             self._fold(memory, gpu)

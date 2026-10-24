@@ -3,6 +3,7 @@
 import os
 import threading
 import time
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -176,6 +177,46 @@ def test_the_card_is_read_every_gpu_seconds() -> None:
     assert reads["card"] == 4
     assert clock._baseline_gpu == 50 * MIB
 
+def test_a_card_reading_in_progress_when_the_stage_changes_goes_to_neither_stage() -> None:
+    now = [0.0]
+    clock = stage_clock(now, lambda: 100 * MIB, lambda: 100 * MIB)
+    clock.start()
+    clock._sample()
+    clock.mark("loading the model")
+
+    def card_read_across_a_change() -> int:
+        now[0] = 1.0
+        clock.mark("transcribing")
+        return 2000 * MIB
+
+    clock._gpu = card_read_across_a_change
+    clock._sample()
+    now[0] = 2.0
+    entries = clock.stop()
+    assert [item["gpu_rise_mb"] for item in entries] == [None, None]
+
+def test_a_stage_shorter_than_a_sample_still_has_the_reading_taken_as_it_began() -> None:
+    now = [0.0]
+    memory = [100 * MIB]
+    clock = stage_clock(now, lambda: memory[0])
+    clock.start()
+    memory[0] = 600 * MIB
+    clock.mark("quick")
+    memory[0] = 100 * MIB
+    now[0] = 0.1
+    entries = clock.stop()
+    assert entries[0]["memory_rise_mb"] == 500
+
+def test_a_restarted_clock_does_not_revive_a_sampler_stop_gave_up_on() -> None:
+    clock = stage_clock([0.0])
+    clock.start()
+    old = clock._stop
+    clock.stop()
+    clock.start()
+    assert old.is_set()
+    assert clock._stop is not old
+    clock.stop()
+
 def test_a_card_rise_is_none_for_a_stage_the_card_was_not_read_in() -> None:
     now = [0.0]
     gpu = [100 * MIB]
@@ -301,6 +342,11 @@ def test_analyze_jobs_without_a_duration_say_the_factor_cannot_be_worked_out() -
     text = summarise(jobs, {"a": asset("a", None)})
     assert "real-time factor: - (no analyzed asset has a duration)" in text
 
+def test_analyze_jobs_with_no_footage_say_the_factor_cannot_be_worked_out() -> None:
+    jobs = [finished(JobKind.ANALYZE, [entry("transcription", 10.0)], asset_id="a")]
+    text = summarise(jobs, {"a": asset("a", Decimal("0"))})
+    assert "real-time factor: - (no analyzed asset has a duration)" in text
+
 def test_nothing_to_summarise_says_so() -> None:
     nothing = [Job(kind=JobKind.RENDER, status=JobStatus.COMPLETED)]
     assert summarise(nothing, {}) == "No completed job has a profile yet."
@@ -420,4 +466,17 @@ def test_the_profile_command_prints_a_summary(capsys: pytest.CaptureFixture[str]
     assert caught.value.code == 0
     out = capsys.readouterr().out
     assert "No completed job has a profile yet." in out or "total s" in out
+
+def test_the_profile_command_reads_as_many_days_back_as_asked(monkeypatch: pytest.MonkeyPatch) -> None:
+    asked = []
+
+    def jobs_to_show(self, since):
+        asked.append(since)
+        return [], []
+
+    monkeypatch.setattr(Repository, "jobs_to_show", jobs_to_show)
+    with pytest.raises(SystemExit):
+        cli.main(["profile", "--days", "5"])
+    back = datetime.now(timezone.utc) - asked[0]
+    assert timedelta(days=5) <= back < timedelta(days=5, minutes=1)
 
