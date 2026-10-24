@@ -18,7 +18,7 @@ from app.engine.semantic import CleanCuts, build_timeline, clean_cuts
 from app.models.media import SecondListen, Span, SpeakerTurn, TranscriptWord
 from app.models.plan import Selection, Trim, TrimKind
 from app.models.semantic import SemanticClip
-from test_edit_plan import plan_for, sourced
+from edit_plan.shared import plan_for, sourced
 from test_semantic_timeline import ASSET_ID, analysis
 
 TALK = [

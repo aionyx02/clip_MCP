@@ -6,7 +6,7 @@ from app.engine.plan.pieces import BREATH_SECONDS
 from app.engine.semantic import clean_cuts
 from app.models.media import HeardWord, MediaAnalysis, SecondListen, Span
 from test_delivery import checks, clip, project_of, talking
-from test_edit_plan import compiled
+from edit_plan.shared import compiled
 from test_semantic_timeline import analysis, spans
 
 

@@ -122,7 +122,7 @@ def test_the_history_never_signs_with_the_user_s_key(kept_history, media: Path) 
                                         kept_history.head()))["name"] == "不簽章"
 
 
-from test_edit_plan import planned  # noqa: E402,F401,F811  (the fixture, used by name below)
+from edit_plan.shared import planned  # noqa: E402,F401,F811  (the fixture, used by name below)
 
 
 def test_going_back_leaves_another_video_compiled_from_the_same_plan_alone(kept_history, planned: dict) -> None:  # noqa: F811
