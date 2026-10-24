@@ -60,6 +60,66 @@ def read_tail(path: str, limit: int = 500) -> str:
     except OSError:
         return ""
 
+@functools.lru_cache(maxsize=None)
+def _card_listed(ffmpeg_bin: str) -> bool:
+    """Say whether this FFmpeg lists CUDA and an NVIDIA card is there to use it.
+
+    Asked once per executable; see `can_decode_on_card` for the rest.
+    """
+    try:
+        listed = subprocess.run(
+            [ffmpeg_bin, "-hide_banner", "-hwaccels"],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=30,
+            creationflags=hidden_window_flags(),
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        return False
+    if "cuda" not in {line.strip() for line in listed.splitlines()}:
+        return False
+    try:
+        from app.engine import machine
+
+        return machine._nvidia_card() is not None
+    except Exception:
+        return False
+
+def can_decode_on_card(ffmpeg_bin: str = "ffmpeg") -> bool:
+    """Say whether FFmpeg can decode the analysis scan on this computer's NVIDIA card.
+
+    CUDA has to be among the hardware methods this FFmpeg was built with, and
+    there has to be an NVIDIA card it was built for. Asking once and
+    remembering the answer (in `_card_listed`) keeps an extra process off
+    every scan. `CLIP_MCP_HWACCEL=off` turns the card off for a driver that misbehaves; it
+    is read on every call, so it can be set after the answer was remembered.
+
+    Args:
+        ffmpeg_bin: Path to, or name of, the FFmpeg executable.
+
+    Returns:
+        True when the card can be used.
+    """
+    if os.environ.get("CLIP_MCP_HWACCEL", "").strip().lower() == "off":
+        return False
+    return _card_listed(ffmpeg_bin)
+
+def card_decode_args(ffmpeg_bin: str = "ffmpeg") -> List[str]:
+    """The FFmpeg arguments that put decoding on the NVIDIA card, before `-i`.
+
+    Without `-hwaccel_output_format`, FFmpeg hands ordinary frames back to the
+    filters, and falls back to software for a codec the card cannot decode.
+
+    Args:
+        ffmpeg_bin: Path to, or name of, the FFmpeg executable.
+
+    Returns:
+        `["-hwaccel", "cuda"]`, or nothing when there is no card to use.
+    """
+    return ["-hwaccel", "cuda"] if can_decode_on_card(ffmpeg_bin) else []
+
 class _ProgressReader(threading.Thread):
     """Background thread that tracks the media position FFmpeg reports."""
 

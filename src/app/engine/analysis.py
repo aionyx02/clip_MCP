@@ -19,7 +19,14 @@ from app.engine.diarize import (
     find_speakers,
     speaker_model_name,
 )
-from app.engine.ffmpeg import FFmpegFailed, OperationCancelled, escape_filter_path, hidden_window_flags, run_ffmpeg
+from app.engine.ffmpeg import (
+    FFmpegFailed,
+    OperationCancelled,
+    card_decode_args,
+    escape_filter_path,
+    hidden_window_flags,
+    run_ffmpeg,
+)
 from app.engine import relisten
 from app.engine.relisten import Listener
 from app.engine.rhythm import measure_rhythm, rhythm_model_name
@@ -630,12 +637,21 @@ def scan_media(
         os.makedirs(faces.frames_dir(work_dir), exist_ok=True)
     graph, outputs = _scan_graph(asset, work_dir, with_shake)
     log_path = os.path.join(work_dir, DETECT_LOG_FILE_NAME)
-    command = [ffmpeg_bin, "-hide_banner", "-nostdin", "-nostats", "-loglevel", "info", "-i", asset.path]
+    head = [ffmpeg_bin, "-hide_banner", "-nostdin", "-nostats", "-loglevel", "info"]
+    tail = ["-i", asset.path]
     if graph:
-        command += ["-filter_complex", graph]
+        tail += ["-filter_complex", graph]
     for output in outputs:
-        command += output
-    run_ffmpeg(command, log_path, duration, on_progress, is_cancelled)
+        tail += output
+    card = card_decode_args(ffmpeg_bin)
+    try:
+        run_ffmpeg(head + card + tail, log_path, duration, on_progress, is_cancelled)
+    except FFmpegFailed:
+        # #149: on the card the scan decodes about twice as fast (15.4 s → 8.5 s for a 50 s
+        # 1080p HEVC clip), but a driver or a card out of memory must not fail the analysis.
+        if not card:
+            raise
+        run_ffmpeg(head + tail, log_path, duration, on_progress, is_cancelled)
 
     with open(log_path, encoding="utf-8", errors="replace") as log_file:
         log = log_file.read()
