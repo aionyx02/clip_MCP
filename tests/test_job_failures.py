@@ -8,6 +8,7 @@ checks the kind recorded, with the message left as it was.
 
 import json
 import os
+import re
 import subprocess
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -62,6 +63,35 @@ def ended(store: Repository, job: Job) -> Job:
     """Run a queued job's worker in this process and read back how it ended."""
     run_worker(store, job.job_id)
     return store.get_job(job.job_id)
+
+def without_the_address(message: str) -> str:
+    """FFmpeg's message with the input's address taken out, which changes on every run."""
+    return re.sub(r"@ [0-9a-fA-F]+", "@ <address>", message)
+
+def read_the_voices(path: str, folder: Path) -> None:
+    """Read a file's sound for the voices, the way an analysis does."""
+    from app.engine import diarize
+    diarize.read_samples(path)
+
+def read_the_beat(path: str, folder: Path) -> None:
+    """Read a file's sound for its beat, the way an analysis does."""
+    from app.engine import rhythm
+    rhythm._decode(path, "ffmpeg")
+
+def cut_the_sound(path: str, folder: Path) -> None:
+    """Cut a stretch of a file's sound, the way an analysis does."""
+    from app.engine import listen
+    listen.cut_sound(path, 0.0, 1.0, str(folder / "out.wav"))
+
+def read_a_frame(path: str, folder: Path) -> None:
+    """Read a frame of a file, the way an analysis does."""
+    from app.engine import frames
+    frames.extract_frame(path, 0.0)
+
+def read_the_metadata(path: str, folder: Path) -> None:
+    """Read a file's metadata, the way an analysis does."""
+    from app.engine import probe
+    probe.probe_file(path)
 
 def test_ffmpeg_failing_with_its_file_there_is_a_render_failure(store: Repository, tmp_path: Path) -> None:
     source = tmp_path / "not-a-video.mp4"
@@ -178,23 +208,35 @@ def test_a_frame_with_no_picture_behind_a_clean_exit_is_not_ffmpeg_failing(tmp_p
         frames.extract_frame(str(source), 5.0)
     assert not isinstance(raised.value, FFmpegFailed)
 
-def test_an_analysis_ffmpeg_cannot_decode_is_a_render_failure(
-    store: Repository, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize(
+    "read_the_file",
+    [
+        pytest.param(read_the_voices, id="diarize.read_samples"),
+        pytest.param(read_the_beat, id="rhythm._decode"),
+        pytest.param(cut_the_sound, id="listen.cut_sound"),
+        pytest.param(read_a_frame, id="frames.extract_frame"),
+        pytest.param(read_the_metadata, id="probe.probe_file"),
+    ],
+)
+def test_an_analysis_ffmpeg_cannot_read_is_a_render_failure_wherever_it_reads(
+    store: Repository, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, read_the_file,
 ) -> None:
-    from app.engine import diarize
-
     source = tmp_path / "talk.mp4"
     source.write_text("these are words, not sound", encoding="utf-8")
+    # What the tool says when called on its own is what the job has to record.
+    with pytest.raises(FFmpegFailed) as raised:
+        read_the_file(str(source), tmp_path)
     store.save_asset(Asset(id="talk", path=str(source), duration=10, has_video=True, has_audio=True))
 
     def read_the_voices(asset, *args, **kwargs) -> None:
-        diarize.read_samples(asset.path)
+        read_the_file(asset.path, tmp_path)
 
     monkeypatch.setattr(renderer, "analyze_media", read_the_voices)
     job = ended(store, queued(store, tmp_path, {"transcribe": False}, kind=JobKind.ANALYZE, asset_id="talk"))
     # The file was still there when it ended, so the failure is FFmpeg's and not the input's.
     assert (job.status, job.failure_kind) == (JobStatus.FAILED, FailureKind.RENDER)
-    assert job.error_message and "Invalid data found" in job.error_message
+    assert job.error_message
+    assert without_the_address(job.error_message) == without_the_address(str(raised.value))
 
 def test_an_analysis_of_a_file_that_is_gone_is_an_input_failure(store: Repository, tmp_path: Path) -> None:
     store.save_asset(Asset(id="gone", path=str(tmp_path / "gone.mp4"), duration=10, has_video=True, has_audio=True))
