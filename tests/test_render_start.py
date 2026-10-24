@@ -207,7 +207,8 @@ def test_a_clip_near_the_start_is_read_from_the_start_and_cut() -> None:
 def test_a_clip_with_a_run_up_is_cut_where_its_picture_input_begins() -> None:
     """A 0.4 s dissolve in reaches back from 0.6 s to 0.2 s: the picture is read from the start and cut at 0.2 s."""
     asset = Asset(id="a", path="x.mp4", duration=6, has_video=True, has_audio=True)
-    clip = source_clip("0.6", "2.6").model_copy(update={"transition_in": Dissolve(kind="dissolve", seconds=Decimal("0.4"))})
+    dissolve = Dissolve(kind="dissolve", seconds=Decimal("0.4"))
+    clip = source_clip("0.6", "2.6").model_copy(update={"transition_in": dissolve})
     assert "-ss" not in builder._input_args(clip, asset, 72, Fraction(30))
     chain = builder._picture_chain(clip, 73, 320, 240, Fraction(30), None)
     assert chain.startswith("trim=start=0.200000,"), chain
