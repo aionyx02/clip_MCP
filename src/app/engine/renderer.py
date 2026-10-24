@@ -10,6 +10,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from app.engine import diarize, loudness, machine, models, resources, scan, speed, sync
 from app.engine.analysis import analyze_media, whisper_model_for
 from app.engine.ffmpeg import FFmpegFailed, OperationCancelled, run_ffmpeg
+from app.engine.profile import StageClock
 from app.models.job import FailureKind, Job, JobKind, JobStatus
 from app.storage import housekeeping
 from app.storage.repo import Repository
@@ -389,20 +390,49 @@ class JobContext:
         self._cancelled = threading.Event()
         self._stopped = threading.Event()
         self._thread = threading.Thread(target=self._heartbeat, daemon=True)
+        self._clock: Optional[StageClock] = StageClock()
 
     def __enter__(self) -> "JobContext":
-        """Start sending heartbeats.
+        """Start timing the job's stages and sending heartbeats.
+
+        A clock that cannot start leaves the job without a profile rather than
+        failing the job.
 
         Returns:
             This context.
         """
+        try:
+            if self._clock is not None:
+                self._clock.start()
+        except Exception:
+            self._clock = None
         self._thread.start()
         return self
 
     def __exit__(self, *exc_info) -> None:
-        """Stop sending heartbeats and wait for the last one to be written."""
+        """Stop sending heartbeats, wait for the last one, and record the stage profile."""
         self._stopped.set()
         self._thread.join()
+        self._record_profile()
+
+    def _record_profile(self) -> None:
+        """Write what each stage cost onto the job; a clock that fails leaves it unset."""
+        if self._clock is None:
+            return
+        try:
+            profile = self._clock.stop()
+        except Exception:
+            return
+
+        def write(job: Job) -> None:
+            """Copy the stage profile onto the job."""
+            job.profile = profile
+
+        try:
+            self._repo.update_job(self._job_id, write)
+        except Exception:
+            # A profile that cannot be saved is no reason to fail a job that already ran.
+            pass
 
     def report(self, progress: float, stage: Optional[str] = None) -> None:
         """Record progress to include in the next heartbeat.
@@ -417,6 +447,11 @@ class JobContext:
         self._progress = max(self._progress, min(progress, 0.99))
         if stage is not None:
             self._stage = stage
+            if self._clock is not None:
+                try:
+                    self._clock.mark(stage)
+                except Exception:
+                    pass
 
     def is_cancelled(self) -> bool:
         """Whether cancellation has been requested.
