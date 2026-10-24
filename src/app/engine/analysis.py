@@ -23,6 +23,7 @@ from app.engine.ffmpeg import (
     FFmpegFailed,
     OperationCancelled,
     card_decode_args,
+    stop_decoding_on_card,
     escape_filter_path,
     hidden_window_flags,
     run_ffmpeg,
@@ -616,6 +617,13 @@ def scan_media(
     Detection runs on the first video stream that is not cover art and on the
     first audio stream.
 
+    The picture is decoded on the NVIDIA card where that is faster (see
+    `card_decode_args`). A file that fails on the card is scanned once more
+    in software, the card's log is kept beside the log as `.card`, and the
+    card is not used again until the record `stop_decoding_on_card` wrote is
+    deleted; a file that fails for its own reasons is therefore read twice
+    before its failure comes through.
+
     Args:
         asset: Asset to scan.
         work_dir: Directory that receives FFmpeg's log and the files its
@@ -643,14 +651,18 @@ def scan_media(
         tail += ["-filter_complex", graph]
     for output in outputs:
         tail += output
-    card = card_decode_args(ffmpeg_bin)
+    card = card_decode_args(ffmpeg_bin, asset.path, duration) if asset.has_video and not asset.still else []
     try:
         run_ffmpeg(head + card + tail, log_path, duration, on_progress, is_cancelled)
-    except FFmpegFailed:
+    except FFmpegFailed as exc:
         # #149: on the card the scan decodes about twice as fast (15.4 s → 8.5 s for a 50 s
         # 1080p HEVC clip), but a driver or a card out of memory must not fail the analysis.
+        # The failure is kept and recorded, not hidden: the card's log stays, and the card
+        # is left alone from now on, so a broken driver costs one run, not one per file.
         if not card:
             raise
+        os.replace(log_path, log_path + ".card")
+        stop_decoding_on_card(asset.path, str(exc))
         run_ffmpeg(head + tail, log_path, duration, on_progress, is_cancelled)
 
     with open(log_path, encoding="utf-8", errors="replace") as log_file:

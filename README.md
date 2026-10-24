@@ -2,7 +2,6 @@
 
 以時間軸為核心、底層為 FFmpeg 的影片剪輯 MCP 伺服器，附本機瀏覽器編輯器。
 分析、轉錄、說話者切分、人臉偵測與語意檢索全部在本機執行；素材檔案不會離開這台電腦。
-分析掃描在有 NVIDIA 顯示卡時改用顯示卡解碼；驅動有問題時可設 `CLIP_MCP_HWACCEL=off` 關閉。
 
 ## 設計原則
 
@@ -117,6 +116,7 @@ LM Studio、Cherry Studio（一鍵安裝連結）。修改前備份為 `<檔名>
 | `CLIP_MCP_MAX_JOBS` | `2` | 同時執行的工作上限 |
 | `CLIP_MCP_MEMORY_RESERVE_MB` | `2048` | 保留給系統的實體記憶體 |
 | `CLIP_MCP_MAX_DECODERS` | `4` | 抽幀解碼行程上限 |
+| `CLIP_MCP_HWACCEL` | 開 | `off` 關閉分析掃描的 NVIDIA 顯示卡解碼；開著時只用在高位元率 HEVC（手機、空拍機素材），約快一倍。顯示卡解碼失敗一次就會停用並寫下 `<workspace>/card-decode-failed.txt`，`clip-mcp check` 會提到，刪掉它再試 |
 
 ## 測試
 
