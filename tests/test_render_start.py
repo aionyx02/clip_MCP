@@ -10,10 +10,13 @@ import numpy
 import pytest
 
 from app.engine import builder
+from app.engine.builder import FFmpegRenderer
 from app.engine.diarize import SAMPLE_RATE, read_samples
 from app.models.media import Asset
 from app.models.timeline.parts import Clip, TimeRange
+from app.runtime import repo
 from app.tools.catalog import import_asset
+from app.tools.shared import referenced_assets
 from helpers import build_project, insert, render, video_track
 
 # Where the noise bursts of the test file start and stop, in seconds: irregular, so the
@@ -99,6 +102,33 @@ def rendered_lag(asset: str, path: Path, start: float, out: Path) -> int:
     return lag_samples(read_samples(str(out)), read_samples(str(path)), start)
 
 
+def rendered_lead_lag(asset: str, path: Path, start: float, lead: float, out: Path) -> int:
+    """Render a clip whose sound leads its picture, after a silent clip, and say where that sound lands.
+
+    Args:
+        asset: The source file's asset ID.
+        path: The source file, decoded whole as the comparison.
+        start: Where the leading clip begins in the source.
+        lead: How far its sound starts before its picture.
+        out: Where the render is written.
+
+    Returns:
+        The shift in samples that lines the render's sound up with the source,
+        against the point in the source where the lead begins.
+    """
+    project = build_project([
+        video_track(),
+        insert("before", asset, 2.0, 3.0, volume=0),
+        insert("led", asset, start, start + 2),
+        {"action": "set_clip_audio", "track_id": "main", "clip_id": "led", "audio_lead": lead},
+    ], width=320, height=240)
+    render(project, out)
+    heard = read_samples(str(out))
+    begins = round((1.0 - lead) * SAMPLE_RATE)
+    length = round((2.0 + lead) * SAMPLE_RATE)
+    return lag_samples(heard[begins:begins + length], read_samples(str(path)), start - lead)
+
+
 @pytest.fixture(scope="module")
 def reference(bursts: Tuple[str, Path], tmp_path_factory: pytest.TempPathFactory) -> int:
     """Where a clip read with a seek, two seconds into the file, lands: the lag every render shares."""
@@ -137,23 +167,31 @@ def test_a_clip_at_the_start_of_an_aac_file_keeps_its_sound(
 
 
 def test_a_clip_a_little_way_in_keeps_its_sound(bursts: Tuple[str, Path], reference: int, tmp_path: Path) -> None:
-    """The same at 0.3 s: close enough to the start that a seek still loses a frame."""
+    """A clip starting inside `SEEK_FROM_SECONDS` is read from the beginning and cut by timestamp.
+
+    Read that way it lands where a clip sought into the file does, within a
+    sample of the reference.
+    """
     asset, path = bursts
     lag = rendered_lag(asset, path, 0.3, tmp_path / "in.mp4")
     assert abs(lag - reference) <= TOLERANCE_SAMPLES, (lag, reference)
 
 
-def test_a_clip_far_from_the_start_still_seeks(bursts: Tuple[str, Path], reference: int) -> None:
+def test_a_clip_read_with_a_seek_lands_where_its_source_says(reference: int) -> None:
+    """A clip past the first second is seeked to, and lands where the source says it does."""
+    assert abs(reference) <= REFERENCE_SAMPLES, reference
+
+
+def test_a_clip_far_from_the_start_still_seeks(bursts: Tuple[str, Path]) -> None:
     """Past the first second a seek is exact, and reading from the start would be wasteful."""
     asset, path = bursts
     args = builder._input_args(source_clip("2.0", "4.0"), Asset(
         id="a", path=str(path), duration=6, has_video=True, has_audio=True,
     ), 60, Fraction(30))
     assert args[:2] == ["-ss", "2.000000"]
-    assert abs(reference) <= REFERENCE_SAMPLES, reference
 
 
-def test_a_clip_near_the_start_is_read_from_the_start_and_cut(tmp_path: Path) -> None:
+def test_a_clip_near_the_start_is_read_from_the_start_and_cut() -> None:
     """The unit of the fix: no seek, a longer read, and a trim at the very front of the chain."""
     asset = Asset(id="a", path="x.mp4", duration=6, has_video=True, has_audio=True)
     clip = source_clip("0.3", "2.3")
@@ -163,3 +201,45 @@ def test_a_clip_near_the_start_is_read_from_the_start_and_cut(tmp_path: Path) ->
     assert args[:2] == ["-t", "2.333333"]
     chain = builder._picture_chain(clip, 61, 320, 240, Fraction(30), None)
     assert chain.startswith("trim=start=0.300000,")
+
+
+def test_a_sounds_own_input_reads_from_the_start_with_room_for_the_cut() -> None:
+    """A sound starting at 0.3 s gets no seek, and is read long enough to cut 0.3 s off its front."""
+    asset = Asset(id="a", path="x.mp4", duration=6, has_video=True, has_audio=True)
+    args = builder._audio_input_args(source_clip("0.3", "2.3"), asset, Fraction(30))
+    assert "-ss" not in args
+    # The sound's 2.0 s, one frame of margin, and the 0.3 s now read before it begins.
+    assert args[:2] == ["-t", "2.333333"]
+
+
+def test_a_leading_sound_near_the_start_lines_up_with_its_source(
+    bursts: Tuple[str, Path], reference: int, tmp_path: Path,
+) -> None:
+    """A 0.2 s lead read from the beginning of the file lands where its source says it does."""
+    asset, path = bursts
+    lag = rendered_lead_lag(asset, path, 0.3, 0.2, tmp_path / "lead.mp4")
+    assert abs(lag - reference) <= TOLERANCE_SAMPLES, (lag, reference)
+
+
+def test_a_leading_overlay_cuts_its_sound_where_its_input_was_read(
+    bursts: Tuple[str, Path], tmp_path: Path,
+) -> None:
+    """A sound sharing the picture's input is cut where that input was read, not where the clip's own sound starts."""
+    asset, _path = bursts
+    project_id = build_project([
+        video_track(),
+        insert("base", asset, 0, 1),
+        video_track("over"),
+        {
+            "action": "add_clip", "track_id": "over", "clip_id": "over", "asset_id": asset,
+            "source_range": {"start": 0.5, "end": 1.5}, "timeline_in": 0.5,
+        },
+        {"action": "set_clip_audio", "track_id": "over", "clip_id": "over", "audio_lead": 0.3},
+    ], width=320, height=240)
+    project = repo.get_project(project_id)
+    command = FFmpegRenderer().build_command(project, referenced_assets(project), str(tmp_path / "out.mp4"))
+    chains = command[command.index("-filter_complex") + 1].split(";")
+    sound = next(chain for chain in chains if "atrim=start=" in chain)
+    picture = next(chain for chain in chains if "trim=start=0.500000" in chain)
+    assert "atrim=start=0.500000" in sound, sound
+    assert "trim=start=0.500000" in picture, picture

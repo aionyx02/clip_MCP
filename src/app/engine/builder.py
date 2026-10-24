@@ -692,28 +692,35 @@ def _silence_filter(samples: int, output_label: str) -> str:
     """
     return f"anullsrc=r={AUDIO_SAMPLE_RATE}:cl=stereo,atrim=end_sample={samples}{output_label}"
 
-def _clip_audio_filter(input_label: str, clip: Clip, samples: int, output_label: str, gain_db: float = 0.0) -> str:
+def _clip_audio_filter(
+    input_label: str, clip: Clip, samples: int, output_label: str, read_start: Decimal, gain_db: float = 0.0,
+) -> str:
     """Build the filter chain that turns a clip's source audio into its output audio.
 
-    A source read from the start of its file rather than seeked to the clip's
-    in point is cut to that point first, by timestamp (see `_read_from`). The
-    audio is then resampled to 48 kHz stereo, padded or trimmed to exactly
-    `samples`, and has the clip's volume and fades applied.
+    A source read from the start of its file rather than seeked to the point it
+    is wanted from is cut there first, by timestamp (see `_read_from`). The cut
+    follows the input the chain is given, not the clip's own sound: an input of
+    its own begins at `audio_source_range.start`, while one shared with the
+    picture begins at `video_source_start`. The audio is then resampled to
+    48 kHz stereo, padded or trimmed to exactly `samples`, and has the clip's
+    volume and fades applied.
 
     Args:
         input_label: Filtergraph label of the source audio, such as `[2:a]`.
         clip: Clip providing volume and fade settings.
         samples: Exact number of output samples.
         output_label: Filtergraph label of the result.
+        read_start: Where in the source the input was read from, which is what
+            the cut has to match.
         gain_db: What the clip is turned by to sit where it belongs in the
             mix, on top of its own volume.
 
     Returns:
         The filter chain.
     """
-    # A read that began at the start of the file rather than at the clip's in point is cut here,
-    # by timestamp, before anything rebases it (see `_read_from`).
-    _seek, cut = _read_from(clip.audio_source_start)
+    # A read that began at the start of the file rather than at the point it is wanted from is cut
+    # here, by timestamp, before anything rebases it (see `_read_from`).
+    _seek, cut = _read_from(read_start)
     cut_filter = [f"atrim=start={cut}"] if cut else []
     chain = [
         *cut_filter,
@@ -1166,12 +1173,14 @@ class FFmpegRenderer:
                     if lead or lag or run_up or cached:
                         audio_index = len(inputs)
                         inputs.append(_audio_input_args(clip, asset, fps))
+                        read_start = clip.audio_source_range.start
                     else:
                         audio_index = input_index
+                        read_start = clip.video_source_start
                     at = _frame_to_sample(segment.start_frame, fps) - lead
                     filters.append(
                         _clip_audio_filter(
-                            f"[{audio_index}:a]", clip, samples + lead + lag, f"[araw{index}]",
+                            f"[{audio_index}:a]", clip, samples + lead + lag, f"[araw{index}]", read_start,
                             clip_gains.get(clip.id, 0.0),
                         )
                     )
@@ -1302,7 +1311,9 @@ class FFmpegRenderer:
                     inputs.append(_input_args(clip, asset, frames, fps))
 
                 if heard:
-                    filters.append(_clip_audio_filter(f"[{input_index}:a]", clip, samples, audio_label))
+                    filters.append(
+                        _clip_audio_filter(f"[{input_index}:a]", clip, samples, audio_label, clip.video_source_start)
+                    )
                 else:
                     filters.append(_silence_filter(samples, audio_label))
                 track_labels.append(audio_label)
@@ -1347,7 +1358,7 @@ class FFmpegRenderer:
                     frames = segment.end_frame - segment.start_frame
                     inputs.append(_input_args(segment.clip, assets[segment.clip.asset_id], frames, fps))
                     filters.append(_clip_audio_filter(
-                        f"[{input_index}:a]", segment.clip, samples, label,
+                        f"[{input_index}:a]", segment.clip, samples, label, segment.clip.video_source_start,
                         # Brought to where the talking is, so a clip's volume says how far under
                         # the voices it sits rather than how far under its own mastering.
                         music_gains.get(track.id, {}).get(segment.clip.id, 0.0),
