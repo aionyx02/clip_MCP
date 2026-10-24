@@ -208,6 +208,19 @@ def test_a_frame_with_no_picture_behind_a_clean_exit_is_not_ffmpeg_failing(tmp_p
         frames.extract_frame(str(source), 5.0)
     assert not isinstance(raised.value, FFmpegFailed)
 
+def test_a_frame_ffmpeg_failed_on_is_not_kept_for_what_it_wrote_first(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.engine import frames
+
+    def failed_halfway(*args, **kwargs) -> subprocess.CompletedProcess:
+        return subprocess.CompletedProcess(args, 1, stdout=b"\x89PNG half a picture", stderr=b"broken frame")
+
+    monkeypatch.setattr(frames.subprocess, "run", failed_halfway)
+    # Whatever reached the pipe before FFmpeg failed is not a picture to keep.
+    with pytest.raises(FFmpegFailed):
+        frames.extract_frame(str(tmp_path / "talk.mp4"), 1.0)
+
 @pytest.mark.parametrize(
     "read_the_file",
     [
@@ -228,10 +241,10 @@ def test_an_analysis_ffmpeg_cannot_read_is_a_render_failure_wherever_it_reads(
         read_the_file(str(source), tmp_path)
     store.save_asset(Asset(id="talk", path=str(source), duration=10, has_video=True, has_audio=True))
 
-    def read_the_voices(asset, *args, **kwargs) -> None:
+    def analyze_by_reading(asset, *args, **kwargs) -> None:
         read_the_file(asset.path, tmp_path)
 
-    monkeypatch.setattr(renderer, "analyze_media", read_the_voices)
+    monkeypatch.setattr(renderer, "analyze_media", analyze_by_reading)
     job = ended(store, queued(store, tmp_path, {"transcribe": False}, kind=JobKind.ANALYZE, asset_id="talk"))
     # The file was still there when it ended, so the failure is FFmpeg's and not the input's.
     assert (job.status, job.failure_kind) == (JobStatus.FAILED, FailureKind.RENDER)
