@@ -52,7 +52,7 @@ def parts_of(project: Project) -> List[Part]:
             for index, (marker, start) in enumerate(zip(markers, starts))]
 
 
-def _shown(project: Project) -> List[Clip]:
+def shown(project: Project) -> List[Clip]:
     """The sequence's clips, in order."""
     base = project.base_video_track
     return sorted(base.clips, key=lambda clip: clip.timeline_in) if base else []
@@ -280,7 +280,7 @@ def compare(before: Project, after: Project, said: Said, named: Named) -> dict:
         the same footage, for playing the two side by side.
     """
     left_parts, right_parts = parts_of(before), parts_of(after)
-    left_clips, right_clips = _shown(before), _shown(after)
+    left_clips, right_clips = shown(before), shown(after)
     right_by_name: Dict[str, Part] = {}
     for part in right_parts:
         right_by_name.setdefault(part.name, part)
