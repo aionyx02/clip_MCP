@@ -19,7 +19,7 @@ from app.models.plan import (
 from app.tools.planning import (
     amend_plan, diff_plan, get_plan, list_plan_versions, preview_plan_diff, revert_plan, save_plan,
 )
-from test_edit_plan import checked, footage, planned, sectioned, speech_of  # noqa: F401 — fixtures and helpers
+from edit_plan.shared import checked, footage, planned, sectioned, speech_of  # noqa: F401 — fixtures and helpers
 
 def amendments(*operations: dict) -> list:
     """Validate amendments the way a client's would be.
@@ -113,7 +113,9 @@ def test_tighter_pacing_makes_the_whole_cut_shorter() -> None:
     by_id, children, assets, section = sectioned()
     plan = EditPlan(timeline_id="tl_test", timeline_input_hash="hash", beats=[Beat(id="b1", name="全部")],
                     selections=[Selection(clip_id=section, beat_id="b1")])
-    from test_edit_plan import FOOTAGE, analysis, clean_cuts, ASSET_ID
+    from app.engine.semantic import clean_cuts
+    from edit_plan.shared import FOOTAGE
+    from test_semantic_timeline import ASSET_ID, analysis
 
     cuts = {ASSET_ID: clean_cuts(analysis(**FOOTAGE))}
     loose = compiled_duration(plan_pieces(plan, by_id, children, assets, cuts))
