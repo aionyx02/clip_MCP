@@ -91,7 +91,10 @@ class Job(BaseModel):
                     "`{at, clip_id, side, lag}` for each side of a join whose sound could be lined up against "
                     "the same stretch of its own file, lag in seconds and positive when the sound is late; "
                     "`sides_asked`, how many sides were offered to the check; `unlined`, how many of those could "
-                    "not be lined up; `left_out`, how many were left out, as `{too_short, faded}`; and "
+                    "not be lined up, as `{weak, beyond_reach}`: `weak` when the sound did not follow the file's "
+                    "closely enough or the file could not be read, `beyond_reach` when a shift that follows closely "
+                    "enough is at the edge of the search; `left_out`, how many were left out, as "
+                    "`{too_short, faded}`; and "
                     "`frame`, one frame of the render in seconds. Null when it was not checked (render jobs)",
     )
     error_message: Optional[str] = None
