@@ -415,7 +415,11 @@ class JobContext:
             """Copy the stage profile onto the job."""
             job.profile = profile
 
-        self._repo.update_job(self._job_id, write)
+        try:
+            self._repo.update_job(self._job_id, write)
+        except Exception:
+            # A profile that cannot be saved is no reason to fail a job that already ran.
+            pass
 
     def report(self, progress: float, stage: Optional[str] = None) -> None:
         """Record progress to include in the next heartbeat.

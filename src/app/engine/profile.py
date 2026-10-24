@@ -9,18 +9,22 @@ the same hour's scene detection is quick and takes almost nothing.
 What it measures is the machine as a whole, not this process. Memory in use
 is total minus available, so it includes FFmpeg and every other child process
 a stage starts, and it also includes whatever else the person has open — a
-browser, another editor, the rest of their day. A rise is therefore an upper
-bound on what the stage itself took, useful for comparing stages with each
-other and not for saying what one of them would need on an idle computer.
+browser, another editor, the rest of their day. Every rise is measured from
+the reading taken when the job started, so a stage that runs after a large
+model was loaded includes that model in its rise; the column is the most
+memory in use during the stage, not what the stage itself added. It is
+therefore an upper bound on the stage's cost, not what the stage would need
+on an idle computer.
 
 The numbers are sampled rather than tracked: memory is read every
 `PROFILE_SAMPLE_SECONDS`, so a stage shorter than that can finish without a
 reading of its own and show a rise of zero. The card is read less often, every
 `GPU_SAMPLE_SECONDS`, because each reading starts nvidia-smi, which takes a
 quarter of a second here: read as often as memory, it would keep a process
-running for the whole job it is measuring. A stage shorter than that may show
-no rise on the card. Nothing here decides anything
-about a job; it only records what was seen.
+running for the whole job it is measuring. A card rise of None means the card
+was not read during that stage: the stage was shorter than `GPU_SAMPLE_SECONDS`
+or the card had stopped answering. Nothing here decides anything about a job;
+it only records what was seen.
 """
 
 import re
@@ -40,6 +44,10 @@ PROFILE_SAMPLE_SECONDS = 0.25
 # Provisional: how often the card's memory is read. Each reading starts nvidia-smi, about
 # 0.25 s on the machine this was written on, so this keeps it to about a tenth of the time.
 GPU_SAMPLE_SECONDS = 2.0
+# How long `stop` waits for the sampler to end. A card reading in progress can take up to
+# nvidia-smi's own 10 s timeout, and the job is not kept waiting for it: the thread is a
+# daemon, so it is abandoned and ends with the process.
+STOP_WAIT_SECONDS = 1.0
 
 def _machine_in_use() -> Optional[int]:
     """Read how much of this computer's physical memory is in use.
@@ -116,20 +124,27 @@ class StageClock:
         self._peak_memory: Optional[int] = None
         self._peak_gpu: Optional[int] = None
         self._gpu_readable = True
+        self._gpu_read_in_stage = False
         self._running = False
         self._stop = threading.Event()
         self._thread: Optional[threading.Thread] = None
 
     def start(self) -> None:
-        """Read the baseline, then sample memory in the background until `stop`."""
+        """Read the memory baseline, then sample in the background until `stop`.
+
+        The card is not read here: a card reading starts nvidia-smi, which can
+        take seconds, and the job's thread must not wait for it. Its baseline
+        is read by the sampler instead, as soon as the sampler starts.
+        """
         if self._running:
             return
         self._baseline_memory = self._memory()
-        self._baseline_gpu = self._gpu()
+        self._baseline_gpu = None
         # A machine with no card is not asked again, so it does not spawn a process per sample.
-        self._gpu_readable = self._baseline_gpu is not None
+        self._gpu_readable = True
+        self._gpu_read_in_stage = False
         self._peak_memory = self._baseline_memory
-        self._peak_gpu = self._baseline_gpu
+        self._peak_gpu = None
         self._entries = []
         self._stage = None
         self._running = True
@@ -160,6 +175,7 @@ class StageClock:
             self._stage_started = now
             self._peak_memory = self._baseline_memory
             self._peak_gpu = self._baseline_gpu
+            self._gpu_read_in_stage = False
             # One reading at the change, so a stage always has at least one.
             self._fold(memory, None)
 
@@ -177,7 +193,9 @@ class StageClock:
         self._stop.set()
         thread = self._thread
         if thread is not None and thread is not threading.current_thread():
-            thread.join()
+            # A card reading in progress can take up to nvidia-smi's own timeout. The thread is
+            # a daemon, so the job does not wait for it beyond this.
+            thread.join(timeout=STOP_WAIT_SECONDS)
         with self._lock:
             self._close(self._clock())
             self._running = False
@@ -199,10 +217,18 @@ class StageClock:
             if card and self._gpu_readable and gpu is None:
                 # A card that could not be read once is not asked again.
                 self._gpu_readable = False
+            if gpu is not None and self._baseline_gpu is None:
+                # The first card reading is the baseline every later rise is measured from.
+                self._baseline_gpu = gpu
+            if gpu is not None and self._stage is not None:
+                self._gpu_read_in_stage = True
             self._fold(memory, gpu)
 
     def _sample_forever(self) -> None:
         """Read memory every `sample_seconds`, and the card every `gpu_seconds`, until the clock is stopped."""
+        # The card's baseline is read here, as soon as the thread starts, rather than at the first scheduled
+        # reading, by when the job may already have put a model on the card.
+        self._sample(card=True)
         ticks = 0
         while not self._stop.wait(self._sample_seconds):
             ticks += 1
@@ -230,9 +256,10 @@ class StageClock:
             "stage": self._stage,
             "seconds": round(now - self._stage_started, 3),
             "memory_rise_mb": _rise(self._peak_memory, self._baseline_memory),
-            "gpu_rise_mb": _rise(self._peak_gpu, self._baseline_gpu),
+            "gpu_rise_mb": _rise(self._peak_gpu, self._baseline_gpu) if self._gpu_read_in_stage else None,
         })
         self._stage = None
+        self._gpu_read_in_stage = False
 
 def _rise(peak: Optional[int], baseline: Optional[int]) -> Optional[int]:
     """How far above the baseline a peak sits, in whole MiB, never below zero.

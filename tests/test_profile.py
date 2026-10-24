@@ -1,12 +1,15 @@
 """Tests for timing each stage of a job and recording the memory it had in use."""
 
 import os
+import threading
+import time
 from decimal import Decimal
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import pytest
 
+from app import cli
 from app.engine import machine, profile, renderer
 from app.engine.profile import StageClock, stage_key, summarise
 from app.engine.renderer import JobContext
@@ -45,6 +48,7 @@ def test_each_stage_is_timed_and_keeps_its_own_peak_rise() -> None:
     gpu = [100 * MIB]
     clock = stage_clock(now, lambda: memory[0], lambda: gpu[0])
     clock.start()
+    clock._sample()
     now[0] = 1.0
     clock.mark("transcribing")
     memory[0], gpu[0] = 1600 * MIB, 400 * MIB
@@ -136,6 +140,80 @@ def test_a_stage_never_reported_leaves_no_entry() -> None:
     now[0] = 2.0
     assert clock.stop() == []
 
+class _StopAfter:
+    """A stop event that answers False a set number of waits, then True."""
+
+    def __init__(self, waits: int):
+        self._left = waits
+
+    def wait(self, seconds: float) -> bool:
+        if self._left > 0:
+            self._left -= 1
+            return False
+        return True
+
+    def set(self) -> None:
+        self._left = 0
+
+def test_the_card_is_read_every_gpu_seconds() -> None:
+    reads = {"memory": 0, "card": 0}
+
+    def memory() -> int:
+        reads["memory"] += 1
+        return 100 * MIB
+
+    def card() -> int:
+        reads["card"] += 1
+        return 50 * MIB * reads["card"]
+
+    clock = StageClock(sample_seconds=0.25, gpu_seconds=1.0, memory=memory, gpu=card)
+    clock._running = True
+    clock._stop = _StopAfter(12)
+    clock._sample_forever()
+    # One reading of each as the sampler starts, the card's baseline among them, then memory every tick
+    # and the card every fourth.
+    assert reads["memory"] == 13
+    assert reads["card"] == 4
+    assert clock._baseline_gpu == 50 * MIB
+
+def test_a_card_rise_is_none_for_a_stage_the_card_was_not_read_in() -> None:
+    now = [0.0]
+    gpu = [100 * MIB]
+    clock = stage_clock(now, lambda: 100 * MIB, lambda: gpu[0])
+    clock.start()
+    now[0] = 1.0
+    clock.mark("quick")
+    now[0] = 2.0
+    clock.mark("long")
+    clock._sample()
+    gpu[0] = 300 * MIB
+    clock._sample()
+    now[0] = 3.0
+    entries = clock.stop()
+    assert entries[0]["gpu_rise_mb"] is None
+    assert entries[1]["gpu_rise_mb"] == 200
+
+def test_stop_does_not_wait_past_the_stop_wait(monkeypatch: pytest.MonkeyPatch) -> None:
+    entered = threading.Event()
+    release = threading.Event()
+
+    def blocking_card() -> Optional[int]:
+        entered.set()
+        release.wait()
+        return None
+
+    clock = StageClock(sample_seconds=0.01, gpu_seconds=0.01, memory=lambda: 100 * MIB, gpu=blocking_card)
+    monkeypatch.setattr(profile, "STOP_WAIT_SECONDS", 0.05)
+    clock.start()
+    try:
+        assert entered.wait(2.0)
+        began = time.monotonic()
+        clock.stop()
+        elapsed = time.monotonic() - began
+        assert elapsed < 1.0
+    finally:
+        release.set()
+
 # --- grouping ----------------------------------------------------------------------------
 
 def test_stage_keys_group_a_counter() -> None:
@@ -159,6 +237,13 @@ def test_the_card_reading_is_mebibytes_as_bytes(monkeypatch: pytest.MonkeyPatch)
 
 def test_a_card_that_says_nothing_has_no_reading(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(machine, "_nvidia_smi", lambda query: None)
+    assert profile._gpu_in_use() is None
+
+@pytest.mark.parametrize("answer", ["[N/A]", "[Not Supported]"])
+def test_a_card_that_answers_something_not_numeric_has_no_reading(
+    monkeypatch: pytest.MonkeyPatch, answer: str,
+) -> None:
+    monkeypatch.setattr(machine, "_nvidia_smi", lambda query: answer)
     assert profile._gpu_in_use() is None
 
 # --- the summary -------------------------------------------------------------------------
@@ -211,6 +296,11 @@ def test_analyze_jobs_report_the_real_time_factor() -> None:
     text = summary()
     assert "real-time factor: 0.37x (2 jobs, 300.0 s of footage)" in text
 
+def test_analyze_jobs_without_a_duration_say_the_factor_cannot_be_worked_out() -> None:
+    jobs = [finished(JobKind.ANALYZE, [entry("transcription", 10.0)], asset_id="a")]
+    text = summarise(jobs, {"a": asset("a", None)})
+    assert "real-time factor: - (no analyzed asset has a duration)" in text
+
 def test_nothing_to_summarise_says_so() -> None:
     nothing = [Job(kind=JobKind.RENDER, status=JobStatus.COMPLETED)]
     assert summarise(nothing, {}) == "No completed job has a profile yet."
@@ -253,3 +343,81 @@ def test_a_clock_that_cannot_start_leaves_the_profile_unset(
     stored = repo.get_job(job.job_id)
     assert stored is not None
     assert stored.profile is None
+
+class _MarkFails:
+    """A clock whose mark fails while the job runs."""
+
+    def start(self) -> None:
+        pass
+
+    def mark(self, stage: str) -> None:
+        raise RuntimeError("no mark")
+
+    def stop(self) -> List[Dict[str, Any]]:
+        return []
+
+class _StopFails:
+    """A clock whose stop fails when the job is recorded."""
+
+    def start(self) -> None:
+        pass
+
+    def mark(self, stage: str) -> None:
+        pass
+
+    def stop(self) -> List[Dict[str, Any]]:
+        raise RuntimeError("no stop")
+
+def test_a_clock_whose_mark_fails_never_fails_the_job(tmp_path: Path) -> None:
+    repo = Repository(str(tmp_path / "mark.db"))
+    job = Job()
+    repo.add_job(job)
+    context = JobContext(repo, job.job_id)
+    context._clock = _MarkFails()
+    with context as running:
+        running.report(0.5, "transcribing")
+    assert repo.get_job(job.job_id) is not None
+
+def test_a_clock_whose_stop_fails_never_fails_the_job(tmp_path: Path) -> None:
+    repo = Repository(str(tmp_path / "stop.db"))
+    job = Job()
+    repo.add_job(job)
+    context = JobContext(repo, job.job_id)
+    context._clock = _StopFails()
+    with context as running:
+        running.report(0.5, "transcribing")
+    stored = repo.get_job(job.job_id)
+    assert stored is not None
+    assert stored.profile is None
+
+def test_a_profile_that_cannot_be_written_never_fails_the_job(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+) -> None:
+    repo = Repository(str(tmp_path / "write.db"))
+    job = Job()
+    repo.add_job(job)
+    context = JobContext(repo, job.job_id)
+    context.__enter__()
+    context.report(0.5, "transcribing")
+    original = repo.update_job
+
+    def failing(job_id: str, change: Any) -> Any:
+        if getattr(change, "__qualname__", "").endswith("_record_profile.<locals>.write"):
+            raise RuntimeError("disk full")
+        return original(job_id, change)
+
+    monkeypatch.setattr(repo, "update_job", failing)
+    context.__exit__(None, None, None)
+    stored = repo.get_job(job.job_id)
+    assert stored is not None
+    assert stored.profile is None
+
+# --- the command -------------------------------------------------------------------------
+
+def test_the_profile_command_prints_a_summary(capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["profile", "--days", "30"])
+    assert caught.value.code == 0
+    out = capsys.readouterr().out
+    assert "No completed job has a profile yet." in out or "total s" in out
+
