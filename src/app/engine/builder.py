@@ -74,6 +74,10 @@ SILENCE_GUARD = r"aeval=exprs=if(isnan(val(0))\,0\,val(0))|if(isnan(val(1))\,0\,
 RUMBLE_HZ = 100
 HISS_REDUCTION_DB = 12
 HISS_FLOOR_DB = -40
+# How far `afftdn` delays the sound at `AUDIO_SAMPLE_RATE`, measured on FFmpeg 9.0 (#144). It has
+# no option to compensate itself, so the delay is taken back by hand; a test pins it so a change
+# in FFmpeg shows up. Measured, not Provisional.
+HISS_DELAY_SAMPLES = 1200
 SIBILANCE_INTENSITY = 0.4
 # Raised whenever the picture chain changes in a way its text does not show, so a
 # cached picture made by the old chain is never mistaken for one made by the new.
@@ -484,6 +488,9 @@ def _cleanup_filters(cleanup: VoiceCleanup) -> List[str]:
     denoiser turned up far enough to remove all the hiss removes the top of the
     voice with it, and the result is worse than the hiss was.
 
+    The hiss filter's delay is taken back, so the sound stays on the picture.
+    The chain runs at `AUDIO_SAMPLE_RATE`, which `HISS_DELAY_SAMPLES` assumes.
+
     Args:
         cleanup: The repairs asked for.
 
@@ -499,7 +506,13 @@ def _cleanup_filters(cleanup: VoiceCleanup) -> List[str]:
         # Nothing in a human voice lives below this, so it costs the voice nothing.
         filters.append(f"highpass=f={RUMBLE_HZ}")
     if cleanup.hiss:
+        # `afftdn` delays the sound by a fixed number of samples. Padding first gives it room
+        # to push the clip's last 25 ms out rather than lose it; trimming after takes the
+        # delay back off the front.
+        filters.append(f"apad=pad_len={HISS_DELAY_SAMPLES}")
         filters.append(f"afftdn=nr={HISS_REDUCTION_DB}:nf={HISS_FLOOR_DB}")
+        filters.append(f"atrim=start_sample={HISS_DELAY_SAMPLES}")
+        filters.append("asetpts=PTS-STARTPTS")
     if cleanup.sibilance:
         filters.append(f"deesser=i={SIBILANCE_INTENSITY}")
     return filters

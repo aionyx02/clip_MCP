@@ -10,11 +10,11 @@ from typing import Tuple
 import numpy
 import pytest
 
-from app.engine import builder
+from app.engine import builder, loudness
 from app.engine.builder import FFmpegRenderer
 from app.engine.diarize import SAMPLE_RATE, read_samples
 from app.models.media import Asset
-from app.models.timeline.parts import Clip, Dissolve, TimeRange
+from app.models.timeline.parts import Clip, Dissolve, TimeRange, VoiceCleanup
 from app.runtime import repo
 from app.tools.catalog import import_asset
 from app.tools.shared import referenced_assets
@@ -31,14 +31,13 @@ WINDOW_SECONDS = 0.1
 # Silence put in front of the source, so a render that begins a little late can still be
 # lined up: a negative shift needs samples from before the file's start.
 PAD = round(WINDOW_SECONDS * SAMPLE_RATE)
-# The loudness chain's limiter looks 1 ms ahead, so every render is about that much late
-# however its clips are read. A clip far into its file is read with a seek, which cuts
-# exactly, so it is the reference; a clip near the start must land within a sample of
-# 16 kHz either way of where that one lands.
+# A clip far into its file is read with a seek, which cuts exactly, so it is the reference; a
+# clip near the start must land within a sample of 16 kHz either way of where that one lands.
 TOLERANCE_SAMPLES = 1
-# How far from where the source says the reference itself may land: the limiter's 1 ms and
-# a little over.
-REFERENCE_SAMPLES = 2 * SAMPLE_RATE // 1000
+# How far from where the source says the reference itself may land: no further than a clip near
+# the start may land from it. The limiter takes back its 1 ms look-ahead (16 samples here), so a
+# render is no longer late however its clips are read (#144).
+REFERENCE_SAMPLES = TOLERANCE_SAMPLES
 
 
 @pytest.fixture(scope="module")
@@ -96,9 +95,61 @@ def lag_samples(heard: numpy.ndarray, source: numpy.ndarray, offset: float) -> i
     return best
 
 
+def filter_output(signal: numpy.ndarray, filters: str) -> numpy.ndarray:
+    """Play a stereo signal at `AUDIO_SAMPLE_RATE` through FFmpeg's filters and return its mono output.
+
+    Args:
+        signal: Stereo samples, shaped `(frames, 2)`.
+        filters: The audio filter chain to play it through.
+
+    Returns:
+        The filtered samples, mixed down to one channel.
+    """
+    rate = builder.AUDIO_SAMPLE_RATE
+    result = subprocess.run(
+        ["ffmpeg", "-hide_banner", "-loglevel", "error", "-f", "f32le", "-ar", str(rate),
+         "-ac", "2", "-i", "-", "-af", filters, "-f", "f32le", "-ar", str(rate), "-ac", "2", "-"],
+        input=signal.astype("<f4").tobytes(), capture_output=True,
+    )
+    assert result.returncode == 0, result.stderr.decode("utf-8", errors="replace")
+    return numpy.frombuffer(result.stdout, dtype="<f4").reshape(-1, 2).mean(axis=1).astype(numpy.float64)
+
+
+def filter_lag(filtered: numpy.ndarray, source: numpy.ndarray, window: int) -> int:
+    """Say by how many samples a filter chain delayed a signal, within `window` either side.
+
+    Args:
+        filtered: The chain's output, mono.
+        source: The signal that went in, shaped `(frames, 2)`.
+        window: How far either side of zero to look, in samples.
+
+    Returns:
+        The shift that lines the two up best: positive means the output is late.
+    """
+    source = source.mean(axis=1)
+    size = 1
+    while size < len(filtered) + len(source) - 1:
+        size *= 2
+    spectrum = numpy.fft.rfft(filtered, size) * numpy.conj(numpy.fft.rfft(source, size))
+    correlation = numpy.fft.irfft(spectrum, size)
+    lags = numpy.arange(-window, window + 1)
+    return int(lags[int(numpy.argmax(correlation[lags % size]))])
+
+
 def rendered_lag(asset: str, path: Path, start: float, out: Path) -> int:
     """Render two seconds of the file from `start` and say where its sound lands, in samples."""
     project = build_project([video_track(), insert("a", asset, start, start + 2)], width=320, height=240)
+    render(project, out)
+    return lag_samples(read_samples(str(out)), read_samples(str(path)), start)
+
+
+def rendered_clean_lag(asset: str, path: Path, start: float, out: Path) -> int:
+    """Render two seconds with hiss cleanup and say where its sound lands, in samples."""
+    project = build_project([
+        video_track(),
+        insert("a", asset, start, start + 2),
+        {"action": "set_clip_audio", "track_id": "main", "clip_id": "a", "cleanup": {"hiss": True}},
+    ], width=320, height=240)
     render(project, out)
     return lag_samples(read_samples(str(out)), read_samples(str(path)), start)
 
@@ -273,3 +324,47 @@ def test_the_music_is_cut_where_its_input_was_read(media: Path, tmp_path: Path) 
     chains = command[command.index("-filter_complex") + 1].split(";")
     sound = next(chain for chain in chains if "atrim=start=0.500000" in chain)
     assert sound.split("]", 1)[1].startswith("atrim=start=0.500000,"), sound
+
+
+def test_hiss_cleanup_leaves_the_sound_where_it_was(
+    bursts: Tuple[str, Path], reference: int, tmp_path: Path,
+) -> None:
+    """`afftdn` delays the sound by 25 ms; the chain takes that back, so the cut still lands on the picture."""
+    asset, path = bursts
+    lag = rendered_clean_lag(asset, path, 2.0, tmp_path / "clean.mp4")
+    assert abs(lag - reference) <= 2, (lag, reference)
+
+
+def test_the_hiss_filter_delays_by_the_constant_that_takes_it_back() -> None:
+    """The pinned measurement: a future FFmpeg that changes the delay fails here, not in a render."""
+    frames = 2 * builder.AUDIO_SAMPLE_RATE
+    clicks = numpy.zeros(frames)
+    clicks[:: builder.AUDIO_SAMPLE_RATE // 4] = 0.9
+    signal = numpy.stack([clicks, clicks], axis=1)
+    filters = f"afftdn=nr={builder.HISS_REDUCTION_DB}:nf={builder.HISS_FLOOR_DB}"
+    filtered = filter_output(signal, filters)
+    assert len(filtered) == frames
+    lag = filter_lag(filtered, signal, 2 * builder.HISS_DELAY_SAMPLES)
+    assert abs(lag - builder.HISS_DELAY_SAMPLES) <= 1, lag
+
+
+def test_the_compensated_hiss_filter_keeps_the_length_and_the_last_words() -> None:
+    """Padding before the denoiser and trimming after keeps the length and the recording's last 25 ms."""
+    frames = 2 * builder.AUDIO_SAMPLE_RATE
+    signal = numpy.zeros(frames)
+    tail = round(0.03 * builder.AUDIO_SAMPLE_RATE)
+    signal[-tail:] = 0.8 * numpy.sin(2 * numpy.pi * 1000 * numpy.arange(tail) / builder.AUDIO_SAMPLE_RATE)
+    stereo = numpy.stack([signal, signal], axis=1)
+    filtered = filter_output(stereo, ",".join(builder._cleanup_filters(VoiceCleanup(hiss=True))))
+    assert len(filtered) == frames
+    held = round(0.025 * builder.AUDIO_SAMPLE_RATE)
+    assert numpy.sqrt(numpy.mean(filtered[-held:] ** 2)) > 0.2
+    lag = filter_lag(filtered, stereo, 2 * builder.HISS_DELAY_SAMPLES)
+    assert abs(lag) <= 1, lag
+
+
+def test_the_limiter_takes_back_its_look_ahead() -> None:
+    """`latency=1` compensates the limiter's 1 ms, so the finished sound stays on the picture."""
+    filters = loudness.chain(-14.0, "0.00")
+    limiter = next(part for part in filters.split(",") if part.startswith("alimiter="))
+    assert "latency=1" in limiter.split(":"), limiter
