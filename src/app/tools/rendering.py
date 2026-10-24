@@ -20,7 +20,7 @@ from app.models.media import Asset, MediaAnalysis
 from app.models.plan import EditPlan
 from app.models.timeline.parts import Clip, Project, TrackType
 from app.models.job import Job, JobKind, JobStatus
-from app.engine import cards, looks, playback, resources, texts
+from app.engine import cards, looks, playback, resources, sync, texts
 from app.engine.analysis import second_listen, with_words_heard_again
 from app.engine.probe import probe_file, speech_loudness
 from app.engine.reframe import Framing, frame_project, placement_at
@@ -677,6 +677,10 @@ def start_render(
     # The captions and words drawn on are read through a filter rather than `-i`, and made here all the same.
     if subtitle_path is not None:
         spec["made"] = sorted({*spec["made"], subtitle_path})
+    if project.base_video_track is not None:
+        sources = {asset_id: asset.path for asset_id, asset in assets.items() if asset.has_audio}
+        offered, left_out = sync.sides(project.tracks, project.base_video_track.clips, sources)
+        spec["sync"] = {"sides": offered, "left_out": left_out, "frame": project.fps_den / project.fps_num}
     job = runtime.job_manager.start_job(job, spec)
     # Every clip on a picture track is one picture, the sequence's and the ones drawn over it.
     pictures = sum(len(track.clips) for track in project.video_tracks)
