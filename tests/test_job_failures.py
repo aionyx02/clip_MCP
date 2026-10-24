@@ -124,6 +124,78 @@ def test_ffmpeg_failing_to_read_a_photo_a_mix_or_a_stretch_of_sound_says_so(
         analysis.refine_unsure_lines(str(broken), Transcript(language="zh", model="small"), 1.0, None, [], "large",
                                      lambda *_: None, lambda: False, str(tmp_path / "refine"))
 
+def test_ffmpeg_failing_to_decode_sound_for_the_voices_says_so(tmp_path: Path) -> None:
+    from app.engine import diarize
+
+    broken = tmp_path / "broken.wav"
+    broken.write_text("not sound", encoding="utf-8")
+    with pytest.raises(FFmpegFailed):
+        diarize.read_samples(str(broken))
+
+def test_ffmpeg_failing_to_decode_sound_for_the_beat_says_so(tmp_path: Path) -> None:
+    from app.engine import rhythm
+
+    broken = tmp_path / "broken.mp3"
+    broken.write_text("not sound", encoding="utf-8")
+    with pytest.raises(FFmpegFailed):
+        rhythm._decode(str(broken), "ffmpeg")
+
+def test_ffmpeg_failing_to_cut_a_stretch_of_sound_says_so(tmp_path: Path) -> None:
+    from app.engine import listen
+
+    broken = tmp_path / "broken.mp4"
+    broken.write_text("not sound", encoding="utf-8")
+    with pytest.raises(FFmpegFailed):
+        listen.cut_sound(str(broken), 0.0, 1.0, str(tmp_path / "out.wav"))
+
+def test_ffmpeg_failing_to_read_a_frame_says_so(tmp_path: Path) -> None:
+    from app.engine import frames
+
+    broken = tmp_path / "broken.png"
+    broken.write_bytes(b"not a picture")
+    with pytest.raises(FFmpegFailed):
+        frames.extract_frame(str(broken), 0.0)
+
+def test_ffprobe_failing_to_read_a_file_says_so(tmp_path: Path) -> None:
+    from app.engine import probe
+
+    broken = tmp_path / "broken.mp4"
+    broken.write_text("not media", encoding="utf-8")
+    with pytest.raises(FFmpegFailed):
+        probe.probe_file(str(broken))
+
+def test_a_frame_with_no_picture_behind_a_clean_exit_is_not_ffmpeg_failing(tmp_path: Path) -> None:
+    from app.engine import frames
+
+    source = tmp_path / "tiny.mp4"
+    subprocess.run(
+        ["ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i", "testsrc=duration=1:size=32x32:rate=5",
+         "-pix_fmt", "yuv420p", str(source)],
+        stdin=subprocess.DEVNULL, capture_output=True, check=True,
+    )
+    # Past the end FFmpeg exits 0 and writes nothing: a clean run that found no picture.
+    with pytest.raises(RuntimeError) as raised:
+        frames.extract_frame(str(source), 5.0)
+    assert not isinstance(raised.value, FFmpegFailed)
+
+def test_an_analysis_ffmpeg_cannot_decode_is_a_render_failure(
+    store: Repository, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.engine import diarize
+
+    source = tmp_path / "talk.mp4"
+    source.write_text("these are words, not sound", encoding="utf-8")
+    store.save_asset(Asset(id="talk", path=str(source), duration=10, has_video=True, has_audio=True))
+
+    def read_the_voices(asset, *args, **kwargs) -> None:
+        diarize.read_samples(asset.path)
+
+    monkeypatch.setattr(renderer, "analyze_media", read_the_voices)
+    job = ended(store, queued(store, tmp_path, {"transcribe": False}, kind=JobKind.ANALYZE, asset_id="talk"))
+    # The file was still there when it ended, so the failure is FFmpeg's and not the input's.
+    assert (job.status, job.failure_kind) == (JobStatus.FAILED, FailureKind.RENDER)
+    assert job.error_message and "Invalid data found" in job.error_message
+
 def test_an_analysis_of_a_file_that_is_gone_is_an_input_failure(store: Repository, tmp_path: Path) -> None:
     store.save_asset(Asset(id="gone", path=str(tmp_path / "gone.mp4"), duration=10, has_video=True, has_audio=True))
     job = ended(store, queued(store, tmp_path, {"transcribe": False}, kind=JobKind.ANALYZE, asset_id="gone"))

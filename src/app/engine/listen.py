@@ -23,7 +23,7 @@ from typing import List, Optional, Sequence
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
-from app.engine.ffmpeg import hidden_window_flags
+from app.engine.ffmpeg import FFmpegFailed, hidden_window_flags
 from app.models.timeline.parts import Project
 
 # Levels are read in windows this long: short enough to see a word, long enough not to
@@ -78,7 +78,7 @@ def cut_sound(path: str, start: float, end: float, keep_as: str, ffmpeg_bin: str
         ffmpeg_bin: Path to, or name of, the FFmpeg executable.
 
     Raises:
-        RuntimeError: If the file has no sound there or it cannot be read.
+        FFmpegFailed: If FFmpeg cannot read the stretch of sound.
     """
     os.makedirs(os.path.dirname(keep_as), exist_ok=True)
     cut = subprocess.run(
@@ -88,7 +88,7 @@ def cut_sound(path: str, start: float, end: float, keep_as: str, ffmpeg_bin: str
         creationflags=hidden_window_flags(),
     )
     if cut.returncode != 0:
-        raise RuntimeError(f"could not read that stretch of sound: {cut.stderr.strip()[-300:]}")
+        raise FFmpegFailed(f"could not read that stretch of sound: {cut.stderr.strip()[-300:]}")
 
 def levels_every(path: str, seconds: float) -> List[float]:
     """Measure a mono WAV's level over longer windows, for reading as numbers.
