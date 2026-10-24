@@ -16,6 +16,10 @@ from app.models.media import Asset, MediaAnalysis
 from app.models.timeline.parts import TOUCHING_SECONDS, Clip, Dip, Project, TrackType, Transition, VoiceCleanup, Wipe
 
 AUDIO_SAMPLE_RATE = 48000
+# Clips starting closer than this to the beginning of their file are read from the beginning and cut by timestamp:
+# a seek that lands near the start of an AAC file drops one more frame of its encoder delay than reading from the
+# start does (#142). Provisional: measured as 46 ms early at 0 and 36 ms at 0.01 s, and right from 0.1 s on.
+SEEK_FROM_SECONDS = 1.0
 # Provisional (roadmap §13): how a shot shown whole sits on its blurred copy — how hard the copy
 # is blurred, and how much darker, so the shot itself reads as the picture.
 WHOLE_BLUR = 30
@@ -267,6 +271,29 @@ def _format_seconds(value: Fraction) -> str:
     """
     return f"{float(value):.6f}"
 
+def _seek_or_cut(clip_start: Decimal) -> Tuple[Optional[str], Optional[str]]:
+    """Choose how a clip's source is read: seek into it, or read from its start and cut to the point.
+
+    A seek that lands within the first moments of an AAC file drops one more
+    frame of the file's encoder delay than reading from the start does, so the
+    sound comes out early by that frame (#142). Reading from the start and
+    cutting by timestamp afterwards gives the same stretch of sound without
+    the loss.
+
+    Args:
+        clip_start: Where in the source the read begins, in seconds.
+
+    Returns:
+        `(seek, cut)`: the `-ss` value, or None to read from the beginning of
+        the file; and the time to cut the beginning off by in the chain, or
+        None when the read begins exactly where it is wanted.
+    """
+    if clip_start >= Decimal(str(SEEK_FROM_SECONDS)):
+        return _format_seconds(Fraction(clip_start)), None
+    if clip_start <= 0:
+        return None, None
+    return None, _format_seconds(Fraction(clip_start))
+
 # Clips this close are touching, not overlapping: the timeline's own tolerance, as a fraction.
 TOUCHING = Fraction(str(TOUCHING_SECONDS))
 
@@ -325,31 +352,36 @@ def _input_args(clip: Clip, asset: Asset, frames: int, fps: Fraction) -> List[st
         fps: Output frame rate.
 
     Returns:
-        The `-ss`, `-t`, and `-i` options for the input. The seek starts at
-        `video_source_start`, which is the clip's own in point unless a
-        transition runs it in, in which case it is that much earlier. The length is in
-        source seconds, so a clip running at double speed reads twice as much
-        of the file as it occupies on the timeline. A photo is one picture,
-        read whole; its chain makes the frames.
+        The `-ss` (when there is one), `-t`, and `-i` options for the input.
+        The read starts at `video_source_start`, which is the clip's own in
+        point unless a transition runs it in, in which case it is that much
+        earlier. A read starting close to the beginning of the file has no
+        `-ss` and is that much longer instead; its chain cuts the beginning
+        off (see `_seek_or_cut`). The length is in source seconds, so a clip
+        running at double speed reads twice as much of the file as it
+        occupies on the timeline. A photo is one picture, read whole; its
+        chain makes the frames.
     """
     if asset.still:
         return ["-i", asset.path]
     if clip.card is not None:
         # A card holds one frame of its file: read a sliver from there, not the rest of the file.
         return ["-ss", _format_seconds(Fraction(clip.card.at)), "-t", "0.2", "-i", asset.path]
-    return [
-        "-ss", _format_seconds(Fraction(clip.video_source_start)),
-        "-t", _format_seconds(Fraction(frames + 1) * Fraction(str(clip.speed)) / fps),
-        "-i", asset.path,
-    ]
+    seek, _cut = _seek_or_cut(clip.video_source_start)
+    length = Fraction(frames + 1) * Fraction(str(clip.speed)) / fps
+    if seek is None:
+        return ["-t", _format_seconds(length + Fraction(clip.video_source_start)), "-i", asset.path]
+    return ["-ss", seek, "-t", _format_seconds(length), "-i", asset.path]
 
 def _audio_input_args(clip: Clip, asset: Asset, fps: Fraction) -> List[str]:
     """Build the FFmpeg input options that read a clip's sound on its own.
 
-    A clip whose sound leads its picture needs audio from before the point the
-    picture input is seeked to, so it gets an input of its own rather than the
-    picture's being moved — moving it would shift every frame. Only clips that
-    actually lead or lag pay for the extra input.
+    A clip gets an input of its own for its sound when the picture's input
+    cannot carry it: its sound leads or lags its picture, its picture input
+    starts early for a transition's run-up, or its picture comes from the
+    cache and has no sound in it. Moving the picture's input instead would
+    shift every frame. Every other clip plays its sound from the picture's own
+    input and pays for nothing extra.
 
     Args:
         clip: Clip whose sound is read.
@@ -358,13 +390,17 @@ def _audio_input_args(clip: Clip, asset: Asset, fps: Fraction) -> List[str]:
             input takes.
 
     Returns:
-        The `-ss`, `-t`, and `-i` options for the input.
+        The `-ss` (when there is one), `-t`, and `-i` options for the input. A
+        read starting close to the beginning of the file has no `-ss` and is
+        that much longer instead; its chain cuts the beginning off (see
+        `_seek_or_cut`).
     """
-    return [
-        "-ss", _format_seconds(Fraction(clip.audio_source_range.start)),
-        "-t", _format_seconds(Fraction(clip.audio_source_range.duration) + Fraction(1) / fps),
-        "-i", asset.path,
-    ]
+    start = Fraction(clip.audio_source_range.start)
+    seek, _cut = _seek_or_cut(clip.audio_source_range.start)
+    length = Fraction(clip.audio_source_range.duration) + Fraction(1) / fps
+    if seek is None:
+        return ["-t", _format_seconds(length + start), "-i", asset.path]
+    return ["-ss", seek, "-t", _format_seconds(length), "-i", asset.path]
 
 def overlay_box(clip: Clip, width: int, height: int) -> Tuple[int, int, int, int]:
     """Work out where a clip is drawn, in whole even pixels.
@@ -554,7 +590,9 @@ def _picture_chain(
 
     The same chain for the sequence and for everything drawn over it, so a
     clip on an upper track plays at its speed and wears its look exactly the
-    way one on the sequence does.
+    way one on the sequence does. A source read from the start of its file
+    rather than seeked to the clip's in point is cut to that point first, by
+    timestamp (see `_seek_or_cut`).
 
     Args:
         clip: The clip.
@@ -587,8 +625,12 @@ def _picture_chain(
             f"trim=end_frame={frames},setpts=PTS-STARTPTS"
             f"{_clip_video_filter(clip, frames, fps)}"
         )
+    # A read that began at the start of the file rather than at the clip's in point is cut here,
+    # by timestamp, before anything rebases it (see `_seek_or_cut`).
+    _seek, cut = _seek_or_cut(clip.video_source_start)
+    head = f"trim=start={cut}," if cut else ""
     return (
-        f"setpts=PTS-STARTPTS{_speed_video_filter(clip)},fps={rate},"
+        f"{head}setpts=PTS-STARTPTS{_speed_video_filter(clip)},fps={rate},"
         f"{_placed(clip, width, height, framing)},setsar=1,format=yuv420p,"
         f"tpad=stop_mode=clone:stop_duration=1,trim=end_frame={frames},setpts=PTS-STARTPTS"
         f"{_clip_video_filter(clip, frames, fps)}"
@@ -652,24 +694,38 @@ def _silence_filter(samples: int, output_label: str) -> str:
     """
     return f"anullsrc=r={AUDIO_SAMPLE_RATE}:cl=stereo,atrim=end_sample={samples}{output_label}"
 
-def _clip_audio_filter(input_label: str, clip: Clip, samples: int, output_label: str, gain_db: float = 0.0) -> str:
+def _clip_audio_filter(
+    input_label: str, clip: Clip, samples: int, output_label: str, read_start: Decimal, gain_db: float = 0.0,
+) -> str:
     """Build the filter chain that turns a clip's source audio into its output audio.
 
-    The audio is resampled to 48 kHz stereo, padded or trimmed to exactly
-    `samples`, and then has the clip's volume and fades applied.
+    A source read from the start of its file rather than seeked to the point it
+    is wanted from is cut there first, by timestamp (see `_seek_or_cut`). The cut
+    follows the input the chain is given, not the clip's own sound: an input of
+    its own begins at `audio_source_range.start`, while one shared with the
+    picture begins at `video_source_start`. The audio is then resampled to
+    48 kHz stereo, padded or trimmed to exactly `samples`, and has the clip's
+    volume and fades applied.
 
     Args:
         input_label: Filtergraph label of the source audio, such as `[2:a]`.
         clip: Clip providing volume and fade settings.
         samples: Exact number of output samples.
         output_label: Filtergraph label of the result.
+        read_start: Where in the source the input was read from, which is what
+            the cut has to match.
         gain_db: What the clip is turned by to sit where it belongs in the
             mix, on top of its own volume.
 
     Returns:
         The filter chain.
     """
+    # A read that began at the start of the file rather than at the point it is wanted from is cut
+    # here, by timestamp, before anything rebases it (see `_seek_or_cut`).
+    _seek, cut = _seek_or_cut(read_start)
+    cut_filter = [f"atrim=start={cut}"] if cut else []
     chain = [
+        *cut_filter,
         "asetpts=PTS-STARTPTS",
         f"aresample={AUDIO_SAMPLE_RATE}",
         "aformat=sample_fmts=fltp:channel_layouts=stereo",
@@ -1119,12 +1175,14 @@ class FFmpegRenderer:
                     if lead or lag or run_up or cached:
                         audio_index = len(inputs)
                         inputs.append(_audio_input_args(clip, asset, fps))
+                        read_start = clip.audio_source_range.start
                     else:
                         audio_index = input_index
+                        read_start = clip.video_source_start
                     at = _frame_to_sample(segment.start_frame, fps) - lead
                     filters.append(
                         _clip_audio_filter(
-                            f"[{audio_index}:a]", clip, samples + lead + lag, f"[araw{index}]",
+                            f"[{audio_index}:a]", clip, samples + lead + lag, f"[araw{index}]", read_start,
                             clip_gains.get(clip.id, 0.0),
                         )
                     )
@@ -1255,7 +1313,9 @@ class FFmpegRenderer:
                     inputs.append(_input_args(clip, asset, frames, fps))
 
                 if heard:
-                    filters.append(_clip_audio_filter(f"[{input_index}:a]", clip, samples, audio_label))
+                    filters.append(
+                        _clip_audio_filter(f"[{input_index}:a]", clip, samples, audio_label, clip.video_source_start)
+                    )
                 else:
                     filters.append(_silence_filter(samples, audio_label))
                 track_labels.append(audio_label)
@@ -1300,7 +1360,7 @@ class FFmpegRenderer:
                     frames = segment.end_frame - segment.start_frame
                     inputs.append(_input_args(segment.clip, assets[segment.clip.asset_id], frames, fps))
                     filters.append(_clip_audio_filter(
-                        f"[{input_index}:a]", segment.clip, samples, label,
+                        f"[{input_index}:a]", segment.clip, samples, label, segment.clip.video_source_start,
                         # Brought to where the talking is, so a clip's volume says how far under
                         # the voices it sits rather than how far under its own mastering.
                         music_gains.get(track.id, {}).get(segment.clip.id, 0.0),
@@ -1406,8 +1466,11 @@ class FFmpegRenderer:
             # normalize=0 keeps every input at its own volume instead of dividing by the number of inputs.
             filters.append(f"{''.join(mix_labels)}amix=inputs={len(mix_labels)}:duration=first:normalize=0[mixa]")
 
+        # The finished sound's clock is its sample count, which is what every length here is measured
+        # in. Filters ahead of it, the loudness chain among them, can hand on timestamps with gaps
+        # that the sample count does not have, and the encoder would turn a gap into a late stretch.
         if loudness_target is None:
-            filters.append("[mixa]anull[outa]")
+            filters.append("[mixa]asetpts=N/SR/TB[outa]")
         else:
             # The gain is not known yet: the mix is measured on its own first, and the gain
             # that reaches the target is written in over the token (see `loudness`). The
@@ -1416,7 +1479,7 @@ class FFmpegRenderer:
             filters.append(
                 f"[mixa]{loudness.chain(loudness_target, loudness.GAIN_TOKEN)},{SILENCE_GUARD},"
                 f"aformat=sample_fmts=fltp:channel_layouts=stereo,"
-                f"apad=whole_len={total_samples},atrim=end_sample={total_samples}[outa]"
+                f"apad=whole_len={total_samples},atrim=end_sample={total_samples},asetpts=N/SR/TB[outa]"
             )
 
         # Log errors only and suppress console stats; render workers read progress through -progress instead.

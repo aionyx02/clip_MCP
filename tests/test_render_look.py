@@ -541,3 +541,74 @@ def test_a_dissolve_after_a_run_of_straight_cuts(tmp_path: Path) -> None:
     # Mid-dissolve the frame holds both the blue it is leaving and the green it is joining.
     blue, green = channels(tmp_path / "three.mp4", 3.7)[2], channels(tmp_path / "three.mp4", 3.7)[1]
     assert blue > 20 and green > 20, (blue, green)
+
+
+# --- the encoded sound's clock ---------------------------------------------------------------
+
+def audio_packet_samples(path: Path) -> list:
+    """Read the duration of each audio packet in a file, in samples.
+
+    The durations come back in the stream's own time base, which for AAC is
+    1/48000, so one 1024-sample frame reads as 1024.
+
+    Args:
+        path: Video to probe.
+
+    Returns:
+        The packet durations in samples, in the order the file stores them.
+    """
+    probed = subprocess.run(
+        ["ffprobe", "-v", "error", "-select_streams", "a", "-show_entries", "packet=duration",
+         "-of", "default=noprint_wrappers=1:nokey=1", str(path)],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+    )
+    assert probed.returncode == 0, probed.stderr
+    return [int(line) for line in probed.stdout.split() if line]
+
+
+def stream_seconds(path: Path) -> dict:
+    """Read each stream's duration in a file.
+
+    Args:
+        path: Video to probe.
+
+    Returns:
+        Durations in seconds, keyed by codec type.
+    """
+    probed = subprocess.run(
+        ["ffprobe", "-v", "error", "-show_entries", "stream=codec_type,duration",
+         "-of", "csv=p=0", str(path)],
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+    )
+    assert probed.returncode == 0, probed.stderr
+    seconds = {}
+    for line in probed.stdout.splitlines():
+        kind, _, duration = line.partition(",")
+        seconds[kind] = float(duration)
+    return seconds
+
+
+@pytest.mark.parametrize("speed", [1.5, 2.0, 0.75, 1.0])
+def test_the_encoded_sound_ends_where_the_picture_does(
+    counting: str, tmp_path: Path, speed: float
+) -> None:
+    """A gap in the sound's timestamps used to play everything after it late.
+
+    Filters ahead of the encoder, the loudness chain among them, can hand on
+    timestamps with a gap that the sample count does not have. The AAC encoder
+    turns a gap into one long packet, and a player that follows timestamps then
+    plays the rest of the sound late. Here the clock is the sample count, so
+    every packet is one frame and the two streams end together.
+    """
+    project = build_project([
+        video_track(), insert("a", counting, 0, 3.5), insert("b", counting, 4, 6),
+    ], width=320, height=240)
+    if speed != 1.0:
+        edit(project, [{"action": "set_clip_speed", "track_id": "main", "clip_id": "a", "speed": speed}])
+    out = tmp_path / f"{speed}.mp4"
+    render(project, out)
+    packets = audio_packet_samples(out)
+    assert packets, "the render has no audio packets"
+    assert packets[:-1] == [1024] * (len(packets) - 1), packets
+    seconds = stream_seconds(out)
+    assert seconds["audio"] == pytest.approx(seconds["video"], abs=1024 / 48000)
