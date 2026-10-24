@@ -14,7 +14,7 @@ from app.engine import builder
 from app.engine.builder import FFmpegRenderer
 from app.engine.diarize import SAMPLE_RATE, read_samples
 from app.models.media import Asset
-from app.models.timeline.parts import Clip, TimeRange
+from app.models.timeline.parts import Clip, Dissolve, TimeRange
 from app.runtime import repo
 from app.tools.catalog import import_asset
 from app.tools.shared import referenced_assets
@@ -202,6 +202,15 @@ def test_a_clip_near_the_start_is_read_from_the_start_and_cut() -> None:
     assert args[:2] == ["-t", "2.333333"]
     chain = builder._picture_chain(clip, 61, 320, 240, Fraction(30), None)
     assert chain.startswith("trim=start=0.300000,")
+
+
+def test_a_clip_with_a_run_up_is_cut_where_its_picture_input_begins() -> None:
+    """A 0.4 s dissolve in reaches back from 0.6 s to 0.2 s: the picture is read from the start and cut at 0.2 s."""
+    asset = Asset(id="a", path="x.mp4", duration=6, has_video=True, has_audio=True)
+    clip = source_clip("0.6", "2.6").model_copy(update={"transition_in": Dissolve(kind="dissolve", seconds=Decimal("0.4"))})
+    assert "-ss" not in builder._input_args(clip, asset, 72, Fraction(30))
+    chain = builder._picture_chain(clip, 73, 320, 240, Fraction(30), None)
+    assert chain.startswith("trim=start=0.200000,"), chain
 
 
 def test_a_sounds_own_input_reads_from_the_start_with_room_for_the_cut() -> None:
