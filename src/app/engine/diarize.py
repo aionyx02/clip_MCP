@@ -20,7 +20,7 @@ import time
 from typing import Callable, Dict, List, Optional, Tuple
 
 from app.engine import models
-from app.engine.ffmpeg import OperationCancelled, hidden_window_flags
+from app.engine.ffmpeg import FFmpegFailed, OperationCancelled, hidden_window_flags
 from app.models.media import SpeakerTurn, Voice
 
 SAMPLE_RATE = 16000
@@ -63,7 +63,7 @@ def read_samples(path: str, ffmpeg_bin: str = "ffmpeg") -> array.array:
         The samples as 32-bit floats at `SAMPLE_RATE`.
 
     Raises:
-        RuntimeError: If FFmpeg cannot decode the file.
+        FFmpegFailed: If FFmpeg cannot decode the file.
     """
     result = subprocess.run(
         [ffmpeg_bin, "-hide_banner", "-nostdin", "-v", "error", "-i", path,
@@ -73,7 +73,9 @@ def read_samples(path: str, ffmpeg_bin: str = "ffmpeg") -> array.array:
         creationflags=hidden_window_flags(),
     )
     if result.returncode != 0:
-        raise RuntimeError(result.stderr.decode("utf-8", errors="replace").strip()[-500:] or "ffmpeg could not read the sound")
+        raise FFmpegFailed(
+            result.stderr.decode("utf-8", errors="replace").strip()[-500:] or "ffmpeg could not read the sound"
+        )
     samples = array.array("f")
     samples.frombytes(result.stdout)
     return samples
