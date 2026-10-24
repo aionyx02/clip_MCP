@@ -183,6 +183,8 @@ def test_a_muted_picture_track_leaves_the_side_alone() -> None:
     offered, left_out = sync.sides(video_tracks(before, after, above=[overlay]), [before, after],
                                    {"asset": "asset.wav"})
     assert [(side["clip_id"], side["side"]) for side in offered] == [("a", "before"), ("b", "after")]
+    after_side = next(side for side in offered if side["clip_id"] == "b")
+    assert (after_side["start"], after_side["end"]) == (4.0, 6.0)
     assert left_out == {"too_short": 0, "faded": 0}
 
 def test_sound_from_an_audio_track_over_the_join_leaves_both_sides_out() -> None:
@@ -297,6 +299,8 @@ def test_a_title_card_on_another_track_is_not_other_sound() -> None:
     offered, left_out = sync.sides(video_tracks(before, after, above=[card]), [before, after],
                                    {"asset": "asset.wav"})
     assert [(side["clip_id"], side["side"]) for side in offered] == [("a", "before"), ("b", "after")]
+    after_side = next(side for side in offered if side["clip_id"] == "b")
+    assert (after_side["start"], after_side["end"]) == (4.0, 6.0)
     assert left_out == {"too_short": 0, "faded": 0}
 
 def test_other_sound_that_ends_before_the_join_still_trims_the_before_side() -> None:
@@ -327,6 +331,17 @@ def test_the_nearest_of_two_pieces_long_enough_is_used() -> None:
     before_side = next(side for side in offered if side["clip_id"] == "a")
     # Both the 0.8s next to the join and the 0.8s before the overlay are long enough; the nearer one is used.
     assert (before_side["start"], before_side["end"]) == (3.2, 4.0)
+    assert left_out == {"too_short": 0, "faded": 0}
+
+def test_the_nearest_of_two_pieces_long_enough_is_used_on_the_after_side() -> None:
+    before = make_clip("a", "asset", source_start=0, source_end=4, timeline_in=0)
+    after = make_clip("b", "asset", source_start=4, source_end=8, timeline_in=4)
+    broll = make_clip("c", "asset", source_start=0, source_end=0.4, timeline_in=4.8)
+    offered, left_out = sync.sides(video_tracks(before, after, above=[broll]), [before, after],
+                                   {"asset": "asset.wav"})
+    after_side = next(side for side in offered if side["clip_id"] == "b")
+    # Both the 0.8s next to the join and the 0.8s after the overlay are long enough; the nearer one is used.
+    assert (after_side["start"], after_side["end"]) == (4.0, 4.8)
     assert left_out == {"too_short": 0, "faded": 0}
 
 def test_a_side_whose_nearest_piece_is_cut_down_by_its_fade_is_faded() -> None:
@@ -379,6 +394,17 @@ def test_a_side_names_the_file_second_that_plays_where_it_starts() -> None:
     before_side = next(side for side in offered if side["clip_id"] == "a")
     assert (before_side["start"], before_side["end"], before_side["source_start"], before_side["speed"]) == (
         0.0, 1.0, 2.0, 2.0)
+
+def test_a_side_that_starts_inside_a_sped_up_clip_names_the_file_second_that_plays() -> None:
+    before = make_clip("a", "asset", source_start=2, source_end=8, timeline_in=0, speed=1.5)
+    after = make_clip("b", "asset", source_start=8, source_end=10, timeline_in=4)
+    offered, _ = sync.sides(video_tracks(before, after), [before, after], {"asset": "asset.wav"})
+    before_side = next(side for side in offered if side["clip_id"] == "a")
+    # The side opens 2s into the clip, three file seconds in: 2.0 + (2.0 - 0.0) * 1.5.
+    expected_source_start = 2.0 + (2.0 - 0.0) * 1.5
+    assert (before_side["start"], before_side["end"]) == (2.0, 4.0)
+    assert before_side["source_start"] == pytest.approx(expected_source_start)
+    assert before_side["speed"] == 1.5
 
 def make_sound(seconds: float = 6.0, seed: int = 1,
                bursts=((1.0, 1.4), (2.2, 2.7), (3.5, 4.0), (4.7, 5.2))) -> np.ndarray:
@@ -484,6 +510,16 @@ def test_a_lag_exactly_at_the_edge_of_the_search_is_reported_as_beyond_reach() -
 def test_a_one_second_side_at_the_search_edge_is_beyond_reach() -> None:
     sound = make_sound()
     assert sync.lag_at(shifted(sound, sync.MAX_LAG_SECONDS), 0.0, sound, side_of(0.0, 1.0)) == sync.BEYOND_REACH
+
+def test_a_one_second_side_one_step_inside_the_search_edge_is_reported_as_that_lag() -> None:
+    # A 1s side can be moved `limit` steps and still keep MIN_SIDE_SECONDS compared. One step inside that
+    # edge the sound is a real lag, not beyond reach.
+    sound = make_sound()
+    steps = int(round(1.0 / sync.LAG_STEP_SECONDS))
+    least = int(round(sync.MIN_SIDE_SECONDS / sync.LAG_STEP_SECONDS))
+    limit = min(int(round(sync.MAX_LAG_SECONDS / sync.LAG_STEP_SECONDS)), max(0, steps - least))
+    offset = (limit - 1) * sync.LAG_STEP_SECONDS
+    assert sync.lag_at(shifted(sound, offset), 0.0, sound, side_of(0.0, 1.0)) == pytest.approx(offset)
 
 def test_a_short_side_does_not_report_an_offset_past_its_own_reach_as_a_smaller_one() -> None:
     # A side of 0.7s can only be moved 0.2s and still keep 0.5s compared. A best lag at the end of
@@ -711,6 +747,25 @@ def test_a_side_whose_file_is_missing_counts_as_unlined_and_the_check_returns(tm
     assert found["joins"] == []
     assert found["sides_asked"] == 1
     assert found["unlined"] == {"weak": 1, "beyond_reach": 0}
+
+def test_an_oserror_reading_a_side_counts_that_side_and_the_rest_are_still_checked(
+        tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    source = source_file(tmp_path)
+    render = cut_render(tmp_path, source)
+    unreadable = tmp_path / "unreadable.wav"
+    real = sync._read_stretch
+
+    def read(path, start, length, ffmpeg_bin):
+        if path == str(unreadable):
+            raise OSError("the file cannot be read")
+        return real(path, start, length, ffmpeg_bin)
+
+    monkeypatch.setattr(sync, "_read_stretch", read)
+    sides = [check_side(unreadable, 0.0, 2.0, 1.0), check_side(source, 0.0, 2.0, 1.0)]
+    found = sync.check(str(render), sides, {"too_short": 0, "faded": 0}, FRAME, FFMPEG, "ffprobe")
+    assert found["sides_asked"] == 2
+    assert found["unlined"] == {"weak": 1, "beyond_reach": 0}
+    assert found["joins"] == [{"at": 0.0, "clip_id": "clip", "side": "after", "lag": 0.0}]
 
 def test_a_finished_render_keeps_what_its_sound_check_found(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     store = Repository(str(tmp_path / "jobs.db"))
