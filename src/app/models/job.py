@@ -84,6 +84,22 @@ class Job(BaseModel):
         description="Where every frame of a finished render was read and found black, frozen or a flash: "
                     "`{kind, start, end}` in seconds of the render; null when it was not read (render jobs)",
     )
+    sync: Optional[Dict[str, Any]] = Field(
+        default=None,
+        description="What a finished render's sound was found doing against its picture: `streams`, how far the "
+                    "two streams' starts and lengths differ or null when they line up; `joins`, "
+                    "`{at, clip_id, side, lag}` for each side of a join whose sound could be lined up against "
+                    "the same stretch of its own file, lag in seconds and positive when the sound is late; "
+                    "`sides_asked`, how many sides were offered to the check; `unlined`, how many of those could "
+                    "not be lined up, as `{weak, beyond_reach, searched}`: `weak` when the sound did not follow "
+                    "the file's closely enough or the file could not be read, `beyond_reach` when a shift that "
+                    "follows closely "
+                    "enough is at the edge of the search, and `searched`, for each of the two, `[least, most]` "
+                    "seconds those sides were searched each way (a short side searches less) or null when there "
+                    "are none; `left_out`, how many were left out, as "
+                    "`{too_short, faded}`; and "
+                    "`frame`, one frame of the render in seconds. Null when it was not checked (render jobs)",
+    )
     error_message: Optional[str] = None
     profile: Optional[List[Dict[str, Any]]] = Field(
         default=None,
