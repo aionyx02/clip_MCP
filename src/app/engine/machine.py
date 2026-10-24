@@ -107,29 +107,49 @@ def whisper_device() -> str:
 
     return "cuda" if ctranslate2.get_cuda_device_count() > 0 else "cpu"
 
+def _nvidia_smi(query: str) -> Optional[str]:
+    """Ask the tool the NVIDIA driver ships one question about the first card.
+
+    An MCP client starts this server with only a few variables, and on Windows
+    nvidia-smi cannot load its library without ProgramFiles: it fails, and a
+    card that is there reads as unknown. The environment is repaired here so
+    every query gets it.
+
+    Args:
+        query: What to ask for, such as `name,memory.total`.
+
+    Returns:
+        The first line of the tool's answer, or None when there is no driver
+        tool or it says nothing.
+    """
+    tool = shutil.which("nvidia-smi")
+    if tool is None:
+        return None
+    environment = dict(os.environ)
+    if sys.platform == "win32" and not any(name.lower() == "programfiles" for name in environment):
+        environment["ProgramFiles"] = (
+            environment.get("ProgramW6432")
+            or os.path.join((environment.get("SystemDrive") or "C:") + "\\", "Program Files")
+        )
+    try:
+        listed = subprocess.run([tool, f"--query-gpu={query}", "--format=csv,noheader,nounits"],
+                                stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=10,
+                                creationflags=hidden_window_flags(), env=environment)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if listed.returncode != 0 or not listed.stdout.strip():
+        return None
+    return listed.stdout.strip().splitlines()[0]
+
 def _nvidia_card() -> Optional[Tuple[str, int]]:
     """Name and memory of the first NVIDIA card, from the tool its driver ships.
 
     Returns:
         `(name, bytes)`, or None when there is no driver tool or it says nothing.
     """
-    tool = shutil.which("nvidia-smi")
-    if tool is None:
+    first = _nvidia_smi("name,memory.total")
+    if not first:
         return None
-    # An MCP client starts this server with only a few variables, and on Windows
-    # nvidia-smi cannot load its library without ProgramFiles: it fails, and a card
-    # that is there reads as unknown.
-    environment = dict(os.environ)
-    if sys.platform == "win32" and not any(name.lower() == "programfiles" for name in environment):
-        environment["ProgramFiles"] = (environment.get("ProgramW6432")
-                                       or os.path.join((environment.get("SystemDrive") or "C:") + "\\", "Program Files"))
-    try:
-        listed = subprocess.run([tool, "--query-gpu=name,memory.total", "--format=csv,noheader,nounits"],
-                                stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=10,
-                                creationflags=hidden_window_flags(), env=environment)
-    except (OSError, subprocess.SubprocessError):
-        return None
-    first = listed.stdout.strip().splitlines()[0] if listed.returncode == 0 and listed.stdout.strip() else ""
     name, _, mebibytes = first.rpartition(",")
     if not name or not mebibytes.strip().isdigit():
         return None
