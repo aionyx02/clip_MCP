@@ -10,7 +10,7 @@ from typing import Tuple
 import numpy
 import pytest
 
-from app.engine import builder, loudness
+from app.engine import builder, loudness, playback
 from app.engine.builder import FFmpegRenderer
 from app.engine.diarize import SAMPLE_RATE, read_samples
 from app.models.media import Asset
@@ -326,12 +326,16 @@ def test_the_music_is_cut_where_its_input_was_read(media: Path, tmp_path: Path) 
     assert sound.split("]", 1)[1].startswith("atrim=start=0.500000,"), sound
 
 
+@pytest.mark.parametrize("start", [0.3, 2.0])
 def test_hiss_cleanup_leaves_the_sound_where_it_was(
-    bursts: Tuple[str, Path], reference: int, tmp_path: Path,
+    bursts: Tuple[str, Path], reference: int, tmp_path: Path, start: float,
 ) -> None:
-    """`afftdn` delays the sound by 25 ms; the chain takes that back, so the cut still lands on the picture."""
+    """`afftdn` delays the sound by 25 ms; the chain takes that back, so the cut still lands on the picture.
+
+    A clip near the start of its file is read from the beginning and cut; one further in is seeked to.
+    """
     asset, path = bursts
-    lag = rendered_clean_lag(asset, path, 2.0, tmp_path / "clean.mp4")
+    lag = rendered_clean_lag(asset, path, start, tmp_path / "clean.mp4")
     assert abs(lag - reference) <= TOLERANCE_SAMPLES, (lag, reference)
 
 
@@ -373,6 +377,52 @@ def test_the_compensated_hiss_filter_starts_its_sound_at_time_zero() -> None:
     chain = builder._cleanup_filters(VoiceCleanup(hiss=True)) + ["afade=t=in:st=0:d=0.2"]
     filtered = filter_output(stereo, ",".join(chain))
     assert abs(filtered[0]) < 1e-3, filtered[0]
+
+
+@pytest.fixture(scope="module")
+def cd_noise(tmp_path_factory: pytest.TempPathFactory) -> Tuple[str, Path]:
+    """A 44.1 kHz AAC file of irregular noise bursts, and its asset ID.
+
+    At this rate a seek into the file starts its first decoded frame at a
+    small positive time, which a 22.05 kHz file like `bursts` does not show.
+    """
+    path = tmp_path_factory.mktemp("cd") / "noise.m4a"
+    result = subprocess.run([
+        "ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi", "-i", "anoisesrc=d=8:c=white:r=44100:a=0.5",
+        "-af", "volume='between(t,1.13,1.3)+between(t,2.4,2.6)+between(t,3.1,3.5)+between(t,4.7,4.8)':eval=frame",
+        "-c:a", "aac", str(path),
+    ], capture_output=True)
+    assert result.returncode == 0, result.stderr.decode("utf-8", errors="replace")
+    return import_asset(str(path))["id"], path
+
+
+def relative_lag(one: numpy.ndarray, other: numpy.ndarray, window: int) -> int:
+    """Say by how many samples `one` comes after `other`, within `window` either side."""
+    size = 1 << int(numpy.ceil(numpy.log2(len(one) + len(other))))
+    product = numpy.fft.rfft(one - one.mean(), size) * numpy.conj(numpy.fft.rfft(other - other.mean(), size))
+    correlation = numpy.fft.irfft(product, size)
+    shifts = numpy.arange(-window, window + 1)
+    return int(shifts[numpy.argmax(correlation[shifts % size])])
+
+
+@pytest.mark.parametrize("start", [0.3, 1.0, 2.0])
+def test_the_playback_repair_with_hiss_cleanup_lands_where_one_without_it_does(
+    cd_noise: Tuple[str, Path], tmp_path: Path, start: float,
+) -> None:
+    """The playback copy seeks into the AAC file itself, so its first timestamp is not zero: the
+    chain must take back only the denoiser's delay, not move the sound to zero."""
+    asset_id, _ = cd_noise
+    asset = repo.get_assets([asset_id])[asset_id]
+    heard = []
+    for name, cleanup in [("rumble", VoiceCleanup(rumble=True)), ("hiss", VoiceCleanup(hiss=True))]:
+        clip = Clip(id="c", asset_id=asset_id, source_range=TimeRange(start=Decimal(str(start)),
+                    end=Decimal(str(start + 4))), timeline_in=Decimal(0), cleanup=cleanup)
+        part = tmp_path / f"{name}.m4a"
+        result = subprocess.run(playback.repair_command(clip, asset, str(part)), capture_output=True)
+        assert result.returncode == 0, result.stderr.decode("utf-8", errors="replace")
+        heard.append(numpy.asarray(read_samples(str(part)), dtype=numpy.float64))
+    lag = relative_lag(heard[1], heard[0], round(WINDOW_SECONDS * SAMPLE_RATE))
+    assert abs(lag) <= TOLERANCE_SAMPLES, lag
 
 
 @pytest.mark.parametrize("frames", [1, 600, 1199, 4800])

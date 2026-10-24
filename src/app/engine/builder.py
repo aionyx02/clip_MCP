@@ -510,11 +510,13 @@ def _cleanup_filters(cleanup: VoiceCleanup) -> List[str]:
     if cleanup.hiss:
         # `afftdn` delays the sound by a fixed number of samples. Padding first gives it room
         # to push the clip's last 25 ms out rather than lose it; trimming after takes the
-        # delay back off the front.
+        # delay back off the front, and the timestamps are moved back by the same amount,
+        # not to zero: a read that seeked into an AAC file starts at a small positive time,
+        # and that offset is what puts the sound where it belongs.
         filters.append(f"apad=pad_len={HISS_DELAY_SAMPLES}")
         filters.append(f"afftdn=nr={HISS_REDUCTION_DB}:nf={HISS_FLOOR_DB}")
         filters.append(f"atrim=start_sample={HISS_DELAY_SAMPLES}")
-        filters.append("asetpts=PTS-STARTPTS")
+        filters.append(f"asetpts=PTS-{HISS_DELAY_SAMPLES}/(SR*TB)")
     if cleanup.sibilance:
         filters.append(f"deesser=i={SIBILANCE_INTENSITY}")
     return filters
