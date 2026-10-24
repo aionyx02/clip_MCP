@@ -664,8 +664,8 @@ def scan_media(
         # #149: on the card the scan decodes about twice as fast (15.4 s → 8.5 s for a 50 s
         # 1080p HEVC clip), but a driver or a card out of memory must not fail the analysis.
         # The failure is kept and said, not hidden: the card's log stays, and once software
-        # has read the file the card is left alone, so a broken driver costs one run, not one
-        # per file.
+        # has read the file the card is left alone, so a broken driver costs one extra run for
+        # each scan already under way, not one per file.
         if not card:
             raise
         os.replace(log_path, log_path + CARD_LOG_SUFFIX)

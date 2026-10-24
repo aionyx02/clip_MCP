@@ -187,8 +187,8 @@ def _card_note(job: Job) -> Optional[str]:
     if not job.work_dir or not os.path.exists(os.path.join(job.work_dir, DETECT_LOG_FILE_NAME + CARD_LOG_SUFFIX)):
         return None
     if card_failure() is None:
-        return ("its picture could not be decoded on the NVIDIA card and was decoded in software; the record "
-                "that keeps the card off could not be written, so the next file will try the card again")
+        return ("its picture could not be decoded on the NVIDIA card and was decoded in software; the card is "
+                "not turned off now, so the next file will try it again")
     return ("its picture could not be decoded on the NVIDIA card and was decoded in software. Tell the user: "
             "scans no longer use the card, so long phone or drone footage now takes about twice as long to "
             f"analyze, until they delete {card_failed_path()} (`clip-mcp check` shows what failed)")

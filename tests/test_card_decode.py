@@ -311,7 +311,7 @@ def test_get_job_says_when_the_card_failed_and_how_to_turn_it_back_on(tmp_path: 
     work.mkdir()
     assert job_queue._card_note(_finished_analysis(work)) is None
     (work / (analysis.DETECT_LOG_FILE_NAME + analysis.CARD_LOG_SUFFIX)).write_text("cuda: out of memory\n")
-    assert "could not be written" in job_queue._card_note(_finished_analysis(work))
+    assert "not turned off now" in job_queue._card_note(_finished_analysis(work))
     engine_ffmpeg.stop_decoding_on_card("clip.mp4", "CUDA_ERROR_OUT_OF_MEMORY")
     told = job_queue._card_note(_finished_analysis(work))
     assert "Tell the user" in told and engine_ffmpeg.card_failed_path() in told
@@ -339,3 +339,25 @@ def test_check_names_the_failure_and_the_record_to_delete(
     out = capsys.readouterr().out
     assert "card:       not used for the scan since it failed on clip.mp4: CUDA_ERROR_OUT_OF_MEMORY" in out
     assert f"delete {engine_ffmpeg.card_failed_path()} to try the card again" in out
+
+def test_get_job_passes_the_card_note_on_beside_any_other(media: Path, tmp_path: Path) -> None:
+    from app import runtime
+    from app.models.job import Job, JobKind, JobStatus
+    from app.models.media import MediaAnalysis, SpeakerTurn
+    from app.tools import catalog, job_queue
+
+    asset = catalog.import_asset(str(media / "wide.mp4"))["id"]
+    work = tmp_path / "job"
+    work.mkdir()
+    (work / (analysis.DETECT_LOG_FILE_NAME + analysis.CARD_LOG_SUFFIX)).write_text("cuda: out of memory\n")
+    engine_ffmpeg.stop_decoding_on_card("clip.mp4", "CUDA_ERROR_OUT_OF_MEMORY")
+    done = Job(kind=JobKind.ANALYZE, status=JobStatus.COMPLETED, progress=1.0, asset_id=asset, work_dir=str(work))
+    runtime.repo.add_job(done)
+    note = job_queue.get_job([done.job_id])["jobs"][0]["note"]
+    assert note.startswith("its picture could not be decoded on the NVIDIA card") and "Tell the user" in note
+
+    runtime.repo.save_analysis(MediaAnalysis(asset_id=asset, duration=40.0, speakers=[
+        SpeakerTurn(speaker=f"S{index}", start=index, end=index + 1) for index in range(40)
+    ]))
+    both = job_queue.get_job([done.job_id])["jobs"][0]["note"]
+    assert both.startswith("heard 40 different voices") and "; its picture could not be decoded" in both

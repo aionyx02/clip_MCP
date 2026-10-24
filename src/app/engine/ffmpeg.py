@@ -73,8 +73,8 @@ CARD_CODECS = frozenset({"hevc"})
 CARD_MIN_BITRATE = 40_000_000
 # Between the 1.4 s clip that lost and the 4.2 s clip that gained.
 CARD_MIN_SECONDS = 3.0
-# Written into the workspace the first time a scan fails on the card, and read by every
-# worker after: while it is there, nothing is decoded on the card. `clip-mcp check`
+# Written into the workspace the first time a scan fails on the card and then succeeds in
+# software, and read by every worker after: while it is there, nothing is decoded on the card. `clip-mcp check`
 # reports it; deleting it lets the card be tried again.
 CARD_FAILED_FILE_NAME = "card-decode-failed.txt"
 
