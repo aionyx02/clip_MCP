@@ -29,6 +29,7 @@ editor (ui/) ──HTTP───────────────────
 | `engine/` | 分析、語意時間軸、計畫編譯、filtergraph 建構、render、字幕、交換格式 |
 | `models/` | Pydantic 領域模型（素材、語意片段、計畫、時間軸、工作） |
 | `storage/` | SQLite 持久化、版本歷史、儲存空間管理 |
+| `benchmark/` | 評測（L2）：語料庫案例（素材雜湊、指令、標註、逐字稿）、剪輯計分與逐字稿 WER／CER；`python -m app.benchmark.seed` 種草稿案例 |
 | `ui/` | 編輯器：與 AI 共用同一組工具與驗證規則 |
 
 詳見 [docs/architecture.md](docs/architecture.md)。
@@ -124,6 +125,8 @@ uv run pytest
 ```
 
 測試以 FFmpeg 即時產生素材並使用暫存工作區；部分測試實際 render 後量測（響度、ducking、轉場、同步、字幕位置、跟臉裁切、節拍）。
+
+`corpus/` 放 L2 評測的案例：素材、指令與人工標註，計分含剪點檢查與逐字稿的 WER／CER。案例的素材只存在各自機器上，`corpus/*.json` 不進 git，沒有案例時相關測試會跳過；格式、雜湊驗證與 `python -m app.benchmark.seed` 見 [`corpus/README.md`](corpus/README.md)。
 
 ## 授權
 
