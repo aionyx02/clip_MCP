@@ -410,9 +410,13 @@ def test_a_transcribing_analysis_counts_the_speech_model_on_top_of_its_other_sta
     assert resources.analysis_memory_bytes(False, "large-v3-turbo", 3600.0) == resources.DETECTION_BYTES
 
 
-@pytest.mark.parametrize("transcribe", [False, True])
-def test_an_analysis_that_does_not_transcribe_lets_the_held_models_go(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, transcribe: bool,
+@pytest.mark.parametrize("transcribe, diarizing, kept", [
+    (False, True, (False, False)),
+    (True, False, (True, False)),
+    (True, True, (True, True)),
+])
+def test_an_analysis_lets_go_of_the_held_models_it_will_not_use(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, transcribe: bool, diarizing: bool, kept: tuple,
 ) -> None:
     repo = store(tmp_path)
     media = tmp_path / "song.mp3"
@@ -435,8 +439,8 @@ def test_an_analysis_that_does_not_transcribe_lets_the_held_models_go(
     monkeypatch.setattr(renderer, "analyze_media", analyze_media)
     context = types.SimpleNamespace(report=lambda fraction, stage=None: None, is_cancelled=lambda: False)
     with pytest.raises(Stop):
-        renderer._run_analysis(repo, job, {"transcribe": transcribe}, context)
-    assert seen == ([(held, (None, engine))] if transcribe else [(None, None)])
+        renderer._run_analysis(repo, job, {"transcribe": transcribe, "diarize": diarizing}, context)
+    assert seen == [(held if kept[0] else None, (None, engine) if kept[1] else None)]
 
 
 @pytest.mark.parametrize("has_video, expected", [(False, False), (True, True)])

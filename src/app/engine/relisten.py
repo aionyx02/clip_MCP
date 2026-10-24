@@ -60,24 +60,6 @@ class Listener:
     device: str
     download_root: str
 
-def hear(path: str, language: Optional[str], listener: Listener) -> str:
-    """Transcribe a short recording on its own, with nothing to lean on.
-
-    For checking what a speech model said: the words it was asked for are
-    not given, so a word it swallowed is not heard anyway.
-
-    Args:
-        path: The recording.
-        language: Its language, when known.
-        listener: The speech model to transcribe with.
-
-    Returns:
-        What is said in it.
-    """
-    model = models.speech_model(listener.name, listener.device, listener.download_root)
-    segments, _ = model.transcribe(path, language=language, condition_on_previous_text=False, vad_filter=False)
-    return "".join(segment.text for segment in segments).strip()
-
 def voiced_stretches(samples: np.ndarray) -> List[Tuple[float, float]]:
     """Find where somebody is talking, by listening alone.
 

@@ -671,9 +671,10 @@ def _run_analysis(repo: Repository, job: Job, spec: Dict[str, Any], context: Job
     unreadable = _unreadable([asset.path])
     if unreadable:
         raise InputUnavailable(unreadable)
+    # Its memory estimate counts no model it will not use, so one a previous analysis left must go.
     if not spec["transcribe"]:
-        # Its memory estimate counts no speech model, so the one a previous analysis left must go.
         models.release_speech_model()
+    if not (spec["transcribe"] and spec.get("diarize", True)):
         diarize.release_engine()
     runs: List[speed.Measured] = []
     analysis = analyze_media(
