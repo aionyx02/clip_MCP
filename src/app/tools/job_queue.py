@@ -8,7 +8,7 @@ from pydantic import Field
 
 from app.models.timeline.parts import Clip
 from app.models.job import Job, JobKind, JobStatus
-from app.engine import stills
+from app.engine import stills, sync
 from app import runtime
 from app.runtime import mcp
 from app.tools import looking, shared
@@ -53,7 +53,16 @@ def get_job(
         flash somewhere, `frames`: `found`, what the
         cut did not ask for — look at them with `view_render` `at: "spots"` —
         and `meant`, inside a fade, a dip, a card or a photo; or `not_read`
-        when the check could not read it, which says nothing about its frames; and a summary
+        when the check could not read it, which says nothing about its frames; for a finished
+        render whose sound does not line up with its picture, `sound`: `out_of_step`, a line
+        each for a stream that starts or runs elsewhere than the picture and for a side of a
+        join where the sound is heard early or late, naming the clip and the side; `not_compared`
+        when some sides of joins could not be lined up, saying how many and why — left out before
+        the check for too little of their own sound or for their own fade, their sound did not follow
+        the file's closely enough within the shifts searched, their file could not be read, or their
+        sound may be further off than was searched, each naming how far it was searched;
+        or `not_checked`
+        when the check could not be run, which says nothing about the sound; and a summary
         over all of them: `finished` and
         `total` counts, `failed` counting those that failed or were
         cancelled, and `progress`, the average.
@@ -134,6 +143,14 @@ def _job_states(job_ids: List[str]) -> List[dict]:
                                                "black, frozen or flashing frames in it are not known"}
             elif job.spots:
                 entry["frames"] = _frame_spots(job)
+            if job.sync is None:
+                entry["sound"] = {
+                    "not_checked": "the sound was not checked against the picture, so whether it lines up is not known"
+                }
+            else:
+                sound = _sound_out_of_step(job)
+                if sound:
+                    entry["sound"] = sound
         if job.kind == JobKind.ANALYZE and job.status == JobStatus.COMPLETED and job.asset_id:
             heard = runtime.repo.get_analysis(job.asset_id)
             voices = len({turn.speaker for turn in heard.speakers}) if heard else 0
@@ -201,6 +218,87 @@ def _frame_spots(job: Job) -> dict:
         reason = meant(str(spot["kind"]), start, end, here)
         (kept if reason else found).append(line + (f": the {reason}" if reason else ""))
     return {"found": found, "meant": kept}
+
+def _searched(span: List[float]) -> str:
+    """Say how far some sides were searched each way, as `check` recorded it: one reach, or the range of them."""
+    least, most = span
+    return f"{most:g}s" if least == most else f"{least:g}–{most:g}s (a shorter side searches less)"
+
+def _sound_out_of_step(job: Job) -> Dict[str, object]:
+    """Say where a finished render's sound does not line up with its picture, and what was not known.
+
+    Args:
+        job: A finished render that was checked.
+
+    Returns:
+        `out_of_step`, a line each for a stream that starts or runs elsewhere
+        than the picture, and for a side of a join where the sound is heard
+        more than a frame, or two envelope steps, early or late, naming the
+        clip and which side of the join it is; and `not_compared` when some sides
+        could not be lined up, saying how many and why — sides left out
+        before the check for too little of their own sound or for their own
+        fade, sides whose sound did not follow the file's closely enough or
+        whose file could not be read, and sides whose sound may be further off
+        than was searched. How far those sides were searched is said as it
+        was: a short side searches less than `MAX_LAG_SECONDS`.
+        Empty when every side that was compared lines up and none were left out.
+    """
+    if job.sync is None:
+        return {}
+    frame = float(job.sync["frame"])
+    threshold = max(frame, 2 * sync.LAG_STEP_SECONDS)
+    lines: List[str] = []
+    streams = job.sync["streams"]
+    if streams:
+        lines.append(
+            f"the sound runs {streams['audio_start']:.2f}s to {streams['audio_start'] + streams['audio_length']:.2f}s "
+            f"while the picture runs {streams['video_start']:.2f}s to "
+            f"{streams['video_start'] + streams['video_length']:.2f}s"
+        )
+    joins = job.sync["joins"]
+    over = [join for join in joins if abs(float(join["lag"])) > threshold]
+    for join in over:
+        lag = float(join["lag"])
+        at = float(join["at"])
+        lines.append(
+            f"at {at:.2f}s, clip {join['clip_id']}, {join['side']} the join: "
+            f"the sound is heard {abs(lag):.2f}s {'late' if lag > 0 else 'early'}"
+        )
+    found: Dict[str, object] = {}
+    if lines:
+        found["out_of_step"] = lines
+    sides_asked = int(job.sync["sides_asked"])
+    too_short = int(job.sync["left_out"]["too_short"])
+    faded = int(job.sync["left_out"]["faded"])
+    weak = int(job.sync["unlined"]["weak"])
+    beyond_reach = int(job.sync["unlined"]["beyond_reach"])
+    unknown = too_short + faded + weak + beyond_reach
+    total = sides_asked + too_short + faded
+    if unknown > 0:
+        reasons: List[str] = []
+        if too_short:
+            reasons.append(f"{too_short} with less than "
+                           f"{sync.MIN_SIDE_SECONDS + sync.MIN_REACH_SECONDS:g}s of their own sound "
+                           "clear of other sound")
+        if faded:
+            reasons.append(f"{faded} where the clip's own fade leaves less than "
+                           f"{sync.MIN_SIDE_SECONDS + sync.MIN_REACH_SECONDS:g}s to compare")
+        searched = job.sync["unlined"]["searched"]
+        if weak:
+            # At no shift searched did the shapes agree: the sound may be further off than the search, or
+            # changed too much (quiet room tone under the loudness levelling) to be followed; a file that
+            # could not be read is counted here too.
+            reasons.append(f"{weak} whose sound followed the file's closely enough at no shift within "
+                           f"{_searched(searched['weak'])}: further off, too changed to compare, "
+                           "or its file unreadable")
+        if beyond_reach:
+            reasons.append(f"{beyond_reach} whose sound may be further off than the "
+                           f"{_searched(searched['beyond_reach'])} searched")
+        found["not_compared"] = (
+            f"{unknown} of the {total} sides of joins could not be lined up — " + ", ".join(reasons)
+            + " — so whether they are in step is not known"
+        )
+    return found
 
 # Provisional (roadmap §13): more voices than this in one file is far more likely a noisy
 # recording split apart than that many people — 40 for two friends talking over traffic.
