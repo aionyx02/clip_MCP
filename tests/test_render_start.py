@@ -332,7 +332,7 @@ def test_hiss_cleanup_leaves_the_sound_where_it_was(
     """`afftdn` delays the sound by 25 ms; the chain takes that back, so the cut still lands on the picture."""
     asset, path = bursts
     lag = rendered_clean_lag(asset, path, 2.0, tmp_path / "clean.mp4")
-    assert abs(lag - reference) <= 2, (lag, reference)
+    assert abs(lag - reference) <= TOLERANCE_SAMPLES, (lag, reference)
 
 
 def test_the_hiss_filter_delays_by_the_constant_that_takes_it_back() -> None:
@@ -361,6 +361,26 @@ def test_the_compensated_hiss_filter_keeps_the_length_and_the_last_words() -> No
     assert numpy.sqrt(numpy.mean(filtered[-held:] ** 2)) > 0.2
     lag = filter_lag(filtered, stereo, 2 * builder.HISS_DELAY_SAMPLES)
     assert abs(lag) <= 1, lag
+
+
+def test_the_compensated_hiss_filter_starts_its_sound_at_time_zero() -> None:
+    """The fades after the cleanup are timed in seconds from the clip's start, so the trimmed sound must start at 0.
+
+    Without that, a fade-in would begin 25 ms in, and the clip would open on a click.
+    """
+    frames = builder.AUDIO_SAMPLE_RATE
+    stereo = numpy.full((frames, 2), 0.5)
+    chain = builder._cleanup_filters(VoiceCleanup(hiss=True)) + ["afade=t=in:st=0:d=0.2"]
+    filtered = filter_output(stereo, ",".join(chain))
+    assert abs(filtered[0]) < 1e-3, filtered[0]
+
+
+@pytest.mark.parametrize("frames", [1, 600, 1199, 4800])
+def test_a_clip_shorter_than_the_hiss_delay_keeps_its_length(frames: int) -> None:
+    """A clip shorter than the denoiser's delay comes out as long as it went in."""
+    stereo = numpy.full((frames, 2), 0.1)
+    filtered = filter_output(stereo, ",".join(builder._cleanup_filters(VoiceCleanup(hiss=True))))
+    assert len(filtered) == frames
 
 
 def test_the_limiter_takes_back_its_look_ahead() -> None:

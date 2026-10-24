@@ -74,10 +74,12 @@ SILENCE_GUARD = r"aeval=exprs=if(isnan(val(0))\,0\,val(0))|if(isnan(val(1))\,0\,
 RUMBLE_HZ = 100
 HISS_REDUCTION_DB = 12
 HISS_FLOOR_DB = -40
-# How far `afftdn` delays the sound at `AUDIO_SAMPLE_RATE`, measured on FFmpeg 9.0 (#144). It has
-# no option to compensate itself, so the delay is taken back by hand; a test pins it so a change
-# in FFmpeg shows up. Measured, not Provisional.
-HISS_DELAY_SAMPLES = 1200
+# How far `afftdn` delays the sound: 25 ms at any sample rate, measured on FFmpeg 9.0 (#144) at
+# 16, 44.1, 48 and 96 kHz. It has no option to compensate itself, so the delay is taken back by
+# hand, in samples at `AUDIO_SAMPLE_RATE`, where the cleanup runs; a test pins it so a change in
+# FFmpeg shows up. Measured, not Provisional.
+HISS_DELAY_SECONDS = 0.025
+HISS_DELAY_SAMPLES = round(HISS_DELAY_SECONDS * AUDIO_SAMPLE_RATE)
 SIBILANCE_INTENSITY = 0.4
 # Raised whenever the picture chain changes in a way its text does not show, so a
 # cached picture made by the old chain is never mistaken for one made by the new.
