@@ -252,6 +252,29 @@ def uninstall(dry_run: bool, delete_data: bool) -> int:
         print("Last, remove the program itself: uv tool uninstall clip-mcp")
     return 1 if failed else 0
 
+# How far back `clip-mcp profile --days` may reach: a century, well inside what a date can hold.
+MOST_DAYS = 36500
+
+def _days(text: str) -> int:
+    """Read `--days`: a whole number of days from 1 to `MOST_DAYS`, refused otherwise.
+
+    Args:
+        text: The value given.
+
+    Returns:
+        The number of days.
+
+    Raises:
+        argparse.ArgumentTypeError: For anything else, saying what is accepted.
+    """
+    try:
+        days = int(text)
+    except ValueError:
+        days = 0
+    if not 1 <= days <= MOST_DAYS:
+        raise argparse.ArgumentTypeError(f"a whole number of days from 1 to {MOST_DAYS}, not {text!r}")
+    return days
+
 def profile(days: int) -> int:
     """Print how long each stage of recent jobs took, and the most memory it had in use.
 
@@ -268,7 +291,12 @@ def profile(days: int) -> int:
     from app.models.job import JobKind
     from app.storage.repo import Repository
 
-    repo = Repository(os.path.join(workspace.workspace_dir(), "clip_mcp.db"))
+    path = os.path.join(workspace.workspace_dir(), "clip_mcp.db")
+    if not os.path.exists(path):
+        # Opening the repository would make an empty database in a workspace that has none.
+        print(summarise([], {}))
+        return 0
+    repo = Repository(path)
     active, ended = repo.jobs_to_show(datetime.now(timezone.utc) - timedelta(days=days))
     jobs = active + ended
     assets = repo.get_assets(
@@ -307,7 +335,7 @@ def main(argv: Optional[List[str]] = None) -> None:
     editor = commands.add_parser("ui", help="open the editor in the browser, to check and adjust a cut by hand")
     editor.add_argument("--no-browser", action="store_true", help="serve it without opening a window")
     profiler = commands.add_parser("profile", help="show how long each stage of recent jobs took, and its memory")
-    profiler.add_argument("--days", type=int, default=30, help="how far back to read ended jobs (default 30)")
+    profiler.add_argument("--days", type=_days, default=30, help="how far back to read ended jobs (default 30)")
     arguments = parser.parse_args(argv)
     workspace.use_installed_ffmpeg()
     global NO_PROMPT

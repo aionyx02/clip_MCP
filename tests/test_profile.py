@@ -26,7 +26,12 @@ def stage_clock(
     memory=lambda: None,
     gpu=lambda: None,
 ) -> StageClock:
-    """A clock with a fake time and fake memory readers, its sampler far away in the future."""
+    """A clock with a fake time and fake readers.
+
+    Its sampler takes one reading as it starts, for the card's baseline, then
+    none for an hour; tests that count readings or need the baseline in place
+    take their own with `_sample`.
+    """
     return StageClock(sample_seconds=3600.0, clock=lambda: now[0], memory=memory, gpu=gpu)
 
 def entry(stage: str, seconds: float, memory: Optional[int] = None, gpu: Optional[int] = None) -> Dict[str, Any]:
@@ -237,6 +242,9 @@ def test_a_restarted_clock_does_not_revive_a_sampler_stop_gave_up_on(monkeypatch
     old.join(5)
     assert not old.is_alive()
     assert reads["old"] == 1
+    waited = time.monotonic() + 5
+    while clock._baseline_gpu is None and time.monotonic() < waited:
+        time.sleep(0.001)
     assert clock._baseline_gpu == 100 * MIB
     assert clock._gpu_readable
     clock.stop()
@@ -316,7 +324,7 @@ def test_stop_does_not_wait_past_the_stop_wait(monkeypatch: pytest.MonkeyPatch) 
 
     def blocking_card() -> Optional[int]:
         entered.set()
-        release.wait()
+        release.wait(5)
         return None
 
     clock = StageClock(sample_seconds=0.01, gpu_seconds=0.01, memory=lambda: 100 * MIB, gpu=blocking_card)
@@ -556,3 +564,40 @@ def test_the_profile_command_reads_as_many_days_back_as_asked(monkeypatch: pytes
     back = datetime.now(timezone.utc) - asked[0]
     assert timedelta(days=5) <= back < timedelta(days=5, minutes=1)
 
+@pytest.mark.parametrize("days", ["-3", "0", "99999999", "a week"])
+def test_the_profile_command_refuses_days_it_cannot_read(days: str, capsys: pytest.CaptureFixture[str]) -> None:
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["profile", "--days", days])
+    assert caught.value.code == 2
+    assert "a whole number of days from 1 to" in capsys.readouterr().err
+
+def test_the_profile_command_makes_no_database_in_an_empty_workspace(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(cli.workspace, "workspace_dir", lambda: str(tmp_path))
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["profile"])
+    assert caught.value.code == 0
+    assert "No completed job has a profile yet." in capsys.readouterr().out
+    assert not (tmp_path / "clip_mcp.db").exists()
+
+def test_a_restarted_clock_reads_its_card_afresh() -> None:
+    clock = stage_clock([0.0], lambda: 100 * MIB, lambda: 50 * MIB)
+    clock.start()
+    clock._sample()
+    clock._gpu = lambda: None
+    clock._sample()
+    assert clock._baseline_gpu == 50 * MIB
+    assert not clock._gpu_readable
+    clock.stop()
+    clock._gpu = lambda: 200 * MIB
+    clock.start()
+    clock._sample()
+    assert clock._gpu_readable
+    assert clock._baseline_gpu == 200 * MIB
+    clock.stop()
+
+def test_stages_of_the_same_total_are_listed_by_name() -> None:
+    jobs = [finished(JobKind.RENDER, [entry("b stage", 5.0), entry("a stage", 5.0)])]
+    text = summarise(jobs, {})
+    assert text.index("a stage") < text.index("b stage")

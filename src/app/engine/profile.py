@@ -365,7 +365,7 @@ def _block(kind: JobKind, jobs: List[Job], assets: Dict[str, Asset]) -> str:
     total = sum(row["seconds"] for row in stages.values())
     lines = [f"{kind.value}: {len(jobs)} completed job{'' if len(jobs) == 1 else 's'}"]
     lines.append(f"  {'stage':<32} {'jobs':>5} {'total s':>10} {'share':>7} {'median s':>10} "
-                 f"{'mem MB':>8} {'gpu MB':>8}")
+                 f"{'mem MiB':>8} {'gpu MiB':>8}")
     for key, row in sorted(stages.items(), key=lambda item: (-item[1]["seconds"], item[0])):
         share = f"{100 * row['seconds'] / total:.1f}%" if total else "-"
         memory = "-" if row["memory"] is None else str(int(row["memory"]))
