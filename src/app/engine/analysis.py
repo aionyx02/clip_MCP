@@ -23,10 +23,10 @@ from app.engine.ffmpeg import (
     FFmpegFailed,
     OperationCancelled,
     card_decode_args,
-    stop_decoding_on_card,
     escape_filter_path,
     hidden_window_flags,
     run_ffmpeg,
+    stop_decoding_on_card,
 )
 from app.engine import relisten
 from app.engine.relisten import Listener
@@ -196,6 +196,9 @@ def _paired_events(log: str, start_pattern: str, end_pattern: str) -> List[tuple
     if open_start is not None:
         pairs.append((open_start, None))
     return pairs
+
+# Beside the scan's log, the log of a scan that failed on the card; `get_job` tells the AI from it.
+CARD_LOG_SUFFIX = ".card"
 
 @dataclass(frozen=True)
 class Scan:
@@ -619,10 +622,13 @@ def scan_media(
 
     The picture is decoded on the NVIDIA card where that is faster (see
     `card_decode_args`). A file that fails on the card is scanned once more
-    in software, the card's log is kept beside the log as `.card`, and the
-    card is not used again until the record `stop_decoding_on_card` wrote is
-    deleted; a file that fails for its own reasons is therefore read twice
-    before its failure comes through.
+    in software, and the card's log is kept beside the log as `.card`, which
+    is what `get_job` reads to tell the AI. Only when the software scan then
+    succeeds was the card at fault: the card is not used again until the
+    record `stop_decoding_on_card` wrote is deleted. When the software scan
+    fails too, the file is at fault, its failure comes through after being
+    read twice, and the card stays on. The progress starts again from nothing
+    for the second scan.
 
     Args:
         asset: Asset to scan.
@@ -657,13 +663,14 @@ def scan_media(
     except FFmpegFailed as exc:
         # #149: on the card the scan decodes about twice as fast (15.4 s → 8.5 s for a 50 s
         # 1080p HEVC clip), but a driver or a card out of memory must not fail the analysis.
-        # The failure is kept and recorded, not hidden: the card's log stays, and the card
-        # is left alone from now on, so a broken driver costs one run, not one per file.
+        # The failure is kept and said, not hidden: the card's log stays, and once software
+        # has read the file the card is left alone, so a broken driver costs one run, not one
+        # per file.
         if not card:
             raise
-        os.replace(log_path, log_path + ".card")
-        stop_decoding_on_card(asset.path, str(exc))
+        os.replace(log_path, log_path + CARD_LOG_SUFFIX)
         run_ffmpeg(head + tail, log_path, duration, on_progress, is_cancelled)
+        stop_decoding_on_card(asset.path, str(exc))
 
     with open(log_path, encoding="utf-8", errors="replace") as log_file:
         log = log_file.read()

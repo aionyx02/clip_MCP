@@ -31,7 +31,12 @@ CARD = ("NVIDIA GeForce RTX 4060", 8 * 1024 ** 3)
 def fresh_card_answers(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[None]:
     """Forget what an earlier test learned about the card, start with the switch unset, and keep failures here."""
     monkeypatch.delenv("CLIP_MCP_HWACCEL", raising=False)
-    monkeypatch.setattr(engine_ffmpeg, "card_failed_path", lambda: str(tmp_path / engine_ffmpeg.CARD_FAILED_FILE_NAME))
+    from app import cli
+    from app.tools import job_queue
+
+    here = str(tmp_path / engine_ffmpeg.CARD_FAILED_FILE_NAME)
+    for module in (engine_ffmpeg, machine, job_queue, cli):
+        monkeypatch.setattr(module, "card_failed_path", lambda: here)
     engine_ffmpeg._card_listed.cache_clear()
     yield
     engine_ffmpeg._card_listed.cache_clear()
@@ -265,9 +270,72 @@ def test_the_card_finds_what_software_finds(tmp_path: Path, monkeypatch: pytest.
         monkeypatch.setattr(analysis, "card_decode_args", lambda ffmpeg_bin, path, duration, card=card: card)
         work = tmp_path / name
         work.mkdir()
+        monkeypatch.setattr(analysis, "discard_scratch", lambda work_dir: None)
         scan = analysis.scan_media(asset, str(work), lambda fraction: None, lambda: False, FFMPEG)
-        files = {path.name: path.read_bytes() for path in work.iterdir()
+        files = {path.relative_to(work).as_posix(): path.read_bytes() for path in work.rglob("*")
                  if path.is_file() and path.name != analysis.DETECT_LOG_FILE_NAME}
         found[name] = (scan, files)
     assert found["card"][0] == found["software"][0]
+    assert any(name.startswith("faces/") for name in found["software"][1]), "the stills should be compared too"
     assert found["card"][1] == found["software"][1]
+
+def test_a_file_that_fails_in_software_too_leaves_the_card_on(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, media: Path
+) -> None:
+    calls: List[List[str]] = []
+
+    def failing(command, log_path, duration, on_progress, is_cancelled):
+        calls.append(list(command))
+        with open(log_path, "w", encoding="utf-8") as log:
+            log.write("No space left on device\n")
+        raise FFmpegFailed("the disk is full" if "-hwaccel" in command else "still full in software")
+
+    monkeypatch.setattr(analysis, "run_ffmpeg", failing)
+    monkeypatch.setattr(analysis, "card_decode_args", lambda ffmpeg_bin, path, duration: ["-hwaccel", "cuda"])
+    with pytest.raises(FFmpegFailed, match="still full in software"):
+        analysis.scan_media(_asset(media), str(tmp_path), lambda fraction: None, lambda: False, FFMPEG)
+    assert len(calls) == 2
+    assert card_failure() is None
+    assert (tmp_path / (analysis.DETECT_LOG_FILE_NAME + analysis.CARD_LOG_SUFFIX)).exists()
+
+def _finished_analysis(work: Path):
+    """A finished analysis job working in this folder."""
+    from app.models.job import Job, JobKind, JobStatus
+
+    return Job(kind=JobKind.ANALYZE, status=JobStatus.COMPLETED, asset_id="card", work_dir=str(work))
+
+def test_get_job_says_when_the_card_failed_and_how_to_turn_it_back_on(tmp_path: Path) -> None:
+    from app.tools import job_queue
+
+    work = tmp_path / "job"
+    work.mkdir()
+    assert job_queue._card_note(_finished_analysis(work)) is None
+    (work / (analysis.DETECT_LOG_FILE_NAME + analysis.CARD_LOG_SUFFIX)).write_text("cuda: out of memory\n")
+    assert "could not be written" in job_queue._card_note(_finished_analysis(work))
+    engine_ffmpeg.stop_decoding_on_card("clip.mp4", "CUDA_ERROR_OUT_OF_MEMORY")
+    told = job_queue._card_note(_finished_analysis(work))
+    assert "Tell the user" in told and engine_ffmpeg.card_failed_path() in told
+
+def test_the_server_says_when_scans_no_longer_use_the_card() -> None:
+    hour = {"transcription_minutes": [2, 3], "basis": "measured"}
+    found = machine.Machine(tier="high", gpu="RTX 4060", gpu_memory_bytes=8 * 1024 ** 3, memory_bytes=32 * 1024 ** 3,
+                            logical_cores=16, apple_silicon=False, mac=False, identity="desk")
+    assert "no longer decodes on the card" not in machine.describe(found, hour)
+    engine_ffmpeg.stop_decoding_on_card("clip.mp4", "CUDA_ERROR_OUT_OF_MEMORY")
+    told = machine.describe(found, hour)
+    assert "no longer decodes on the card since it failed on clip.mp4: CUDA_ERROR_OUT_OF_MEMORY" in told
+    assert engine_ffmpeg.card_failed_path() in told
+
+def test_check_names_the_failure_and_the_record_to_delete(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture,
+) -> None:
+    from app import cli
+
+    monkeypatch.setattr(cli.clients, "register", lambda command, dry_run: [])
+    cli.check()
+    assert "card:" not in capsys.readouterr().out
+    engine_ffmpeg.stop_decoding_on_card("clip.mp4", "CUDA_ERROR_OUT_OF_MEMORY")
+    cli.check()
+    out = capsys.readouterr().out
+    assert "card:       not used for the scan since it failed on clip.mp4: CUDA_ERROR_OUT_OF_MEMORY" in out
+    assert f"delete {engine_ffmpeg.card_failed_path()} to try the card again" in out

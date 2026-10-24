@@ -99,6 +99,10 @@ def card_failure() -> Optional[str]:
 def stop_decoding_on_card(path: str, error: str) -> None:
     """Record that a scan failed on the card, so no worker decodes on it again until the record is deleted.
 
+    A record that cannot be written is not an error of the scan, which has
+    its result: the card is then tried again on the next file, and `get_job`
+    says so (`card_failure` is None).
+
     Args:
         path: The file whose scan failed.
         error: What FFmpeg said; its last line is kept.
