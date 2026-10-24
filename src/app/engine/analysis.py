@@ -1080,7 +1080,7 @@ def _run_whisper(
         RuntimeError: If the machine has less free memory than the model
             needs, or if the device cannot run it.
     """
-    from faster_whisper import BatchedInferencePipeline, WhisperModel
+    from faster_whisper import BatchedInferencePipeline
 
     model_name = model_name or whisper_model_name()
     # Only on the CPU do the weights sit in system memory; on the GPU they are in VRAM,
@@ -1095,12 +1095,7 @@ def _run_whisper(
         )
     # Kept in the workspace rather than in a cache under the user's home directory, so
     # that the project holds everything it needs and deleting it takes the weights with it.
-    model = WhisperModel(
-        model_name,
-        device=device,
-        compute_type="float16" if device == "cuda" else "int8",
-        download_root=models.whisper_dir(),
-    )
+    model = models.speech_model(model_name, device, models.whisper_dir())
     began = time.monotonic()
     # Batched decoding on CPU overflows CTranslate2's native stack on Windows, so the CPU decodes one chunk at a time.
     segments, info = BatchedInferencePipeline(model).transcribe(

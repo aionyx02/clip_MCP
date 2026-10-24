@@ -20,15 +20,25 @@ import os
 import shutil
 import tarfile
 import tempfile
+import threading
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
-from typing import Callable, Optional
+from typing import Any, Callable, Optional, Tuple
 from app.workspace import workspace_dir
 
 MEGABYTE = 1024 * 1024
 DOWNLOAD_CHUNK_BYTES = 1024 * 1024
 DOWNLOAD_TIMEOUT_SECONDS = 60
+
+# The speech model built most recently, and the key it was built for. A worker that
+# analyses several files in a row reuses it instead of loading the weights again. Only a
+# worker keeps it: the MCP server also hears stretches again, and a server that kept the
+# weights after one of those would hold gigabytes for as long as it runs.
+_keep_speech_model = False
+_speech_model_lock = threading.Lock()
+_speech_model: Optional[Any] = None
+_speech_model_key: Optional[Tuple[str, str, str]] = None
 
 @dataclass(frozen=True)
 class Model:
@@ -112,6 +122,48 @@ def whisper_dir() -> str:
         The absolute path.
     """
     return os.path.join(models_dir(), "whisper")
+
+def keep_speech_model() -> None:
+    """Keep the speech model loaded between calls, for a worker that runs one analysis after another."""
+    global _keep_speech_model
+    _keep_speech_model = True
+
+def speech_model(name: str, device: str, download_root: str) -> Any:
+    """Load the speech model, reusing the one built last for the same settings.
+
+    A worker that analyses one file after another would otherwise load the
+    weights again for every file. Nothing is kept unless `keep_speech_model`
+    was called, as a worker does. Only the model built most recently is kept:
+    asking for a different name, device or download root drops it before the
+    new one is built, so two of these large models are never held at once.
+
+    Args:
+        name: The model's name, or a path to it.
+        device: `"cuda"` or `"cpu"`.
+        download_root: Where the weights are kept.
+
+    Returns:
+        A `faster_whisper.WhisperModel` for those settings.
+    """
+    global _speech_model, _speech_model_key
+    key = (name, device, download_root)
+    with _speech_model_lock:
+        if _speech_model is not None and _speech_model_key == key:
+            return _speech_model
+        # Let the old weights go before the new ones are asked for.
+        _speech_model = None
+        _speech_model_key = None
+        from faster_whisper import WhisperModel
+
+        model = WhisperModel(
+            name,
+            device=device,
+            compute_type="float16" if device == "cuda" else "int8",
+            download_root=download_root,
+        )
+        if _keep_speech_model:
+            _speech_model, _speech_model_key = model, key
+        return model
 
 def model_path(model: Model) -> str:
     """Where a model is kept.

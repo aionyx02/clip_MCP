@@ -16,8 +16,9 @@ better-known ones.
 
 import array
 import subprocess
+import threading
 import time
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from app.engine import models
 from app.engine.ffmpeg import FFmpegFailed, OperationCancelled, hidden_window_flags
@@ -39,6 +40,11 @@ THREADS = 2
 # interview would otherwise pay for the whole hour twice. The longest turns are taken
 # first: a two-second interjection carries more of the room than of the speaker.
 VOICE_SECONDS = 20.0
+
+# The diarization engine built most recently, with the speaker count it was built for.
+# `num_clusters` is part of the engine's configuration, so the key is that count.
+_engine_lock = threading.Lock()
+_engine_cache: Optional[Tuple[Optional[int], Any]] = None
 
 def speaker_model_name() -> str:
     """Name the models that produced a set of speaker turns.
@@ -94,26 +100,33 @@ def _engine(speakers: Optional[int]):
         RuntimeError: If a model cannot be downloaded, or if the engine
             rejects the configuration.
     """
-    import sherpa_onnx
+    global _engine_cache
+    with _engine_lock:
+        if _engine_cache is not None and _engine_cache[0] == speakers:
+            return _engine_cache[1]
+        # Let the old engine go before the new one loads the same models again.
+        _engine_cache = None
+        import sherpa_onnx
 
-    segmentation = models.ensure(models.SPEAKER_SEGMENTATION)
-    embedding = models.ensure(models.SPEAKER_EMBEDDING)
-    config = sherpa_onnx.OfflineSpeakerDiarizationConfig(
-        segmentation=sherpa_onnx.OfflineSpeakerSegmentationModelConfig(
-            pyannote=sherpa_onnx.OfflineSpeakerSegmentationPyannoteModelConfig(model=segmentation),
-            num_threads=THREADS,
-        ),
-        embedding=sherpa_onnx.SpeakerEmbeddingExtractorConfig(model=embedding, num_threads=THREADS),
-        clustering=sherpa_onnx.FastClusteringConfig(
-            num_clusters=speakers if speakers and speakers > 0 else -1,
-            threshold=SPEAKER_DISTANCE,
-        ),
-        min_duration_on=MIN_SPEECH_SECONDS,
-        min_duration_off=MIN_PAUSE_SECONDS,
-    )
-    if not config.validate():
-        raise RuntimeError("the speaker models were downloaded but the diarizer would not accept them")
-    return sherpa_onnx.OfflineSpeakerDiarization(config)
+        segmentation = models.ensure(models.SPEAKER_SEGMENTATION)
+        embedding = models.ensure(models.SPEAKER_EMBEDDING)
+        config = sherpa_onnx.OfflineSpeakerDiarizationConfig(
+            segmentation=sherpa_onnx.OfflineSpeakerSegmentationModelConfig(
+                pyannote=sherpa_onnx.OfflineSpeakerSegmentationPyannoteModelConfig(model=segmentation),
+                num_threads=THREADS,
+            ),
+            embedding=sherpa_onnx.SpeakerEmbeddingExtractorConfig(model=embedding, num_threads=THREADS),
+            clustering=sherpa_onnx.FastClusteringConfig(
+                num_clusters=speakers if speakers and speakers > 0 else -1,
+                threshold=SPEAKER_DISTANCE,
+            ),
+            min_duration_on=MIN_SPEECH_SECONDS,
+            min_duration_off=MIN_PAUSE_SECONDS,
+        )
+        if not config.validate():
+            raise RuntimeError("the speaker models were downloaded but the diarizer would not accept them")
+        _engine_cache = (speakers, sherpa_onnx.OfflineSpeakerDiarization(config))
+        return _engine_cache[1]
 
 def _voices(samples: array.array, turns: List[SpeakerTurn]) -> List[Voice]:
     """Measure what each voice in a recording sounds like.
