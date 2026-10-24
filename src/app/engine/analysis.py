@@ -1083,19 +1083,23 @@ def _run_whisper(
     from faster_whisper import BatchedInferencePipeline
 
     model_name = model_name or whisper_model_name()
-    # Only on the CPU do the weights sit in system memory; on the GPU they are in VRAM,
-    # and a card that is too small raises its own error and falls back here.
-    needed = resources.whisper_memory_bytes(model_name)
-    available = resources.memory_status() if device == "cpu" else None
-    if available is not None and available[0] < needed:
-        raise RuntimeError(
-            f"{model_name} needs about {needed // resources.MEGABYTE} MB to transcribe and only "
-            f"{available[0] // resources.MEGABYTE} MB is free; close something, or set "
-            "CLIP_MCP_WHISPER_MODEL to a smaller model such as small"
-        )
+
+    def enough_memory() -> None:
+        # Only on the CPU do the weights sit in system memory; on the GPU they are in VRAM,
+        # and a card that is too small raises its own error and falls back here. Checked only
+        # when the model is about to be built: one this worker already holds needs no more.
+        needed = resources.whisper_memory_bytes(model_name)
+        available = resources.memory_status() if device == "cpu" else None
+        if available is not None and available[0] < needed:
+            raise RuntimeError(
+                f"{model_name} needs about {needed // resources.MEGABYTE} MB to transcribe and only "
+                f"{available[0] // resources.MEGABYTE} MB is free; close something, or set "
+                "CLIP_MCP_WHISPER_MODEL to a smaller model such as small"
+            )
+
     # Kept in the workspace rather than in a cache under the user's home directory, so
     # that the project holds everything it needs and deleting it takes the weights with it.
-    model = models.speech_model(model_name, device, models.whisper_dir())
+    model = models.speech_model(model_name, device, models.whisper_dir(), before_build=enough_memory)
     began = time.monotonic()
     # Batched decoding on CPU overflows CTranslate2's native stack on Windows, so the CPU decodes one chunk at a time.
     segments, info = BatchedInferencePipeline(model).transcribe(

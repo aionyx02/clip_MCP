@@ -128,7 +128,9 @@ def keep_speech_model() -> None:
     global _keep_speech_model
     _keep_speech_model = True
 
-def speech_model(name: str, device: str, download_root: str) -> Any:
+def speech_model(
+    name: str, device: str, download_root: str, before_build: Optional[Callable[[], None]] = None,
+) -> Any:
     """Load the speech model, reusing the one built last for the same settings.
 
     A worker that analyses one file after another would otherwise load the
@@ -136,11 +138,16 @@ def speech_model(name: str, device: str, download_root: str) -> Any:
     was called, as a worker does. Only the model built most recently is kept:
     asking for a different name, device or download root drops it before the
     new one is built, so two of these large models are never held at once.
+    A check of free memory belongs in `before_build`, which runs only when a
+    model is about to be built, after the old one was let go: a model already
+    held needs no more memory.
 
     Args:
         name: The model's name, or a path to it.
         device: `"cuda"` or `"cpu"`.
         download_root: Where the weights are kept.
+        before_build: Called before a model is built, never when the one kept
+            is returned; it raises to stop the build.
 
     Returns:
         A `faster_whisper.WhisperModel` for those settings.
@@ -153,6 +160,8 @@ def speech_model(name: str, device: str, download_root: str) -> Any:
         # Let the old weights go before the new ones are asked for.
         _speech_model = None
         _speech_model_key = None
+        if before_build is not None:
+            before_build()
         from faster_whisper import WhisperModel
 
         model = WhisperModel(

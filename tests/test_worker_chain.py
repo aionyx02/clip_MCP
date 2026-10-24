@@ -10,12 +10,13 @@ import json
 import os
 import sys
 import types
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List
 
 import pytest
 
-from app.engine import diarize, models, renderer, resources
+from app.engine import analysis, diarize, models, renderer, resources
 from app.engine.renderer import SPEC_FILE_NAME, JobManager, run_worker
 from app.models.job import FailureKind, Job, JobKind, JobStatus
 from app.storage.repo import Repository
@@ -163,6 +164,8 @@ def test_the_speech_model_is_built_once_for_the_same_settings(
         """Stand in for faster-whisper's model, recording each construction."""
 
         def __init__(self, name: str, device: str, compute_type: str, download_root: str):
+            # The old model is let go before a new one is built, so two are never held at once.
+            assert models._speech_model is None
             built.append({
                 "name": name, "device": device,
                 "compute_type": compute_type, "download_root": download_root,
@@ -236,6 +239,8 @@ def test_the_diarizer_is_built_once_for_the_same_speaker_count(
         """Stand in for the diarization engine, recording each construction."""
 
         def __init__(self, config):
+            # The old engine is let go before a new one loads the same models again.
+            assert diarize._engine_cache is None
             built.append(config)
 
     module = types.ModuleType("sherpa_onnx")
@@ -261,3 +266,95 @@ def test_the_diarizer_is_built_once_for_the_same_speaker_count(
     assert len(built) == 2
     assert diarize._engine_cache[0] is None
     assert diarize._engine_cache[1] is other
+
+
+def fake_whisper(monkeypatch: pytest.MonkeyPatch, free: List[int]) -> List[str]:
+    """Stand in for faster-whisper, each model taking 1500 MB of the memory `free` reports.
+
+    Args:
+        monkeypatch: The test's monkeypatch.
+        free: The free memory, in bytes, in a list the fake models lower.
+
+    Returns:
+        The names of the models built, in order.
+    """
+    built: List[str] = []
+
+    class FakeWhisperModel:
+        """A model that takes its memory when built."""
+
+        def __init__(self, name: str, device: str, compute_type: str, download_root: str):
+            built.append(name)
+            free[0] -= 1500 * resources.MEGABYTE
+
+    class FakePipeline:
+        """Transcribe nothing, as the real pipeline would a silent file."""
+
+        def __init__(self, model):
+            self.model = model
+
+        def transcribe(self, path, **kwargs):
+            return [], types.SimpleNamespace(language="en")
+
+    module = types.ModuleType("faster_whisper")
+    module.WhisperModel = FakeWhisperModel
+    module.BatchedInferencePipeline = FakePipeline
+    monkeypatch.setitem(sys.modules, "faster_whisper", module)
+    monkeypatch.setattr(resources, "memory_status", lambda: (free[0], 32 * 1024 * resources.MEGABYTE))
+    monkeypatch.setattr(resources, "whisper_memory_bytes", lambda name: 2200 * resources.MEGABYTE)
+    monkeypatch.setattr(models, "_speech_model", None)
+    monkeypatch.setattr(models, "_speech_model_key", None)
+    monkeypatch.setattr(models, "_keep_speech_model", True)
+    return built
+
+
+def test_a_model_the_worker_holds_is_not_counted_as_missing_memory(monkeypatch: pytest.MonkeyPatch) -> None:
+    free = [3000 * resources.MEGABYTE]
+    built = fake_whisper(monkeypatch, free)
+
+    def listen(model_name: str):
+        return analysis._run_whisper("cpu", "speech.wav", 10.0, None, None, lambda fraction: None,
+                                     lambda: False, model_name=model_name)
+
+    listen("large-v3-turbo")
+    # 1500 MB free now, under the 2200 MB a build needs; the model held needs nothing more.
+    listen("large-v3-turbo")
+    assert built == ["large-v3-turbo"]
+    # Another model would be built, so it is checked, and there is not room for it.
+    with pytest.raises(RuntimeError, match="needs about 2200 MB"):
+        listen("small")
+    assert built == ["large-v3-turbo"]
+
+
+def test_before_build_runs_only_when_a_model_is_built(monkeypatch: pytest.MonkeyPatch) -> None:
+    built = fake_whisper(monkeypatch, [8000 * resources.MEGABYTE])
+    checked: List[Any] = []
+
+    def check() -> None:
+        checked.append(models._speech_model)
+
+    models.speech_model("large-v3", "cpu", "models", before_build=check)
+    models.speech_model("large-v3", "cpu", "models", before_build=check)
+    models.speech_model("small", "cpu", "models", before_build=check)
+    assert built == ["large-v3", "small"]
+    # Each check ran with no model held: the old one is let go before memory is checked for the new.
+    assert checked == [None, None]
+
+
+def test_a_kept_analysis_cancelled_before_it_starts_ends_the_chain(tmp_path: Path) -> None:
+    repo = store(tmp_path)
+    kept = queued(repo, tmp_path, admitted_at=datetime.now(timezone.utc), cancel_requested=True)
+    assert run_worker(repo, kept.job_id) is None
+    assert repo.get_job(kept.job_id).status == JobStatus.QUEUED
+
+
+def test_a_kept_analysis_whose_worker_died_is_failed_as_abandoned(tmp_path: Path) -> None:
+    # Kept, it is queued with `admitted_at` set; if the worker dies before starting it, nothing writes to it.
+    repo = store(tmp_path)
+    kept = queued(repo, tmp_path, admitted_at=datetime.now(timezone.utc))
+    when = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat().replace("+00:00", "Z")
+    repo._conn.execute("UPDATE jobs SET data = json_set(data, '$.updated_at', ?) WHERE id = ?", (when, kept.job_id))
+    failed = JobManager(repo).get_job(kept.job_id)
+    assert (failed.status, failed.failure_kind, failed.error_message) == (
+        JobStatus.FAILED, FailureKind.WORKER, renderer.ABANDONED,
+    )
