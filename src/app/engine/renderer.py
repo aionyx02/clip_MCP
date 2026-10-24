@@ -7,7 +7,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
-from app.engine import loudness, machine, resources, scan, speed, sync
+from app.engine import diarize, loudness, machine, models, resources, scan, speed, sync
 from app.engine.analysis import analyze_media, whisper_model_for
 from app.engine.ffmpeg import FFmpegFailed, OperationCancelled, run_ffmpeg
 from app.engine.profile import StageClock
@@ -162,7 +162,7 @@ class JobManager:
         self.launch_ready()
         return self.repo.get_job(job.job_id) or job
 
-    def launch_ready(self) -> List[Job]:
+    def launch_ready(self, keep: Optional[JobKind] = None) -> Tuple[List[Job], Optional[Job]]:
         """Start workers for as many queued jobs as the machine can afford.
 
         Jobs are admitted oldest first and never out of order, so a small job
@@ -170,14 +170,27 @@ class JobManager:
         The jobs that stay queued have their `stage` set to what they are
         waiting for, which is what `get_job` reports back.
 
+        Args:
+            keep: A kind of job whose first admitted job is returned instead of
+                being launched, so that a worker already holding the models
+                can run it in this process. It is admitted by `_plan` like any
+                other, so it takes its place in the queue.
+
         Returns:
-            The jobs that were admitted and had a worker launched for them.
+            `(launched, kept)`: the admitted jobs a worker was launched for,
+            and the admitted job held back for the caller, if any.
         """
         admitted = [job for job in self.repo.update_active_jobs(self._plan)
                     if job.status == JobStatus.QUEUED and job.admitted_at is not None]
+        launched: List[Job] = []
+        kept: Optional[Job] = None
         for job in admitted:
+            if kept is None and keep is not None and job.kind == keep:
+                kept = job
+                continue
             self._launch_worker(job)
-        return admitted
+            launched.append(job)
+        return launched, kept
 
     def _plan(self, jobs: List[Job]) -> List[str]:
         """Decide which queued jobs may start, and why the rest may not.
@@ -694,22 +707,48 @@ def _inputs(repo: Repository, job: Job, spec: Dict[str, Any]) -> List[str]:
         return [asset.path] if asset is not None else []
     return spec.get("inputs", [])
 
-def run_worker(repo: Repository, job_id: str) -> None:
+def _let_go_of_unused_models(spec: Dict[str, Any]) -> None:
+    """Let go of a model the previous analysis in this worker left that this one will not use.
+
+    Its memory estimate counts no such model. Done before the job's clock
+    starts (`JobContext`), so the stage profile's baseline does not include a
+    model that is about to go, which would put the stages below it.
+
+    A held speech model of another name, such as the large one before a fast
+    analysis, is kept until the transcription builds the one it needs: the
+    estimate counts a model there, and the snapshot of free memory already
+    counts the one held.
+
+    Args:
+        spec: The analysis's specification.
+    """
+    if not spec["transcribe"]:
+        models.release_speech_model()
+    if not (spec["transcribe"] and spec.get("diarize", True)):
+        diarize.release_engine()
+
+def run_worker(repo: Repository, job_id: str) -> Optional[str]:
     """Run a queued job to completion and record its outcome.
 
     Returns without doing anything if the job is missing or no longer queued.
     A render that fails or is cancelled has its partial output file deleted.
     A job that ends without completing has its `failure_kind` recorded from
     what stopped it, never from its error's words.
-    Whatever queued job the freed memory allows is started before returning.
+    Whatever queued job the freed memory allows is started before returning,
+    except that after an analysis the next analysis is kept back and its ID
+    returned, so this process can run it with the models already loaded.
 
     Args:
         repo: Repository that stores the job.
         job_id: ID of the job to run.
+
+    Returns:
+        The ID of the next analysis to run in this process, or None when this
+        was not an analysis or no analysis was admitted.
     """
     job = repo.get_job(job_id)
     if job is None or job.work_dir is None:
-        return
+        return None
     with open(os.path.join(job.work_dir, SPEC_FILE_NAME), encoding="utf-8") as spec_file:
         spec = json.load(spec_file)
 
@@ -724,7 +763,9 @@ def run_worker(repo: Repository, job_id: str) -> None:
 
     repo.update_job(job_id, start)
     if not started:
-        return
+        return None
+    if job.kind == JobKind.ANALYZE:
+        _let_go_of_unused_models(spec)
 
     status, error_message, failure = JobStatus.COMPLETED, None, None
     with JobContext(repo, job_id) as context:
@@ -780,14 +821,21 @@ def run_worker(repo: Repository, job_id: str) -> None:
 
     repo.update_job(job_id, finish)
     # This worker's slot and its memory are free now, so hand them to whatever is waiting
-    # rather than leaving the queue still until someone next asks about a job.
+    # rather than leaving the queue still until someone next asks about a job. An analysis
+    # worker keeps the next analysis for itself, because its models are already loaded.
+    if job.kind == JobKind.ANALYZE:
+        _, next_job = JobManager(repo).launch_ready(keep=JobKind.ANALYZE)
+        return next_job.job_id if next_job is not None else None
     JobManager(repo).launch_ready()
+    return None
 
 def main(argv: Optional[List[str]] = None) -> None:
-    """Run the worker process for one job.
+    """Run the worker process for one job, then any analysis it keeps for itself.
 
     Usage: `python -m app.engine.renderer <db_path> <job_id>`. Any unexpected
-    error is recorded on the job before it propagates.
+    error is recorded on the job before it propagates. An analysis worker runs
+    the next admitted analysis in this same process, with its models already
+    loaded, and keeps doing so until no analysis is waiting.
 
     Args:
         argv: Command-line arguments, excluding the program name. Defaults to
@@ -795,11 +843,15 @@ def main(argv: Optional[List[str]] = None) -> None:
     """
     db_path, job_id = argv if argv is not None else sys.argv[1:]
     repo = Repository(db_path)
-    try:
-        run_worker(repo, job_id)
-    except Exception as exc:
-        repo.update_job(job_id, _fail_if_active(f"worker crashed: {exc}"))
-        raise
+    # Only a worker keeps the speech model loaded between analyses; the server does not.
+    models.keep_speech_model()
+    current: Optional[str] = job_id
+    while current is not None:
+        try:
+            current = run_worker(repo, current)
+        except Exception as exc:
+            repo.update_job(current, _fail_if_active(f"worker crashed: {exc}"))
+            raise
 
 if __name__ == "__main__":
     main()

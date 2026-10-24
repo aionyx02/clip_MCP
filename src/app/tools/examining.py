@@ -146,7 +146,9 @@ def start_analysis(asset: Asset, transcribe: bool, transcription: str, language:
         detect_faces=asset.has_video,
     )
     return runtime.job_manager.start_job(job, {
-        "transcribe": transcribe,
+        # What the analysis will do, not what was asked: a song is never transcribed, and a worker
+        # that holds a speech model lets it go before an analysis that does not use it.
+        "transcribe": with_speech,
         "transcription": transcription,
         "language": language,
         "prompt": prompt,
