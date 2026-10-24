@@ -1,5 +1,6 @@
 """Background jobs: how each one is doing, where it stands in the queue, and cancelling it."""
 
+import os
 import time
 from datetime import datetime, timezone
 from typing import Annotated, Dict, List, Optional, Sequence
@@ -9,6 +10,8 @@ from pydantic import Field
 from app.models.timeline.parts import Clip
 from app.models.job import Job, JobKind, JobStatus
 from app.engine import stills, sync
+from app.engine.analysis import CARD_LOG_SUFFIX, DETECT_LOG_FILE_NAME
+from app.engine.ffmpeg import card_failed_path, card_failure
 from app import runtime
 from app.runtime import mcp
 from app.tools import looking, shared
@@ -48,7 +51,10 @@ def get_job(
         failed with every file it reads there; `worker`: its worker
         never started, crashed or was stopped, and the same call again may
         well work; `cancelled`; left out when the cause is none of these —
-        for a finished analysis worth a second look a `note` to pass on, and
+        for a finished analysis worth a second look a `note` to pass on — a
+        crowd of voices, or a picture the NVIDIA card failed to decode, which
+        makes later scans slower until the user deletes the record it names —
+        and
         for a finished render whose every frame was found black, frozen or a
         flash somewhere, `frames`: `found`, what the
         cut did not ask for — look at them with `view_render` `at: "spots"` —
@@ -154,14 +160,38 @@ def _job_states(job_ids: List[str]) -> List[dict]:
         if job.kind == JobKind.ANALYZE and job.status == JobStatus.COMPLETED and job.asset_id:
             heard = runtime.repo.get_analysis(job.asset_id)
             voices = len({turn.speaker for turn in heard.speakers}) if heard else 0
+            notes = []
             if voices > MANY_VOICES:
-                entry["note"] = (
+                notes.append(
                     f"heard {voices} different voices, more than a video usually has — noisy talk splits one "
                     "person into many. If you know how many people talk, ask the user and analyze it again "
                     "with `speakers` and `again`"
                 )
+            card = _card_note(job)
+            if card:
+                notes.append(card)
+            if notes:
+                entry["note"] = "; ".join(notes)
         listed.append(entry)
     return listed
+
+def _card_note(job: Job) -> Optional[str]:
+    """What to tell the user when an analysis's picture could not be decoded on the NVIDIA card.
+
+    Args:
+        job: A finished analysis.
+
+    Returns:
+        The note, or None when the scan did not fail on the card.
+    """
+    if not job.work_dir or not os.path.exists(os.path.join(job.work_dir, DETECT_LOG_FILE_NAME + CARD_LOG_SUFFIX)):
+        return None
+    if card_failure() is None:
+        return ("its picture could not be decoded on the NVIDIA card and was decoded in software; the card is "
+                "not turned off now, so the next file will try it again")
+    return ("its picture could not be decoded on the NVIDIA card and was decoded in software. Tell the user: "
+            "scans no longer use the card, so long phone or drone footage now takes about twice as long to "
+            f"analyze, until they delete {card_failed_path()} (`clip-mcp check` shows what failed)")
 
 def _frame_spots(job: Job) -> dict:
     """Say where every frame of a render was found black, frozen or a flash, and which of it the cut meant.

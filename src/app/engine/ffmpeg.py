@@ -1,10 +1,11 @@
 import functools
+import json
 import os
 import re
 import subprocess
 import threading
 import time
-from typing import Callable, List
+from typing import Callable, List, Optional
 
 POLL_INTERVAL_SECONDS = 0.5
 TERMINATE_GRACE_SECONDS = 3.0
@@ -59,6 +60,155 @@ def read_tail(path: str, limit: int = 500) -> str:
             return file.read().decode("utf-8", errors="replace").strip()[-limit:]
     except OSError:
         return ""
+
+# Which files the scan decodes on the card (#149). Starting CUDA costs about half a second,
+# which a cheap file does not earn back. Provisional, from one machine (RTX 4060 Laptop,
+# FFmpeg 9.0), scan seconds in software against on the card: DJI HEVC 10-bit at 55 Mbps
+# gained from 4.2 s long (1.18 → 0.96) to 50 s (15.4 → 8.5), and 263 Mbps HEVC 20 s gained
+# (9.8 → 4.1); a 1.4 s DJI clip lost (0.39 → 0.64), and so did HEVC at 30 Mbps (40 s,
+# 5.1 → 6.3), 9.8 Mbps (365 s, 39.2 → 40.9) and under 4 Mbps; H.264 never gained, not even
+# at 218 Mbps (8.35 → 8.19). Only HEVC was measured gaining, so only HEVC is listed.
+CARD_CODECS = frozenset({"hevc"})
+# Between the 30 Mbps file that lost and the 55 Mbps footage that gained.
+CARD_MIN_BITRATE = 40_000_000
+# Between the 1.4 s clip that lost and the 4.2 s clip that gained.
+CARD_MIN_SECONDS = 3.0
+# Written into the workspace the first time a scan fails on the card and then succeeds in
+# software, and read by every worker after: while it is there, nothing is decoded on the card. `clip-mcp check`
+# reports it; deleting it lets the card be tried again.
+CARD_FAILED_FILE_NAME = "card-decode-failed.txt"
+
+def card_failed_path() -> str:
+    """Where a failed decode on the card is recorded, in the workspace in use."""
+    from app import workspace
+
+    return os.path.join(workspace.workspace_dir(), CARD_FAILED_FILE_NAME)
+
+def card_failure() -> Optional[str]:
+    """Say what failed on the card, if a scan ever did.
+
+    Returns:
+        The file and FFmpeg's last line, as recorded; None when nothing has.
+    """
+    try:
+        with open(card_failed_path(), encoding="utf-8", errors="replace") as handle:
+            return handle.read().strip() or "a scan"
+    except OSError:
+        return None
+
+def stop_decoding_on_card(path: str, error: str) -> None:
+    """Record that a scan failed on the card, so no worker decodes on it again until the record is deleted.
+
+    A record that cannot be written is not an error of the scan, which has
+    its result: the card is then tried again on the next file, and `get_job`
+    says so (`card_failure` is None).
+
+    Args:
+        path: The file whose scan failed.
+        error: What FFmpeg said; its last line is kept.
+    """
+    lines = error.strip().splitlines()
+    try:
+        with open(card_failed_path(), "w", encoding="utf-8") as handle:
+            handle.write(f"{path}: {lines[-1] if lines else 'FFmpeg failed'}\n")
+    except OSError:
+        pass
+
+@functools.lru_cache(maxsize=None)
+def _card_listed(ffmpeg_bin: str) -> bool:
+    """Say whether this FFmpeg lists CUDA and an NVIDIA card is there to use it.
+
+    Asked once per executable; see `can_decode_on_card` for the rest.
+    """
+    try:
+        listed = subprocess.run(
+            [ffmpeg_bin, "-hide_banner", "-hwaccels"],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=30,
+            creationflags=hidden_window_flags(),
+        ).stdout
+    except (OSError, subprocess.SubprocessError):
+        return False
+    if "cuda" not in {line.strip() for line in listed.splitlines()}:
+        return False
+    try:
+        from app.engine import machine
+
+        return machine._nvidia_card() is not None
+    except Exception:
+        return False
+
+def can_decode_on_card(ffmpeg_bin: str = "ffmpeg") -> bool:
+    """Say whether FFmpeg can decode the analysis scan on this computer's NVIDIA card.
+
+    CUDA has to be among the hardware methods this FFmpeg was built with, and
+    there has to be an NVIDIA card it was built for. Asking once and
+    remembering the answer (in `_card_listed`) keeps an extra process off
+    every scan; a check that failed at first use, such as a card still
+    waking, is remembered too, until the process ends. `CLIP_MCP_HWACCEL=off`
+    turns the card off, and so does a scan that once failed on it (see
+    `stop_decoding_on_card`); both are read on every call.
+
+    Args:
+        ffmpeg_bin: Path to, or name of, the FFmpeg executable.
+
+    Returns:
+        True when the card can be used.
+    """
+    if os.environ.get("CLIP_MCP_HWACCEL", "").strip().lower() == "off":
+        return False
+    if card_failure() is not None:
+        return False
+    return _card_listed(ffmpeg_bin)
+
+def _ffprobe_beside(ffmpeg_bin: str) -> str:
+    """The ffprobe that came with an FFmpeg: in the same folder when it was given as a path."""
+    folder = os.path.dirname(ffmpeg_bin)
+    return os.path.join(folder, "ffprobe") if folder else "ffprobe"
+
+def _worth_decoding_on_card(path: str, ffmpeg_bin: str) -> bool:
+    """Say whether a file's picture is costly enough to decode that the card earns its start-up."""
+    try:
+        result = subprocess.run(
+            [_ffprobe_beside(ffmpeg_bin), "-v", "error", "-select_streams", "V:0",
+             "-show_entries", "stream=codec_name:format=bit_rate", "-of", "json", path],
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=30,
+            creationflags=hidden_window_flags(),
+        )
+        found = json.loads(result.stdout or "{}")
+        codec = (found.get("streams") or [{}])[0].get("codec_name")
+        bitrate = int((found.get("format") or {}).get("bit_rate") or 0)
+    except (OSError, subprocess.SubprocessError, ValueError, AttributeError):
+        return False
+    return codec in CARD_CODECS and bitrate >= CARD_MIN_BITRATE
+
+def card_decode_args(ffmpeg_bin: str, path: str, duration: float) -> List[str]:
+    """The FFmpeg arguments that decode a file on the NVIDIA card, before `-i`, where that is faster.
+
+    Only a file at least `CARD_MIN_SECONDS` long, whose picture is in one of
+    `CARD_CODECS` at `CARD_MIN_BITRATE` or more, and only when the card can be
+    used at all. The length is checked first, so a short file costs no probe.
+    Without `-hwaccel_output_format`, FFmpeg hands ordinary frames back to the
+    filters, and falls back to software for a codec the card cannot decode.
+
+    Args:
+        ffmpeg_bin: Path to, or name of, the FFmpeg executable.
+        path: The file to decode.
+        duration: Its length in seconds.
+
+    Returns:
+        `["-hwaccel", "cuda"]`, or nothing.
+    """
+    if duration < CARD_MIN_SECONDS or not can_decode_on_card(ffmpeg_bin):
+        return []
+    return ["-hwaccel", "cuda"] if _worth_decoding_on_card(path, ffmpeg_bin) else []
 
 class _ProgressReader(threading.Thread):
     """Background thread that tracks the media position FFmpeg reports."""

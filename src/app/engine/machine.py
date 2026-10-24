@@ -24,7 +24,7 @@ from pathlib import Path
 from typing import Optional, Tuple
 
 from app.engine import resources
-from app.engine.ffmpeg import hidden_window_flags
+from app.engine.ffmpeg import card_failed_path, card_failure, hidden_window_flags
 
 GIB = 1024 ** 3
 
@@ -238,7 +238,9 @@ def describe(found: Machine, hour: dict) -> str:
             accurately, measured here or from the hardware.
 
     Returns:
-        The tier, what it rests on, and how long an hour of footage takes.
+        The tier, what it rests on, and how long an hour of footage takes;
+        and, when a scan once failed on the card, that scans no longer use
+        it and which record to delete.
     """
     if found.gpu:
         runs_on = f"an NVIDIA card ({found.gpu}, {_gibibytes(found.gpu_memory_bytes)})"
@@ -254,4 +256,13 @@ def describe(found: Machine, hour: dict) -> str:
         f" footage accurately takes about {_minutes_in_words(hour['transcription_minutes'])} here"
         f" ({hour['basis']}). Before analyzing, `analyze_asset` with `dry_run` gives both choices' times for"
         " the files at hand."
-    )
+    ) + _card_off()
+
+def _card_off() -> str:
+    """A sentence saying the scan stopped decoding on the card, or nothing when it did not."""
+    failed = card_failure()
+    if failed is None:
+        return ""
+    return (f" The analysis scan no longer decodes on the card since it failed on {failed}, so long phone or"
+            f" drone footage takes about twice as long to analyze; tell the user that deleting"
+            f" {card_failed_path()} lets the card be tried again.")
