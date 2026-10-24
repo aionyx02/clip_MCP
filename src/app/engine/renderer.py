@@ -535,8 +535,8 @@ def _run_render(job: Job, spec: Dict[str, Any], context: JobContext, repo: Optio
         taken["scan"] = (time.monotonic() - began, length)
     except (RuntimeError, OSError, OperationCancelled):
         pass
-    # Where the cut says talking is, checked against where the sound was heard: a stream
-    # that runs late, a join the voice sits to one side of. It has no share of the bar.
+    # The render's sound, checked against the files it was cut from: a stream that runs
+    # late, a join the sound sits to one side of. It has no share of the bar.
     checking = spec.get("sync")
     if checking:
         context.report(start + share, "checking sound against picture")

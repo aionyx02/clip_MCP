@@ -88,10 +88,10 @@ class Job(BaseModel):
         default=None,
         description="What a finished render's sound was found doing against its picture: `streams`, how far the "
                     "two streams' starts and lengths differ or null when they line up; `joins`, "
-                    "`{at, clip_id, side, lag}` for each side of a join whose voicing could be lined up, lag in "
-                    "seconds and positive when the sound is late; `sides_asked`, how many sides were offered to "
-                    "the check; `unlined`, how many of those could not be lined up, as `{faded, other}`; "
-                    "`left_out`, how many were left out, as `{not_listened, too_short, faded}`; and "
+                    "`{at, clip_id, side, lag}` for each side of a join whose sound could be lined up against "
+                    "the same stretch of its own file, lag in seconds and positive when the sound is late; "
+                    "`sides_asked`, how many sides were offered to the check; `unlined`, how many of those could "
+                    "not be lined up; `left_out`, how many were left out, as `{too_short, faded}`; and "
                     "`frame`, one frame of the render in seconds. Null when it was not checked (render jobs)",
     )
     error_message: Optional[str] = None

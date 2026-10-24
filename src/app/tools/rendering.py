@@ -678,18 +678,9 @@ def start_render(
     if subtitle_path is not None:
         spec["made"] = sorted({*spec["made"], subtitle_path})
     if project.base_video_track is not None:
-        analyses = analyses_of(project)
-        heard = {
-            asset_id: [(span.start, span.end) for span in analysis.second_listen.voiced]
-            for asset_id, analysis in analyses.items() if analysis.second_listen is not None
-        }
-        sounding = {asset_id for asset_id, asset in assets.items() if asset.has_audio}
-        offered, left_out = sync.sides(project.tracks, project.base_video_track.clips, heard, sounding)
-        spec["sync"] = {
-            "sides": offered,
-            "left_out": left_out,
-            "frame": project.fps_den / project.fps_num,
-        }
+        sources = {asset_id: asset.path for asset_id, asset in assets.items() if asset.has_audio}
+        offered, left_out = sync.sides(project.tracks, project.base_video_track.clips, sources)
+        spec["sync"] = {"sides": offered, "left_out": left_out, "frame": project.fps_den / project.fps_num}
     job = runtime.job_manager.start_job(job, spec)
     # Every clip on a picture track is one picture, the sequence's and the ones drawn over it.
     pictures = sum(len(track.clips) for track in project.video_tracks)

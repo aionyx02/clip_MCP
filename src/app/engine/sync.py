@@ -1,44 +1,49 @@
-"""A finished render's sound, checked against where the picture says it should be.
+"""A finished render's sound, checked against the sound of the files it was cut from.
 
 A file's picture and sound are two streams in one container, and they can
 drift apart without anything looking wrong: the sound can start after the
 picture and stay late for the whole cut, or a join can be a little to one
-side of the voice it should land on. Neither shows up in a look at a frame,
+side of the sound it should land on. Neither shows up in a look at a frame,
 and a viewer hears the second one as a cut that feels off without being able
-to say why. The render is read once more, the sound alone, and where somebody
-is talking is compared with where the cut said talking would be. What was
-meant — a J cut, a line carried across a cut, a pause — is for whoever reads
-the result to say; this only knows where the voice is, not why.
+to say why. Each side of a join is compared with the same stretch of its own
+source file, by how its loudness rises and falls: a shape that survives
+whatever is being said. What was meant — a J cut, a line carried across a
+cut, a pause — is for whoever reads the result to say; this only says how far
+the sound has moved.
 """
 
 import json
 import os
-from typing import Collection, Dict, List, Mapping, Optional, Sequence, Tuple
+import subprocess
+from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 
 import numpy as np
 
-from app.engine.diarize import read_samples
+from app.engine.ffmpeg import FFmpegFailed, hidden_window_flags
 from app.engine.probe import probe_file
-from app.engine.relisten import voiced_stretches
 from app.models.timeline.parts import Clip, Track
 
 SYNC_FILE_NAME = "sync.json"
 # How far, in seconds either side of a join, the sound is compared. Provisional.
 JOIN_WINDOW_SECONDS = 2.0
-# The shortest stretch, in seconds, a side of a join is compared over; less holds too little voice to line up.
+# The shortest stretch, in seconds, a side of a join is compared over; less holds too little sound to line up.
 # Provisional.
 MIN_SIDE_SECONDS = 0.5
 # The furthest the sound is looked for out of place, in seconds. Provisional.
 MAX_LAG_SECONDS = 0.5
-# The grid voicing is compared on, in seconds.
+# The grid loudness is compared on, in seconds.
 LAG_STEP_SECONDS = 0.01
-# The voice detector decides in steps of this many seconds (512 samples at 16 kHz).
-VOICE_STEP_SECONDS = 0.032
-# How far one edge of the voice was seen to move between a file and its render with nothing out of step:
-# two of the voice detector's steps. A lag no larger says nothing. Provisional.
-EDGE_SLACK_SECONDS = 2 * VOICE_STEP_SECONDS
-# The share of the voice in the window that must line up at the best lag for it to be believed. Provisional.
-MIN_AGREEMENT = 0.8
+# Sound is compared as its loudness every LAG_STEP_SECONDS, read at this many samples a second.
+SAMPLE_RATE = 16000
+# How closely the render's loudness must follow the file's at the best lag for it to be believed:
+# a correlation, 1 being the same shape. Provisional.
+MIN_CORRELATION = 0.8
+# Loudness that varies less than this (as a standard deviation of RMS on a -1..1 scale) holds nothing to line up:
+# digital silence. Provisional.
+MIN_VARIATION = 1e-4
+# How far short of a stretch its file is sought before decoding, so the seek never lands at the file's very
+# start; the rest is cut by timestamp.
+SEEK_SHORT_SECONDS = 1.0
 
 def stream_mismatch(probed: dict, frame: float) -> Optional[dict]:
     """Say how far a file's sound and picture streams differ, when they do.
@@ -84,36 +89,6 @@ def _merged(stretches: Sequence[Tuple[float, float]]) -> List[Tuple[float, float
             merged.append((start, end))
     return merged
 
-def expected_voicing(clips: Sequence[Clip],
-                     voiced: Mapping[str, Sequence[Tuple[float, float]]]) -> List[Tuple[float, float]]:
-    """Work out where the cut says each source file's talking should be heard.
-
-    A title card has no sound of its own, so its clip contributes nothing.
-
-    Args:
-        clips: The clips whose voicing to work out, in timeline order.
-        voiced: Per asset ID, the source file's voiced stretches in seconds.
-
-    Returns:
-        `(start, end)` of each stretch on the timeline, in order, with
-        overlapping or touching stretches merged and times rounded to three
-        places.
-    """
-    found: List[Tuple[float, float]] = []
-    for clip in clips:
-        if clip.volume <= 0 or clip.card is not None or clip.asset_id not in voiced:
-            continue
-        begin = float(clip.timeline_in) - float(clip.audio_lead)
-        source_start = float(clip.audio_source_start)
-        source_end = float(clip.audio_source_end)
-        speed = float(clip.speed)
-        for stretch_start, stretch_end in voiced[clip.asset_id]:
-            low, high = max(float(stretch_start), source_start), min(float(stretch_end), source_end)
-            if high <= low:
-                continue
-            found.append((begin + (low - source_start) / speed, begin + (high - source_start) / speed))
-    return [(round(start, 3), round(end, 3)) for start, end in _merged(found)]
-
 def _sound_span(clip: Clip) -> Tuple[float, float]:
     """Say where on the timeline one clip's own sound plays."""
     return float(clip.audio_timeline_in), float(clip.audio_timeline_out)
@@ -151,8 +126,7 @@ def _clear_stretch(window: Tuple[float, float], at: float, others: Sequence[Tupl
     return max(at, start), min(end, clear)
 
 def sides(project_tracks: Sequence[Track], base_clips: Sequence[Clip],
-          voiced: Mapping[str, Sequence[Tuple[float, float]]],
-          sounding: Collection[str]) -> Tuple[List[dict], Dict[str, int]]:
+          sources: Mapping[str, str]) -> Tuple[List[dict], Dict[str, int]]:
     """Say which sides of which joins have a stretch of their own sound to line up.
 
     A join has two sides, the clip before it and the clip after it. Each side
@@ -160,111 +134,193 @@ def sides(project_tracks: Sequence[Track], base_clips: Sequence[Clip],
     down to where that clip is the only sound playing: music or another
     picture track over it, and the neighbouring clip's own lead or lag, leave
     nothing there or a shorter stretch further from the join. The clip's own
-    fades are taken off as well, since inside one the detector hears the voice
-    begin or end before the sound really does; a side is marked `faded` when
-    that took anything off, so that one it leaves too short, or that cannot
-    then be lined up, is put down to the fade. A clip whose file has no sound
-    makes none, so it neither offers a side nor counts as other sound.
+    fades are taken off as well, since a fade changes the loudness's shape, so
+    it is not compared. A clip whose asset has no sound makes none, so it
+    neither offers a side nor counts as other sound.
 
     Args:
         project_tracks: Every track of the project, so that sound from a
             picture track drawn above or from an audio track is counted.
         base_clips: The base video track's clips, which meet at the joins.
-        voiced: Per asset ID, the source file's voiced stretches, as for
-            `expected_voicing`.
-        sounding: The asset IDs whose files have sound.
+        sources: Per asset ID whose file has sound, the file's path.
 
     Returns:
         The sides offered to the check, in timeline order with `before` before
-        `after` at one join: `{at, clip_id, side, start, end, faded,
-        expected}`, its `expected` being that clip's voicing only; and how many
-        sides were left out, as `{not_listened, too_short, faded}`.
+        `after` at one join: `{at, clip_id, side, start, end, path,
+        source_start, speed}`, where `source_start` is the second of the file
+        that plays at `start`; and how many sides were left out, as
+        `{too_short, faded}`.
     """
-    counts = {"not_listened": 0, "too_short": 0, "faded": 0}
+    counts = {"too_short": 0, "faded": 0}
     offered: List[dict] = []
     ordered = sorted(base_clips, key=lambda clip: clip.timeline_in)
     heard = [clip for track in project_tracks for clip in track.clips
-             if clip.volume > 0 and clip.card is None and clip.asset_id in sounding]
+             if clip.volume > 0 and clip.card is None and clip.asset_id in sources]
     for before, after in zip(ordered, ordered[1:]):
         at = float(after.timeline_in)
         for side, clip in (("before", before), ("after", after)):
-            if clip.volume <= 0 or clip.card is not None or clip.asset_id not in sounding:
-                continue
-            if clip.asset_id not in voiced:
-                counts["not_listened"] += 1
+            if clip.volume <= 0 or clip.card is not None or clip.asset_id not in sources:
                 continue
             window = (at - JOIN_WINDOW_SECONDS, at) if side == "before" else (at, at + JOIN_WINDOW_SECONDS)
             others = [_sound_span(other) for other in heard if other is not clip]
             start, end = _clear_stretch(window, at, others, side)
             own_start, own_end = _sound_span(clip)
             start, end = max(start, own_start), min(end, own_end)
-            # Inside a fade the voice is heard starting or stopping before it does, so a fade is not compared.
+            # Inside a fade the loudness is a ramp rather than the file's own, so a fade is not compared.
             clear = (max(start, own_start + float(clip.audio_fade_in)), min(end, own_end - float(clip.audio_fade_out)))
-            faded = clear != (start, end)
             if clear[1] - clear[0] < MIN_SIDE_SECONDS:
-                counts["faded" if faded and end - start >= MIN_SIDE_SECONDS else "too_short"] += 1
+                counts["faded" if end - start >= MIN_SIDE_SECONDS else "too_short"] += 1
                 continue
             start, end = clear
+            source_start = float(clip.audio_source_start) + (start - float(clip.audio_timeline_in)) * float(clip.speed)
             offered.append({
-                "at": round(at, 3), "clip_id": clip.id, "side": side,
-                "start": round(start, 3), "end": round(end, 3), "faded": faded,
-                "expected": [list(stretch) for stretch in expected_voicing([clip], voiced)],
+                "at": round(at, 3), "clip_id": clip.id, "side": side, "start": round(start, 3),
+                "end": round(end, 3), "path": sources[clip.asset_id], "source_start": round(source_start, 3),
+                "speed": float(clip.speed),
             })
     return offered, counts
 
-def _on(stretches: Sequence[Sequence[float]], moment: float) -> bool:
-    """Whether a moment falls inside one of the stretches."""
-    return any(start <= moment < end for start, end in stretches)
-
-def lag_at(expected: Sequence[Sequence[float]], measured: Sequence[Sequence[float]], start: float,
-           end: float) -> Optional[float]:
-    """Say how far the sound on one side of a join is heard from where the cut put it.
-
-    Agreement at a lag is the share, among window samples where the expected
-    voicing or the shifted measured voicing is on, of those where both are on.
-    A lag with no sample on in either has an agreement of 0. A lag at the edge
-    of the search may be a real offset larger than the search, so it is not
-    reported.
+def _read_stretch(path: str, start: float, length: Optional[float], ffmpeg_bin: str) -> np.ndarray:
+    """Decode a stretch of a file's sound to mono samples at `SAMPLE_RATE`.
 
     Args:
-        expected: Where the cut says talking is, as `(start, end)` on the render.
-        measured: Where the sound was heard talking, likewise.
-        start: Where the side's window begins, in seconds of the render.
-        end: Where it ends.
+        path: The media file.
+        start: The first second of the file to read; a negative one reads
+            from 0 and pads the front with zeros, so sample 0 still means
+            `start`.
+        length: How many seconds to read; None reads to the end of the file.
+        ffmpeg_bin: The FFmpeg executable.
 
     Returns:
-        The lag in seconds whose voicing agrees with the cut's best, rounded to
-        two places; positive when the sound is heard late. None when the window
-        holds no change to line up, no lag agrees well enough, or the best lag
-        is at the edge of what was searched.
+        The samples as 32-bit floats, sample 0 at `start` seconds of the file.
+
+    Raises:
+        FFmpegFailed: If FFmpeg cannot decode the file.
     """
-    # Only the stretches that can reach the window, so a long cut costs no more per side.
-    expected = [stretch for stretch in expected
-                if stretch[1] > start - MAX_LAG_SECONDS and stretch[0] < end + MAX_LAG_SECONDS]
-    measured = [stretch for stretch in measured
-                if stretch[1] > start - MAX_LAG_SECONDS and stretch[0] < end + MAX_LAG_SECONDS]
-    steps = int(round((end - start) / LAG_STEP_SECONDS)) + 1
-    window = [start + number * LAG_STEP_SECONDS for number in range(steps)]
-    wanted = [_on(expected, moment) for moment in window]
-    if all(value == wanted[0] for value in wanted):
+    pad = max(0.0, -start)
+    if length is None:
+        read_length: Optional[float] = None
+    else:
+        read_length = max(0.0, length - pad)
+    # A seek to the very start of an AAC file drops one more frame of its encoder delay than reading it from the
+    # start does, so the file is only sought to well short of the stretch and the rest is cut by timestamp.
+    coarse = start - SEEK_SHORT_SECONDS if start > SEEK_SHORT_SECONDS else 0.0
+    command = [ffmpeg_bin, "-hide_banner", "-nostdin", "-v", "error"]
+    if coarse > 0:
+        command += ["-ss", f"{coarse:.6f}"]
+    command += ["-i", path]
+    if max(start, 0.0) - coarse > 0:
+        command += ["-ss", f"{max(start, 0.0) - coarse:.6f}"]
+    if read_length is not None:
+        command += ["-t", f"{read_length:.6f}"]
+    command += ["-f", "f32le", "-ac", "1", "-ar", str(SAMPLE_RATE), "-"]
+    result = subprocess.run(
+        command,
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        creationflags=hidden_window_flags(),
+    )
+    if result.returncode != 0:
+        raise FFmpegFailed(result.stderr.decode("utf-8", errors="replace").strip()[-500:]
+                           or "ffmpeg could not read the sound")
+    samples = np.frombuffer(result.stdout, dtype=np.float32)
+    if pad > 0:
+        silence = np.zeros(int(round(pad * SAMPLE_RATE)), dtype=np.float32)
+        samples = np.concatenate((silence, samples))
+    return samples
+
+def _loudness(samples: np.ndarray, origin: float, times: Sequence[float],
+              window: float = LAG_STEP_SECONDS) -> np.ndarray:
+    """Measure the RMS of the samples in a window starting at each of several moments.
+
+    Sample `i` is at `origin + i / SAMPLE_RATE`. A window that reaches outside
+    the samples has an RMS of 0.
+
+    Args:
+        samples: The sound.
+        origin: The second the first sample is at, in whatever time `times` is in.
+        times: Where each window begins, in seconds.
+        window: How long each window is, in seconds.
+
+    Returns:
+        One RMS per moment.
+    """
+    moments = np.asarray(times, dtype=np.float64)
+    first = np.rint((moments - origin) * SAMPLE_RATE).astype(np.int64)
+    width = max(1, int(round(window * SAMPLE_RATE)))
+    low = np.clip(first, 0, len(samples))
+    high = np.clip(first + width, 0, len(samples))
+    if low.size == 0:
+        return np.zeros(0)
+    # Only the part the windows reach is summed, so a side of a long render costs no more than one of a short one.
+    begin = int(low.min())
+    values = np.asarray(samples[begin:int(high.max())], dtype=np.float64)
+    squared = np.concatenate(([0.0], np.cumsum(values * values)))
+    totals = squared[high - begin] - squared[low - begin]
+    return np.sqrt(totals / width)
+
+def _correlation(one: np.ndarray, other: np.ndarray) -> float:
+    """Say how closely two shapes follow each other, from -1 to 1; 0 when either never varies."""
+    one = one - one.mean()
+    other = other - other.mean()
+    scale = float(np.dot(one, one)) * float(np.dot(other, other))
+    if scale == 0.0:
+        return 0.0
+    return float(np.dot(one, other) / np.sqrt(scale))
+
+def lag_at(render: np.ndarray, render_origin: float, source: np.ndarray, side: Mapping[str, object],
+           source_origin: Optional[float] = None) -> Optional[float]:
+    """Say how far the sound on one side of a join is heard from where the cut put it.
+
+    The file's loudness is measured on a grid over the side, and the render's
+    at each lag tried on that grid, and the two shapes correlated. A lag at
+    the edge of the search may be a real offset larger than the search, so it
+    is not reported. The render is held at its sounds, not at any voice in
+    them, so a side of room tone lines up as well as one of talking.
+
+    Args:
+        render: The render's samples, sample 0 at `render_origin` on the timeline.
+        render_origin: The timeline second of the render's first sample.
+        source: The file's samples, sample 0 at `source_origin` in the file.
+        side: The side's `start` and `end` on the timeline, the file second
+            `source_start` that plays at `start`, and its `speed`.
+        source_origin: The file second of the source's first sample; left out,
+            it is the side's `source_start`.
+
+    Returns:
+        The lag in seconds whose loudness follows the file's best, rounded to
+        two places; positive when the sound is heard late. None when the file
+        holds nothing varying to line up, no lag follows closely enough, or
+        the best lag is at the edge of what was searched.
+    """
+    start, end = float(side["start"]), float(side["end"])
+    speed = float(side["speed"])
+    steps = max(1, int(round((end - start) / LAG_STEP_SECONDS)))
+    times = start + np.arange(steps, dtype=np.float64) * LAG_STEP_SECONDS
+    file_start = float(side["source_start"])
+    origin = file_start if source_origin is None else float(source_origin)
+    offsets = (file_start - origin) + (times - start) * speed
+    from_file = _loudness(source, 0.0, offsets, LAG_STEP_SECONDS * speed)
+    if float(np.std(from_file)) < MIN_VARIATION:
         return None
     limit = int(round(MAX_LAG_SECONDS / LAG_STEP_SECONDS))
-    best: Optional[Tuple[Tuple[float, float, int], float, float]] = None
-    for number in range(-limit, limit + 1):
-        lag = number * LAG_STEP_SECONDS
-        heard = [_on(measured, moment + lag) for moment in window]
-        either = sum(cut or sound for cut, sound in zip(wanted, heard))
-        together = sum(cut and sound for cut, sound in zip(wanted, heard))
-        agreement = together / either if either else 0.0
-        # The best agreement first, then the smaller move, and a negative one before a positive.
-        key = (-agreement, abs(lag), 0 if lag < 0 else 1)
-        if best is None or key < best[0]:
-            best = (key, lag, agreement)
-    if best is None or best[2] < MIN_AGREEMENT:
+    # The render's loudness is measured once over everything the search reaches; each lag is then a shift along it.
+    heard = _loudness(render, render_origin,
+                      start + np.arange(-limit, steps + limit, dtype=np.float64) * LAG_STEP_SECONDS)
+    lag, correlation = 0.0, _correlation(from_file, heard[limit:limit + steps])
+    # In order of the smaller move, and a negative one before a positive, so
+    # that equal correlations keep the lag preferred by the tie-break.
+    moves = sorted((number for number in range(-limit, limit + 1) if number != 0),
+                   key=lambda number: (abs(number), number))
+    for number in moves:
+        shape = _correlation(from_file, heard[limit + number:limit + number + steps])
+        if shape > correlation:
+            lag, correlation = number * LAG_STEP_SECONDS, shape
+    if correlation < MIN_CORRELATION:
         return None
-    if abs(best[1]) >= MAX_LAG_SECONDS - LAG_STEP_SECONDS / 2:
+    if abs(lag) >= MAX_LAG_SECONDS - LAG_STEP_SECONDS / 2:
         return None
-    return round(best[1], 2)
+    return round(lag, 2)
 
 def check(render_path: str, offered_sides: Sequence[dict], left_out: Mapping[str, int], frame: float,
           ffmpeg_bin: str, ffprobe_bin: str) -> dict:
@@ -282,23 +338,29 @@ def check(render_path: str, offered_sides: Sequence[dict], left_out: Mapping[str
         `streams`, what `stream_mismatch` found or None; `joins`, `{at,
         clip_id, side, lag}` for each side that could be lined up;
         `sides_asked`, how many sides were offered to the check; `unlined`,
-        how many of those could not be lined up, as `{faded, other}`, `faded`
-        counting the sides a fade on their clip was taken off; `left_out`,
-        how many were left out before the check and why; and `frame`, rounded
-        to four places.
+        how many of those could not be lined up; `left_out`, how many were
+        left out before the check and why; and `frame`, rounded to four
+        places.
     """
     streams = stream_mismatch(probe_file(render_path, ffprobe_bin), frame)
     lags: List[dict] = []
-    unlined = {"faded": 0, "other": 0}
+    unlined = 0
     if offered_sides:
-        samples = np.frombuffer(read_samples(render_path, ffmpeg_bin), dtype=np.float32)
-        measured = voiced_stretches(samples)
+        render = _read_stretch(render_path, 0.0, None, ffmpeg_bin)
         for side in offered_sides:
-            lag = lag_at(side["expected"], measured, float(side["start"]), float(side["end"]))
+            speed = float(side["speed"])
+            read_start = float(side["source_start"]) - MAX_LAG_SECONDS * speed
+            length = (float(side["end"]) - float(side["start"]) + 2 * MAX_LAG_SECONDS) * speed
+            try:
+                source = _read_stretch(side["path"], read_start, length, ffmpeg_bin)
+            except (FFmpegFailed, OSError):
+                unlined += 1
+                continue
+            lag = lag_at(render, 0.0, source, side, source_origin=read_start)
             if lag is not None:
                 lags.append({"at": side["at"], "clip_id": side["clip_id"], "side": side["side"], "lag": lag})
             else:
-                unlined["faded" if side["faded"] else "other"] += 1
+                unlined += 1
     return {"streams": streams, "joins": lags, "sides_asked": len(offered_sides), "unlined": unlined,
             "left_out": dict(left_out), "frame": round(frame, 4)}
 
