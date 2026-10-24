@@ -60,7 +60,7 @@ def get_job(
         when some sides of joins could not be lined up, saying how many and why — left out before
         the check for too little of their own sound or for their own fade, their sound did not follow
         the file's closely enough within the shifts searched, their file could not be read, or their
-        sound may be further off than was searched, naming how far that was;
+        sound may be further off than was searched, each naming how far it was searched;
         or `not_checked`
         when the check could not be run, which says nothing about the sound; and a summary
         over all of them: `finished` and

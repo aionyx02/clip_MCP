@@ -793,6 +793,15 @@ def test_a_short_side_late_past_its_reach_records_that_reach(tmp_path: Path) -> 
     assert found["joins"] == []
     assert found["unlined"] == unlined(0, 1, reach=0.3)
 
+def test_a_short_side_late_past_its_reach_and_matching_nowhere_records_that_reach(tmp_path: Path) -> None:
+    # 0.4s late is past the 0.3s a 0.8s side can be moved, so no shift tried matches: weak, within 0.3s.
+    source = source_file(tmp_path)
+    render = cut_render(tmp_path, source, audio_filter="adelay=400:all=1")
+    found = sync.check(str(render), [check_side(source, 1.0, 1.8, 2.0)], {"too_short": 0, "faded": 0},
+                       FRAME, FFMPEG, "ffprobe")
+    assert found["joins"] == []
+    assert found["unlined"] == unlined(1, 0, reach=0.3)
+
 def test_an_oserror_reading_a_side_counts_that_side_and_the_rest_are_still_checked(
         tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     source = source_file(tmp_path)
