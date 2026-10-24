@@ -284,6 +284,31 @@ def _correlation(one: np.ndarray, other: np.ndarray) -> float:
         return 0.0
     return float(np.dot(one, other) / np.sqrt(scale))
 
+def _reach_steps(start: float, end: float) -> Tuple[int, int]:
+    """Count a side's grid times, and how many steps it may be moved and still keep `MIN_SIDE_SECONDS` compared.
+
+    Args:
+        start: The side's start on the timeline.
+        end: The side's end on the timeline.
+
+    Returns:
+        `(steps, limit)`: the side's grid times, and its reach in steps.
+    """
+    steps = max(1, int(round((end - start) / LAG_STEP_SECONDS)))
+    least = int(round(MIN_SIDE_SECONDS / LAG_STEP_SECONDS))
+    return steps, min(int(round(MAX_LAG_SECONDS / LAG_STEP_SECONDS)), max(0, steps - least))
+
+def reach(side: Mapping[str, object]) -> float:
+    """Say how far a side's sound was searched each way: `MAX_LAG_SECONDS`, or less for a short side.
+
+    Args:
+        side: The side's `start` and `end` on the timeline.
+
+    Returns:
+        Seconds, rounded to two places.
+    """
+    return round(_reach_steps(float(side["start"]), float(side["end"]))[1] * LAG_STEP_SECONDS, 2)
+
 def lag_at(render: np.ndarray, render_origin: float, source: np.ndarray, side: Mapping[str, object],
            source_origin: Optional[float] = None) -> Union[float, str, None]:
     """Say how far the sound on one side of a join is heard from where the cut put it.
@@ -315,7 +340,8 @@ def lag_at(render: np.ndarray, render_origin: float, source: np.ndarray, side: M
     """
     start, end = float(side["start"]), float(side["end"])
     speed = float(side["speed"])
-    steps = max(1, int(round((end - start) / LAG_STEP_SECONDS)))
+    # A lag must leave `MIN_SIDE_SECONDS` of the side compared, so a short side searches less far.
+    steps, limit = _reach_steps(start, end)
     times = start + np.arange(steps, dtype=np.float64) * LAG_STEP_SECONDS
     file_start = float(side["source_start"])
     origin = file_start if source_origin is None else float(source_origin)
@@ -323,9 +349,6 @@ def lag_at(render: np.ndarray, render_origin: float, source: np.ndarray, side: M
     from_file = _loudness(source, 0.0, offsets, LAG_STEP_SECONDS * speed)
     # The render's loudness is measured once over the side; each lag is then a pair of slices of the two.
     heard = _loudness(render, render_origin, times)
-    least = int(round(MIN_SIDE_SECONDS / LAG_STEP_SECONDS))
-    # A lag must leave `MIN_SIDE_SECONDS` of the side compared, so a short side searches less far.
-    limit = min(int(round(MAX_LAG_SECONDS / LAG_STEP_SECONDS)), max(0, steps - least))
     lag, correlation = 0.0, _correlation(from_file, heard)
     # In order of the smaller move, and a negative one before a positive, so
     # that equal correlations keep the lag preferred by the tie-break.
@@ -360,15 +383,19 @@ def check(render_path: str, offered_sides: Sequence[dict], left_out: Mapping[str
         `streams`, what `stream_mismatch` found or None; `joins`, `{at,
         clip_id, side, lag}` for each side that could be lined up;
         `sides_asked`, how many sides were offered to the check; `unlined`,
-        `{weak, beyond_reach}`: how many of those could not be lined up
-        because their sound did not follow the file's closely enough, or
-        their file could not be read, and how many because the best shift
-        was at the edge of the search; `left_out`, how many were left out
+        `{weak, beyond_reach, searched}`: how many of those could not be
+        lined up because their sound did not follow the file's closely
+        enough, or their file could not be read, and how many because the
+        best shift was at the edge of the search; `searched` gives, for each
+        of the two, `[least, most]` seconds those sides were searched each way
+        (a short side searches less than `MAX_LAG_SECONDS`), or None when
+        there are none; `left_out`, how many were left out
         before the check and why; and `frame`, rounded to four places.
     """
     streams = stream_mismatch(probe_file(render_path, ffprobe_bin), frame)
     lags: List[dict] = []
-    unlined = {"weak": 0, "beyond_reach": 0}
+    unlined: Dict[str, object] = {"weak": 0, "beyond_reach": 0}
+    searched: Dict[str, List[float]] = {"weak": [], "beyond_reach": []}
     if offered_sides:
         render = _read_stretch(render_path, 0.0, None, ffmpeg_bin)
         for side in offered_sides:
@@ -378,15 +405,19 @@ def check(render_path: str, offered_sides: Sequence[dict], left_out: Mapping[str
             try:
                 source = _read_stretch(side["path"], read_start, length, ffmpeg_bin)
             except (FFmpegFailed, OSError):
-                unlined["weak"] += 1
+                searched["weak"].append(reach(side))
                 continue
             lag = lag_at(render, 0.0, source, side, source_origin=read_start)
             if lag == BEYOND_REACH:
-                unlined["beyond_reach"] += 1
+                searched["beyond_reach"].append(reach(side))
             elif lag is not None:
                 lags.append({"at": side["at"], "clip_id": side["clip_id"], "side": side["side"], "lag": lag})
             else:
-                unlined["weak"] += 1
+                searched["weak"].append(reach(side))
+    for kind, reaches in searched.items():
+        unlined[kind] = len(reaches)
+    unlined["searched"] = {kind: [min(reaches), max(reaches)] if reaches else None
+                           for kind, reaches in searched.items()}
     return {"streams": streams, "joins": lags, "sides_asked": len(offered_sides), "unlined": unlined,
             "left_out": dict(left_out), "frame": round(frame, 4)}
 
