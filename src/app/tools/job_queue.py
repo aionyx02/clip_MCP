@@ -55,7 +55,9 @@ def get_job(
         crowd of voices, or a picture the NVIDIA card failed to decode, which
         makes later scans slower until the user deletes the record it names
         (or, when no record is there, says the next file will try the card
-        again) — and
+        again); a failed analysis whose picture the card failed to decode
+        carries that note too, since the card stays off for later scans
+        whatever failed after it — and
         for a finished render whose every frame was found black, frozen or a
         flash somewhere, `frames`: `found`, what the
         cut did not ask for — look at them with `view_render` `at: "spots"` —
@@ -173,6 +175,10 @@ def _job_states(job_ids: List[str]) -> List[dict]:
                 notes.append(card)
             if notes:
                 entry["note"] = "; ".join(notes)
+        elif job.kind == JobKind.ANALYZE and job.status == JobStatus.FAILED:
+            card = _card_note(job)
+            if card:
+                entry["note"] = card
         listed.append(entry)
     return listed
 
@@ -180,7 +186,7 @@ def _card_note(job: Job) -> Optional[str]:
     """What to tell the user when an analysis's picture could not be decoded on the NVIDIA card.
 
     Args:
-        job: A finished analysis.
+        job: A finished or failed analysis.
 
     Returns:
         The note, or None when the scan did not fail on the card.
