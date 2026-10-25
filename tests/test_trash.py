@@ -4,6 +4,7 @@ import os
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from starlette.testclient import TestClient
@@ -94,15 +95,20 @@ def test_a_starred_version_keeps_its_finished_video(kept_history, client: TestCl
     assert client.get(f"/api/projects/{project}/storage").json()["other_outputs"] == []
 
 
-def test_caches_give_room_back_oldest_first_when_the_disk_runs_low(tmp_path: Path) -> None:
+def test_caches_give_room_back_oldest_first_when_the_disk_runs_low(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
     proxies = tmp_path / "cache" / "proxies"
     proxies.mkdir(parents=True)
     old, new = proxies / "old.mp4", proxies / "new.mp4"
     for path, age in ((old, 7200), (new, 10)):
         path.write_bytes(b"x" * 1000)
         os.utime(path, (time.time() - age, time.time() - age))
+    # The disk's free space is said here rather than read, so another process writing to the
+    # same disk cannot make one file not enough.
+    free = 10 ** 9
+    monkeypatch.setattr(housekeeping.shutil, "disk_usage", lambda path: SimpleNamespace(free=free))
     # A floor just above what is free: one file is enough.
-    free = __import__("shutil").disk_usage(tmp_path).free
     freed = housekeeping.give_cache_back(str(tmp_path), set(), floor=free + 1, headroom=0)
     assert freed == 1000 and not old.exists() and new.exists()
     # With room to spare nothing goes.
