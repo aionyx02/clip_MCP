@@ -17,7 +17,7 @@ from typing import Any, Dict, List
 import pytest
 
 from app.engine import analysis, diarize, models, relisten, renderer, resources
-from app.engine.renderer import SPEC_FILE_NAME, JobManager, run_worker
+from app.engine.renderer import SPEC_FILE_NAME, InputUnavailable, JobManager, run_worker
 from app.models.job import FailureKind, Job, JobKind, JobStatus
 from app.models.media import Asset
 from app.storage.repo import Repository
@@ -84,6 +84,32 @@ def test_an_analysis_worker_keeps_the_next_analysis(
     # The second was admitted like any other job, but no worker was started for it.
     assert launched == []
     assert repo.get_job(second.job_id).admitted_at is not None
+
+
+@pytest.mark.parametrize("error, kept", [
+    (RuntimeError("CUDA error: an illegal memory access was encountered"), False),
+    (InputUnavailable("the file is gone"), True),
+])
+def test_an_analysis_that_failed_for_a_reason_not_known_hands_the_next_to_a_fresh_worker(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, error: Exception, kept: bool,
+) -> None:
+    repo = store(tmp_path)
+    first = queued(repo, tmp_path)
+    second = queued(repo, tmp_path)
+
+    def fail(*args, **kwargs) -> None:
+        raise error
+
+    monkeypatch.setattr(renderer, "_run_analysis", fail)
+    launched: List[str] = []
+    monkeypatch.setattr(JobManager, "_launch_worker", lambda self, job: launched.append(job.job_id))
+    room_for(monkeypatch)
+
+    next_job = run_worker(repo, first.job_id)
+
+    assert repo.get_job(first.job_id).status == JobStatus.FAILED
+    # A file that could not be read says nothing about the process, so it still keeps the next.
+    assert (next_job, launched) == ((second.job_id, []) if kept else (None, [second.job_id]))
 
 
 def test_a_render_waiting_behind_an_analysis_is_launched_as_before(

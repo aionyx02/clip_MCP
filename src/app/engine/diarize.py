@@ -93,7 +93,10 @@ def release_engine() -> None:
         _engine_cache = None
 
 def _engine(speakers: Optional[int]):
-    """Build the diarization engine, downloading its models on first use.
+    """The diarization engine for a speaker count: the one built last when it was for the same count.
+
+    Otherwise the one kept is dropped and a new one built, downloading its
+    models on first use. `release_engine` lets the one kept go.
 
     Args:
         speakers: How many people are talking, when that is known. `None`

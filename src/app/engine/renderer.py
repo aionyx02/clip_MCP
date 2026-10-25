@@ -718,6 +718,12 @@ def _let_go_of_unused_models(spec: Dict[str, Any]) -> None:
     not include a model that is about to go, which would put the stages
     below it.
 
+    Only the specification is read, never the file's earlier analysis, so two
+    cases cost time but not correctness: a fast transcript refined to
+    balanced starts with the large model, which is let go here and built
+    again; and a diarizer is kept through an analysis that reuses the earlier
+    speaker turns and never runs it.
+
     Args:
         spec: The analysis's specification.
     """
@@ -823,8 +829,10 @@ def run_worker(repo: Repository, job_id: str) -> Optional[str]:
     repo.update_job(job_id, finish)
     # This worker's slot and its memory are free now, so hand them to whatever is waiting
     # rather than leaving the queue still until someone next asks about a job. An analysis
-    # worker keeps the next analysis for itself, because its models are already loaded.
-    if job.kind == JobKind.ANALYZE:
+    # worker keeps the next analysis for itself, because its models are already loaded,
+    # unless it failed for a reason not known: the process may not be fit to reuse, so the
+    # next analysis gets a fresh one, as a render's does.
+    if job.kind == JobKind.ANALYZE and not (status == JobStatus.FAILED and failure is None):
         _, next_job = JobManager(repo).launch_ready(keep=JobKind.ANALYZE)
         return next_job.job_id if next_job is not None else None
     JobManager(repo).launch_ready()
