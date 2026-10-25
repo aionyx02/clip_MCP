@@ -590,3 +590,71 @@ def test_footage_replaced_is_matched_clip_by_clip_on_the_timeline() -> None:
     after = project(clip("n", asset="c", start=0, end=2, timeline_in=4),
                     clip("o", asset="b", start=0, end=8, timeline_in=6))
     assert compared(before, after)["clips"] == {**NO_CLIP_CHANGE, "removed": 1, "added": 1}
+
+
+# One long sentence a word a character, captioned as two lines; after a trim the words left fit on one.
+SENTENCE = "今天我們要來聊一聊這個城市裡面最好吃的早餐店還有它們的故事"
+
+
+def test_a_sentence_recaptioned_on_fewer_lines_after_a_trim_is_not_misheard(
+    kept_history, media: Path, capsys,
+) -> None:
+    step = 8.0 / len(SENTENCE)
+    one = _recaptioned_after_a_trim(kept_history, media, capsys, [TranscriptSegment(
+        start=0.5, end=8.5, text=SENTENCE,
+        words=words(*((character, 0.5 + index * step, 0.5 + (index + 1) * step)
+                      for index, character in enumerate(SENTENCE))),
+    )], 3.0)
+    assert one["causes"]["misheard"] == 0
+    # The lines are broken in other places than before; the history does not say who broke them.
+    assert one["by_ai"]["captions"] == {**NO_CAPTION_CHANGE, "rebroken": 1}
+
+
+def test_a_caption_with_words_retimed_by_hand_is_retimed(kept_history, media: Path, capsys) -> None:
+    asset = catalog.import_asset(str(media / "wide.mp4"))["id"]
+    transcribe(asset, [TranscriptSegment(start=1.0, end=3.0, text="大家好今天",
+                                         words=words(("大家好", 1.0, 2.0), ("今天", 2.0, 3.0)))])
+    with kept_history.step(AI):
+        project_id = build_project([video_track(), insert("a", asset, 0, 9)])
+    with kept_history.step(AI):
+        cue_id = caption(project_id)["cues"][0]["id"]
+    with kept_history.step(corrections.EDITOR_AUTHOR):
+        edit(project_id, [{"action": "edit_subtitle", "cue_id": cue_id, "source_start": 1.5, "source_end": 3.5}])
+    one = summary_of(capsys, "--project", project_id)["projects"][project_id]
+    assert one["by_hand"]["captions"] == {**NO_CAPTION_CHANGE, "retimed": 1}
+
+
+def test_the_same_short_word_deleted_in_one_place_and_added_far_from_it_is_not_a_move() -> None:
+    before = project(SHOWN, cues=(cue("c1", "對", 1, 1.5),))
+    after = project(SHOWN, cues=(cue("c1", "對", 8, 8.5),))
+    assert compared(before, after)["captions"] == {**NO_CAPTION_CHANGE, "added": 1, "removed": 1}
+
+
+def test_a_split_that_adds_punctuation_is_re_broken() -> None:
+    before = project(SHOWN, cues=(cue("c1", "大家好今天", 1, 3),))
+    after = project(SHOWN, cues=(cue("c1", "大家好，", 1, 2), cue("c2", "今天", 2, 3)))
+    assert compared(before, after)["captions"] == {**NO_CAPTION_CHANGE, "rebroken": 1}
+
+
+def test_lines_broken_in_other_places_on_as_many_captions_are_re_broken_once() -> None:
+    before = project(SHOWN, cues=(cue("c1", "我們今天", 0, 2), cue("c2", "去海邊玩", 2, 4)))
+    after = project(SHOWN, cues=(cue("c1", "我們今天去", 0, 2.5), cue("c2", "海邊玩", 2.5, 4)))
+    assert compared(before, after)["captions"] == {**NO_CAPTION_CHANGE, "rebroken": 1}
+
+
+def test_stretches_less_than_touching_apart_are_one() -> None:
+    joined = corrections._footage(Project.model_validate(project(
+        clip("x", start=0, end=2, timeline_in=0), clip("y", start=2.0005, end=4, timeline_in=2))))
+    assert [(stretch.start, stretch.end) for stretch in joined["a"]] == [(0.0, 4.0)]
+
+
+def test_a_sliver_no_longer_than_touching_is_not_footage_both_show() -> None:
+    one = corrections._footage(Project.model_validate(project(clip("x", start=0, end=2))))
+    other = corrections._footage(Project.model_validate(project(clip("x", start=1.9995, end=4))))
+    assert corrections._common(one, other) == {}
+
+
+def test_hand_versions_exactly_a_sitting_gap_apart_are_one_sitting() -> None:
+    gap = corrections.SITTING_GAP_SECONDS / 60
+    hands = [version("編輯器", at(0), None)[0], version("編輯器", at(gap), None)[0]]
+    assert corrections._hand_minutes(hands) == round(gap + corrections.MINUTES_PER_SITTING_FLOOR, 1)
