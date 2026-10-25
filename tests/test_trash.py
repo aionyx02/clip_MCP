@@ -5,6 +5,7 @@ import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Tuple
 
 import pytest
 from starlette.testclient import TestClient
@@ -95,24 +96,45 @@ def test_a_starred_version_keeps_its_finished_video(kept_history, client: TestCl
     assert client.get(f"/api/projects/{project}/storage").json()["other_outputs"] == []
 
 
-def test_caches_give_room_back_oldest_first_when_the_disk_runs_low(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def _two_proxies(tmp_path: Path) -> Tuple[Path, Path]:
+    """An old and a new cached proxy of 1000 bytes each, made afresh.
+
+    Returns:
+        `(old, new)`.
+    """
     proxies = tmp_path / "cache" / "proxies"
-    proxies.mkdir(parents=True)
+    proxies.mkdir(parents=True, exist_ok=True)
     old, new = proxies / "old.mp4", proxies / "new.mp4"
     for path, age in ((old, 7200), (new, 10)):
         path.write_bytes(b"x" * 1000)
         os.utime(path, (time.time() - age, time.time() - age))
-    # The disk's free space is said here rather than read, so another process writing to the
-    # same disk cannot make one file not enough.
-    free = 10 ** 9
-    monkeypatch.setattr(housekeeping.shutil, "disk_usage", lambda path: SimpleNamespace(free=free))
-    # A floor just above what is free: one file is enough.
-    freed = housekeeping.give_cache_back(str(tmp_path), set(), floor=free + 1, headroom=0)
-    assert freed == 1000 and not old.exists() and new.exists()
-    # With room to spare nothing goes.
-    assert housekeeping.give_cache_back(str(tmp_path), set(), floor=0) == 0 and new.exists()
+    return old, new
+
+
+# The disk's free space, said by the tests below rather than read, so another process writing
+# to the same disk cannot change how much has to go.
+FREE = 10 ** 9
+
+
+@pytest.mark.parametrize("floor, headroom, gone", [
+    # Just below the floor: the oldest file is enough.
+    (FREE + 1, 0, ("old",)),
+    # Exactly as far below the floor as one file: still one file, once it reaches the floor.
+    (FREE + 1000, 0, ("old",)),
+    # Headroom past the floor asks for more than one file gives.
+    (FREE + 1, 1000, ("old", "new")),
+    # At the floor, or above it, nothing goes, whatever the headroom.
+    (FREE, 1000, ()),
+    (0, 0, ()),
+])
+def test_caches_give_room_back_oldest_first_when_the_disk_runs_low(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, floor: int, headroom: int, gone: tuple,
+) -> None:
+    old, new = _two_proxies(tmp_path)
+    monkeypatch.setattr(housekeeping.shutil, "disk_usage", lambda path: SimpleNamespace(free=FREE))
+    freed = housekeeping.give_cache_back(str(tmp_path), set(), floor=floor, headroom=headroom)
+    assert freed == 1000 * len(gone)
+    assert {name for name, path in (("old", old), ("new", new)) if not path.exists()} == set(gone)
 
 
 def test_the_ai_files_footage_in_folders_and_deletes_nothing(media: Path) -> None:
