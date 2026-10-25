@@ -361,3 +361,19 @@ def test_get_job_passes_the_card_note_on_beside_any_other(media: Path, tmp_path:
     ]))
     both = job_queue.get_job([done.job_id])["jobs"][0]["note"]
     assert both.startswith("heard 40 different voices") and "; its picture could not be decoded" in both
+
+def test_a_record_that_cannot_be_written_does_not_fail_the_scan(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, media: Path
+) -> None:
+    from app import cli
+    from app.tools import job_queue
+
+    nowhere = str(tmp_path / "missing" / engine_ffmpeg.CARD_FAILED_FILE_NAME)
+    for module in (engine_ffmpeg, machine, job_queue, cli):
+        monkeypatch.setattr(module, "card_failed_path", lambda: nowhere)
+    _scans(monkeypatch, ["-hwaccel", "cuda"], fail_on_card=True)
+    work = tmp_path / "work"
+    work.mkdir()
+    found = analysis.scan_media(_asset(media), str(work), lambda fraction: None, lambda: False, FFMPEG)
+    assert found.scenes, "the software scan's result should come back"
+    assert card_failure() is None

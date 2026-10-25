@@ -53,8 +53,9 @@ def get_job(
         well work; `cancelled`; left out when the cause is none of these —
         for a finished analysis worth a second look a `note` to pass on — a
         crowd of voices, or a picture the NVIDIA card failed to decode, which
-        makes later scans slower until the user deletes the record it names —
-        and
+        makes later scans slower until the user deletes the record it names
+        (or, when no record is there, says the next file will try the card
+        again) — and
         for a finished render whose every frame was found black, frozen or a
         flash somewhere, `frames`: `found`, what the
         cut did not ask for — look at them with `view_render` `at: "spots"` —
