@@ -82,6 +82,7 @@ def test_a_card_that_cannot_be_asked_about_is_not_used(monkeypatch: pytest.Monke
 def test_an_ffmpeg_without_cuda_is_not_used(monkeypatch: pytest.MonkeyPatch) -> None:
     _cards(monkeypatch, listed="Hardware acceleration methods:\nvaapi\nvdpau\n")
     assert can_decode_on_card("ffmpeg") is False
+    assert card_decode_args("ffmpeg", "clip.mp4", 50.0) == []
 
 def test_cuda_must_be_listed_as_a_method_of_its_own(monkeypatch: pytest.MonkeyPatch) -> None:
     _cards(monkeypatch, listed="Hardware acceleration methods:\ncuda_like\n")
@@ -307,7 +308,9 @@ def test_a_file_that_fails_in_software_too_leaves_the_card_on(
         analysis.scan_media(_asset(media), str(tmp_path), lambda fraction: None, lambda: False, FFMPEG)
     assert len(calls) == 2
     assert card_failure() is None
-    assert (tmp_path / (analysis.DETECT_LOG_FILE_NAME + analysis.CARD_LOG_SUFFIX)).exists()
+    # The card's log is kept, but not under the name that says software read the file.
+    assert (tmp_path / (analysis.DETECT_LOG_FILE_NAME + analysis.CARD_TRIED_SUFFIX)).exists()
+    assert not (tmp_path / (analysis.DETECT_LOG_FILE_NAME + analysis.CARD_LOG_SUFFIX)).exists()
 
 def _finished_analysis(work: Path):
     """A finished analysis job working in this folder."""
@@ -376,8 +379,9 @@ def test_get_job_passes_the_card_note_on_beside_any_other(media: Path, tmp_path:
     both = job_queue.get_job([done.job_id])["jobs"][0]["note"]
     assert both.startswith("heard 40 different voices") and "; its picture could not be decoded" in both
 
-def test_get_job_says_the_card_is_off_for_an_analysis_that_failed_after_the_scan(
-    media: Path, tmp_path: Path,
+@pytest.mark.parametrize("status", ["failed", "cancelled"])
+def test_get_job_says_the_card_is_off_for_an_analysis_that_stopped_after_the_scan(
+    media: Path, tmp_path: Path, status: str,
 ) -> None:
     from app import runtime
     from app.models.job import Job, JobKind, JobStatus
@@ -388,11 +392,26 @@ def test_get_job_says_the_card_is_off_for_an_analysis_that_failed_after_the_scan
     work.mkdir()
     (work / (analysis.DETECT_LOG_FILE_NAME + analysis.CARD_LOG_SUFFIX)).write_text("cuda: out of memory\n")
     engine_ffmpeg.stop_decoding_on_card("clip.mp4", "CUDA_ERROR_OUT_OF_MEMORY")
+    stopped = Job(kind=JobKind.ANALYZE, status=JobStatus(status), asset_id=asset, work_dir=str(work))
+    runtime.repo.add_job(stopped)
+    assert "Tell the user" in job_queue.get_job([stopped.job_id])["jobs"][0]["note"]
+
+
+def test_get_job_says_nothing_of_the_card_when_software_could_not_read_the_file_either(
+    media: Path, tmp_path: Path,
+) -> None:
+    from app import runtime
+    from app.models.job import Job, JobKind, JobStatus
+    from app.tools import catalog, job_queue
+
+    asset = catalog.import_asset(str(media / "wide.mp4"))["id"]
+    work = tmp_path / "job"
+    work.mkdir()
+    (work / (analysis.DETECT_LOG_FILE_NAME + analysis.CARD_TRIED_SUFFIX)).write_text("cuda: out of memory\n")
     failed = Job(kind=JobKind.ANALYZE, status=JobStatus.FAILED, asset_id=asset, work_dir=str(work),
-                 error_message="transcription failed")
+                 error_message="the file cannot be read")
     runtime.repo.add_job(failed)
-    found = job_queue.get_job([failed.job_id])["jobs"][0]
-    assert found["error_message"] == "transcription failed" and "Tell the user" in found["note"]
+    assert "note" not in job_queue.get_job([failed.job_id])["jobs"][0]
 
 def test_a_record_that_cannot_be_written_does_not_fail_the_scan(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, media: Path
