@@ -146,9 +146,10 @@ def start_analysis(asset: Asset, transcribe: bool, transcription: str, language:
         detect_faces=asset.has_video,
     )
     return runtime.job_manager.start_job(job, {
-        # What the analysis will do, not what was asked: a song is never transcribed, and a worker
-        # that holds a speech model lets it go before an analysis that does not use it.
-        "transcribe": with_speech,
+        "transcribe": transcribe,
+        # What the analysis is expected to do when it is queued: a song is never transcribed. Only
+        # used to let a held model go; whether to transcribe is decided again when it runs.
+        "with_speech": with_speech,
         "transcription": transcription,
         "language": language,
         "prompt": prompt,

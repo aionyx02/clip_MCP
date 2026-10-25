@@ -410,13 +410,17 @@ def test_a_transcribing_analysis_counts_the_speech_model_on_top_of_its_other_sta
     assert resources.analysis_memory_bytes(False, "large-v3-turbo", 3600.0) == resources.DETECTION_BYTES
 
 
-@pytest.mark.parametrize("transcribe, diarizing, kept", [
-    (False, True, (False, False)),
-    (True, False, (True, False)),
-    (True, True, (True, True)),
+@pytest.mark.parametrize("transcribe, diarizing, transcription, kept", [
+    (False, True, "accurate", (False, False)),
+    (True, False, "accurate", (True, False)),
+    (True, True, "accurate", (True, True)),
+    # Balanced and fast start with the small model, so the large one held would only wait to be dropped.
+    (True, True, "balanced", (False, True)),
+    (True, True, "fast", (False, True)),
 ])
-def test_an_analysis_lets_go_of_the_held_models_it_will_not_use(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, transcribe: bool, diarizing: bool, kept: tuple,
+def test_an_analysis_lets_go_of_the_held_models_it_will_not_start_with(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, transcribe: bool, diarizing: bool, transcription: str,
+    kept: tuple,
 ) -> None:
     repo = store(tmp_path)
     media = tmp_path / "song.mp3"
@@ -425,7 +429,7 @@ def test_an_analysis_lets_go_of_the_held_models_it_will_not_use(
     job = queued(repo, tmp_path, asset_id="song")
     held, engine = object(), object()
     monkeypatch.setattr(models, "_speech_model", held)
-    monkeypatch.setattr(models, "_speech_model_key", ("large-v3-turbo", "cpu", "models"))
+    monkeypatch.setattr(models, "_speech_model_key", (analysis.whisper_model_for("accurate"), "cpu", "models"))
     monkeypatch.setattr(diarize, "_engine_cache", (None, engine))
     seen = []
 
@@ -438,7 +442,8 @@ def test_an_analysis_lets_go_of_the_held_models_it_will_not_use(
 
     monkeypatch.setattr(renderer, "analyze_media", analyze_media)
     with open(os.path.join(job.work_dir, SPEC_FILE_NAME), "w", encoding="utf-8") as handle:
-        json.dump({"transcribe": transcribe, "diarize": diarizing}, handle)
+        json.dump({"transcribe": True, "with_speech": transcribe, "diarize": diarizing,
+                   "transcription": transcription}, handle)
     clocked = []
     monkeypatch.setattr(renderer.StageClock, "start",
                         lambda self: clocked.append((models._speech_model, diarize._engine_cache)))
@@ -449,10 +454,10 @@ def test_an_analysis_lets_go_of_the_held_models_it_will_not_use(
 
 
 @pytest.mark.parametrize("has_video, expected", [(False, False), (True, True)])
-def test_an_analysis_specification_says_whether_it_will_transcribe(
+def test_an_analysis_specification_says_what_was_asked_and_whether_it_will_transcribe(
     monkeypatch: pytest.MonkeyPatch, has_video: bool, expected: bool,
 ) -> None:
-    # A song is never transcribed, whatever was asked; the worker reads this to let a held model go.
+    # A song is never transcribed; the worker reads this to let a held model go, and what was asked is kept.
     from app import runtime
     from app.tools import examining
 
@@ -460,4 +465,4 @@ def test_an_analysis_specification_says_whether_it_will_transcribe(
     monkeypatch.setattr(runtime.job_manager, "start_job", lambda job, spec: specs.append(spec) or job)
     asset = Asset(id="a", path="a.mp4", duration=10, has_video=has_video, has_audio=True)
     examining.start_analysis(asset, True, "accurate")
-    assert specs[0]["transcribe"] is expected
+    assert specs[0]["with_speech"] is expected and specs[0]["transcribe"] is True

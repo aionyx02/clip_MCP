@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from app.engine import diarize, loudness, machine, models, resources, scan, speed, sync
-from app.engine.analysis import analyze_media, whisper_model_for
+from app.engine.analysis import BALANCED_JOIN, analyze_media, whisper_model_for
 from app.engine.ffmpeg import FFmpegFailed, OperationCancelled, run_ffmpeg
 from app.engine.profile import StageClock
 from app.models.job import FailureKind, Job, JobKind, JobStatus
@@ -708,23 +708,24 @@ def _inputs(repo: Repository, job: Job, spec: Dict[str, Any]) -> List[str]:
     return spec.get("inputs", [])
 
 def _let_go_of_unused_models(spec: Dict[str, Any]) -> None:
-    """Let go of a model the previous analysis in this worker left that this one will not use.
+    """Let go of a model the previous analysis in this worker left that this one will not start with.
 
-    Its memory estimate counts no such model. Done before the job's clock
-    starts (`JobContext`), so the stage profile's baseline does not include a
-    model that is about to go, which would put the stages below it.
-
-    A held speech model of another name, such as the large one before a fast
-    analysis, is kept until the transcription builds the one it needs: the
-    estimate counts a model there, and the snapshot of free memory already
-    counts the one held.
+    The speech model is kept only when this analysis transcribes and its
+    first model is the one held: the large one held into a balanced or fast
+    analysis, which starts with the small one, would be dropped anyway when
+    the small one is built, with only the scan in between. Done before the
+    job's clock starts (`JobContext`), so the stage profile's baseline does
+    not include a model that is about to go, which would put the stages
+    below it.
 
     Args:
         spec: The analysis's specification.
     """
-    if not spec["transcribe"]:
+    with_speech = spec.get("with_speech", spec["transcribe"])
+    first = whisper_model_for(spec.get("transcription", "accurate")).partition(BALANCED_JOIN)[0]
+    if not with_speech or models.held_speech_model_name() != first:
         models.release_speech_model()
-    if not (spec["transcribe"] and spec.get("diarize", True)):
+    if not (with_speech and spec.get("diarize", True)):
         diarize.release_engine()
 
 def run_worker(repo: Repository, job_id: str) -> Optional[str]:

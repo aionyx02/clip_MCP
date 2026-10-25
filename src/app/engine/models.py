@@ -128,11 +128,17 @@ def keep_speech_model() -> None:
     global _keep_speech_model
     _keep_speech_model = True
 
+def held_speech_model_name() -> Optional[str]:
+    """The name of the speech model kept, or None when none is."""
+    with _speech_model_lock:
+        return _speech_model_key[0] if _speech_model is not None and _speech_model_key else None
+
 def release_speech_model() -> None:
     """Let go of the speech model kept, if any.
 
-    A worker does this before an analysis that does not transcribe, whose
-    memory estimate does not count a model.
+    A worker does this before an analysis that will not start with that
+    model, so it is not in the analysis's memory or its stage profile's
+    baseline.
     """
     global _speech_model, _speech_model_key
     with _speech_model_lock:

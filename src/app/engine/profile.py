@@ -19,8 +19,8 @@ after another keeps its speech model loaded (#110): an analysis that
 transcribes with the model the previous one left starts with that model
 already in memory, so its baseline includes the model, its rise does not,
 and its transcription has no load time in it. Compared with the first, such
-an analysis looks a model cheaper. A model the analysis will not use is let
-go before its clock starts, so it is not in the baseline.
+an analysis looks a model cheaper. A model the analysis will not start
+with is let go before its clock starts, so it is not in the baseline.
 
 The numbers are sampled rather than tracked: memory is read every
 `PROFILE_SAMPLE_SECONDS`, so a stage shorter than that can finish without a
