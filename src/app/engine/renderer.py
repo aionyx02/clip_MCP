@@ -832,9 +832,13 @@ def run_worker(repo: Repository, job_id: str) -> Optional[str]:
     # worker keeps the next analysis for itself, because its models are already loaded,
     # unless it failed for a reason not known: the process may not be fit to reuse, so the
     # next analysis gets a fresh one, as a render's does.
-    if job.kind == JobKind.ANALYZE and not (status == JobStatus.FAILED and failure is None):
-        _, next_job = JobManager(repo).launch_ready(keep=JobKind.ANALYZE)
-        return next_job.job_id if next_job is not None else None
+    if job.kind == JobKind.ANALYZE:
+        if not (status == JobStatus.FAILED and failure is None):
+            _, next_job = JobManager(repo).launch_ready(keep=JobKind.ANALYZE)
+            return next_job.job_id if next_job is not None else None
+        # Let go of the models first, so the fresh worker finds their memory free.
+        models.release_speech_model()
+        diarize.release_engine()
     JobManager(repo).launch_ready()
     return None
 

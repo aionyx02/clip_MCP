@@ -101,15 +101,21 @@ def test_an_analysis_that_failed_for_a_reason_not_known_hands_the_next_to_a_fres
         raise error
 
     monkeypatch.setattr(renderer, "_run_analysis", fail)
-    launched: List[str] = []
-    monkeypatch.setattr(JobManager, "_launch_worker", lambda self, job: launched.append(job.job_id))
+    held, engine = object(), object()
+    monkeypatch.setattr(models, "_speech_model", held)
+    monkeypatch.setattr(models, "_speech_model_key", ("large-v3", "cpu", "models"))
+    monkeypatch.setattr(diarize, "_engine_cache", (None, engine))
+    launched: List[tuple] = []
+    monkeypatch.setattr(JobManager, "_launch_worker", lambda self, job: launched.append(
+        (job.job_id, models._speech_model, diarize._engine_cache)))
     room_for(monkeypatch)
 
     next_job = run_worker(repo, first.job_id)
 
     assert repo.get_job(first.job_id).status == JobStatus.FAILED
     # A file that could not be read says nothing about the process, so it still keeps the next.
-    assert (next_job, launched) == ((second.job_id, []) if kept else (None, [second.job_id]))
+    # Otherwise the models are let go before the fresh worker starts.
+    assert (next_job, launched) == ((second.job_id, []) if kept else (None, [(second.job_id, None, None)]))
 
 
 def test_a_render_waiting_behind_an_analysis_is_launched_as_before(
@@ -212,11 +218,18 @@ def test_the_speech_model_is_built_once_for_the_same_settings(
     assert len(built) == 1
     assert built[0]["compute_type"] == "float16"
 
+    # The same name on another device, as when a broken card falls back to the processor, is another model.
+    fallen_back = models.speech_model("large-v3", "cpu", "models")
+    assert fallen_back is not first
+    assert built[1] == {"name": "large-v3", "device": "cpu", "compute_type": "int8", "download_root": "models"}
+    elsewhere = models.speech_model("large-v3", "cpu", "other-models")
+    assert elsewhere is not fallen_back and len(built) == 3
+
     other = models.speech_model("small", "cpu", "models")
 
     assert other is not first
-    assert len(built) == 2
-    assert built[1]["compute_type"] == "int8"
+    assert len(built) == 4
+    assert built[3]["compute_type"] == "int8"
     # Only the newest model is kept.
     assert models._speech_model is other
     assert models._speech_model_key == ("small", "cpu", "models")
@@ -448,6 +461,30 @@ def test_an_analysis_lets_go_of_the_held_models_it_will_not_start_with(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, transcribe: bool, diarizing: bool, transcription: str,
     kept: tuple,
 ) -> None:
+    _let_go_before(tmp_path, monkeypatch, transcribe, diarizing, transcription, kept,
+                   analysis.whisper_model_for("accurate"))
+
+
+def test_the_small_model_a_fast_analysis_left_is_kept_into_a_balanced_one(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Balanced starts with the small model, so the one held is used, not dropped and built again.
+    _let_go_before(tmp_path, monkeypatch, True, True, "balanced", (True, True), analysis.FAST_WHISPER_MODEL)
+
+
+def _let_go_before(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, transcribe: bool, diarizing: bool,
+                   transcription: str, kept: tuple, held_name: str) -> None:
+    """Run an analysis with a speech model and a diarizer held, and check which are held when its clock starts.
+
+    Args:
+        tmp_path: Folder for the job and its repository.
+        monkeypatch: Fixture used to stand in for the models and the analysis.
+        transcribe: Whether the analysis is expected to transcribe.
+        diarizing: Whether it tells the speakers apart.
+        transcription: Its transcription choice.
+        kept: Whether the speech model and the diarizer are still held.
+        held_name: The name of the speech model held.
+    """
     repo = store(tmp_path)
     media = tmp_path / "song.mp3"
     media.write_bytes(b"")
@@ -455,7 +492,7 @@ def test_an_analysis_lets_go_of_the_held_models_it_will_not_start_with(
     job = queued(repo, tmp_path, asset_id="song")
     held, engine = object(), object()
     monkeypatch.setattr(models, "_speech_model", held)
-    monkeypatch.setattr(models, "_speech_model_key", (analysis.whisper_model_for("accurate"), "cpu", "models"))
+    monkeypatch.setattr(models, "_speech_model_key", (held_name, "cpu", "models"))
     monkeypatch.setattr(diarize, "_engine_cache", (None, engine))
     seen = []
 
