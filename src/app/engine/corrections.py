@@ -19,8 +19,11 @@ counted. Footage is compared by which stretches of each file are shown, never
 by clip: a recompile names every clip after its place, and a split leaves two
 clips where one was. So a split, a swap, a move along the timeline and a
 change of speed are not counted, and footage shown twice counts once — only
-which footage is shown. Captions are matched by what they say where, and a
-caption that comes or goes with its footage is not a correction. A restore or
+which footage is shown. A slip, which moves both edges of a shot, counts as two
+edges moved. Captions are matched by what they say where, and only over the
+footage both versions show: a caption that comes or goes with its footage, or
+shrinks with it, is not a correction. A caption's second line (`secondary`)
+and its speaker are not compared. A restore or
 an undo is a new version like any other, so what it puts back is counted
 again, under whoever restored it. A branch keeps its own history, so hand
 edits made on a branch before the branch's first AI version with footage in
@@ -45,7 +48,7 @@ from typing import Any, Callable, Dict, List, Mapping, Optional, Sequence, Tuple
 from pydantic import ValidationError
 
 from app.engine.compare import shown
-from app.models.timeline.parts import TOUCHING_SECONDS, Clip, Project, SubtitleCue
+from app.models.timeline.parts import TOUCHING_SECONDS, Clip, CueWord, Project, SubtitleCue
 from app.storage.history import Version
 
 # Who the editor app writes as. Said here rather than imported from the UI, which
@@ -123,14 +126,12 @@ class Stretch:
     Attributes:
         start: Where it starts in the file, in seconds.
         end: Where it ends in the file.
-        timeline_in: Where the first clip showing it starts on the timeline.
-        timeline_out: Where the last clip showing it ends.
+        shown: Each stretch of the timeline a clip showing it covers.
     """
 
     start: float
     end: float
-    timeline_in: float
-    timeline_out: float
+    shown: List[Tuple[float, float]]
 
 def _footage(project: Project) -> Dict[str, List[Stretch]]:
     """What the cut shows of each file, as stretches that neither overlap nor touch.
@@ -148,7 +149,7 @@ def _footage(project: Project) -> Dict[str, List[Stretch]]:
     for clip in _footage_clips(project):
         found.setdefault(clip.asset_id, []).append(Stretch(
             float(clip.source_range.start), float(clip.source_range.end),
-            float(clip.timeline_in), float(clip.timeline_out),
+            [(float(clip.timeline_in), float(clip.timeline_out))],
         ))
     merged: Dict[str, List[Stretch]] = {}
     for asset_id, stretches in found.items():
@@ -156,8 +157,7 @@ def _footage(project: Project) -> Dict[str, List[Stretch]]:
         for stretch in sorted(stretches, key=lambda one: one.start):
             last = joined[-1] if joined else None
             if last is not None and stretch.start <= last.end + TOUCHING:
-                joined[-1] = Stretch(last.start, max(last.end, stretch.end), min(last.timeline_in, stretch.timeline_in),
-                                     max(last.timeline_out, stretch.timeline_out))
+                joined[-1] = Stretch(last.start, max(last.end, stretch.end), last.shown + stretch.shown)
             else:
                 joined.append(stretch)
         merged[asset_id] = joined
@@ -214,8 +214,9 @@ def _pairs(count: int, other_count: int, shared: Callable[[int, int], float]) ->
     return pairs
 
 def _on_timeline_together(one: Stretch, other: Stretch) -> float:
-    """How many seconds of the timeline two stretches are both shown over."""
-    return max(0.0, min(one.timeline_out, other.timeline_out) - max(one.timeline_in, other.timeline_in))
+    """How many seconds of the timeline two stretches are both shown over, clip by clip."""
+    return sum(max(0.0, min(end, other_end) - max(start, other_start))
+               for start, end in one.shown for other_start, other_end in other.shown)
 
 def _clip_changes(before: Project, after: Project) -> Dict[str, Any]:
     """How the footage the cut shows changed, by what is shown rather than by clip.
@@ -274,6 +275,55 @@ def _tight(text: str) -> str:
     """Text with every space, tab and line break taken out, for comparing what was said."""
     return "".join(text.split())
 
+def _common(one: Dict[str, List[Stretch]], other: Dict[str, List[Stretch]]) -> Dict[str, List[Tuple[float, float]]]:
+    """The stretches of each file both versions show."""
+    found: Dict[str, List[Tuple[float, float]]] = {}
+    for asset_id, stretches in one.items():
+        for stretch in stretches:
+            for theirs in other.get(asset_id, []):
+                start, end = max(stretch.start, theirs.start), min(stretch.end, theirs.end)
+                if end - start > TOUCHING:
+                    found.setdefault(asset_id, []).append((start, end))
+    return found
+
+def _piece_of(word: CueWord, pieces: List[Tuple[float, float]]) -> Optional[Tuple[float, float]]:
+    """The shown piece a word's middle falls in, or None."""
+    middle = float(word.start + word.end) / 2
+    return next(((start, end) for start, end in pieces if start <= middle <= end), None)
+
+def _seen(cue: SubtitleCue, common: Dict[str, List[Tuple[float, float]]]) -> Optional[Tuple[str, Tuple[float, ...]]]:
+    """What a caption says over the footage both versions show, and when.
+
+    With word timings that spell its text, the caption is the words whose
+    middle is shown, from the first one's start to the last one's end, each
+    edge held to the shown footage: a caption made again after a trim drops a
+    word whose middle was cut off and cuts the times of one that keeps its
+    middle. Without, it is its whole text, over the shown part of its
+    stretch.
+
+    Args:
+        cue: The caption.
+        common: What both versions show of each file (`_common`).
+
+    Returns:
+        The words, with spaces and line breaks taken out, and where they
+        start and end, rounded to the millisecond; None when none of the
+        caption is shown in both.
+    """
+    pieces = common.get(cue.asset_id, [])
+    if cue.words and "".join(_tight(word.text) for word in cue.words) == _tight(cue.text):
+        kept = [(word, piece) for word in cue.words for piece in [_piece_of(word, pieces)] if piece is not None]
+        if not kept:
+            return None
+        (first, first_piece), (last, last_piece) = kept[0], kept[-1]
+        return ("".join(_tight(word.text) for word, _ in kept),
+                (round(max(float(first.start), first_piece[0]), 3), round(min(float(last.end), last_piece[1]), 3)))
+    shown = [(max(float(cue.source_start), start), min(float(cue.source_end), end)) for start, end in pieces]
+    shown = [(start, end) for start, end in shown if end - start > TOUCHING]
+    if not shown:
+        return None
+    return _tight(cue.text), tuple(round(edge, 3) for piece in shown for edge in piece)
+
 def _broken_differently(ones: List[SubtitleCue], others: List[SubtitleCue], left: set, other_left: set) -> int:
     """Find each caption split into several, or several joined into one, with the same words.
 
@@ -305,11 +355,15 @@ def _caption_changes(before: Project, after: Project) -> Dict[str, int]:
     A caption split into several with the same words, or several joined into
     one, is re-broken, once. The rest are paired by the most shared seconds of
     the same file, each in at most one pair, which survives captions being
-    made again and renumbered. A paired caption whose words changed is
-    rewritten, or only re-broken when nothing but its spaces and line breaks
-    changed; one whose words are the same but whose times moved is retimed.
-    An unpaired caption with exactly the words of an unpaired one on the other
-    side, from the same file, was moved: retimed.
+    made again and renumbered. A paired caption is compared only over the
+    footage both versions show (`_seen`), so one that shrinks with a trim is
+    not counted, nor is a pair neither of which is shown in both. One whose
+    text changed in nothing but its spaces and line breaks is re-broken; one
+    whose words over that footage changed is rewritten; one whose words are
+    the same but whose times there moved is retimed. An unpaired caption with
+    exactly the words of an unpaired one on the other side, from the same
+    file, was moved: retimed. A caption's second line (`secondary`) and its
+    speaker are not compared.
 
     What is left over counts only where it corrects the captions of footage
     the cut kept: a caption removed while the cut still shows its words (a
@@ -330,15 +384,22 @@ def _caption_changes(before: Project, after: Project) -> Dict[str, int]:
     old_left, new_left = set(range(len(old))), set(range(len(new)))
     counts["rebroken"] += _broken_differently(old, new, old_left, new_left)
     counts["rebroken"] += _broken_differently(new, old, new_left, old_left)
+    was_shown, now_shown = _footage(before), _footage(after)
+    common = _common(was_shown, now_shown)
     olds, news = sorted(old_left), sorted(new_left)
     for index, other_index in _pairs(len(olds), len(news),
                                      lambda one, other: _same_words(old[olds[one]], new[news[other]])):
         cue, other = old[olds[index]], new[news[other_index]]
         old_left.discard(olds[index])
         new_left.discard(news[other_index])
-        if cue.text != other.text:
-            counts["rebroken" if _tight(cue.text) == _tight(other.text) else "rewritten"] += 1
-        elif (cue.source_start, cue.source_end) != (other.source_start, other.source_end):
+        seen, other_seen = _seen(cue, common), _seen(other, common)
+        if seen is None and other_seen is None:
+            continue
+        if cue.text != other.text and _tight(cue.text) == _tight(other.text):
+            counts["rebroken"] += 1
+        elif seen is None or other_seen is None or seen[0] != other_seen[0]:
+            counts["rewritten"] += 1
+        elif seen[1] != other_seen[1]:
             counts["retimed"] += 1
     for index in sorted(old_left):
         moved = next((other for other in sorted(new_left) if new[other].asset_id == old[index].asset_id
@@ -347,7 +408,6 @@ def _caption_changes(before: Project, after: Project) -> Dict[str, int]:
             counts["retimed"] += 1
             old_left.discard(index)
             new_left.discard(moved)
-    was_shown, now_shown = _footage(before), _footage(after)
     counts["removed"] = sum(1 for index in old_left if _in_cut(old[index], now_shown))
     if old:
         counts["added"] = sum(1 for index in new_left if _in_cut(new[index], was_shown))
@@ -681,7 +741,9 @@ def report(summary: Mapping[str, Any]) -> str:
         "AI 第一次剪完之後改了什麼：手動的與 AI 的版本都算（依規則計數，沒有模型在裡面）",
         _table(headers, rows),
         "手動分鐘是從版本的時間戳推算的估計，不是量出來的；節奏與剪在字中間無法用這些規則分辨。",
-        "只比較主軌畫面用了檔案的哪幾段與字幕：標題卡、音樂、B-roll 不算；字幕跟著畫面一起進出不算修正。",
+        "只比較主軌畫面用了檔案的哪幾段與字幕：標題卡、音樂、B-roll 不算；字幕跟著畫面一起進出或縮短不算修正。",
+        "同一段畫面用兩次只算一次；還原或復原的版本也算，所以放回來的會再算一次；滑動一個鏡頭（兩端一起移）算兩處邊緣移動。",
+        "字幕的第二行與說話者不比較。",
         *skipped,
     ])
 

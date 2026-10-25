@@ -500,3 +500,93 @@ def test_a_renamed_project_is_reported_by_its_newest_name() -> None:
     summary = corrections.summarise_project([version(AI, at(1), project(clip("a"))),
                                              version("編輯器", at(2), renamed)])
     assert summary is not None and summary["name"] == "新名字"
+
+
+def _recaptioned_after_a_trim(kept_history, media: Path, capsys, segments: list, start: float) -> dict:
+    """Caption a real cut, trim its start by hand, caption it again, and read the summary back.
+
+    Args:
+        kept_history: The history fixture.
+        media: The test media folder.
+        capsys: The output capture fixture.
+        segments: The transcript of the file.
+        start: Where the trim makes the shot start.
+
+    Returns:
+        The project's summary.
+    """
+    asset = catalog.import_asset(str(media / "wide.mp4"))["id"]
+    transcribe(asset, segments)
+    with kept_history.step(AI):
+        project_id = build_project([video_track(), insert("a", asset, 0, 9)])
+    with kept_history.step(AI):
+        caption(project_id)
+    with kept_history.step(corrections.EDITOR_AUTHOR):
+        edit(project_id, [{"action": "trim_clip", "track_id": "main", "clip_id": "a",
+                           "new_source_range": {"start": start, "end": 9}}])
+    with kept_history.step(AI):
+        caption(project_id)
+    return summary_of(capsys, "--project", project_id)["projects"][project_id]
+
+
+def test_a_caption_that_shrinks_with_a_trim_is_not_counted(kept_history, media: Path, capsys) -> None:
+    one = _recaptioned_after_a_trim(kept_history, media, capsys, [
+        TranscriptSegment(start=begin, end=begin + 2, text=text, words=words((text, begin, begin + 2)))
+        for begin, text in ((1.0, "第一句"), (4.0, "第二句"), (7.0, "第三句"))
+    ], 2.0)
+    assert one["causes"]["misheard"] == 0 and one["causes"]["caption_timing"] == 0
+
+
+def test_a_caption_that_loses_a_word_cut_in_half_by_a_trim_is_not_counted(kept_history, media: Path, capsys) -> None:
+    one = _recaptioned_after_a_trim(kept_history, media, capsys, [
+        TranscriptSegment(start=1.0, end=3.0, text="大家好今天", words=words(("大家好", 1.0, 2.0), ("今天", 2.0, 3.0))),
+        TranscriptSegment(start=4.0, end=6.0, text="第二句", words=words(("第二句", 4.0, 6.0))),
+    ], 1.9)
+    assert one["by_ai"]["captions"] == NO_CAPTION_CHANGE
+    assert one["causes"]["misheard"] == 0 and one["causes"]["caption_timing"] == 0
+
+
+def test_a_caption_rewritten_inside_the_footage_both_show_still_counts() -> None:
+    before = project(SHOWN, cues=(cue("c1", "大家好今天", 1, 3) | {"words": [
+        {"start": 1, "end": 2, "text": "大家好"}, {"start": 2, "end": 3, "text": "今天"}]},))
+    after = project(SHOWN, cues=(cue("c1", "大家好明天", 1, 3) | {"words": [
+        {"start": 1, "end": 2, "text": "大家好"}, {"start": 2, "end": 3, "text": "明天"}]},))
+    assert compared(before, after)["captions"] == {**NO_CAPTION_CHANGE, "rewritten": 1}
+
+
+def test_a_caption_whose_words_no_longer_spell_it_is_compared_by_its_text() -> None:
+    # Words left from before the text was edited by hand do not hide the edit.
+    stale = [{"start": 1, "end": 3, "text": "今天"}]
+    before = project(SHOWN, cues=(cue("c1", "今天", 1, 3) | {"words": stale},))
+    after = project(SHOWN, cues=(cue("c1", "明天", 1, 3) | {"words": stale},))
+    assert compared(before, after)["captions"] == {**NO_CAPTION_CHANGE, "rewritten": 1}
+
+
+def test_a_caption_with_the_same_words_in_another_file_is_not_a_move() -> None:
+    other = {"id": "o", "asset_id": "b", "source_range": {"start": 0, "end": 10}, "timeline_in": 10}
+    before = project(SHOWN, other, cues=(cue("c1", "一樣的話", 1, 2, asset="a"),))
+    after = project(SHOWN, other, cues=(cue("c1", "一樣的話", 5, 6, asset="b"),))
+    assert compared(before, after)["captions"] == {**NO_CAPTION_CHANGE, "added": 1, "removed": 1}
+
+
+def test_a_part_that_starts_before_the_whole_but_centres_inside_it_is_re_broken() -> None:
+    whole = cue("c1", "我們今天去海邊", 1, 4)
+    parts = (cue("c1", "我們今天", 0.5, 2), cue("c2", "去海邊", 2, 4))
+    assert compared(project(SHOWN, cues=(whole,)), project(SHOWN, cues=parts))["captions"] == {
+        **NO_CAPTION_CHANGE, "rebroken": 1}
+
+
+def test_an_edge_moved_by_no_more_than_touching_is_not_counted() -> None:
+    before = project(clip("x", start=0, end=4))
+    after = project(clip("x", start=0, end=3.9995))
+    assert compared(before, after)["clips"] == NO_CLIP_CHANGE
+
+
+def test_footage_replaced_is_matched_clip_by_clip_on_the_timeline() -> None:
+    # One stretch of `a`, shown by two clips with `b` between them on the timeline. Footage of `c`
+    # put where `b` was shown was not on the timeline at the same time as either clip of `a`.
+    before = project(clip("x", start=0, end=2, timeline_in=0), clip("o", asset="b", start=0, end=8, timeline_in=2),
+                     clip("y", start=2, end=4, timeline_in=10))
+    after = project(clip("n", asset="c", start=0, end=2, timeline_in=4),
+                    clip("o", asset="b", start=0, end=8, timeline_in=6))
+    assert compared(before, after)["clips"] == {**NO_CLIP_CHANGE, "removed": 1, "added": 1}
