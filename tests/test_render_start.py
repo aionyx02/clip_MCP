@@ -425,6 +425,32 @@ def test_the_playback_repair_with_hiss_cleanup_lands_where_one_without_it_does(
     assert abs(lag) <= TOLERANCE_SAMPLES, lag
 
 
+@pytest.mark.parametrize("start", [0.0, 0.3, 1.0, 2.37, 4.0])
+def test_the_playback_repair_lands_where_the_source_says(
+    bursts: Tuple[str, Path], tmp_path: Path, start: float,
+) -> None:
+    """A seek in a 22.05 kHz AAC file lands up to 25 ms early (#154); the copy is cut after decoding instead."""
+    asset_id, path = bursts
+    asset = repo.get_assets([asset_id])[asset_id]
+    clip = Clip(id="c", asset_id=asset_id, source_range=TimeRange(start=Decimal(str(start)),
+                end=Decimal(str(start + 1.5))), timeline_in=Decimal(0), cleanup=VoiceCleanup(rumble=True))
+    part = tmp_path / "rumble.m4a"
+    result = subprocess.run(playback.repair_command(clip, asset, str(part)), capture_output=True)
+    assert result.returncode == 0, result.stderr.decode("utf-8", errors="replace")
+    heard = read_samples(str(part))
+    assert abs(lag_samples(heard, read_samples(str(path)), start)) <= TOLERANCE_SAMPLES
+
+
+def test_a_repaired_sound_cut_another_way_is_named_anew(bursts: Tuple[str, Path], monkeypatch) -> None:
+    asset_id, _ = bursts
+    asset = repo.get_assets([asset_id])[asset_id]
+    clip = Clip(id="c", asset_id=asset_id, source_range=TimeRange(start=Decimal("1"), end=Decimal("2")),
+                timeline_in=Decimal(0), cleanup=VoiceCleanup(rumble=True))
+    name = playback.repair_name(clip, asset)
+    monkeypatch.setattr(playback, "REPAIR_CUT", playback.REPAIR_CUT + 1)
+    assert playback.repair_name(clip, asset) != name
+
+
 @pytest.mark.parametrize("frames", [1, 600, 1199, 4800])
 def test_a_clip_shorter_than_the_hiss_delay_keeps_its_length(frames: int) -> None:
     """A clip shorter than the denoiser's delay comes out as long as it went in."""

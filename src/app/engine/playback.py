@@ -111,6 +111,14 @@ def proxy_command(asset: Asset, part: str, fps: float, ffmpeg_bin: str = "ffmpeg
     return command + ["-movflags", "+faststart", "-f", "mp4", part]
 
 
+# Provisional: how far before a repaired sound's start FFmpeg seeks in the file, before cutting
+# exactly where it starts. A seek in the file lands up to 25 ms off on AAC at rates other than
+# 48 kHz (#154); a cut after decoding is exact, and this lead keeps it from decoding the whole
+# file up to there.
+SEEK_LEAD_SECONDS = 1.0
+# Changes when the way a repaired sound is cut changes, so a copy cut the old way is made again.
+REPAIR_CUT = 2
+
 def needs_repair(clip: Clip) -> bool:
     """Whether a clip's sound has repairs the browser cannot make itself."""
     return bool(_cleanup_filters(clip.cleanup))
@@ -130,7 +138,7 @@ def repair_name(clip: Clip, asset: Asset) -> Optional[str]:
     if found is None:
         return None
     start, end = _heard_span(clip)
-    recipe = json.dumps([found, start, end, _cleanup_filters(clip.cleanup)])
+    recipe = json.dumps([found, start, end, _cleanup_filters(clip.cleanup), REPAIR_CUT])
     return hashlib.sha256(recipe.encode("utf-8")).hexdigest()[:32] + ".m4a"
 
 
@@ -147,6 +155,11 @@ def repair_command(clip: Clip, asset: Asset, part: str, ffmpeg_bin: str = "ffmpe
     The repairs run on the sound as recorded, before any change of speed or
     level, just as they do in a render; the browser applies the rest.
 
+    FFmpeg seeks in the file to `SEEK_LEAD_SECONDS` before the start, and
+    cuts exactly at the start once the sound is decoded. A seek in the file
+    alone lands up to 25 ms early on AAC at rates other than 48 kHz, even a
+    seek to zero, so there is none when the lead reaches back to the start.
+
     Args:
         clip: The clip.
         asset: Its file.
@@ -157,9 +170,12 @@ def repair_command(clip: Clip, asset: Asset, part: str, ffmpeg_bin: str = "ffmpe
         The command.
     """
     start, end = _heard_span(clip)
+    lead = min(start, SEEK_LEAD_SECONDS)
+    seek = ["-ss", f"{start - lead:.3f}"] if start - lead > 0 else []
     return [
-        ffmpeg_bin, "-y", "-loglevel", "error", "-nostats", "-ss", f"{start:.3f}", "-t", f"{end - start:.3f}",
-        "-i", asset.path, "-vn", "-af", ",".join(["aresample=48000", *_cleanup_filters(clip.cleanup)]),
+        ffmpeg_bin, "-y", "-loglevel", "error", "-nostats", *seek, "-i", asset.path,
+        "-ss", f"{lead:.3f}", "-t", f"{end - start:.3f}",
+        "-vn", "-af", ",".join(["aresample=48000", *_cleanup_filters(clip.cleanup)]),
         "-c:a", "aac", "-b:a", "160k", "-ac", "2", "-f", "mp4", part,
     ]
 
