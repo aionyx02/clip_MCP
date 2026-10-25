@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import List, Optional
 
 from app import clients, workspace
-from app.engine.ffmpeg import hidden_window_flags
+from app.engine.ffmpeg import card_failed_path, card_failure, hidden_window_flags
 
 def _version() -> str:
     """Read the installed version.
@@ -70,6 +70,10 @@ def check() -> int:
         found = _tool_version(tool)
         missing += found.startswith("not found")
         print(f"{tool + ':':<11} {found}")
+    failed = card_failure()
+    if failed is not None:
+        print(f"card:       not used for the scan since it failed on {failed}")
+        print(f"  delete {card_failed_path()} to try the card again")
     print("clients:")
     for result in clients.register(command, dry_run=True):
         state = {"unchanged": "registered", "would register": "not registered, or out of date",
