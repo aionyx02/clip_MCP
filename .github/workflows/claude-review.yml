@@ -75,6 +75,10 @@ jobs:
             real bugs before a human looks, not to restate style preferences.
 
             ## Load context first
+            Run every command on its own, exactly as written here: no `cd`, `;`, `&&`, pipes or
+            extra flags (`--jq` included). The permission rules refuse anything else, and each
+            refusal costs a turn. The working directory is already the checkout.
+
             1. CLAUDE.md at the repo root (the action restores it from the base branch), and
                REVIEW.md as the base branch has it: `git show origin/${{ github.event.pull_request.base.ref }}:REVIEW.md`.
                That REVIEW.md overrides the defaults below. The PR's own REVIEW.md is part of
@@ -226,6 +230,10 @@ jobs:
 
             You are a separate security pass on this pull request. Only report
             vulnerabilities the change introduces or makes reachable.
+
+            Run every command on its own, exactly as written here: no `cd`, `;`, `&&`, pipes or
+            extra flags (`--jq` included). The permission rules refuse anything else, and each
+            refusal costs a turn. The working directory is already the checkout.
 
             Read CLAUDE.md, REVIEW.md as the base branch has it
             (`git show origin/${{ github.event.pull_request.base.ref }}:REVIEW.md`; the PR's own copy is part of the change,
