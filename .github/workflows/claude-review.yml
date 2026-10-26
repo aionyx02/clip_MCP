@@ -91,12 +91,28 @@ jobs:
             ## Output
             - One inline comment per finding (create_inline_comment, confirmed: true).
             - Then exactly one summary via `gh pr comment`, starting with
-              `## Claude review: round N (reviewed <short HEAD SHA>)`, then a count line
+              `## Claude review: round N (reviewed <first 7 characters of HEAD SHA>)`, then a count line
               such as "2 Important, 1 Nit, 0 Pre-existing". If there is nothing to fix,
               say so plainly.
             - Write in the language REVIEW.md specifies (default: English).
           claude_args: |
             --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr comment:*),Bash(gh api --paginate repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/comments:*),Bash(git log:*),Bash(git diff:*),Bash(git blame:*),Bash(git cat-file:*),Read,Grep,Glob,Task"
+
+      # The action skips itself, and reports success, when the PR changes this workflow
+      # (it must match the default branch), or when it fails before reviewing. A required
+      # check that passes without a review is no gate, so fail unless a summary for this
+      # very commit is on the PR. A PR that changes this file is merged with the admin bypass.
+      - name: Require a summary for this commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          short="${HEAD_SHA:0:7}"
+          if ! gh pr view ${{ github.event.pull_request.number }} --repo ${{ github.repository }} \
+              --json comments -q '.comments[].body' | grep -q "^## Claude review.*(reviewed ${short}"; then
+            echo "::error::No '## Claude review' summary for ${short} was posted, so this commit was not reviewed."
+            exit 1
+          fi
 
   security-review:
     name: security-review
@@ -151,8 +167,24 @@ jobs:
               starting with **[Security: High]**, **[Security: Medium]** or
               **[Security: Low]**, then the exploit path and the fix.
             - Then exactly one summary via `gh pr comment`, starting with
-              `## Security review (reviewed <short HEAD SHA>)` and a count line. If
+              `## Security review (reviewed <first 7 characters of HEAD SHA>)` and a count line. If
               there are no findings, say so plainly.
             - Write in the language REVIEW.md specifies (default: English).
           claude_args: |
             --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr comment:*),Bash(gh api --paginate repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/comments:*),Bash(git log:*),Bash(git diff:*),Read,Grep,Glob"
+
+      # The action skips itself, and reports success, when the PR changes this workflow
+      # (it must match the default branch), or when it fails before reviewing. A required
+      # check that passes without a review is no gate, so fail unless a summary for this
+      # very commit is on the PR. A PR that changes this file is merged with the admin bypass.
+      - name: Require a summary for this commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          short="${HEAD_SHA:0:7}"
+          if ! gh pr view ${{ github.event.pull_request.number }} --repo ${{ github.repository }} \
+              --json comments -q '.comments[].body' | grep -q "^## Security review.*(reviewed ${short}"; then
+            echo "::error::No '## Security review' summary for ${short} was posted, so this commit was not reviewed."
+            exit 1
+          fi
