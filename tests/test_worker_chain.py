@@ -67,6 +67,22 @@ def room_for(monkeypatch: pytest.MonkeyPatch, jobs: int = 4) -> None:
     monkeypatch.setattr(resources, "max_concurrent_jobs", lambda: jobs)
 
 
+def holding(monkeypatch: pytest.MonkeyPatch) -> tuple:
+    """Have the worker hold a speech model and a diarizer, and let neither go before the analysis.
+
+    What is let go before an analysis is tested on its own; here only what happens once it ends is.
+
+    Returns:
+        `(held, engine)`, the model and the diarizer held.
+    """
+    held, engine = object(), object()
+    monkeypatch.setattr(models, "_speech_model", held)
+    monkeypatch.setattr(models, "_speech_model_key", ("large-v3", "cpu", "models"))
+    monkeypatch.setattr(diarize, "_engine_cache", (None, engine))
+    monkeypatch.setattr(renderer, "_let_go_of_unused_models", lambda spec: None)
+    return held, engine
+
+
 def test_an_analysis_worker_keeps_the_next_analysis(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -74,6 +90,7 @@ def test_an_analysis_worker_keeps_the_next_analysis(
     first = queued(repo, tmp_path)
     second = queued(repo, tmp_path)
     monkeypatch.setattr(renderer, "_run_analysis", lambda *args, **kwargs: None)
+    held, engine = holding(monkeypatch)
     launched: List[str] = []
     monkeypatch.setattr(JobManager, "_launch_worker", lambda self, job: launched.append(job.job_id))
     room_for(monkeypatch)
@@ -84,6 +101,8 @@ def test_an_analysis_worker_keeps_the_next_analysis(
     # The second was admitted like any other job, but no worker was started for it.
     assert launched == []
     assert repo.get_job(second.job_id).admitted_at is not None
+    # The models stay loaded for it: that is what keeping it is for.
+    assert (models._speech_model, diarize._engine_cache) == (held, (None, engine))
 
 
 @pytest.mark.parametrize("error, kept", [
@@ -101,10 +120,7 @@ def test_an_analysis_that_failed_for_a_reason_not_known_hands_the_next_to_a_fres
         raise error
 
     monkeypatch.setattr(renderer, "_run_analysis", fail)
-    held, engine = object(), object()
-    monkeypatch.setattr(models, "_speech_model", held)
-    monkeypatch.setattr(models, "_speech_model_key", ("large-v3", "cpu", "models"))
-    monkeypatch.setattr(diarize, "_engine_cache", (None, engine))
+    held, engine = holding(monkeypatch)
     launched: List[tuple] = []
     monkeypatch.setattr(JobManager, "_launch_worker", lambda self, job: launched.append(
         (job.job_id, models._speech_model, diarize._engine_cache)))
@@ -113,9 +129,13 @@ def test_an_analysis_that_failed_for_a_reason_not_known_hands_the_next_to_a_fres
     next_job = run_worker(repo, first.job_id)
 
     assert repo.get_job(first.job_id).status == JobStatus.FAILED
-    # A file that could not be read says nothing about the process, so it still keeps the next.
-    # Otherwise the models are let go before the fresh worker starts.
-    assert (next_job, launched) == ((second.job_id, []) if kept else (None, [(second.job_id, None, None)]))
+    # A file that could not be read says nothing about the process, so it still keeps the next and
+    # the models. Otherwise both models are let go before the fresh worker starts.
+    if kept:
+        assert (next_job, launched) == (second.job_id, [])
+        assert (models._speech_model, diarize._engine_cache) == (held, (None, engine))
+    else:
+        assert (next_job, launched) == (None, [(second.job_id, None, None)])
 
 
 def test_a_render_waiting_behind_an_analysis_is_launched_as_before(
