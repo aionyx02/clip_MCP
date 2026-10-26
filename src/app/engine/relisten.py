@@ -22,6 +22,7 @@ from typing import Callable, List, Optional, Sequence, Tuple
 
 import numpy as np
 
+from app.engine import models
 from app.engine.diarize import SAMPLE_RATE, read_samples
 from app.engine.ffmpeg import OperationCancelled
 from app.models.media import HeardWord, SecondListen, Span
@@ -58,29 +59,6 @@ class Listener:
     name: str
     device: str
     download_root: str
-
-def hear(path: str, language: Optional[str], listener: Listener) -> str:
-    """Transcribe a short recording on its own, with nothing to lean on.
-
-    For checking what a speech model said: the words it was asked for are
-    not given, so a word it swallowed is not heard anyway.
-
-    Args:
-        path: The recording.
-        language: Its language, when known.
-        listener: The speech model to transcribe with.
-
-    Returns:
-        What is said in it.
-    """
-    from faster_whisper import WhisperModel
-
-    model = WhisperModel(
-        listener.name, device=listener.device,
-        compute_type="float16" if listener.device == "cuda" else "int8", download_root=listener.download_root,
-    )
-    segments, _ = model.transcribe(path, language=language, condition_on_previous_text=False, vad_filter=False)
-    return "".join(segment.text for segment in segments).strip()
 
 def voiced_stretches(samples: np.ndarray) -> List[Tuple[float, float]]:
     """Find where somebody is talking, by listening alone.
@@ -158,20 +136,13 @@ def listen_again(
         OperationCancelled: If cancellation was requested.
         RuntimeError: If the file cannot be decoded.
     """
-    from faster_whisper import WhisperModel
-
     samples = np.frombuffer(read_samples(path, ffmpeg_bin), dtype=np.float32)
     duration = len(samples) / SAMPLE_RATE
     voiced = voiced_stretches(samples)
     pieces = stretches_to_transcribe(voiced, duration)
     words: List[HeardWord] = []
     if pieces:
-        model = WhisperModel(
-            listener.name,
-            device=listener.device,
-            compute_type="float16" if listener.device == "cuda" else "int8",
-            download_root=listener.download_root,
-        )
+        model = models.speech_model(listener.name, listener.device, listener.download_root)
         for index, (start, end) in enumerate(pieces):
             if is_cancelled():
                 raise OperationCancelled()
