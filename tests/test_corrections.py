@@ -5,6 +5,8 @@ import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import pytest
+
 from app.engine import corrections
 from app.models.media import TranscriptSegment
 from app.models.plan import Beat, EditPlan, Selection
@@ -152,8 +154,10 @@ def test_summarise_project_splits_by_author_skips_the_server_and_counts_sittings
         version("自動", at(3), project(clip("a", start=0.5, end=1.0), clip("z", asset="z", timeline_in=0.5))),
         version("編輯器", at(10), project(clip("a", start=0.5, end=1.5))),
         version("編輯器", at(13), project(clip("a", start=0.5, end=1.5), clip("b", start=5, end=6, timeline_in=1))),
-        version("編輯器", at(40), project(clip("a", start=0.5, end=1.5), clip("b", start=5, end=6, timeline_in=1),
-                                         clip("c", start=10, end=11, timeline_in=2))),
+        version("編輯器", at(40), project(
+            clip("a", start=0.5, end=1.5), clip("b", start=5, end=6, timeline_in=1),
+            clip("c", start=10, end=11, timeline_in=2),
+        )),
     ]
     summary = corrections.summarise_project(versions)
     assert summary is not None
@@ -199,8 +203,9 @@ def _asset_project(asset: str) -> list:
     """A project cut from one file, with one change made by hand."""
     return [
         version(AI, at(1), project(clip("a", asset=asset))),
-        version("編輯器", at(2), project(clip("a", asset=asset), clip("b", asset=asset, start=5, end=6,
-                                                                      timeline_in=1))),
+        version("編輯器", at(2), project(
+            clip("a", asset=asset), clip("b", asset=asset, start=5, end=6, timeline_in=1),
+        )),
     ]
 
 
@@ -427,10 +432,10 @@ def test_shots_of_one_file_far_apart_on_the_timeline_are_compared_as_what_they_s
 
 def test_a_title_card_renamed_by_a_recompile_is_not_counted() -> None:
     card = {"title": "第一天"}
-    before = project(clip("t1", asset="a", end=2, timeline_in=0) | {"card": card}, clip("p001", start=5, end=6,
-                                                                                         timeline_in=2))
-    after = project(clip("p001", asset="a", end=2, timeline_in=0) | {"card": card}, clip("p002", start=5, end=6,
-                                                                                           timeline_in=2))
+    before = project(clip("t1", asset="a", end=2, timeline_in=0) | {"card": card},
+                     clip("p001", start=5, end=6, timeline_in=2))
+    after = project(clip("p001", asset="a", end=2, timeline_in=0) | {"card": card},
+                    clip("p002", start=5, end=6, timeline_in=2))
     assert compared(before, after)["clips"] == NO_CLIP_CHANGE
 
 
@@ -562,6 +567,15 @@ def test_a_caption_whose_words_no_longer_spell_it_is_compared_by_its_text() -> N
     assert compared(before, after)["captions"] == {**NO_CAPTION_CHANGE, "rewritten": 1}
 
 
+@pytest.mark.parametrize("start, end", [(1.5, 3), (1, 3.5)])
+def test_either_edge_of_a_caption_with_words_moved_alone_is_retimed(start: float, end: float) -> None:
+    # Moving an edge by hand leaves its words' times as they were.
+    spelled = [{"start": 1, "end": 2, "text": "大家好"}, {"start": 2, "end": 3, "text": "今天"}]
+    before = project(SHOWN, cues=(cue("c1", "大家好今天", 1, 3) | {"words": spelled},))
+    after = project(SHOWN, cues=(cue("c1", "大家好今天", start, end) | {"words": spelled},))
+    assert compared(before, after)["captions"] == {**NO_CAPTION_CHANGE, "retimed": 1}
+
+
 def test_a_caption_with_the_same_words_in_another_file_is_not_a_move() -> None:
     other = {"id": "o", "asset_id": "b", "source_range": {"start": 0, "end": 10}, "timeline_in": 10}
     before = project(SHOWN, other, cues=(cue("c1", "一樣的話", 1, 2, asset="a"),))
@@ -658,3 +672,64 @@ def test_hand_versions_exactly_a_sitting_gap_apart_are_one_sitting() -> None:
     gap = corrections.SITTING_GAP_SECONDS / 60
     hands = [version("編輯器", at(0), None)[0], version("編輯器", at(gap), None)[0]]
     assert corrections._hand_minutes(hands) == round(gap + corrections.MINUTES_PER_SITTING_FLOOR, 1)
+
+
+def _retimed_by_hand(kept_history, media: Path, capsys, segments: list, edits) -> dict:
+    """Caption a real cut, edit its captions by hand, and read what the hand edit counted.
+
+    Args:
+        kept_history: The history fixture.
+        media: The test media folder.
+        capsys: The output capture fixture.
+        segments: The transcript of the file.
+        edits: Given the captions made, the caption edits to make by hand.
+
+    Returns:
+        The hand edit's caption counts.
+    """
+    asset = catalog.import_asset(str(media / "wide.mp4"))["id"]
+    transcribe(asset, segments)
+    with kept_history.step(AI):
+        project_id = build_project([video_track(), insert("a", asset, 0, 9)])
+    with kept_history.step(AI):
+        cues = caption(project_id)["cues"]
+    with kept_history.step(corrections.EDITOR_AUTHOR):
+        edit(project_id, edits(cues))
+    return summary_of(capsys, "--project", project_id)["projects"][project_id]["by_hand"]["captions"]
+
+
+def test_a_caption_with_words_widened_by_hand_is_retimed(kept_history, media: Path, capsys) -> None:
+    found = _retimed_by_hand(kept_history, media, capsys, [TranscriptSegment(
+        start=1.0, end=3.0, text="大家好今天", words=words(("大家好", 1.0, 2.0), ("今天", 2.0, 3.0)))],
+        lambda cues: [{"action": "edit_subtitle", "cue_id": cues[0]["id"], "source_start": 0.5, "source_end": 3.8}])
+    assert found == {**NO_CAPTION_CHANGE, "retimed": 1}
+
+
+def test_a_caption_deleted_and_its_neighbour_stretched_over_its_place_is_removed_and_retimed(
+    kept_history, media: Path, capsys,
+) -> None:
+    found = _retimed_by_hand(kept_history, media, capsys, [
+        TranscriptSegment(start=1.0, end=2.0, text="嗯嗯嗯", words=words(("嗯嗯嗯", 1.0, 2.0))),
+        TranscriptSegment(start=4.0, end=6.0, text="大家好", words=words(("大家好", 4.0, 6.0))),
+    ], lambda cues: [{"action": "edit_subtitle", "cue_id": cues[0]["id"], "delete": True},
+                     {"action": "edit_subtitle", "cue_id": cues[1]["id"], "source_start": 1.0}])
+    assert found == {**NO_CAPTION_CHANGE, "removed": 1, "retimed": 1}
+
+
+def test_a_caption_without_words_deleted_beside_one_stretched_over_it_is_removed_and_retimed() -> None:
+    before = project(SHOWN, cues=(cue("c1", "嗯", 0, 2), cue("c2", "大家好", 2, 4)))
+    after = project(SHOWN, cues=(cue("c2", "大家好", 1, 4),))
+    assert compared(before, after)["captions"] == {**NO_CAPTION_CHANGE, "removed": 1, "retimed": 1}
+
+
+def test_a_caption_added_beside_one_shrunk_to_make_room_is_added_and_retimed() -> None:
+    before = project(SHOWN, cues=(cue("c2", "大家好", 1, 4),))
+    after = project(SHOWN, cues=(cue("c1", "嗯", 0, 2), cue("c2", "大家好", 2, 4)))
+    assert compared(before, after)["captions"] == {**NO_CAPTION_CHANGE, "added": 1, "retimed": 1}
+
+
+def test_a_caption_without_words_over_footage_with_a_pause_cut_out_is_retimed_by_its_end() -> None:
+    paused = (clip("x", start=0, end=2, timeline_in=0), clip("y", start=3, end=10, timeline_in=2))
+    before = project(*paused, cues=(cue("c1", "大家好", 1, 5),))
+    after = project(*paused, cues=(cue("c1", "大家好", 1, 6),))
+    assert compared(before, after)["captions"] == {**NO_CAPTION_CHANGE, "retimed": 1}

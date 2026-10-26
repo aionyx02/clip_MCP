@@ -27,9 +27,8 @@ digits: a change of spaces, line breaks or punctuation alone is a re-break,
 not a line heard wrong. Captions made again after a trim, on other lines
 than before, count as re-broken, since the history does not say who broke
 them. A caption's second line (`secondary`) and its speaker are not
-compared. A restore or
-an undo is a new version like any other, so what it puts back is counted
-again, under whoever restored it. A branch keeps its own history, so hand
+compared. A restore or an undo is a new version like any other, so what it
+puts back is counted again, under whoever restored it. A branch keeps its own history, so hand
 edits made on a branch before the branch's first AI version with footage in
 it are not counted.
 
@@ -287,12 +286,14 @@ def _seen(cue: SubtitleCue, common: Dict[str, List[Tuple[float, float]]]) -> Opt
     """What a caption says over the footage both versions show, and when.
 
     With word timings that spell its text, the caption is the words whose
-    middle is shown, from the first one's start to the last one's end, each
-    edge held to the shown footage and to the caption's own stretch: a
-    caption made again after a trim drops a word whose middle was cut off and
-    cuts the times of one that keeps its middle, and a caption retimed by
-    hand keeps its words' old times. Without, it is its whole text, over the
-    shown part of its stretch.
+    middle is shown. An edge whose outer word is shown is the caption's own
+    edge, held to the shown footage: a caption retimed by hand keeps its
+    words' old times, and a caption made again after a trim cuts the times
+    of a word that keeps its middle. An edge whose outer word is not shown is
+    the first or last shown word's, so a caption made again after a trim,
+    which drops a word whose middle was cut off, starts where it does.
+    Without word timings, it is its whole text, over the shown part of its
+    stretch.
 
     Args:
         cue: The caption.
@@ -308,9 +309,10 @@ def _seen(cue: SubtitleCue, common: Dict[str, List[Tuple[float, float]]]) -> Opt
         if not kept:
             return None
         (first, first_piece), (last, last_piece) = kept[0], kept[-1]
+        start = float(cue.source_start) if first is cue.words[0] else max(float(first.start), float(cue.source_start))
+        end = float(cue.source_end) if last is cue.words[-1] else min(float(last.end), float(cue.source_end))
         return (_said("".join(word.text for word, _ in kept)),
-                (round(max(float(first.start), first_piece[0], float(cue.source_start)), 3),
-                 round(min(float(last.end), last_piece[1], float(cue.source_end)), 3)))
+                (round(max(start, first_piece[0]), 3), round(min(end, last_piece[1]), 3)))
     shown = [(max(float(cue.source_start), start), min(float(cue.source_end), end)) for start, end in pieces]
     shown = [(start, end) for start, end in shown if end - start > TOUCHING]
     if not shown:
@@ -355,6 +357,28 @@ def _groups(old: List[SubtitleCue], new: List[SubtitleCue], common: Dict[str, Li
         side[0 if key[0] == "old" else 1].append(key[1])
     return list(gathered.values())
 
+def _kept_in_order(longer: List[str], shorter: List[str]) -> Optional[List[int]]:
+    """Which of the longer side's captions the shorter side keeps whole, in order, if it only dropped some.
+
+    Args:
+        longer: What each caption of the side with more says, in time order.
+        shorter: The same for the side with fewer.
+
+    Returns:
+        The indexes into `longer` of the captions kept, one for each of
+        `shorter`; None when the shorter side is not the longer one with
+        whole captions taken out.
+    """
+    kept, at = [], 0
+    for said in shorter:
+        while at < len(longer) and longer[at] != said:
+            at += 1
+        if at == len(longer):
+            return None
+        kept.append(at)
+        at += 1
+    return kept
+
 def _caption_changes(before: Project, after: Project) -> Dict[str, int]:
     """How the captions changed, over the footage both versions show, matched by what they say where.
 
@@ -372,7 +396,10 @@ def _caption_changes(before: Project, after: Project) -> Dict[str, int]:
     is written differently — spaces, line breaks, punctuation — is re-broken;
     one whose times there moved is retimed. A group with more captions on one
     side than the other was split or joined: re-broken once when together
-    they say the same thing, rewritten once when not. Captions made again
+    they say the same thing. When not, and the side with fewer is the other
+    with whole captions taken out — one deleted and its neighbour stretched
+    over its place — those are removed or added, and the rest are compared
+    caption by caption; otherwise it is rewritten once. Captions made again
     after a trim, broken in other places than before, count as re-broken
     too: the history does not say who broke them.
 
@@ -403,10 +430,23 @@ def _caption_changes(before: Project, after: Project) -> Dict[str, int]:
         seen = [_seen(old[index], common) for index in olds]
         other_seen = [_seen(new[index], common) for index in news]
         same_words = "".join(said for said, _ in seen) == "".join(said for said, _ in other_seen)
-        if len(olds) != len(news):
-            counts["rebroken" if same_words else "rewritten"] += 1
+        if len(olds) != len(news) and same_words:
+            counts["rebroken"] += 1
             continue
-        if same_words and [said for said, _ in seen] != [said for said, _ in other_seen]:
+        if len(olds) != len(news):
+            fewer_new = len(news) < len(olds)
+            longer, shorter = (seen, other_seen) if fewer_new else (other_seen, seen)
+            kept = _kept_in_order([said for said, _ in longer], [said for said, _ in shorter])
+            if kept is None:
+                counts["rewritten"] += 1
+                continue
+            dropped = [index for at, index in enumerate(olds if fewer_new else news) if at not in kept]
+            (gone if fewer_new else come).extend(dropped)
+            if fewer_new:
+                olds, seen = [olds[at] for at in kept], [seen[at] for at in kept]
+            else:
+                news, other_seen = [news[at] for at in kept], [other_seen[at] for at in kept]
+        elif same_words and [said for said, _ in seen] != [said for said, _ in other_seen]:
             counts["rebroken"] += 1
             continue
         for index, other_index, one, other in zip(olds, news, seen, other_seen):
