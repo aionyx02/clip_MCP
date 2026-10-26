@@ -276,3 +276,18 @@ def music_unanalyzed() -> Iterator[None]:
     kept, catalog.ANALYZE_MUSIC_ON_ADD = catalog.ANALYZE_MUSIC_ON_ADD, False
     yield
     catalog.ANALYZE_MUSIC_ON_ADD = kept
+
+@pytest.fixture(autouse=True)
+def no_model_held(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Start every test with no speech model or diarizer held, and none kept.
+
+    A worker keeps its models for the next file, and `renderer.main` turns
+    that on for the rest of the process: a test that runs it would otherwise
+    hand every test after it the model the last one built.
+    """
+    from app.engine import diarize, models
+
+    monkeypatch.setattr(models, "_keep_speech_model", False)
+    monkeypatch.setattr(models, "_speech_model", None)
+    monkeypatch.setattr(models, "_speech_model_key", None)
+    monkeypatch.setattr(diarize, "_engine_cache", None)
