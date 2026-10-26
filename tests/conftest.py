@@ -269,6 +269,17 @@ def playback_unprepared() -> Iterator[None]:
     rendering.PREPARE_PLAYBACK = kept
 
 @pytest.fixture(autouse=True)
+def room_left_alone() -> Iterator[None]:
+    """Give no cache room back during previews: on a disk with less free than the floor, that
+    would delete the proxies other tests share, depending on the machine the suite runs on.
+    `give_cache_back` is tested on its own, with the disk's free space said by the test."""
+    from app.tools import rendering
+
+    kept, rendering._make_room = rendering._make_room, lambda: None
+    yield
+    rendering._make_room = kept
+
+@pytest.fixture(autouse=True)
 def music_unanalyzed() -> Iterator[None]:
     """Start no analysis when a song is added unless a test turns it on, for the same reason."""
     from app.tools import catalog
