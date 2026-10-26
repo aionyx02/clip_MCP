@@ -312,6 +312,29 @@ def test_a_file_that_fails_in_software_too_leaves_the_card_on(
     assert (tmp_path / (analysis.DETECT_LOG_FILE_NAME + analysis.CARD_TRIED_SUFFIX)).exists()
     assert not (tmp_path / (analysis.DETECT_LOG_FILE_NAME + analysis.CARD_LOG_SUFFIX)).exists()
 
+def test_a_cancel_during_the_retry_in_software_leaves_the_card_on(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, media: Path
+) -> None:
+    calls: List[List[str]] = []
+
+    def failing_then_cancelled(command, log_path, duration, on_progress, is_cancelled):
+        calls.append(list(command))
+        with open(log_path, "w", encoding="utf-8") as log:
+            log.write("CUDA_ERROR_OUT_OF_MEMORY\n")
+        if "-hwaccel" in command:
+            raise FFmpegFailed("the card ran out of memory")
+        raise OperationCancelled()
+
+    monkeypatch.setattr(analysis, "run_ffmpeg", failing_then_cancelled)
+    monkeypatch.setattr(analysis, "card_decode_args", lambda ffmpeg_bin, path, duration: ["-hwaccel", "cuda"])
+    with pytest.raises(OperationCancelled):
+        analysis.scan_media(_asset(media), str(tmp_path), lambda fraction: None, lambda: False, FFMPEG)
+    assert len(calls) == 2
+    assert card_failure() is None
+    # Software never finished reading the file, so nothing may say it did.
+    assert (tmp_path / (analysis.DETECT_LOG_FILE_NAME + analysis.CARD_TRIED_SUFFIX)).exists()
+    assert not (tmp_path / (analysis.DETECT_LOG_FILE_NAME + analysis.CARD_LOG_SUFFIX)).exists()
+
 def _finished_analysis(work: Path):
     """A finished analysis job working in this folder."""
     from app.models.job import Job, JobKind, JobStatus
