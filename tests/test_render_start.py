@@ -40,6 +40,28 @@ TOLERANCE_SAMPLES = 1
 REFERENCE_SAMPLES = TOLERANCE_SAMPLES
 
 
+def _make_bursts(folder: Path, picture: bool) -> Tuple[str, Path]:
+    """Write a 22.05 kHz AAC file of noise bursts, with or without a picture, and import it.
+
+    Returns:
+        `(asset_id, path)`.
+    """
+    path = folder / ("bursts.mp4" if picture else "bursts.m4a")
+    gate = "+".join(f"between(t,{start},{end})" for start, end in BURSTS)
+    video = ["-f", "lavfi", "-i", "color=c=black:size=320x240:rate=30:duration=6"] if picture else []
+    sound = "1:a" if picture else "0:a"
+    mapping = ["-map", "0:v", "-map", "[a]", "-c:v", "libx264", "-preset", "ultrafast",
+               "-pix_fmt", "yuv420p"] if picture else ["-map", "[a]"]
+    result = subprocess.run([
+        "ffmpeg", "-y", "-loglevel", "error", *video,
+        "-f", "lavfi", "-i", "anoisesrc=d=6:c=white:r=22050:a=0.5",
+        "-filter_complex", f"[{sound}]volume='{gate}':eval=frame[a]", *mapping,
+        "-c:a", "aac", "-ar", "22050", "-b:a", "96k", "-shortest", str(path),
+    ], capture_output=True)
+    assert result.returncode == 0, result.stderr.decode("utf-8", errors="replace")
+    return import_asset(str(path))["id"], path
+
+
 @pytest.fixture(scope="module")
 def bursts(tmp_path_factory: pytest.TempPathFactory) -> Tuple[str, Path]:
     """A 22.05 kHz AAC file of noise bursts, with a picture, and its asset ID.
@@ -48,19 +70,18 @@ def bursts(tmp_path_factory: pytest.TempPathFactory) -> Tuple[str, Path]:
         `(asset_id, path)`. The sound is what makes a seek near the start of an
         AAC file visible; the picture is there so the file renders like footage.
     """
-    path = tmp_path_factory.mktemp("bursts") / "bursts.mp4"
-    gate = "+".join(f"between(t,{start},{end})" for start, end in BURSTS)
-    result = subprocess.run([
-        "ffmpeg", "-y", "-loglevel", "error",
-        "-f", "lavfi", "-i", "color=c=black:size=320x240:rate=30:duration=6",
-        "-f", "lavfi", "-i", "anoisesrc=d=6:c=white:r=22050:a=0.5",
-        "-filter_complex", f"[1:a]volume='{gate}':eval=frame[a]",
-        "-map", "0:v", "-map", "[a]",
-        "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
-        "-c:a", "aac", "-ar", "22050", "-b:a", "96k", "-shortest", str(path),
-    ], capture_output=True)
-    assert result.returncode == 0, result.stderr.decode("utf-8", errors="replace")
-    return import_asset(str(path))["id"], path
+    return _make_bursts(tmp_path_factory.mktemp("bursts"), picture=True)
+
+
+@pytest.fixture(scope="module")
+def bursts_alone(tmp_path_factory: pytest.TempPathFactory) -> Tuple[str, Path]:
+    """The same sound with no picture, and its asset ID.
+
+    Returns:
+        `(asset_id, path)`. Without a picture, a seek in the file lands off at
+        most starts, not only at the first: #154's 22.05 kHz audio-only case.
+    """
+    return _make_bursts(tmp_path_factory.mktemp("bursts_alone"), picture=False)
 
 
 def lag_samples(heard: numpy.ndarray, source: numpy.ndarray, offset: float) -> int:
@@ -425,12 +446,14 @@ def test_the_playback_repair_with_hiss_cleanup_lands_where_one_without_it_does(
     assert abs(lag) <= TOLERANCE_SAMPLES, lag
 
 
-@pytest.mark.parametrize("start", [0.0, 0.3, 1.0, 2.37, 4.0])
+@pytest.mark.parametrize("source", ["bursts", "bursts_alone"])
+@pytest.mark.parametrize("start", [0.0, 0.3, 0.7, 1.0, 2.37, 4.0])
 def test_the_playback_repair_lands_where_the_source_says(
-    bursts: Tuple[str, Path], tmp_path: Path, start: float,
+    source: str, request: pytest.FixtureRequest, tmp_path: Path, start: float,
 ) -> None:
-    """A seek in a 22.05 kHz AAC file lands up to 25 ms early (#154); the copy is cut after decoding instead."""
-    asset_id, path = bursts
+    """A seek in a 22.05 kHz AAC file lands up to 25 ms off (#154): with a picture at the first
+    start, without one at most starts. The copy is cut after decoding instead."""
+    asset_id, path = request.getfixturevalue(source)
     asset = repo.get_assets([asset_id])[asset_id]
     clip = Clip(id="c", asset_id=asset_id, source_range=TimeRange(start=Decimal(str(start)),
                 end=Decimal(str(start + 1.5))), timeline_in=Decimal(0), cleanup=VoiceCleanup(rumble=True))

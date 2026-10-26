@@ -113,11 +113,13 @@ def proxy_command(asset: Asset, part: str, fps: float, ffmpeg_bin: str = "ffmpeg
 
 # Provisional: how far before a repaired sound's start FFmpeg seeks in the file, before cutting
 # exactly where it starts. A seek in the file lands up to 25 ms off on AAC at rates other than
-# 48 kHz (#154); a cut after decoding is exact, and this lead keeps it from decoding the whole
-# file up to there.
+# 48 kHz (#154), so the lead must be longer than that: at 0.001 s the copy lands as off as a plain
+# seek, from 0.05 s it lands within a sample. A cut after decoding is exact, and the lead keeps it
+# from decoding the whole file up to there; a second more costs about 0.05 s on an hour of AAC.
 SEEK_LEAD_SECONDS = 1.0
 # Changes when the way a repaired sound is cut changes, so a copy cut the old way is made again.
 REPAIR_CUT = 2
+
 
 def needs_repair(clip: Clip) -> bool:
     """Whether a clip's sound has repairs the browser cannot make itself."""
