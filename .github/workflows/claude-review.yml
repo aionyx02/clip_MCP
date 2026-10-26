@@ -106,8 +106,15 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
         run: |
           short="${HEAD_SHA:0:7}"
+          if ! git diff --quiet "origin/${BASE_REF}" HEAD -- .github/workflows/claude-review.yml; then
+            echo "::error::This PR changes .github/workflows/claude-review.yml, so the action skipped itself" \
+              "(the file must match ${BASE_REF}) and nothing reviewed ${short}." \
+              "Have it reviewed some other way, then merge it with the admin bypass."
+            exit 1
+          fi
           if ! gh pr view ${{ github.event.pull_request.number }} --repo ${{ github.repository }} \
               --json comments -q '.comments[].body' | grep -q "^## Claude review.*(reviewed ${short}"; then
             echo "::error::No '## Claude review' summary for ${short} was posted, so this commit was not reviewed."
@@ -181,8 +188,15 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          BASE_REF: ${{ github.event.pull_request.base.ref }}
         run: |
           short="${HEAD_SHA:0:7}"
+          if ! git diff --quiet "origin/${BASE_REF}" HEAD -- .github/workflows/claude-review.yml; then
+            echo "::error::This PR changes .github/workflows/claude-review.yml, so the action skipped itself" \
+              "(the file must match ${BASE_REF}) and nothing reviewed ${short}." \
+              "Have it reviewed some other way, then merge it with the admin bypass."
+            exit 1
+          fi
           if ! gh pr view ${{ github.event.pull_request.number }} --repo ${{ github.repository }} \
               --json comments -q '.comments[].body' | grep -q "^## Security review.*(reviewed ${short}"; then
             echo "::error::No '## Security review' summary for ${short} was posted, so this commit was not reviewed."
