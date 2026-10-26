@@ -1,0 +1,158 @@
+name: claude-review
+
+on:
+  pull_request:
+    types: [opened, synchronize, ready_for_review, reopened]
+
+concurrency:
+  group: claude-review-${{ github.event.pull_request.number }}
+  # Don't cancel: a run killed after posting inline comments but before its summary breaks round counting.
+  cancel-in-progress: false
+
+jobs:
+  claude-review:
+    name: claude-review
+    # Drafts wait until ready (GitHub won't merge a draft anyway).
+    if: ${{ !github.event.pull_request.draft }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      pull-requests: write
+      id-token: write
+    steps:
+      # A skipped job satisfies a required check, so fail fork PRs instead of skipping them.
+      - name: Refuse fork PRs (no secrets)
+        if: github.event.pull_request.head.repo.full_name != github.repository
+        run: |
+          echo "::error::Fork PRs get no secrets. Review locally, then merge with the admin bypass."
+          exit 1
+
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0 # git blame / diff against earlier rounds
+
+      - uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          prompt: |
+            REPO: ${{ github.repository }}
+            PR NUMBER: ${{ github.event.pull_request.number }}
+            HEAD SHA: ${{ github.event.pull_request.head.sha }}
+
+            You are the automated reviewer for this pull request. Your job is to find
+            real bugs before a human looks, not to restate style preferences.
+
+            ## Load context first
+            1. CLAUDE.md and REVIEW.md at the repo root, if present. REVIEW.md overrides
+               the defaults below.
+            2. The PR title and body (`gh pr view`), including Testing, Risk and How to revert.
+            3. The diff (`gh pr diff`). Read it against the whole repo, not in isolation.
+            4. Your earlier rounds: summary comments starting with "## Claude review"
+               (`gh pr view --json comments`) and inline findings
+               (`gh api --paginate repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/comments`).
+
+            If an earlier summary already reviewed HEAD SHA (re-run, reopen, ready for
+            review with no new commits), stop without posting anything.
+
+            ## What to look for
+            Does the change solve its stated problem, fit the system, and avoid breaking
+            something else? For a bug fix, check that it addresses the root cause.
+            Paths listed under "Always review deeply" in REVIEW.md get extra scrutiny.
+
+            ## Verify before posting
+            For every candidate finding, re-read the relevant code and cite file:line
+            evidence. Drop it if you can't name concrete inputs or state that produce
+            wrong behavior. Drop findings that are only about style, diagnostics or
+            cleanup unless REVIEW.md asks for them.
+
+            ## Tags
+            Start each inline comment with one tag:
+            - **[Important]** a bug this PR introduces, or a real risk it creates
+            - **[Nit]** minor; at most 3 per round
+            - **[Pre-existing]** a real bug the PR didn't introduce (check with git blame)
+            If a finding is one instance of a class of bug, say so and list the other
+            locations in the same comment, so the author fixes all of them.
+            Anchor every finding on a changed line, since only inline threads block the
+            merge. A Pre-existing finding with no changed line nearby goes in the summary.
+
+            ## Converge
+            This round is N = (number of earlier "## Claude review" summaries) + 1.
+            - Never repost a finding that was already posted, open or resolved.
+            - Rounds 1-2: full review.
+            - Round 3 on: review only what changed since the SHA in your last summary:
+              `git diff <sha> HEAD -- <files from gh pr diff --name-only>`, which keeps
+              base-branch updates out. If <sha> no longer exists (force-push), do a full
+              review instead.
+            - Round 4 on (after three rounds): post only Important findings, and ask the
+              author in the summary to step back and reconsider the approach instead of
+              patching line by line.
+
+            ## Output
+            - One inline comment per finding (create_inline_comment, confirmed: true).
+            - Then exactly one summary via `gh pr comment`, starting with
+              `## Claude review: round N (reviewed <short HEAD SHA>)`, then a count line
+              such as "2 Important, 1 Nit, 0 Pre-existing". If there is nothing to fix,
+              say so plainly.
+            - Write in the language REVIEW.md specifies (default: English).
+          claude_args: |
+            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr comment:*),Bash(gh api --paginate repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/comments:*),Bash(git log:*),Bash(git diff:*),Bash(git blame:*),Bash(git cat-file:*),Read,Grep,Glob,Task"
+
+  security-review:
+    name: security-review
+    if: ${{ !github.event.pull_request.draft }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      pull-requests: write
+      id-token: write
+    steps:
+      - name: Refuse fork PRs (no secrets)
+        if: github.event.pull_request.head.repo.full_name != github.repository
+        run: |
+          echo "::error::Fork PRs get no secrets. Review locally, then merge with the admin bypass."
+          exit 1
+
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - uses: anthropics/claude-code-action@v1
+        with:
+          claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
+          prompt: |
+            REPO: ${{ github.repository }}
+            PR NUMBER: ${{ github.event.pull_request.number }}
+            HEAD SHA: ${{ github.event.pull_request.head.sha }}
+
+            You are a separate security pass on this pull request. Only report
+            vulnerabilities the change introduces or makes reachable.
+
+            Read CLAUDE.md and REVIEW.md, the PR body (`gh pr view`), the diff
+            (`gh pr diff`), and your earlier summaries starting with "## Security review"
+            plus inline comments
+            (`gh api --paginate repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/comments`).
+            If an earlier summary already reviewed HEAD SHA, stop without posting anything.
+
+            Look for: injection (SQL, command, path, template), auth or access-control
+            gaps, secrets in code or logs, unsafe deserialization, SSRF, insecure crypto,
+            and dangerous changes to CI workflows, release scripts or installers.
+
+            For every candidate, trace an attacker-controlled input to the sink with
+            file:line evidence. Drop it if you can't show that path. Don't report
+            hardening suggestions, missing best practices without an exploit, or
+            denial of service from resource exhaustion.
+
+            Never repost a finding that was already posted, open or resolved.
+
+            Output:
+            - One inline comment per finding (create_inline_comment, confirmed: true),
+              starting with **[Security: High]**, **[Security: Medium]** or
+              **[Security: Low]**, then the exploit path and the fix.
+            - Then exactly one summary via `gh pr comment`, starting with
+              `## Security review (reviewed <short HEAD SHA>)` and a count line. If
+              there are no findings, say so plainly.
+            - Write in the language REVIEW.md specifies (default: English).
+          claude_args: |
+            --allowedTools "mcp__github_inline_comment__create_inline_comment,Bash(gh pr view:*),Bash(gh pr diff:*),Bash(gh pr comment:*),Bash(gh api --paginate repos/${{ github.repository }}/pulls/${{ github.event.pull_request.number }}/comments:*),Bash(git log:*),Bash(git diff:*),Read,Grep,Glob"

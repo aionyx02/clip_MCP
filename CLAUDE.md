@@ -25,3 +25,16 @@
 - 跑測試用 `uv run --no-sync pytest`：MCP server 佔住 venv 裡的 `clip-mcp.exe`，一般的 `uv run` 會同步失敗。
 - 每個 commit 與 tag 都要 GPG 簽章。
 - 工作在分支上做、開 PR，不直接推 `main`。
+
+## 驗證
+
+- 測試：`uv run --no-sync pytest`
+- Lint：`uvx ruff check --select=E9,F63,F7,F82 .`（與 CI 擋的規則相同）
+- 建置：`uv build --wheel -o <資料夾>`
+
+說一個改動完成之前，先貼出命令的輸出。
+
+## 開 PR 之前
+
+跑完上面的檢查，再對 base 分支跑 `/code-review` 與 `/security-review`。
+照 PR 範本填寫；Testing 與 How to revert 由提出改動的人確認。
