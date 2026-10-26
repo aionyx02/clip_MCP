@@ -427,7 +427,6 @@ def test_playback_is_prepared_knowing_which_files_it_reads(media: Path, monkeypa
         return job
 
     monkeypatch.setattr(rendering, "PREPARE_PLAYBACK", True)
-    monkeypatch.setattr(rendering, "_make_room", lambda: None)
     monkeypatch.setattr(rendering, "_being_prepared", set)
     # Whatever an earlier test left in the shared folder, the copy to play from is made again.
     monkeypatch.setattr(rendering.playback, "missing", lambda project, assets, present: [wide])
