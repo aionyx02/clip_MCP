@@ -462,6 +462,8 @@ def test_the_playback_repair_lands_where_the_source_says(
     assert result.returncode == 0, result.stderr.decode("utf-8", errors="replace")
     heard = read_samples(str(part))
     assert abs(lag_samples(heard, read_samples(str(path)), start)) <= TOLERANCE_SAMPLES
+    # Cut after decoding, the length counts from the clip's start, not from where the seek landed.
+    assert abs(len(heard) - 1.5 * SAMPLE_RATE) <= 0.025 * SAMPLE_RATE, len(heard) / SAMPLE_RATE
 
 
 def test_a_repaired_sound_cut_another_way_is_named_anew(bursts: Tuple[str, Path], monkeypatch) -> None:
