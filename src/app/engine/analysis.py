@@ -592,8 +592,8 @@ def sound_note(windows: Sequence[SoundMeasurement]) -> Optional[dict]:
         The levels are in dBFS, named in `unit` so they are not read as LUFS:
         loudness is RMS, peak and noise floor are peak levels. `flatness_max`
         is not one of them: it is decibels of how many samples in a row sit at
-        the peak, 0 when no two in a row do. Narrow the range and ask again
-        to find where a bad patch is.
+        the waveform's top or bottom, 0 when no two in a row do. Narrow the
+        range and ask again to find where a bad patch is.
     """
     if not windows:
         return None

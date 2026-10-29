@@ -354,8 +354,8 @@ def query_clips(
             handheld. Sound: `loudness`, `peak` and `noise_floor` (the hiss
             under everything) in dBFS, and `flatness`, which is not a level:
             high where the waveform is squared off, so a `peak` near 0 with a
-            high `flatness` is a clipped recording. Faces: `faces` is how many were up, averaged
-            over the clip; `face_share` how much of the frame the largest
+            high `flatness` is a clipped recording. Faces: `faces` is how
+            many were up, averaged over the clip; `face_share` how much of the frame the largest
             filled (close-up against wide); `face_x` and `face_y` where it
             sat, 0 to 1 across and down. Faces are found, not people: 0 means
             no face was seen, not that the shot is empty.
@@ -800,7 +800,8 @@ def get_semantic_clip(clip_id: str, include_words: bool = False, timeline_id: Op
     Returns:
         The clip: its `clip_id`, `timeline_id`, `asset_id`, `level`, `kind`,
         `source_range`, `safe_in` / `safe_out`, full `text`, `speaker`,
-        `scores`, and `tags` with where each came from. With `include_words`,
+        `scores` (measured as `query_clips`' `min_scores` describes: sound
+        levels in dBFS), and `tags` with where each came from. With `include_words`,
         also `words`, each with `start`, `end`, `text` and `probability`, how
         sure the speech model was of it; `unsure`, the words it was guessing
         at, worth `listen_again`; and `unsure_unknown` when the file was

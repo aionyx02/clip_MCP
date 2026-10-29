@@ -175,9 +175,9 @@ class SoundMeasurement(Measured):
     noise_floor: float = Field(..., description="Level of the quietest part, which is the hiss under everything")
     flatness: float = Field(
         ...,
-        description="How flat the waveform is where it peaks, in decibels of how many samples in a row sit at the "
-                    "peak (0 when no two in a row do), not dBFS. A clipped recording peaks near 0 dB and is flat there, "
-                    "so a high peak together with a high flatness is what clipping looks like",
+        description="How flat the waveform is where it peaks, in decibels of how many samples in a row sit at its "
+                    "top or bottom (0 when no two in a row do), not dBFS. A clipped recording peaks near 0 dB and "
+                    "is flat there, so a high peak together with a high flatness is what clipping looks like",
     )
 
 class FaceMeasurement(Measured):
