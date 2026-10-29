@@ -466,7 +466,10 @@ def test_the_playback_repair_lands_where_the_source_says(
     assert abs(len(heard) - 1.5 * SAMPLE_RATE) <= 0.025 * SAMPLE_RATE, len(heard) / SAMPLE_RATE
 
 
-def test_a_repaired_sound_cut_another_way_is_named_anew(bursts: Tuple[str, Path], monkeypatch) -> None:
+def test_a_repaired_sound_cut_another_way_is_named_anew(
+    bursts: Tuple[str, Path], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A copy cut the old way lands early, so the new way gets a new name and is made again."""
     asset_id, _ = bursts
     asset = repo.get_assets([asset_id])[asset_id]
     clip = Clip(id="c", asset_id=asset_id, source_range=TimeRange(start=Decimal("1"), end=Decimal("2")),
