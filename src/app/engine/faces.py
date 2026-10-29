@@ -216,7 +216,10 @@ def framing_note(measurements: Sequence[FaceMeasurement]) -> Optional[dict]:
         were usually up, and the middle and spread of where the largest face
         sat across the frame. `None` when nothing was measured. The spread is
         what says whether one crop can hold the whole stretch or whether it
-        has to move.
+        has to move. `largest_face_at` is the second the largest face was up:
+        a face printed on a card or a poster, or on a screen, is found like a
+        real one, and nothing measured here tells them apart, so that is the
+        moment to look at before saying somebody is on screen.
     """
     if not measurements:
         return None
@@ -231,4 +234,5 @@ def framing_note(measurements: Sequence[FaceMeasurement]) -> Optional[dict]:
         note["face_x_median"] = round(statistics.median(across), 3)
         note["face_x_range"] = [round(min(across), 3), round(max(across), 3)]
         note["face_share_median"] = round(statistics.median(record.face_share for record in placed), 4)
+        note["largest_face_at"] = max(placed, key=lambda record: record.face_share).start
     return note

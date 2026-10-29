@@ -358,7 +358,8 @@ def query_clips(
             over the clip; `face_share` how much of the frame the largest
             filled (close-up against wide); `face_x` and `face_y` where it
             sat, 0 to 1 across and down. Faces are found, not people: 0 means
-            no face was seen, not that the shot is empty.
+            no face was seen, not that the shot is empty, and a face on a
+            photo, a poster or a screen is counted like anyone's.
         max_scores: Upper bounds on scores, such as `{"black": 0.1}` or
             `{"shake": 0.01}` for shots steady enough to hold on screen.
         limit: Largest number of clips to return.
