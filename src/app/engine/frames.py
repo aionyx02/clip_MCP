@@ -41,12 +41,17 @@ class Crop(BaseModel):
     height: float = 1
 
 def _tile_shape(box: int, aspect: float) -> Tuple[int, int]:
-    """The width and height of a tile fitted into a square box at a given ratio."""
-    if aspect >= 1:
-        return box, max(1, round(box / aspect))
-    return max(1, round(box * aspect)), box
+    """The width and height of a tile fitted into a square box at a given ratio.
 
-def tile_size_for(count: int, aspect: float) -> Tuple[int, int]:
+    The short side is rounded up: FFmpeg's scale rounds it to the nearer
+    pixel, which is up as often as down, and a sheet sized on the low side
+    could come out over the budget.
+    """
+    if aspect >= 1:
+        return box, max(1, math.ceil(box / aspect))
+    return max(1, math.ceil(box * aspect)), box
+
+def tile_size_for(count: int, aspects: Sequence[float]) -> Tuple[int, int]:
     """Choose how many columns and how large a box a sheet of `count` tiles should use.
 
     The sheet keeps within the pixels today's default sheet takes, so asking
@@ -54,7 +59,9 @@ def tile_size_for(count: int, aspect: float) -> Tuple[int, int]:
 
     Args:
         count: Number of tiles on the sheet.
-        aspect: Tile width divided by height.
+        aspects: Width divided by height of each shape on the sheet. Every
+            cell is as wide as the widest and as tall as the tallest, so a
+            sheet of landscape and portrait frames is sized for both.
 
     Returns:
         `(columns, box)`: the most tiles per row, at most four, and the side
@@ -66,7 +73,8 @@ def tile_size_for(count: int, aspect: float) -> Tuple[int, int]:
     rows = math.ceil(count / columns)
 
     def fits(box: int) -> bool:
-        width, height = _tile_shape(box, aspect)
+        shapes = [_tile_shape(box, aspect) for aspect in aspects]
+        width, height = max(shape[0] for shape in shapes), max(shape[1] for shape in shapes)
         return (
             (columns * width + (columns + 1) * TILE_GAP)
             * (rows * height + (rows + 1) * TILE_GAP)

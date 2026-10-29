@@ -1,5 +1,6 @@
 """Looking at footage and renders: frames, storyboards, and a close look at each join in a cut."""
 
+import math
 import os
 from pathlib import Path
 from typing import Annotated, List, Literal, Optional, Sequence, Tuple
@@ -18,6 +19,10 @@ from app.engine.subtitles import place_cues
 from app import runtime
 from app.runtime import mcp
 from app.tools import rendering, shared, versioning
+
+# FFmpeg cannot cut less than this from a picture whose colour is stored at half the size, as
+# yuv420 footage is: a narrower crop rounds to nothing and the decode fails.
+MIN_CROP_PIXELS = 2
 
 @mcp.tool()
 def view_frames(
@@ -74,6 +79,8 @@ def view_frames(
     if crop is not None:
         if len(asset_ids) > 1:
             raise ValueError("a crop only means something for one asset; drop crop, or ask about one file")
+        if not all(math.isfinite(value) for value in (crop.x, crop.y, crop.width, crop.height)):
+            raise ValueError("crop x, y, width and height must be numbers between 0 and 1")
         if crop.width <= 0 or crop.height <= 0:
             raise ValueError(
                 f"crop width and height must be greater than 0, not {crop.width} by {crop.height}; "
@@ -96,13 +103,18 @@ def view_frames(
             )
 
     assets = [shared.get_asset(asset_id) for asset_id in asset_ids]
-    first = assets[0]
-    if first.width and first.height:
-        aspect = first.width / first.height
-        if crop is not None:
-            aspect = (first.width * crop.width) / (first.height * crop.height)
-    else:
-        aspect = 16 / 9
+    if crop is not None and assets[0].width and assets[0].height:
+        across, down = assets[0].width * crop.width, assets[0].height * crop.height
+        if across < MIN_CROP_PIXELS or down < MIN_CROP_PIXELS:
+            raise ValueError(
+                f"the crop is {across:.1f} by {down:.1f} pixels of a {assets[0].width}x{assets[0].height} "
+                f"picture; make it at least {MIN_CROP_PIXELS} pixels each way"
+            )
+    aspects = [
+        (asset.width * (crop.width if crop else 1)) / (asset.height * (crop.height if crop else 1))
+        if asset.width and asset.height else 16 / 9
+        for asset in assets
+    ]
 
     shots: List[tuple[str, float, str]] = []
     listing: List[str] = []
@@ -123,7 +135,7 @@ def view_frames(
             listing.append(f"#{number}: {name} | {seconds:.3f}s ({format_timestamp(seconds)})")
 
     where = f"asset {asset_ids[0]}" if len(asset_ids) == 1 else f"{len(asset_ids)} assets, {count} frames each"
-    columns, box = tile_size_for(len(shots), aspect)
+    columns, box = tile_size_for(len(shots), aspects)
     said = [f"Contact sheet of {where}, in reading order:"]
     if crop is not None:
         said.append(
