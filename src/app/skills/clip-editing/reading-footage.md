@@ -195,6 +195,7 @@ project keeps playing the file from where it went.
 | 「剪掉黑畫面／畫面卡住的地方」 / remove black or frozen parts | Keep the time outside `black_frames` / `frozen_frames`; a plan does this at every cut on its own |
 | 「找出精華剪成 60 秒」 / a 60 s highlight reel | Choose segments by transcript and frames until about 60 s; confirm the list before rendering |
 | 「第 3 分鐘那個畫面是什麼」 / what is on screen at 3:00 | `view_frames` with one `asset_ids` entry, `start: 175`, `end: 185`, `count: 4` |
+| 「畫面角落那排數字是多少」 / read small on-screen text or numbers | `view_frames` with one `asset_ids` entry, a narrow `start`–`end`, `count` 1–4, and `crop` around the detail |
 
 ## When the user brings raw footage and no plan
 

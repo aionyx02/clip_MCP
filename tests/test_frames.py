@@ -1,12 +1,26 @@
 """Tests for timestamp formatting, cropping, and sheet composition."""
 
+import base64
 import io
+import math
+import subprocess
 from pathlib import Path
 
 import pytest
 from PIL import Image
 
-from app.engine.frames import TILE_SIZE, _crop_to_aspect, format_timestamp, storyboard_sheet
+from app.engine.frames import (
+    SHEET_PIXEL_BUDGET,
+    TILE_GAP,
+    TILE_SIZE,
+    Crop,
+    _compose_sheet,
+    _crop_to_aspect,
+    extract_frame,
+    format_timestamp,
+    storyboard_sheet,
+    tile_size_for,
+)
 from app.tools.catalog import import_asset
 from app.tools.looking import view_frames
 from app.tools.shared import MAX_STORYBOARD_TILES
@@ -85,6 +99,17 @@ def sheet_text(result) -> list:
     """
     return result.content[0].text.splitlines()
 
+def sheet_image(result) -> Image.Image:
+    """Decode the contact sheet a `view_frames` result carries.
+
+    Args:
+        result: What `view_frames` returned.
+
+    Returns:
+        The sheet as an RGB image.
+    """
+    return Image.open(io.BytesIO(base64.b64decode(result.content[1].data))).convert("RGB")
+
 def test_view_frames_samples_one_asset_across_a_range(media: Path) -> None:
     wide, _, _ = assets_for(media)
     lines = sheet_text(view_frames([wide], start=2, end=6, count=4))
@@ -115,3 +140,143 @@ def test_view_frames_refuses_a_range_across_several_assets(media: Path) -> None:
 def test_view_frames_needs_at_least_one_asset() -> None:
     with pytest.raises(ValueError, match="at least one asset"):
         view_frames([])
+
+def test_tile_size_for_keeps_the_default_at_twelve_or_more() -> None:
+    assert tile_size_for(12, [16 / 9]) == (4, TILE_SIZE)
+    assert tile_size_for(36, [16 / 9]) == (4, TILE_SIZE)
+
+@pytest.mark.parametrize("count", [1, 2, 4])
+def test_tile_size_for_makes_fewer_frames_larger_within_the_budget(count: int) -> None:
+    columns, box = tile_size_for(count, [16 / 9])
+    assert box > TILE_SIZE
+    if count == 4:
+        assert columns == 2
+    height = math.ceil(box / (16 / 9))
+    tiles = [Image.new("RGB", (box, height)) for _ in range(count)]
+    sheet = Image.open(io.BytesIO(_compose_sheet(tiles, [f"#{index}" for index in range(count)], columns)))
+    assert sheet.width * sheet.height <= SHEET_PIXEL_BUDGET
+
+def test_view_frames_shows_fewer_frames_larger(media: Path) -> None:
+    wide, _, _ = assets_for(media)
+    few = sheet_image(view_frames([wide], count=4))
+    many = sheet_image(view_frames([wide], count=12))
+    few_tile = (few.width - 3 * TILE_GAP) // 2
+    many_tile = (many.width - 5 * TILE_GAP) // 4
+    assert few_tile > many_tile
+    assert many_tile == TILE_SIZE
+
+def corner_video(folder: Path) -> str:
+    """A black landscape clip with a red square filling its top-left quarter.
+
+    Args:
+        folder: Directory to write it to.
+
+    Returns:
+        The asset ID.
+    """
+    path = folder / "corner.mp4"
+    subprocess.run(
+        ["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi", "-i", "color=c=black:s=640x360:r=30:d=2",
+         "-vf", "drawbox=x=0:y=0:w=160:h=90:color=red:t=fill",
+         "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", str(path)],
+        check=True, capture_output=True,
+    )
+    return import_asset(str(path))["id"]
+
+def test_view_frames_crop_zooms_into_the_named_part(tmp_path: Path) -> None:
+    result = view_frames([corner_video(tmp_path)], count=1, crop=Crop(x=0, y=0, width=0.25, height=0.25))
+    sheet = sheet_image(result)
+    # The crop is 160x90 of the source, and it is not scaled past that.
+    assert sheet.width - 2 * TILE_GAP <= 160
+    assert sheet.height - 2 * TILE_GAP <= 90
+    red, green, blue = sheet.getpixel((sheet.width // 2, sheet.height // 2))
+    assert red > 180 and green < 80 and blue < 80
+    assert any("zoomed to x 0.00–0.25" in line for line in sheet_text(result))
+
+@pytest.mark.parametrize("crop", [
+    Crop(width=0, height=1),
+    Crop(width=1, height=0),
+    Crop(x=-0.1, width=0.5),
+    Crop(y=-0.1, height=0.5),
+    Crop(x=0.8, width=0.4),
+    Crop(y=0.8, height=0.4),
+])
+def test_view_frames_refuses_a_crop_outside_the_frame(media: Path, crop: Crop) -> None:
+    wide, _, _ = assets_for(media)
+    with pytest.raises(ValueError, match="crop"):
+        view_frames([wide], count=1, crop=crop)
+
+def test_view_frames_refuses_a_crop_across_several_assets(media: Path) -> None:
+    wide, tall, _ = assets_for(media)
+    with pytest.raises(ValueError, match="one asset"):
+        view_frames([wide, tall], count=1, crop=Crop(width=0.5, height=0.5))
+
+def test_extract_frame_does_not_enlarge_a_small_source(media: Path) -> None:
+    frame = extract_frame(str(media / "silent.mp4"), 1.0, box=1000)
+    assert frame.size == (320, 240)
+
+def test_storyboard_sheet_default_keeps_the_old_box(media: Path) -> None:
+    sheet = Image.open(io.BytesIO(storyboard_sheet([(str(media / "wide.mp4"), 1.0, "#1")])))
+    assert sheet.width - 2 * TILE_GAP == TILE_SIZE
+    assert sheet.height - 2 * TILE_GAP == round(TILE_SIZE * 9 / 16)
+
+def _video(folder: Path, name: str, size: str) -> str:
+    """A three-second test pattern at a given size, imported.
+
+    Returns:
+        The asset ID.
+    """
+    path = folder / name
+    subprocess.run(
+        ["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi", "-i", f"testsrc2=s={size}:r=30:d=3",
+         "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", str(path)],
+        check=True, capture_output=True,
+    )
+    return import_asset(str(path))["id"]
+
+@pytest.fixture(scope="module")
+def full_size(tmp_path_factory: pytest.TempPathFactory) -> tuple:
+    """A 1920x1080 and a 1080x1920 clip: large enough that every box is filled, so the budget is reached."""
+    folder = tmp_path_factory.mktemp("full")
+    return _video(folder, "landscape.mp4", "1920x1080"), _video(folder, "portrait.mp4", "1080x1920")
+
+@pytest.mark.parametrize("count", range(1, 13))
+def test_a_sheet_of_real_frames_stays_within_the_budget(full_size: tuple, count: int) -> None:
+    """Sized on FFmpeg's own rounding, not on the model's: a pixel more per tile adds up."""
+    sheet = sheet_image(view_frames([full_size[0]], count=count))
+    assert sheet.width * sheet.height <= SHEET_PIXEL_BUDGET
+
+@pytest.mark.parametrize("count", [1, 2, 3])
+def test_a_sheet_of_landscape_and_portrait_frames_stays_within_the_budget(full_size: tuple, count: int) -> None:
+    """Every cell is as wide as the widest frame and as tall as the tallest, so both shapes count.
+
+    Past that, the box is held at TILE_SIZE, the size every sheet had before the budget.
+    """
+    sheet = sheet_image(view_frames(list(full_size), count=count))
+    assert sheet.width * sheet.height <= SHEET_PIXEL_BUDGET
+
+def test_a_crop_is_sized_by_its_own_shape(full_size: tuple) -> None:
+    """A thin strip across the frame fits a wider box than the whole frame does."""
+    sheet = sheet_image(view_frames([full_size[0]], count=1, crop=Crop(y=0.4, height=0.1)))
+    assert sheet.width - 2 * TILE_GAP > tile_size_for(1, [16 / 9])[1]
+
+def test_view_frames_refuses_a_crop_that_is_not_a_number(media: Path) -> None:
+    wide, _, _ = assets_for(media)
+    with pytest.raises(ValueError, match="numbers"):
+        view_frames([wide], count=1, crop=Crop(x=float("nan"), width=0.5))
+
+def test_view_frames_refuses_a_crop_too_small_to_cut(full_size: tuple) -> None:
+    """Under two pixels FFmpeg cuts nothing from yuv420 footage, and its error would say nothing useful."""
+    with pytest.raises(ValueError, match="at least 2 pixels"):
+        view_frames([full_size[0]], count=1, crop=Crop(width=0.0007, height=0.5))
+
+def test_storyboard_sheet_default_still_enlarges_a_small_source(tmp_path: Path) -> None:
+    """Every other caller keeps the old filter, which fills the 320 box even from a smaller picture."""
+    path = tmp_path / "small.mp4"
+    subprocess.run(
+        ["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi", "-i", "testsrc2=s=160x90:r=10:d=1",
+         "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", str(path)],
+        check=True, capture_output=True,
+    )
+    sheet = Image.open(io.BytesIO(storyboard_sheet([(str(path), 0.5, "#1")])))
+    assert sheet.width - 2 * TILE_GAP == TILE_SIZE
