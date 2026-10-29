@@ -894,10 +894,12 @@ def get_analysis(
         `shots` carries one record per shot in the range — `exposure`,
         `contrast`, `blur`, `motion` and `shake` — while `sound` and `faces`
         summarise the range's per-second records rather than listing them,
-        since an hour of those is thousands of rows. `faces` says how much of
-        the range had anybody on screen, how many there usually were, and
-        where the largest face sat across the frame and how far it moved,
-        which is what a vertical reframe needs. `speakers` lists the stretches
+        since an hour of those is thousands of rows. `sound`'s levels are in
+        dBFS, as its `unit` says, not LUFS, so they do not compare with the
+        render's loudness target; `flatness_max` is not a level. `faces` says
+        how much of the range had anybody on screen, how many there usually
+        were, and where the largest face sat across the frame and how far it
+        moved, which is what a vertical reframe needs. `speakers` lists the stretches
         each voice held; the labels are this file's own and mean nothing
         outside it. `rhythm` is for a file in the music library, and gives
         the `tempo` in beats per minute and the `beats` in the range; its `tempo` is null when the music has no steady pulse, and

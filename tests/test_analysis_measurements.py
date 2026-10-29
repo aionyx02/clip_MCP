@@ -27,6 +27,7 @@ from app.engine.analysis import (
     analyze_media,
     can_measure_shake,
     current_recipe,
+    sound_note,
 )
 from app.engine.faces import FRAME_PATTERN, frames_dir
 from app.models.media import (
@@ -400,3 +401,8 @@ def test_one_clipped_second_is_not_averaged_out_of_a_clip() -> None:
     combined = combined_over(0, 10, windows)
     assert combined["peak"] == 0.0
     assert combined["flatness"] == 24.0
+
+def test_the_sound_summary_names_its_unit() -> None:
+    """Levels in dBFS read as LUFS would be compared with the render's target."""
+    window = SoundMeasurement(start=0, end=1, loudness=-42.0, peak=-20.0, noise_floor=-60.0, flatness=0.0)
+    assert sound_note([window])["unit"] == "dBFS"
