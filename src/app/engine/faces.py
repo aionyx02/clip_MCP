@@ -219,7 +219,8 @@ def framing_note(measurements: Sequence[FaceMeasurement]) -> Optional[dict]:
         has to move. `largest_face_at` is the second the largest face was up:
         a face printed on a card or a poster, or on a screen, is found like a
         real one, and nothing measured here tells them apart, so that is the
-        moment to look at before saying somebody is on screen.
+        moment to look at, from it to a second after, before saying somebody
+        is on screen.
     """
     if not measurements:
         return None
