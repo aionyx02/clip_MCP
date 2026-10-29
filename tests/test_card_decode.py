@@ -139,6 +139,9 @@ def test_a_short_file_is_not_decoded_on_the_card_and_costs_no_probe(monkeypatch:
     None,
     "not json",
     json.dumps({"streams": [{"codec_name": "hevc"}], "format": {"bit_rate": "N/A"}}),
+    # JSON, but not the object ffprobe writes: no `.get` on a list or on a null stream.
+    "[]",
+    json.dumps({"streams": [None]}),
 ])
 def test_a_probe_that_fails_or_cannot_be_read_means_no_card(monkeypatch: pytest.MonkeyPatch, said) -> None:
     _cards(monkeypatch)
