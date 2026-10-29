@@ -197,8 +197,11 @@ def _paired_events(log: str, start_pattern: str, end_pattern: str) -> List[tuple
         pairs.append((open_start, None))
     return pairs
 
-# Beside the scan's log, the log of a scan that failed on the card; `get_job` tells the AI from it.
+# Beside the scan's log, the log of a scan that failed on the card once software has read the
+# file; `get_job` tells the AI from it. Until software has, it carries `CARD_TRIED_SUFFIX`, so a
+# file software could not read either is never said to have been decoded in software.
 CARD_LOG_SUFFIX = ".card"
+CARD_TRIED_SUFFIX = ".card-tried"
 
 @dataclass(frozen=True)
 class Scan:
@@ -622,13 +625,14 @@ def scan_media(
 
     The picture is decoded on the NVIDIA card where that is faster (see
     `card_decode_args`). A file that fails on the card is scanned once more
-    in software, and the card's log is kept beside the log as `.card`, which
-    is what `get_job` reads to tell the AI. Only when the software scan then
-    succeeds was the card at fault: the card is not used again until the
-    record `stop_decoding_on_card` wrote is deleted. When the software scan
-    fails too, the file is at fault, its failure comes through after being
-    read twice, and the card stays on. The progress starts again from nothing
-    for the second scan.
+    in software, and the card's log is kept beside the log. Only when the
+    software scan then succeeds was the card at fault: the card's log is
+    renamed `.card`, which is what `get_job` reads to tell the AI, and the
+    card is not used again until the record `stop_decoding_on_card` wrote is
+    deleted. When the software scan fails too, the file is at fault, its
+    failure comes through after being read twice, the card's log keeps the
+    name `.card-tried`, and the card stays on. The progress starts again
+    from nothing for the second scan.
 
     Args:
         asset: Asset to scan.
@@ -668,8 +672,9 @@ def scan_media(
         # each scan already under way, not one per file.
         if not card:
             raise
-        os.replace(log_path, log_path + CARD_LOG_SUFFIX)
+        os.replace(log_path, log_path + CARD_TRIED_SUFFIX)
         run_ffmpeg(head + tail, log_path, duration, on_progress, is_cancelled)
+        os.replace(log_path + CARD_TRIED_SUFFIX, log_path + CARD_LOG_SUFFIX)
         stop_decoding_on_card(asset.path, str(exc))
 
     with open(log_path, encoding="utf-8", errors="replace") as log_file:
