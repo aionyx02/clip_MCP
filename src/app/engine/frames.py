@@ -5,6 +5,7 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Optional, Sequence, Tuple
 
 from PIL import Image, ImageDraw, ImageEnhance, ImageFilter, ImageFont
+from pydantic import BaseModel
 
 from app.engine import cards, resources, stills
 from app.engine.builder import WHOLE_DIM
@@ -14,6 +15,73 @@ from app.engine.reframe import Placement
 TILE_SIZE = 320
 TILE_GAP = 6
 LABEL_FONT_SIZE = 18
+
+# How many columns and rows today's default storyboard has: twelve 16:9 tiles at TILE_SIZE.
+DEFAULT_SHEET_COLUMNS = 4
+DEFAULT_SHEET_ROWS = 3
+# Provisional: the pixels in today's default sheet — four columns and three rows of 16:9 tiles at
+# TILE_SIZE, with TILE_GAP between and around them. Fewer frames get larger tiles rather than a
+# larger sheet, so looking closer does not cost more to send than the default does; twelve or more
+# keep the default tile size.
+SHEET_PIXEL_BUDGET = (
+    (DEFAULT_SHEET_COLUMNS * TILE_SIZE + (DEFAULT_SHEET_COLUMNS + 1) * TILE_GAP)
+    * (DEFAULT_SHEET_ROWS * round(TILE_SIZE * 9 / 16) + (DEFAULT_SHEET_ROWS + 1) * TILE_GAP)
+)
+
+class Crop(BaseModel):
+    """A part of a frame, as fractions of the frame's width and height.
+
+    `x` and `y` are the top-left corner, so the part runs from `x` to
+    `x + width` across and from `y` to `y + height` down.
+    """
+
+    x: float = 0
+    y: float = 0
+    width: float = 1
+    height: float = 1
+
+def _tile_shape(box: int, aspect: float) -> Tuple[int, int]:
+    """The width and height of a tile fitted into a square box at a given ratio."""
+    if aspect >= 1:
+        return box, max(1, round(box / aspect))
+    return max(1, round(box * aspect)), box
+
+def tile_size_for(count: int, aspect: float) -> Tuple[int, int]:
+    """Choose how many columns and how large a box a sheet of `count` tiles should use.
+
+    The sheet keeps within the pixels today's default sheet takes, so asking
+    for fewer frames gives each one a larger tile rather than a larger sheet.
+
+    Args:
+        count: Number of tiles on the sheet.
+        aspect: Tile width divided by height.
+
+    Returns:
+        `(columns, box)`: the most tiles per row, at most four, and the side
+        of the square box each tile is fitted into. The box is never smaller
+        than TILE_SIZE, so a sheet of twelve or more looks as it always has.
+    """
+    count = max(1, count)
+    columns = min(4, math.ceil(math.sqrt(count)))
+    rows = math.ceil(count / columns)
+
+    def fits(box: int) -> bool:
+        width, height = _tile_shape(box, aspect)
+        return (
+            (columns * width + (columns + 1) * TILE_GAP)
+            * (rows * height + (rows + 1) * TILE_GAP)
+        ) <= SHEET_PIXEL_BUDGET
+
+    low, high = TILE_SIZE, TILE_SIZE
+    while fits(high):
+        low, high = high, high * 2
+    while low < high - 1:
+        middle = (low + high) // 2
+        if fits(middle):
+            low = middle
+        else:
+            high = middle
+    return columns, max(TILE_SIZE, low)
 
 # How wide a cover is where people first see it: a third of a phone's 1080 pixels in a
 # profile grid, and not much more in a feed or beside another video. A cover that reads
@@ -65,7 +133,14 @@ def format_timestamp(seconds: float) -> str:
     text = f"{minutes:02d}:{rest // 10:02d}.{rest % 10}"
     return f"{hours}:{text}" if hours else text
 
-def extract_frame(path: str, seconds: float, max_size: int = TILE_SIZE, ffmpeg_bin: str = "ffmpeg") -> Image.Image:
+def extract_frame(
+    path: str,
+    seconds: float,
+    max_size: int = TILE_SIZE,
+    ffmpeg_bin: str = "ffmpeg",
+    crop: Optional[Crop] = None,
+    box: Optional[int] = None,
+) -> Image.Image:
     """Decode a single video frame, scaled to fit a square box.
 
     Waits for one of the server's decoding slots first, so several sheets
@@ -75,8 +150,14 @@ def extract_frame(path: str, seconds: float, max_size: int = TILE_SIZE, ffmpeg_b
     Args:
         path: Media file to read.
         seconds: Time of the frame in the file.
-        max_size: Maximum width and height of the returned image in pixels.
+        max_size: Maximum width and height of the returned image in pixels,
+            as the default path has always applied it. Ignored when `box` is
+            given.
         ffmpeg_bin: Path to, or name of, the FFmpeg executable.
+        crop: Part of the frame to take before scaling, as fractions of it.
+        box: An explicit square box to fit the frame into. The frame is then
+            never enlarged past the pixels it has, so a small source stays
+            small; `crop` is applied before that fit.
 
     Returns:
         The frame as an RGB image.
@@ -87,6 +168,15 @@ def extract_frame(path: str, seconds: float, max_size: int = TILE_SIZE, ffmpeg_b
     """
     # A photo is the same picture at every moment, and seeking into one finds nothing.
     seek = [] if stills.is_image(path) else ["-ss", f"{max(seconds, 0):.3f}"]
+    if box is None:
+        # The default path keeps the filter it has always used, so no other caller changes.
+        filters = f"scale={max_size}:{max_size}:force_original_aspect_ratio=decrease"
+    else:
+        parts = []
+        if crop is not None:
+            parts.append(f"crop=iw*{crop.width}:ih*{crop.height}:iw*{crop.x}:ih*{crop.y}")
+        parts.append(f"scale='min(iw,{box})':'min(ih,{box})':force_original_aspect_ratio=decrease")
+        filters = ",".join(parts)
     # Wait for a slot, then decode on one thread: a single frame is wanted, and frame
     # threading would hold several decoded pictures of a 4K source in memory to produce it.
     with resources.decoder_slot():
@@ -95,7 +185,7 @@ def extract_frame(path: str, seconds: float, max_size: int = TILE_SIZE, ffmpeg_b
                 ffmpeg_bin, "-hide_banner", "-loglevel", "error", "-nostdin",
                 "-threads", "1", *seek, "-i", path,
                 "-map", "0:V:0", "-frames:v", "1",
-                "-vf", f"scale={max_size}:{max_size}:force_original_aspect_ratio=decrease",
+                "-vf", filters,
                 "-f", "image2pipe", "-c:v", "png", "-",
             ],
             stdin=subprocess.DEVNULL,
@@ -231,6 +321,8 @@ def storyboard_sheet(
     columns: int = 4,
     ffmpeg_bin: str = "ffmpeg",
     borders: Optional[Sequence[Optional[Tuple[int, int, int]]]] = None,
+    tile_size: Optional[int] = None,
+    crop: Optional[Crop] = None,
 ) -> bytes:
     """Render frames drawn from several videos as one labeled grid image.
 
@@ -249,6 +341,11 @@ def storyboard_sheet(
         columns: Maximum number of tiles per row.
         ffmpeg_bin: Path to, or name of, the FFmpeg executable.
         borders: A colour to frame each tile in, or None, per tile.
+        tile_size: An explicit box for each frame, which is never enlarged
+            past the source's own pixels. None keeps the default TILE_SIZE
+            box, applied as it always has been.
+        crop: Part of each frame to take before scaling, as fractions of it.
+            None takes the whole frame.
 
     Returns:
         The grid encoded as JPEG.
@@ -256,11 +353,18 @@ def storyboard_sheet(
     Raises:
         RuntimeError: If a frame cannot be decoded.
     """
+    base = TILE_SIZE if tile_size is None else tile_size
+
+    def decode(shot: Tuple) -> Image.Image:
+        if tile_size is None and crop is None:
+            return extract_frame(shot[0], shot[1], ffmpeg_bin=ffmpeg_bin)
+        return extract_frame(shot[0], shot[1], ffmpeg_bin=ffmpeg_bin, crop=crop, box=base)
+
     with ThreadPoolExecutor(max_workers=resources.max_decoders()) as pool:
-        frames = list(pool.map(lambda shot: extract_frame(shot[0], shot[1], ffmpeg_bin=ffmpeg_bin), shots))
+        frames = list(pool.map(decode, shots))
     if aspect is not None:
         # One size for every tile, so sources of different shapes line up in the grid.
-        size = (TILE_SIZE, max(1, round(TILE_SIZE / aspect))) if aspect >= 1 else (max(1, round(TILE_SIZE * aspect)), TILE_SIZE)
+        size = (base, max(1, round(base / aspect))) if aspect >= 1 else (max(1, round(base * aspect)), base)
         frames = [
             _crop_to_aspect(frame, aspect, shot[3] if len(shot) > 3 else None).resize(size, Image.LANCZOS)
             for frame, shot in zip(frames, shots)
