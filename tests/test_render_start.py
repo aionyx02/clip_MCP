@@ -40,6 +40,28 @@ TOLERANCE_SAMPLES = 1
 REFERENCE_SAMPLES = TOLERANCE_SAMPLES
 
 
+def _make_bursts(folder: Path, picture: bool) -> Tuple[str, Path]:
+    """Write a 22.05 kHz AAC file of noise bursts, with or without a picture, and import it.
+
+    Returns:
+        `(asset_id, path)`.
+    """
+    path = folder / ("bursts.mp4" if picture else "bursts.m4a")
+    gate = "+".join(f"between(t,{start},{end})" for start, end in BURSTS)
+    video = ["-f", "lavfi", "-i", "color=c=black:size=320x240:rate=30:duration=6"] if picture else []
+    sound = "1:a" if picture else "0:a"
+    mapping = ["-map", "0:v", "-map", "[a]", "-c:v", "libx264", "-preset", "ultrafast",
+               "-pix_fmt", "yuv420p"] if picture else ["-map", "[a]"]
+    result = subprocess.run([
+        "ffmpeg", "-y", "-loglevel", "error", *video,
+        "-f", "lavfi", "-i", "anoisesrc=d=6:c=white:r=22050:a=0.5",
+        "-filter_complex", f"[{sound}]volume='{gate}':eval=frame[a]", *mapping,
+        "-c:a", "aac", "-ar", "22050", "-b:a", "96k", "-shortest", str(path),
+    ], capture_output=True)
+    assert result.returncode == 0, result.stderr.decode("utf-8", errors="replace")
+    return import_asset(str(path))["id"], path
+
+
 @pytest.fixture(scope="module")
 def bursts(tmp_path_factory: pytest.TempPathFactory) -> Tuple[str, Path]:
     """A 22.05 kHz AAC file of noise bursts, with a picture, and its asset ID.
@@ -48,19 +70,18 @@ def bursts(tmp_path_factory: pytest.TempPathFactory) -> Tuple[str, Path]:
         `(asset_id, path)`. The sound is what makes a seek near the start of an
         AAC file visible; the picture is there so the file renders like footage.
     """
-    path = tmp_path_factory.mktemp("bursts") / "bursts.mp4"
-    gate = "+".join(f"between(t,{start},{end})" for start, end in BURSTS)
-    result = subprocess.run([
-        "ffmpeg", "-y", "-loglevel", "error",
-        "-f", "lavfi", "-i", "color=c=black:size=320x240:rate=30:duration=6",
-        "-f", "lavfi", "-i", "anoisesrc=d=6:c=white:r=22050:a=0.5",
-        "-filter_complex", f"[1:a]volume='{gate}':eval=frame[a]",
-        "-map", "0:v", "-map", "[a]",
-        "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
-        "-c:a", "aac", "-ar", "22050", "-b:a", "96k", "-shortest", str(path),
-    ], capture_output=True)
-    assert result.returncode == 0, result.stderr.decode("utf-8", errors="replace")
-    return import_asset(str(path))["id"], path
+    return _make_bursts(tmp_path_factory.mktemp("bursts"), picture=True)
+
+
+@pytest.fixture(scope="module")
+def bursts_alone(tmp_path_factory: pytest.TempPathFactory) -> Tuple[str, Path]:
+    """The same sound with no picture, and its asset ID.
+
+    Returns:
+        `(asset_id, path)`. Without a picture, a seek in the file lands off at
+        most starts, not only at the first: #154's 22.05 kHz audio-only case.
+    """
+    return _make_bursts(tmp_path_factory.mktemp("bursts_alone"), picture=False)
 
 
 def lag_samples(heard: numpy.ndarray, source: numpy.ndarray, offset: float) -> int:
@@ -423,6 +444,39 @@ def test_the_playback_repair_with_hiss_cleanup_lands_where_one_without_it_does(
         heard.append(numpy.asarray(read_samples(str(part)), dtype=numpy.float64))
     lag = relative_lag(heard[1], heard[0], round(WINDOW_SECONDS * SAMPLE_RATE))
     assert abs(lag) <= TOLERANCE_SAMPLES, lag
+
+
+@pytest.mark.parametrize("source", ["bursts", "bursts_alone"])
+@pytest.mark.parametrize("start", [0.0, 0.3, 0.7, 1.0, 2.37, 4.0])
+def test_the_playback_repair_lands_where_the_source_says(
+    source: str, request: pytest.FixtureRequest, tmp_path: Path, start: float,
+) -> None:
+    """A seek in a 22.05 kHz AAC file lands up to 25 ms off (#154): with a picture at the first
+    start, without one at most starts. The copy is cut after decoding instead."""
+    asset_id, path = request.getfixturevalue(source)
+    asset = repo.get_assets([asset_id])[asset_id]
+    clip = Clip(id="c", asset_id=asset_id, source_range=TimeRange(start=Decimal(str(start)),
+                end=Decimal(str(start + 1.5))), timeline_in=Decimal(0), cleanup=VoiceCleanup(rumble=True))
+    part = tmp_path / "rumble.m4a"
+    result = subprocess.run(playback.repair_command(clip, asset, str(part)), capture_output=True)
+    assert result.returncode == 0, result.stderr.decode("utf-8", errors="replace")
+    heard = read_samples(str(part))
+    assert abs(lag_samples(heard, read_samples(str(path)), start)) <= TOLERANCE_SAMPLES
+    # Cut after decoding, the length counts from the clip's start, not from where the seek landed.
+    assert abs(len(heard) - 1.5 * SAMPLE_RATE) <= 0.025 * SAMPLE_RATE, len(heard) / SAMPLE_RATE
+
+
+def test_a_repaired_sound_cut_another_way_is_named_anew(
+    bursts: Tuple[str, Path], monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A copy cut the old way lands early, so the new way gets a new name and is made again."""
+    asset_id, _ = bursts
+    asset = repo.get_assets([asset_id])[asset_id]
+    clip = Clip(id="c", asset_id=asset_id, source_range=TimeRange(start=Decimal("1"), end=Decimal("2")),
+                timeline_in=Decimal(0), cleanup=VoiceCleanup(rumble=True))
+    name = playback.repair_name(clip, asset)
+    monkeypatch.setattr(playback, "REPAIR_CUT", playback.REPAIR_CUT + 1)
+    assert playback.repair_name(clip, asset) != name
 
 
 @pytest.mark.parametrize("frames", [1, 600, 1199, 4800])
