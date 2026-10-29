@@ -419,7 +419,6 @@ def test_get_job_says_the_card_is_off_for_an_analysis_that_stopped_after_the_sca
     runtime.repo.add_job(stopped)
     assert "Tell the user" in job_queue.get_job([stopped.job_id])["jobs"][0]["note"]
 
-
 def test_get_job_says_nothing_of_the_card_when_software_could_not_read_the_file_either(
     media: Path, tmp_path: Path,
 ) -> None:
