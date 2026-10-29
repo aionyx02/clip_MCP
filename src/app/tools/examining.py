@@ -894,9 +894,9 @@ def get_analysis(
         `shots` carries one record per shot in the range — `exposure`,
         `contrast`, `blur`, `motion` and `shake` — while `sound` and `faces`
         summarise the range's per-second records rather than listing them,
-        since an hour of those is thousands of rows. `sound` levels are RMS in
+        since an hour of those is thousands of rows. `sound`'s levels are in
         dBFS, as its `unit` says, not LUFS, so they do not compare with the
-        render's loudness target. `faces` says how much of
+        render's loudness target; `flatness_max` is not a level. `faces` says how much of
         the range had anybody on screen, how many there usually were, and
         where the largest face sat across the frame and how far it moved,
         which is what a vertical reframe needs. `speakers` lists the stretches

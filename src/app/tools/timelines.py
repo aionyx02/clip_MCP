@@ -351,10 +351,10 @@ def query_clips(
             picture goes soft, a sharp shot near 5; `motion` is how much
             changes from frame to frame, 0 locked off; `shake` is how unsteady
             the camera was, near 0 on a tripod or an even pan and far higher
-            handheld. Sound, in dBFS: `loudness`, `peak`, `noise_floor` (the
-            hiss under everything) and `flatness`, high where the waveform is
-            squared off, so a `peak` near 0 with a high `flatness` is a
-            clipped recording. Faces: `faces` is how many were up, averaged
+            handheld. Sound: `loudness`, `peak` and `noise_floor` (the hiss
+            under everything) in dBFS, and `flatness`, which is not a level:
+            high where the waveform is squared off, so a `peak` near 0 with a
+            high `flatness` is a clipped recording. Faces: `faces` is how many were up, averaged
             over the clip; `face_share` how much of the frame the largest
             filled (close-up against wide); `face_x` and `face_y` where it
             sat, 0 to 1 across and down. Faces are found, not people: 0 means

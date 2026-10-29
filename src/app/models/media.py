@@ -168,14 +168,15 @@ class ShotMeasurement(Measured):
 SILENCE_DB = -120.0
 
 class SoundMeasurement(Measured):
-    """What the sound was like over one second, in decibels relative to full scale."""
+    """What the sound was like over one second: levels in decibels relative to full scale, and flatness."""
 
     loudness: float = Field(..., description="RMS level; -120 stands for digital silence")
     peak: float = Field(..., description="Loudest sample in the window; near 0 means it is at the ceiling")
     noise_floor: float = Field(..., description="Level of the quietest part, which is the hiss under everything")
     flatness: float = Field(
         ...,
-        description="How flat the waveform is where it peaks. A clipped recording peaks near 0 dB and is flat there, "
+        description="How flat the waveform is where it peaks, in decibels of how many samples in a row sit at the "
+                    "peak (0 when no two in a row do), not dBFS. A clipped recording peaks near 0 dB and is flat there, "
                     "so a high peak together with a high flatness is what clipping looks like",
     )
 
