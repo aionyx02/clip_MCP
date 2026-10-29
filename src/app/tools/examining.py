@@ -897,9 +897,13 @@ def get_analysis(
         since an hour of those is thousands of rows. `faces` says how much of
         the range had anybody on screen, how many there usually were, and
         where the largest face sat across the frame and how far it moved,
-        which is what a vertical reframe needs. `speakers` lists the stretches
-        each voice held; the labels are this file's own and mean nothing
-        outside it. `rhythm` is for a file in the music library, and gives
+        which is what a vertical reframe needs. A face on a photo, a poster or
+        a screen counts too, and nothing measured tells it from a person's, so
+        before saying somebody is on screen, look with `view_frames` from
+        `largest_face_at` to a second after it. That is the largest face only:
+        a narrower `start` and `end` here gives each stretch its own.
+        `speakers` lists the stretches each voice held; the labels are this
+        file's own and mean nothing outside it. `rhythm` is for a file in the music library, and gives
         the `tempo` in beats per minute and the `beats` in the range; its `tempo` is null when the music has no steady pulse, and
         the whole of it is null for footage, or for music analyzed before
         beats were measured. `music`, for a song, has the `moods` and
