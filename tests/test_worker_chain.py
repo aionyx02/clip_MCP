@@ -536,6 +536,35 @@ def _let_go_before(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, transcribe: 
     assert clocked == [after] and seen == [after]
 
 
+def test_on_the_card_only_the_workers_share_of_the_speech_model_counts_as_system_memory() -> None:
+    assert resources.analysis_memory_bytes(True, "large-v3-turbo", device="cuda") == (
+        resources.WHISPER_ON_CARD_BYTES + resources.DETECTION_BYTES)
+    assert resources.analysis_memory_bytes(True, "large-v3-turbo", device="cpu") == (
+        resources.whisper_memory_bytes("large-v3-turbo") + resources.DETECTION_BYTES)
+
+
+def test_where_speech_runs_makes_no_difference_when_nothing_is_transcribed() -> None:
+    assert (resources.analysis_memory_bytes(False, "large-v3-turbo", device="cuda")
+            == resources.analysis_memory_bytes(False, "large-v3-turbo", device="cpu"))
+
+
+@pytest.mark.parametrize("device", ["cuda", "cpu"])
+def test_a_queued_analysis_is_estimated_for_the_device_speech_will_run_on(
+    monkeypatch: pytest.MonkeyPatch, device: str,
+) -> None:
+    from app import runtime
+    from app.engine import machine
+    from app.tools import examining
+
+    monkeypatch.setattr(machine, "whisper_device", lambda: device)
+    monkeypatch.setattr(runtime.job_manager, "start_job", lambda job, spec: job)
+    asset = Asset(id="a", path="a.mp4", duration=10, has_video=True, has_audio=True)
+    job = examining.start_analysis(asset, True, "accurate", diarize=False)
+    model = examining.whisper_model_for("accurate").split(examining.BALANCED_JOIN)[-1]
+    assert job.memory_estimate == resources.analysis_memory_bytes(
+        True, model, duration=10.0, detect_faces=True, device=device)
+
+
 @pytest.mark.parametrize("has_video, expected", [(False, False), (True, True)])
 def test_an_analysis_specification_says_what_was_asked_and_whether_it_will_transcribe(
     monkeypatch: pytest.MonkeyPatch, has_video: bool, expected: bool,

@@ -51,6 +51,12 @@ WHISPER_MODEL_BYTES = {
     "large-v3": 4500 * MEGABYTE,
 }
 DEFAULT_WHISPER_BYTES = 2600 * MEGABYTE
+# Provisional: the system memory a worker holds while the speech model runs on the card, where the
+# weights sit in the card's own memory. Measured with large-v3-turbo on an RTX 4060 Laptop,
+# 2026-10-29: 616 MB held after transcribing 30 s, rounded up. The working set peaks at about
+# 1.7 GB for a moment around the first transcription; the scheduler reads real free memory once a
+# job has warmed up, so it is the held figure that decides. Other models are not measured.
+WHISPER_ON_CARD_BYTES = 650 * MEGABYTE
 
 # Above this many inputs, each decoder is held to one thread: frame threading keeps
 # several decoded pictures in flight per input, which a hundred inputs cannot afford.
@@ -255,6 +261,7 @@ def analysis_memory_bytes(
     duration: float = 0.0,
     diarize: bool = False,
     detect_faces: bool = False,
+    device: str = "cpu",
 ) -> int:
     """Estimate what analyzing one asset needs.
 
@@ -262,7 +269,8 @@ def analysis_memory_bytes(
     than their sum, with one exception: the speech model. A worker keeps it
     loaded from the transcription to the end of the file, and on to the next
     file that transcribes with it (#110), so it is counted alongside the
-    largest of the other stages rather than as one of them.
+    largest of the other stages rather than as one of them. On the card the
+    weights sit in the card's memory, so only the worker's share is counted.
 
     Args:
         transcribe: Whether speech recognition runs as well as detection.
@@ -271,6 +279,7 @@ def analysis_memory_bytes(
             cost follows.
         diarize: Whether voices are told apart as well.
         detect_faces: Whether faces are looked for.
+        device: Where speech recognition runs, `cuda` or `cpu`.
 
     Returns:
         The estimate in bytes.
@@ -280,7 +289,9 @@ def analysis_memory_bytes(
         stages.append(FACE_DETECTION_BYTES)
     if diarize:
         stages.append(DIARIZATION_BYTES + int(max(0.0, duration) * DIARIZATION_BYTES_PER_SECOND))
-    held = whisper_memory_bytes(model_name) if transcribe else 0
+    held = 0
+    if transcribe:
+        held = WHISPER_ON_CARD_BYTES if device == "cuda" else whisper_memory_bytes(model_name)
     return held + max(stages)
 
 def render_memory_bytes(input_count: int) -> int:
