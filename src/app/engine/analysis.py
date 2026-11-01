@@ -24,6 +24,7 @@ from app.engine.ffmpeg import (
     OperationCancelled,
     card_decode_args,
     escape_filter_path,
+    exact_stretch_args,
     hidden_window_flags,
     run_ffmpeg,
     stop_decoding_on_card,
@@ -1418,7 +1419,8 @@ def refine_unsure_lines(
             raise OperationCancelled()
         piece = os.path.join(work_dir, f"refine_{index:04d}.wav")
         cut = subprocess.run(
-            [ffmpeg_bin, "-y", "-v", "error", "-ss", f"{start:.3f}", "-t", f"{end - start:.3f}", "-i", path,
+            # Its word times go back into the transcript, so it starts exactly where it says (#171).
+            [ffmpeg_bin, "-y", "-v", "error", *exact_stretch_args(path, start, end),
              "-vn", "-ac", "1", "-ar", "16000", piece],
             stdin=subprocess.DEVNULL, capture_output=True, text=True, encoding="utf-8", errors="replace",
             creationflags=hidden_window_flags(),

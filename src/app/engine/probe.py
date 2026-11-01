@@ -182,10 +182,11 @@ def speech_loudness(
         The integrated loudness in LUFS, or nothing when the file cannot be
         read or the stretch is silent.
     """
-    from app.engine.ffmpeg import hidden_window_flags
+    from app.engine.ffmpeg import exact_stretch_args, hidden_window_flags
 
+    # A stretch can be as short as its clip, and a seek an AAC frame off left a short one unreadable (#171).
     result = subprocess.run(
-        [ffmpeg_bin, "-hide_banner", "-nostats", "-ss", f"{start:.3f}", "-t", f"{duration:.3f}", "-i", filepath,
+        [ffmpeg_bin, "-hide_banner", "-nostats", *exact_stretch_args(filepath, start, start + duration),
          "-vn", "-af", "ebur128", "-f", "null", "-"],
         stdin=subprocess.DEVNULL, capture_output=True, creationflags=hidden_window_flags(),
     )

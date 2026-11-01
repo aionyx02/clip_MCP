@@ -23,7 +23,7 @@ from typing import List, Optional, Sequence
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
-from app.engine.ffmpeg import FFmpegFailed, hidden_window_flags
+from app.engine.ffmpeg import FFmpegFailed, exact_stretch_args, hidden_window_flags
 from app.models.timeline.parts import Project
 
 # Levels are read in windows this long: short enough to see a word, long enough not to
@@ -82,7 +82,7 @@ def cut_sound(path: str, start: float, end: float, keep_as: str, ffmpeg_bin: str
     """
     os.makedirs(os.path.dirname(keep_as), exist_ok=True)
     cut = subprocess.run(
-        [ffmpeg_bin, "-y", "-v", "error", "-ss", f"{start:.3f}", "-t", f"{end - start:.3f}", "-i", path,
+        [ffmpeg_bin, "-y", "-v", "error", *exact_stretch_args(path, start, end),
          "-vn", "-ac", "1", "-ar", "16000", keep_as],
         stdin=subprocess.DEVNULL, capture_output=True, text=True, encoding="utf-8", errors="replace",
         creationflags=hidden_window_flags(),

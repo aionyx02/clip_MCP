@@ -9,6 +9,14 @@ from typing import Callable, List, Optional
 
 POLL_INTERVAL_SECONDS = 0.5
 TERMINATE_GRACE_SECONDS = 3.0
+# Provisional: how far before a stretch's start FFmpeg seeks in the file, before cutting exactly
+# where it starts. A seek in the file lands up to one AAC frame off, measured at up to 46 ms on
+# an audio-only file at 22.05 kHz and 19 ms at 48 kHz (#154, #171), so the lead must be longer than
+# that: at 0.001 s the copy lands as off as a plain seek, from 0.05 s it lands within a sample. A
+# cut after decoding is exact, and the lead keeps it from
+# decoding the whole file up to there. It takes about 0.05 s longer than a plain seek, measured on
+# an hour of AAC.
+SEEK_LEAD_SECONDS = 1.0
 
 class OperationCancelled(Exception):
     """Raised when a long-running operation stops because cancellation was requested."""
@@ -23,6 +31,26 @@ def hidden_window_flags() -> int:
         `CREATE_NO_WINDOW` on Windows; 0 elsewhere.
     """
     return subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+
+def exact_stretch_args(path: str, start: float, end: float) -> List[str]:
+    """The input arguments that read a stretch of a file from exactly where it starts.
+
+    FFmpeg seeks in the file to `SEEK_LEAD_SECONDS` before the start, and cuts
+    exactly at the start once the sound is decoded. A seek in the file alone
+    lands up to an AAC frame early, even a seek to zero, so there is none when
+    the lead reaches back to the start.
+
+    Args:
+        path: The file.
+        start: Where the stretch starts, in seconds of the file.
+        end: Where it ends.
+
+    Returns:
+        The arguments, to go where `-i path` would.
+    """
+    lead = min(start, SEEK_LEAD_SECONDS)
+    seek = ["-ss", f"{start - lead:.3f}"] if start - lead > 0 else []
+    return [*seek, "-i", path, "-ss", f"{lead:.3f}", "-t", f"{end - start:.3f}"]
 
 def escape_filter_path(path: str) -> str:
     """Make a file path safe to put inside a quoted filtergraph argument.
