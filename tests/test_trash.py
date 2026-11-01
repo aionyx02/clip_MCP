@@ -17,6 +17,9 @@ from app.storage import housekeeping
 from app.workspace import output_dir
 from helpers import build_project, edit, insert, video_track
 
+# Captured at import, before the `room_left_alone` fixture replaces it with a no-op.
+REAL_MAKE_ROOM = rendering._make_room
+
 
 @pytest.fixture
 def client() -> TestClient:
@@ -218,6 +221,58 @@ def test_a_broken_project_in_the_trash_stays_there(tmp_path: Path, monkeypatch: 
     with pytest.raises(ValueError):
         upkeep.restore_from_trash(kept.key)
     assert [item.key for item in housekeeping.in_trash(str(tmp_path))] == [kept.key]
+
+
+def _aged_file(path: Path, size: int, age: float) -> Path:
+    """A file of a given size, last used a given number of seconds ago."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"x" * size)
+    os.utime(path, (time.time() - age, time.time() - age))
+    return path
+
+
+def _aged_folder(folder: Path, size: int, age: float) -> Path:
+    """A folder holding one file, last used a given number of seconds ago."""
+    _aged_file(folder / "made.mp4", size, age)
+    os.utime(folder, (time.time() - age, time.time() - age))
+    return folder
+
+
+@pytest.mark.parametrize("kind", ["previews", "sounds"])
+def test_caches_leave_half_written_files_and_running_jobs_alone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str,
+) -> None:
+    """A .part file and a busy job's folder stay while the rest give their room back."""
+    ordinary = _aged_file(tmp_path / "cache" / "proxies" / "playback.mp4", 1000, 100)
+    partial = _aged_file(tmp_path / "cache" / "proxies" / "x.mp4.part", 2000, 9000)
+    busy = _aged_folder(tmp_path / "temp" / kind / "project" / "busy-job", 3000, 8000)
+    idle = _aged_folder(tmp_path / "temp" / kind / "project" / "idle-job", 4000, 5000)
+
+    monkeypatch.setattr(housekeeping.shutil, "disk_usage", lambda path: SimpleNamespace(free=FREE))
+    freed = housekeeping.give_cache_back(
+        str(tmp_path), {"busy-job"}, floor=FREE + 10 ** 9, headroom=10 ** 12,
+    )
+
+    assert partial.exists() and busy.exists()
+    assert not ordinary.exists() and not idle.exists()
+    assert freed == 1000 + 4000
+
+
+def test_room_is_made_at_most_once_per_interval(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The real check asks for room once, and not again until `ROOM_CHECK_SECONDS` have passed."""
+    assert REAL_MAKE_ROOM.__name__ == "_make_room"
+    calls = []
+    monkeypatch.setattr(rendering, "_room_checked", time.monotonic() - rendering.ROOM_CHECK_SECONDS - 1)
+    monkeypatch.setattr(rendering.housekeeping, "give_cache_back", lambda *args: calls.append(args))
+    monkeypatch.setattr(runtime.repo, "active_job_ids", lambda: {"job-a", "job-b"})
+
+    REAL_MAKE_ROOM()
+    REAL_MAKE_ROOM()
+    assert calls == [(runtime.WORKSPACE_DIR, {"job-a", "job-b"})]
+
+    monkeypatch.setattr(rendering, "_room_checked", time.monotonic() - rendering.ROOM_CHECK_SECONDS - 1)
+    REAL_MAKE_ROOM()
+    assert len(calls) == 2
 
 
 def test_other_versions_of_a_video_with_no_name_are_not_let_go(media: Path) -> None:
