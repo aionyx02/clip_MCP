@@ -1013,7 +1013,7 @@ def _in_script_of(transcript: Transcript, prompt: str) -> str:
     """
     if transcript.chinese_variant is None or transcript.language not in CHINESE_LANGUAGES:
         return prompt
-    line = TranscriptSegment(start=0, end=0, text=prompt, words=[])
+    line = TranscriptSegment(start=0, end=0, text=prompt, words=[TranscriptWord(text=prompt, start=0, end=0)])
     return convert_chinese_variant([line], transcript.chinese_variant)[0].text
 
 def prompt_check(transcript: Transcript, start: float, end: float) -> Optional[dict]:
