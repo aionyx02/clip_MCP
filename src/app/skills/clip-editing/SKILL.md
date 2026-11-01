@@ -208,7 +208,7 @@ was not there to agree to them.
 6. If the user asked for captions, set the caption style first (the platform
    file), because each caption is proposed one line wide for that style. Then
    call `generate_subtitles` and read every line it returns — transcripts
-   mishear names — starting with its `to_check`, the lines nobody has read
+   mishear names, even ones in the `prompt`, whose spellings `get_analysis`' `prompt_check` offers — starting with its `to_check`, the lines nobody has read
    yet, unsure ones first; `get_subtitles` says where each came from and
    marks the unsure words. Correct a line with `edit_subtitle` (`cue_id`; times in the
    cut with `timeline_start`/`timeline_end`), add one with `add_subtitle`, and

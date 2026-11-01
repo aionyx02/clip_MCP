@@ -71,3 +71,44 @@ def test_words_carry_their_probability_when_asked_for(analysed: str) -> None:
 def test_the_stored_transcript_never_holds_the_marks(analysed: str) -> None:
     examining.get_analysis(analysed)
     assert "⟦" not in runtime.repo.get_analysis(analysed).transcript.segments[1].text
+
+def _check(*lines: TranscriptSegment, prompt: str) -> dict:
+    return analysis.prompt_check(Transcript(language="zh", model="m", segments=list(lines), prompt=prompt), 0, 100)
+
+def test_an_unsure_stretch_that_reads_like_a_name_in_the_prompt_is_offered() -> None:
+    line = segment(word("黃", 0, SURE), word("家", 0.2, UNSURE), word("瑋", 0.4, SURE))
+    assert _check(line, prompt="黃嘉瑋")["offers"] == [
+        {"heard": "黃家瑋", "suggested": "黃嘉瑋", "start": 0, "end": line.words[-1].end, "exact": True}]
+
+def test_a_stretch_nobody_doubted_is_not_offered() -> None:
+    line = segment(word("黃", 0, SURE), word("家", 0.2, SURE), word("瑋", 0.4, SURE))
+    assert _check(line, prompt="黃嘉瑋")["offers"] == []
+
+def test_words_of_several_characters_are_read_character_by_character() -> None:
+    assert _check(segment(word("小蘇", 0, UNSURE)), prompt="小舒")["offers"][0]["suggested"] == "小舒"
+
+def test_a_reading_that_is_only_close_says_so() -> None:
+    offered = _check(segment(word("張", 0, UNSURE), word("三", 0.2, SURE)), prompt="臧三")["offers"]
+    assert [offer["exact"] for offer in offered] == [False]
+
+def test_a_name_already_right_is_not_offered_and_one_never_said_is_listed() -> None:
+    found = _check(segment(word("黃嘉瑋", 0, UNSURE)), prompt="黃嘉瑋，Kubernetes，陳大文")
+    assert found["offers"] == []
+    assert found["not_heard"] == ["Kubernetes", "陳大文"]
+
+def test_offers_never_change_what_is_stored(analysed: str) -> None:
+    stored = runtime.repo.get_analysis(analysed)
+    runtime.repo.save_analysis(stored.model_copy(update={
+        "transcript": stored.transcript.model_copy(update={"prompt": "阿尼克司"})}))
+    found = examining.get_analysis(analysed)
+    assert found["prompt_check"]["offers"][0]["suggested"] == "阿尼克司"
+    assert runtime.repo.get_analysis(analysed).transcript.segments[1].text == "我是阿尼克斯"
+
+def test_without_a_prompt_there_is_no_check_to_read(analysed: str) -> None:
+    assert "prompt_check" not in examining.get_analysis(analysed)
+
+def test_a_prompt_is_kept_in_the_script_the_transcript_was_converted_to() -> None:
+    converted = Transcript(language="zh", model="m", chinese_variant="zh-TW", segments=[])
+    assert analysis._in_script_of(converted, "软件") == "軟體"
+    assert analysis._in_script_of(Transcript(language="zh", model="m", segments=[]), "软件") == "软件"
+    assert analysis._in_script_of(converted.model_copy(update={"language": "en"}), "软件") == "软件"

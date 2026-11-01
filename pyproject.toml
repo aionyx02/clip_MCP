@@ -36,6 +36,7 @@ dependencies = [
     # files this server fetches and stores itself, and none of them is gated.
     "sherpa-onnx>=1.13",
     "typing-extensions>=4.16.0",
+    "pypinyin>=0.55.0",
 ]
 
 [project.scripts]

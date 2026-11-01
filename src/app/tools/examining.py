@@ -19,7 +19,8 @@ from app.models.job import Job, JobKind
 from app.engine import clap, machine, resources, speed
 from app.engine.analysis import listen_again as listen_again_in_file
 from app.engine.analysis import (
-    BALANCED_JOIN, current_recipe, doubtful_spots, marked_text, sound_note, transcription_of, unsure_words,
+    BALANCED_JOIN, current_recipe, doubtful_spots, marked_text, prompt_check, sound_note, transcription_of,
+    unsure_words,
     whisper_model_for, whisper_model_name,
 )
 from app.engine.diarize import speaker_model_name
@@ -886,6 +887,14 @@ def get_analysis(
         `segments` with `start`, `end`, and `text`), or null for `transcript`
         if speech was not transcribed.
 
+        When a prompt was given, `prompt_check` sets its names against what
+        was heard: `offers` are unsure stretches in the range that read like
+        one of them (`heard`, `suggested`, `start`, `end`, and `exact`, false
+        when the reading is only close), `more_offers` how many were left out,
+        and `not_heard` the terms found nowhere in the transcript. The
+        transcript is not changed by them: they only read alike, so decide by
+        what the footage is about, and correct as below.
+
         In `text`, words the speech model was unsure of are wrapped in ⟦ ⟧.
         The marks are only here: captions and the video never carry them, so
         never copy them into anything the user will see. Read the marked
@@ -948,6 +957,7 @@ def get_analysis(
             ],
         }
     notes = shared.get_asset(asset_id).notes
+    checked = None if analysis.transcript is None else prompt_check(analysis.transcript, start, end)
     return {
         "asset_id": asset_id,
         **({"notes": notes} if notes else {}),
@@ -957,6 +967,7 @@ def get_analysis(
         "stale": is_stale(analysis),
         "transcription": transcription_kind(analysis),
         "doubtful_spots": None if analysis.transcript is None else doubtful_spots(analysis.transcript.segments),
+        **({"prompt_check": checked} if checked is not None else {}),
         "range": {"start": start, "end": end},
         "scenes": shared.overlapping(analysis.scenes, start, end),
         "black_frames": shared.overlapping(analysis.black_frames, start, end),

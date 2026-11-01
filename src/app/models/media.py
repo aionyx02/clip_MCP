@@ -112,15 +112,16 @@ class Transcript(BaseModel):
     model: str = Field(..., description="Speech recognition model that produced the transcript")
     chinese_variant: Optional[str] = Field(default=None, description="Chinese variant the text was converted to, such as 'zh-TW'")
     segments: List[TranscriptSegment] = Field(default_factory=list)
+    prompt: Optional[str] = Field(default=None, description="Text given to guide transcription, kept to check against")
 
 class Measured(BaseModel):
     """A stretch of a file, and numbers measured over the whole of it.
 
     Subclasses add the numbers. Everything else about them is the same, and
     the code that averages a measurement onto a clip relies on that: every
-    field but `start` and `end` is a number it can weight by overlap, and a
-    field left null is one that was not measured rather than one measured as
-    zero.
+    field but `start`, `end` and `momentary`, which is a list of blocks, is a
+    number it can weight by overlap, and a field left null is one that was
+    not measured rather than one measured as zero.
     """
 
     start: float
