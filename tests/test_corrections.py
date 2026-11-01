@@ -809,3 +809,44 @@ def test_a_caption_retimed_shorter_than_its_last_shown_word_keeps_its_own_end() 
     before = project(short, cues=(cue("c1", "甲乙丙", 1, 2.5) | {"words": spelled},))
     after = project(short, cues=(cue("c1", "甲乙丙", 1, 3.0) | {"words": spelled},))
     assert compared(before, after)["captions"] == {**NO_CAPTION_CHANGE, "retimed": 1}
+
+
+def _lines(*texts: str) -> tuple:
+    return tuple(cue(f"c{at}", text, float(at), at + 1.0) for at, text in enumerate(texts))
+
+
+def test_a_word_changed_across_other_line_breaks_is_one_word_and_one_rebreak() -> None:
+    # A second a character, so the moved breaks overlap the old captions as they do in a real transcript.
+    change = compared(project(SHOWN, cues=(cue("a", "我們今天", 0, 4), cue("b", "去海邊玩", 4, 8), cue("c", "很開心", 8, 10))),
+                      project(SHOWN, cues=(cue("d", "我們明天去", 0, 5), cue("e", "海邊玩很", 5, 8.5),
+                                           cue("f", "開心", 8.5, 10))))
+    assert change["captions"]["rewritten"] == 1
+    assert change["captions"]["rebroken"] == 1
+
+
+def test_every_line_changed_in_its_own_place_still_counts_each_line() -> None:
+    clip_of = {"id": "p001", "asset_id": "a", "source_range": {"start": 0, "end": 3}, "timeline_in": 0}
+    change = compared(project(clip_of, cues=_lines("我們今天", "去海邊玩", "很開心")),
+                      project(clip_of, cues=_lines("我們明天", "去山上玩", "不開心")))
+    assert change["captions"]["rewritten"] == 3
+    assert change["captions"]["rebroken"] == 0
+
+
+def test_lines_replaced_by_other_lines_are_not_read_as_one_change() -> None:
+    clip_of = {"id": "p001", "asset_id": "a", "source_range": {"start": 0, "end": 3}, "timeline_in": 0}
+    change = compared(project(clip_of, cues=_lines("我們今天", "去海邊玩", "很開心")),
+                      project(clip_of, cues=_lines("大家好", "歡迎收看", "這部影片")))
+    assert change["captions"]["rewritten"] == 3
+
+
+def test_a_caption_whose_words_would_end_it_before_it_starts_keeps_its_own_times() -> None:
+    from app.engine.corrections import _seen
+    from app.models.timeline.parts import SubtitleCue
+
+    caption = SubtitleCue.model_validate({
+        **cue("c", "abc", 5.0, 6.0),
+        "words": [{"text": "a", "start": 1.0, "end": 1.5}, {"text": "b", "start": 2.0, "end": 2.5},
+                  {"text": "c", "start": 8.0, "end": 8.5}],
+    })
+    found = _seen(caption, {"a": [(0.0, 2.6), (5.0, 6.0)]})
+    assert found == ("abc", (5.0, 6.0))
