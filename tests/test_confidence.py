@@ -106,3 +106,9 @@ def test_offers_never_change_what_is_stored(analysed: str) -> None:
 
 def test_without_a_prompt_there_is_no_check_to_read(analysed: str) -> None:
     assert "prompt_check" not in examining.get_analysis(analysed)
+
+def test_a_prompt_is_kept_in_the_script_the_transcript_was_converted_to() -> None:
+    converted = Transcript(language="zh", model="m", chinese_variant="zh-TW", segments=[])
+    assert analysis._in_script_of(converted, "软件") == "軟體"
+    assert analysis._in_script_of(Transcript(language="zh", model="m", segments=[]), "软件") == "软件"
+    assert analysis._in_script_of(converted.model_copy(update={"language": "en"}), "软件") == "软件"

@@ -1000,6 +1000,22 @@ def _doubtful(word: TranscriptWord) -> bool:
     """Whether the speech model was guessing at this word."""
     return word.probability is not None and word.probability < LOW_CONFIDENCE
 
+def _in_script_of(transcript: Transcript, prompt: str) -> str:
+    """A prompt in the script its transcript was converted to, so the two can be compared.
+
+    Args:
+        transcript: The transcript.
+        prompt: What was given to guide transcription.
+
+    Returns:
+        The prompt converted the way the transcript was, or as it was given
+        when the transcript was not converted.
+    """
+    if transcript.chinese_variant is None or transcript.language not in CHINESE_LANGUAGES:
+        return prompt
+    line = TranscriptSegment(start=0, end=0, text=prompt, words=[])
+    return convert_chinese_variant([line], transcript.chinese_variant)[0].text
+
 def prompt_check(transcript: Transcript, start: float, end: float) -> Optional[dict]:
     """What the prompt's names came out as, for the AI to check.
 
@@ -1830,7 +1846,8 @@ def analyze_media(
         )
     if transcript is not None:
         # Kept so what was asked for can be checked against what was heard.
-        given = prompt or (earlier.transcript.prompt if refining_earlier else None)
+        given = (_in_script_of(transcript, prompt) if prompt
+                 else earlier.transcript.prompt if refining_earlier else None)
         transcript = transcript.model_copy(update={"prompt": given})
     listened: Optional[SecondListen] = None
     if transcript is not None:
