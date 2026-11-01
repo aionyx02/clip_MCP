@@ -146,7 +146,7 @@ def _features(samples: np.ndarray) -> np.ndarray:
 
 def _decode(path: str, start: float, ffmpeg_bin: str) -> np.ndarray:
     """Ten seconds of a file from `start`, mono at the model's rate."""
-    # Ten seconds of what a song sounds like: a seek up to 25 ms early on some AAC does not change that (#171).
+    # Ten seconds of what a song sounds like: a seek an AAC frame early does not change that (#171).
     decoded = subprocess.run(
         [ffmpeg_bin, "-v", "error", "-nostdin", "-ss", f"{start:.3f}", "-t", str(_SECONDS), "-i", path,
          "-vn", "-ac", "1", "-ar", str(_RATE), "-f", "f32le", "-"],

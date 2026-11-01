@@ -9,6 +9,7 @@ import pytest
 
 from app.engine.ffmpeg import SEEK_LEAD_SECONDS, exact_stretch_args
 from app.engine.listen import cut_sound
+from app.engine.probe import speech_loudness
 
 RATE = 16000
 CLICK_AT = 2.5
@@ -70,3 +71,12 @@ def test_a_later_stretch_seeks_a_lead_early_and_cuts_after_decoding() -> None:
     args = exact_stretch_args("a.m4a", 10.0, 12.5)
     assert args == ["-ss", f"{10.0 - SEEK_LEAD_SECONDS:.3f}", "-i", "a.m4a",
                     "-ss", f"{SEEK_LEAD_SECONDS:.3f}", "-t", "2.500"]
+
+
+@pytest.mark.parametrize("start", [1.0, 1.37, 2.03])
+def test_the_loudness_of_a_clip_under_half_a_second_can_be_read_after_any_seek(tmp_path: Path, start: float) -> None:
+    """A seek an AAC frame early cut the head off such a stretch, leaving too little to measure (#171)."""
+    path = tmp_path / "tone.m4a"
+    subprocess.run(["ffmpeg", "-y", "-v", "error", "-f", "lavfi", "-i", "sine=frequency=1000:sample_rate=22050:d=4",
+                    "-vn", "-c:a", "aac", "-b:a", "128k", str(path)], check=True)
+    assert speech_loudness(str(path), start, 0.41) is not None

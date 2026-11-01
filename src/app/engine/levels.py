@@ -31,7 +31,7 @@ from typing import Callable, Dict, List, Mapping, Optional, Tuple
 
 from app.engine.builder import Talking
 from app.engine.delivery import _on_timeline
-from app.engine.ffmpeg import hidden_window_flags
+from app.engine.ffmpeg import exact_stretch_args, hidden_window_flags
 from app.models.media import Asset, MediaAnalysis
 from app.models.timeline.parts import Clip, Project, TrackType
 
@@ -230,9 +230,9 @@ def _mean_volume(path: str, start: float, seconds: float) -> Optional[float]:
     Returns:
         The mean level in dBFS, or None when it cannot be read or is silent.
     """
-    # A mean level over seconds: a seek up to 25 ms early on some AAC changes nothing that matters (#171).
+    # A stretch can be as short as its clip, where a seek an AAC frame off would change the reading (#171).
     result = subprocess.run(
-        ["ffmpeg", "-hide_banner", "-nostats", "-ss", f"{start:.3f}", "-t", f"{seconds:.3f}", "-i", path,
+        ["ffmpeg", "-hide_banner", "-nostats", *exact_stretch_args(path, start, start + seconds),
          "-vn", "-af", "volumedetect", "-f", "null", "-"],
         stdin=subprocess.DEVNULL, capture_output=True, creationflags=hidden_window_flags(),
     )

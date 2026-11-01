@@ -10,9 +10,10 @@ from typing import Callable, List, Optional
 POLL_INTERVAL_SECONDS = 0.5
 TERMINATE_GRACE_SECONDS = 3.0
 # Provisional: how far before a stretch's start FFmpeg seeks in the file, before cutting exactly
-# where it starts. A seek in the file lands up to 25 ms off on AAC at rates other than 48 kHz
-# (#154), so the lead must be longer than that: at 0.001 s the copy lands as off as a plain seek,
-# from 0.05 s it lands within a sample. A cut after decoding is exact, and the lead keeps it from
+# where it starts. A seek in the file lands up to one AAC frame off, measured at up to 46 ms on
+# an audio-only file at 22.05 kHz and 19 ms at 48 kHz (#154, #171), so the lead must be longer than
+# that: at 0.001 s the copy lands as off as a plain seek, from 0.05 s it lands within a sample. A
+# cut after decoding is exact, and the lead keeps it from
 # decoding the whole file up to there. It takes about 0.05 s longer than a plain seek, measured on
 # an hour of AAC.
 SEEK_LEAD_SECONDS = 1.0
@@ -36,8 +37,8 @@ def exact_stretch_args(path: str, start: float, end: float) -> List[str]:
 
     FFmpeg seeks in the file to `SEEK_LEAD_SECONDS` before the start, and cuts
     exactly at the start once the sound is decoded. A seek in the file alone
-    lands up to 25 ms early on AAC at rates other than 48 kHz, even a seek to
-    zero, so there is none when the lead reaches back to the start.
+    lands up to an AAC frame early, even a seek to zero, so there is none when
+    the lead reaches back to the start.
 
     Args:
         path: The file.
