@@ -45,6 +45,7 @@ is called, so importing this module stays light and pure.
 
 import argparse
 import difflib
+import itertools
 import json
 import statistics
 import unicodedata
@@ -403,9 +404,12 @@ def _reworded_runs(olds: List[str], news: List[str]) -> Optional[int]:
 
     Returns:
         The number of runs of text that differ, taken over the whole group;
-        None when comparing the group caption by caption says as much or less,
-        or the group's text is no longer the same lines.
+        None when no break moved, when comparing the group caption by caption
+        says as much or less, or when the group's text is no longer the same
+        lines.
     """
+    if list(itertools.accumulate(map(len, olds))) == list(itertools.accumulate(map(len, news))):
+        return None
     matcher = difflib.SequenceMatcher(None, "".join(olds), "".join(news), autojunk=False)
     runs = sum(1 for tag, *_ in matcher.get_opcodes() if tag != "equal")
     changed = sum(1 for old, new in zip(olds, news) if old != new)
