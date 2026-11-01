@@ -28,14 +28,16 @@ not a line heard wrong. Captions made again after a trim, on other lines
 than before, count as re-broken, since the history does not say who broke
 them. A caption's second line (`secondary`) and its speaker are not
 compared. A restore or an undo is a new version like any other, so what it
-puts back is counted again, under whoever restored it. A branch keeps its own history, so hand
-edits made on a branch before the branch's first AI version with footage in
-it are not counted.
+puts back is counted again, under whoever restored it. A branch keeps its
+own history, so hand edits made on a branch before the branch's first AI
+version with footage in it are not counted.
 
 A version that cannot be read as a project is not compared at all: the
 comparison runs from the last version that could be read to the next one that
 could, and the ones skipped are counted as `unreadable`. Nothing about them
-is guessed at.
+is guessed at. A version with no project file, which is the project having
+been in the trash, is skipped without being counted: a missing file is not
+an unreadable one.
 
 Reading the history lives in `main`, which imports the workspace only when it
 is called, so importing this module stays light and pure.
@@ -76,6 +78,9 @@ MINUTES_PER_SITTING_FLOOR = 1.0
 # How many versions of a project to read: more than any project is likely to have, so
 # that no correction is silently left out of the summary.
 VERSION_LIMIT = 10000
+# A version with no project file in it, which is the project having been in the trash then.
+# Not the same as a file that is there and cannot be read as a project.
+MISSING = object()
 
 # The causes a change is counted under, in the order they are reported when their
 # counts are equal.
@@ -88,8 +93,10 @@ CAUSE_LABELS = {
     "wrong_piece": "選錯片段",
 }
 
-def _readable(project: Optional[Mapping]) -> Optional[Project]:
-    """A stored project as a model, or None when it cannot be read as one."""
+def _readable(project: Any) -> Any:
+    """A stored project as a model, None when it cannot be read, MISSING when there is no file."""
+    if project is MISSING:
+        return MISSING
     if project is None:
         return None
     try:
@@ -97,18 +104,18 @@ def _readable(project: Optional[Mapping]) -> Optional[Project]:
     except ValidationError:
         return None
 
-def _read(versions: List[Tuple[Version, Optional[dict]]]) -> List[Tuple[Version, Optional[Project]]]:
-    """Each version with its project read as a model, None where it cannot be."""
+def _read(versions: List[Tuple[Version, Optional[dict]]]) -> List[Tuple[Version, Any]]:
+    """Each version with its project read as a model, None where it cannot be, MISSING where no file."""
     return [(version, _readable(project)) for version, project in versions]
 
 def _footage_clips(project: Project) -> List[Clip]:
     """The clips of the cut that show footage: the base video track's, title cards left out."""
     return [clip for clip in shown(project) if clip.card is None]
 
-def _first(read: List[Tuple[Version, Optional[Project]]]) -> Optional[int]:
+def _first(read: List[Tuple[Version, Any]]) -> Optional[int]:
     """The index of the first AI version whose cut shows footage, or None."""
     for index, (version, project) in enumerate(read):
-        if version.author.startswith("AI") and project is not None and _footage_clips(project):
+        if version.author.startswith("AI") and isinstance(project, Project) and _footage_clips(project):
             return index
     return None
 
@@ -587,7 +594,9 @@ def _changes_since_first_cut(
     """Compare every version after the AI's first cut with the one before it.
 
     A version that cannot be read as a project is skipped: the next one that
-    can is compared with the last one that could.
+    can is compared with the last one that could. A version with no project
+    file, which is the project having been in the trash, is skipped without
+    being counted.
 
     Args:
         versions: A project's versions, oldest first.
@@ -595,7 +604,8 @@ def _changes_since_first_cut(
     Returns:
         The compared changes made by hand, those made by the AI, the versions
         made by hand, and how many versions after the first cut could not be
-        read — or None when the project has no first cut. The AI's are every
+        read — or None when the project has no first cut. A version with no
+        project file is skipped and not counted. The AI's are every
         AI version after the first cut: those the person asked for, and those
         the AI went on to make by itself (captions, fixes the checks asked
         for), which the history does not tell apart. Versions written by the
@@ -611,6 +621,8 @@ def _changes_since_first_cut(
     unreadable = 0
     previous = read[start][1]
     for version, project in read[start + 1:]:
+        if project is MISSING:
+            continue
         if project is None:
             unreadable += 1
             continue
@@ -661,8 +673,9 @@ def summarise_project(versions: List[Tuple[Version, Optional[dict]]]) -> Optiona
         `_summarise_changes`), the two together as `causes` and `edge_moves`,
         `hand_minutes` — an estimate from the versions' timestamps, not a
         measurement — and `unreadable`, how many versions after the first cut
-        could not be read and were skipped; None when the project has no
-        first cut.
+        could not be read and were skipped (a version with no project file,
+        the project in the trash then, is not one); None when the project has
+        no first cut.
     """
     changes = _changes_since_first_cut(versions)
     if changes is None:
@@ -671,7 +684,7 @@ def summarise_project(versions: List[Tuple[Version, Optional[dict]]]) -> Optiona
 
 def _kinds_of(versions: List[Tuple[Version, Optional[dict]]], kinds: Mapping[str, List[str]]) -> List[str]:
     """The footage kinds a project was cut from, by the files its cut shows."""
-    assets = {clip.asset_id for _, project in _read(versions) if project is not None
+    assets = {clip.asset_id for _, project in _read(versions) if isinstance(project, Project)
               for clip in _footage_clips(project)}
     found = {kind for asset_id in assets for kind in kinds.get(asset_id, [])}
     return sorted(found)
@@ -835,6 +848,9 @@ def main(argv: Optional[List[str]] = None) -> None:
                 stored = project_json_at(project_id, version.commit)
             except ValueError:
                 stored = None  # Not even JSON: counted as unreadable, like a project that fails to validate.
+            else:
+                if stored is None:
+                    stored = MISSING  # No file in that version: the project was in the trash then.
             projects[project_id].append((version, stored))
     summary = summarise(projects)
     if arguments.json:

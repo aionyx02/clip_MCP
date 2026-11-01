@@ -733,3 +733,79 @@ def test_a_caption_without_words_over_footage_with_a_pause_cut_out_is_retimed_by
     before = project(*paused, cues=(cue("c1", "大家好", 1, 5),))
     after = project(*paused, cues=(cue("c1", "大家好", 1, 6),))
     assert compared(before, after)["captions"] == {**NO_CAPTION_CHANGE, "retimed": 1}
+
+
+def test_a_project_out_of_the_trash_is_not_counted_as_unreadable(kept_history, media: Path, capsys) -> None:
+    from app.tools import upkeep
+
+    asset = catalog.import_asset(str(media / "wide.mp4"))["id"]
+    with kept_history.step(AI):
+        project_id = build_project([video_track(), insert("a", asset, 0, 3), insert("b", asset, 5, 8)])
+    with kept_history.step(corrections.EDITOR_AUTHOR):
+        upkeep.trash_projects([project_id])
+    key = upkeep.list_trash()["items"][0]["key"]
+    with kept_history.step(corrections.EDITOR_AUTHOR):
+        upkeep.restore_from_trash(key)
+    with kept_history.step(corrections.EDITOR_AUTHOR):
+        edit(project_id, [{"action": "delete_clip", "track_id": "main", "clip_id": "b"}])
+
+    one = summary_of(capsys, "--project", project_id)["projects"][project_id]
+    # The version in the trash has no project file; that is not a version that could not be read.
+    assert one["unreadable"] == 0
+    assert one["by_hand"]["causes"]["wrong_piece"] == 1
+
+
+def test_the_totals_include_the_minutes_worked_by_hand() -> None:
+    hands = [version("編輯器", at(0), None)[0], version("編輯器", at(5), None)[0]]
+    assert corrections._totals([], [], hands)["hand_minutes"] == 6.0
+
+
+def test_a_short_shot_inside_a_stretch_shown_again_does_not_shrink_it() -> None:
+    merged = corrections._footage(Project.model_validate(project(
+        clip("x", start=0, end=10, timeline_in=0), clip("y", start=2, end=4, timeline_in=10))))
+    assert [(stretch.start, stretch.end) for stretch in merged["a"]] == [(0.0, 10.0)]
+
+
+def test_the_last_of_a_repeated_caption_is_matched_after_the_one_before_it() -> None:
+    before = project(SHOWN, cues=(cue("c1", "對", 0, 2), cue("c2", "對", 1, 3), cue("c3", "好", 2, 4)))
+    after = project(SHOWN, cues=(cue("c1", "對", 0, 2), cue("c2", "對", 1, 3)))
+    assert compared(before, after)["captions"] == {**NO_CAPTION_CHANGE, "removed": 1}
+
+
+def test_dropped_captions_are_the_old_ones_so_the_added_one_is_found_as_a_move() -> None:
+    before = project(SHOWN, cues=(cue("c1", "對", 0, 2), cue("c2", "對", 1, 3), cue("c3", "好", 2, 4)))
+    after = project(SHOWN, cues=(cue("c1", "對", 5.5, 6.5), cue("c2", "對", 0, 2), cue("c3", "好", 2, 4)))
+    assert compared(before, after)["captions"] == {**NO_CAPTION_CHANGE, "retimed": 1}
+
+
+def test_punctuation_and_times_changing_together_is_re_broken() -> None:
+    before = project(SHOWN, cues=(cue("c1", "大家好今天", 1, 3),))
+    after = project(SHOWN, cues=(cue("c1", "大家好，今天", 1.5, 3.5),))
+    assert compared(before, after)["captions"] == {**NO_CAPTION_CHANGE, "rebroken": 1}
+
+
+def test_a_caption_over_only_a_sliver_of_the_shared_footage_is_not_counted() -> None:
+    before = project(SHOWN, cues=(cue("c1", "邊緣", 9.9992, 12),))
+    assert compared(before, project(SHOWN))["captions"] == NO_CAPTION_CHANGE
+
+
+def test_a_caption_moved_by_its_start_is_a_move_when_its_end_is_far() -> None:
+    before = project(SHOWN, cues=(cue("c1", "對", 1, 2),))
+    after = project(SHOWN, cues=(cue("c1", "對", 4, 9),))
+    assert compared(before, after)["captions"] == {**NO_CAPTION_CHANGE, "retimed": 1}
+
+
+def test_the_median_edge_move_is_the_middle_one_not_the_mean() -> None:
+    change = {"clips": {"edges_moved": [0.2, 1.0, 4.0]}, "captions": {}}
+    assert corrections._summarise_changes([change])["edge_moves"] == {
+        "count": 3, "median": 1.0, "largest": 4.0,
+    }
+
+
+def test_a_caption_retimed_shorter_than_its_last_shown_word_keeps_its_own_end() -> None:
+    short = clip("short", start=0, end=5)
+    spelled = [{"start": 1, "end": 2, "text": "甲"}, {"start": 2, "end": 3, "text": "乙"},
+               {"start": 9, "end": 10, "text": "丙"}]
+    before = project(short, cues=(cue("c1", "甲乙丙", 1, 2.5) | {"words": spelled},))
+    after = project(short, cues=(cue("c1", "甲乙丙", 1, 3.0) | {"words": spelled},))
+    assert compared(before, after)["captions"] == {**NO_CAPTION_CHANGE, "retimed": 1}
