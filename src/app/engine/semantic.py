@@ -316,7 +316,7 @@ def combined_over(start: float, end: float, measurements: Sequence[Measured]) ->
         overlap = min(end, measurement.end) - max(start, measurement.start)
         if overlap <= 0:
             continue
-        for name, value in measurement.model_dump(exclude={"start", "end"}).items():
+        for name, value in measurement.model_dump(exclude={"start", "end", "momentary"}).items():
             if value is not None:
                 parts.setdefault(name, []).append((float(value), overlap))
     return _combined(parts)
