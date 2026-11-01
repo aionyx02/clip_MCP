@@ -11,7 +11,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional, Sequence, Tuple, TypeVar
 
-from app.engine import faces, machine, models, resources, stills
+from app.engine import faces, machine, models, prompt_names, resources, stills
 from app.engine.diarize import (
     MIN_PAUSE_SECONDS as SPEAKER_MIN_PAUSE_SECONDS,
     MIN_SPEECH_SECONDS as SPEAKER_MIN_SPEECH_SECONDS,
@@ -120,6 +120,9 @@ REFINE_LONGEST_SECONDS = 28.0
 # word, and the AI is pointed at it to check.
 LOW_CONFIDENCE = 0.5
 DOUBT_OPEN, DOUBT_CLOSE = "⟦", "⟧"
+# Provisional: how many places `get_analysis` offers a prompt's spelling at once; a name that came
+# out wrong all through a long file repeats, and the first few are enough to act on.
+MAX_PROMPT_OFFERS = 30
 # OpenCC configurations by BCP 47 tag. zh-TW and zh-HK also convert vocabulary to regional usage.
 CHINESE_VARIANT_CONFIGS = {"zh-TW": "s2twp", "zh-HK": "s2hk", "zh-Hant": "s2t", "zh-Hans": "t2s"}
 CHINESE_LANGUAGES = {"zh", "yue"}
@@ -997,6 +1000,30 @@ def _doubtful(word: TranscriptWord) -> bool:
     """Whether the speech model was guessing at this word."""
     return word.probability is not None and word.probability < LOW_CONFIDENCE
 
+def prompt_check(transcript: Transcript, start: float, end: float) -> Optional[dict]:
+    """What the prompt's names came out as, for the AI to check.
+
+    Args:
+        transcript: The transcript.
+        start: Where the range starts.
+        end: Where it ends.
+
+    Returns:
+        None when no prompt was given. Otherwise `offers`, at most
+        `MAX_PROMPT_OFFERS` places in the range where an unsure stretch reads
+        like a name in the prompt; `more_offers`, how many were left out; and
+        `not_heard`, the prompt's terms found nowhere in the whole transcript.
+    """
+    if not transcript.prompt:
+        return None
+    lines = [segment for segment in transcript.segments if segment.end > start and segment.start < end]
+    found = prompt_names.offers(lines, transcript.prompt, _doubtful)
+    return {
+        "offers": found[:MAX_PROMPT_OFFERS],
+        "more_offers": max(0, len(found) - MAX_PROMPT_OFFERS),
+        "not_heard": prompt_names.missing(transcript.segments, transcript.prompt),
+    }
+
 def marked_text(segment: TranscriptSegment) -> str:
     """A line of transcript with the words the speech model was unsure of in `⟦…⟧`.
 
@@ -1801,6 +1828,10 @@ def analyze_media(
             report("refine", "hearing the unsure lines again with the accurate model"), is_cancelled,
             os.path.join(work_dir, "refine"), ffmpeg_bin,
         )
+    if transcript is not None:
+        # Kept so what was asked for can be checked against what was heard.
+        given = prompt or (earlier.transcript.prompt if refining_earlier else None)
+        transcript = transcript.model_copy(update={"prompt": given})
     listened: Optional[SecondListen] = None
     if transcript is not None:
         listened = second_listen(
