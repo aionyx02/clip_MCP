@@ -44,6 +44,7 @@ is called, so importing this module stays light and pure.
 """
 
 import argparse
+import difflib
 import json
 import statistics
 import unicodedata
@@ -69,6 +70,10 @@ SMALL_EDGE_SECONDS = 1.0
 # no further apart than this were one caption moved; further apart, short words said more
 # than once (對, 好) are more likely another line deleted and one added.
 MOVE_SECONDS = 5.0
+# Provisional: a group of captions saying at least this much the same, measured on its whole text,
+# is the same lines with words changed rather than other lines. It only decides whether a change
+# of wording across other line breaks is counted by the words that changed.
+SAME_LINES_RATIO = 0.5
 # Provisional: a gap longer than this between two versions made by hand is a new
 # sitting at the editor, not a pause inside one.
 SITTING_GAP_SECONDS = 600
@@ -300,7 +305,8 @@ def _seen(cue: SubtitleCue, common: Dict[str, List[Tuple[float, float]]]) -> Opt
     the first or last shown word's, so a caption made again after a trim,
     which drops a word whose middle was cut off, starts where it does.
     Without word timings, it is its whole text, over the shown part of its
-    stretch.
+    stretch, which is also what a caption gets whose words would leave it
+    ending before it starts.
 
     Args:
         cue: The caption.
@@ -318,8 +324,10 @@ def _seen(cue: SubtitleCue, common: Dict[str, List[Tuple[float, float]]]) -> Opt
         (first, first_piece), (last, last_piece) = kept[0], kept[-1]
         start = float(cue.source_start) if first is cue.words[0] else max(float(first.start), float(cue.source_start))
         end = float(cue.source_end) if last is cue.words[-1] else min(float(last.end), float(cue.source_end))
-        return (_said("".join(word.text for word, _ in kept)),
-                (round(max(start, first_piece[0]), 3), round(min(end, last_piece[1]), 3)))
+        span = (round(max(start, first_piece[0]), 3), round(min(end, last_piece[1]), 3))
+        # A caption retimed by hand away from its words, and then trimmed, can end before it starts.
+        if span[1] > span[0]:
+            return _said("".join(word.text for word, _ in kept)), span
     shown = [(max(float(cue.source_start), start), min(float(cue.source_end), end)) for start, end in pieces]
     shown = [(start, end) for start, end in shown if end - start > TOUCHING]
     if not shown:
@@ -386,6 +394,23 @@ def _kept_in_order(longer: List[str], shorter: List[str]) -> Optional[List[int]]
         at += 1
     return kept
 
+def _reworded_runs(olds: List[str], news: List[str]) -> Optional[int]:
+    """How many places changed, when words changed in lines that are also broken differently.
+
+    Args:
+        olds: What each caption said, in time order.
+        news: What each says now; as many captions.
+
+    Returns:
+        The number of runs of text that differ, taken over the whole group;
+        None when comparing the group caption by caption says as much or less,
+        or the group's text is no longer the same lines.
+    """
+    matcher = difflib.SequenceMatcher(None, "".join(olds), "".join(news), autojunk=False)
+    runs = sum(1 for tag, *_ in matcher.get_opcodes() if tag != "equal")
+    changed = sum(1 for old, new in zip(olds, news) if old != new)
+    return runs if runs < changed and matcher.ratio() >= SAME_LINES_RATIO else None
+
 def _caption_changes(before: Project, after: Project) -> Dict[str, int]:
     """How the captions changed, over the footage both versions show, matched by what they say where.
 
@@ -398,7 +423,10 @@ def _caption_changes(before: Project, after: Project) -> Dict[str, int]:
 
     A group of as many captions on each side is compared caption by caption
     in time order, unless together they say the same thing but break it in
-    other places, which is one re-break. Caption by caption: one whose words
+    other places, which is one re-break. When words changed as well and the
+    breaks moved, so that fewer places changed than captions (`_reworded_runs`),
+    each place is rewritten once and the breaks are one re-break. Caption by
+    caption: one whose words
     there changed is rewritten; one whose whole text says the same thing but
     is written differently — spaces, line breaks, punctuation — is re-broken;
     one whose times there moved is retimed. A group with more captions on one
@@ -454,6 +482,11 @@ def _caption_changes(before: Project, after: Project) -> Dict[str, int]:
             else:
                 news, other_seen = [news[at] for at in kept], [other_seen[at] for at in kept]
         elif same_words and [said for said, _ in seen] != [said for said, _ in other_seen]:
+            counts["rebroken"] += 1
+            continue
+        elif not same_words and (runs := _reworded_runs([said for said, _ in seen],
+                                                        [said for said, _ in other_seen])) is not None:
+            counts["rewritten"] += runs
             counts["rebroken"] += 1
             continue
         for index, other_index, one, other in zip(olds, news, seen, other_seen):
