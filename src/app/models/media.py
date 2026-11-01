@@ -179,6 +179,11 @@ class SoundMeasurement(Measured):
                     "top or bottom (0 when no two in a row do), not dBFS. A clipped recording peaks near 0 dB and "
                     "is flat there, so a high peak together with a high flatness is what clipping looks like",
     )
+    momentary: List[float] = Field(
+        default_factory=list,
+        description="Momentary loudness in LUFS of the 400 ms blocks starting in this second, which integrated "
+                    "loudness is worked out from; a block under -70 LUFS is left out",
+    )
 
 class FaceMeasurement(Measured):
     """Who was on screen during one second.

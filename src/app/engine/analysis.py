@@ -64,7 +64,7 @@ from app.models.media import (
 # into a shot as movement inside it.
 # 3: a word placed across a whole pause is kept to one side of it, a long unpunctuated
 # sentence is split at its pauses, and Chinese is converted into Traditional a word at a time.
-ANALYSIS_VERSION = 3
+ANALYSIS_VERSION = 4
 SCENE_THRESHOLD = 10.0
 BLACK_MIN_SECONDS = 0.5
 FREEZE_MIN_SECONDS = 2.0
@@ -125,6 +125,11 @@ CHINESE_LANGUAGES = {"zh", "yue"}
 PICTURE_FILE_NAME = "picture.txt"
 CAMERA_FILE_NAME = "camera.trf"
 SOUND_FILE_NAME = "sound.txt"
+LOUDNESS_FILE_NAME = "loudness.txt"
+# The gates of BS.1770's integrated loudness: blocks at or under the first are not counted at all,
+# and blocks more than the second under the mean of the rest are not counted either.
+ABSOLUTE_GATE_LUFS = -70.0
+RELATIVE_GATE_LU = 10.0
 DETECT_LOG_FILE_NAME = "detect.log"
 
 ProgressCallback = Callable[[float, str], None]
@@ -367,7 +372,8 @@ def _scan_graph(asset: Asset, work_dir: str, with_shake: bool) -> Tuple[str, Lis
         ])
     if asset.has_audio:
         sound = escape_filter_path(os.path.join(work_dir, SOUND_FILE_NAME))
-        chains.append("[0:a:0]asplit=2[quiet][level]")
+        loudness = escape_filter_path(os.path.join(work_dir, LOUDNESS_FILE_NAME))
+        chains.append("[0:a:0]asplit=3[quiet][level][blocks]")
         chains.append(f"[quiet]silencedetect=noise={SILENCE_NOISE_DB}dB:d={SILENCE_MIN_SECONDS}[heard]")
         # astats only reports an overall noise floor while it is also measuring one per
         # channel, so the per-channel request below is what makes the overall one appear.
@@ -377,6 +383,9 @@ def _scan_graph(asset: Asset, work_dir: str, with_shake: bool) -> Tuple[str, Lis
             ":measure_overall=Peak_level+RMS_level+Noise_floor+Flat_factor,"
             f"ametadata=mode=print:file='{sound}',anullsink"
         )
+        # The same pass measures loudness: each 400 ms block, every 100 ms, as any range's integrated
+        # loudness needs them, since the per-second levels above are not K-weighted or gated.
+        chains.append(f"[blocks]ebur128=metadata=1,ametadata=mode=print:key=lavfi.r128.M:file='{loudness}',anullsink")
         outputs.append(["-map", "[heard]", "-f", "null", "-"])
     return ";".join(chains), outputs
 
@@ -551,19 +560,31 @@ def _shot_measurements(
         ))
     return shots
 
-def _sound_measurements(records: Sequence[Tuple[float, Dict[str, float]]], duration: float) -> List[SoundMeasurement]:
+def _sound_measurements(
+    records: Sequence[Tuple[float, Dict[str, float]]],
+    duration: float,
+    blocks: Sequence[Tuple[float, Dict[str, float]]] = (),
+) -> List[SoundMeasurement]:
     """Turn the per-second sound statistics into records.
 
     Args:
         records: Sampled sound measurements, as `_frame_records` returns them.
         duration: Length of the file in seconds, which the last window is cut
             to.
+        blocks: Loudness blocks, as `_frame_records` returns them. Each goes
+            in the window its time falls in, and one under the absolute gate
+            is left out, since it would never count.
 
     Returns:
         One measurement per window. Digital silence measures as minus infinity
         decibels, which `_frame_records` drops, so a window that reports no
         level at all is silence and is written as `SILENCE_DB`.
     """
+    by_window: Dict[int, List[float]] = {}
+    for seconds, values in blocks:
+        level = values.get("lavfi.r128.M")
+        if level is not None and level > ABSOLUTE_GATE_LUFS:
+            by_window.setdefault(int(seconds // SOUND_WINDOW_SECONDS), []).append(round(level, 1))
     measurements: List[SoundMeasurement] = []
     for seconds, values in records:
         end = min(seconds + SOUND_WINDOW_SECONDS, duration) if duration else seconds + SOUND_WINDOW_SECONDS
@@ -576,8 +597,27 @@ def _sound_measurements(records: Sequence[Tuple[float, Dict[str, float]]], durat
             peak=round(values.get("lavfi.astats.Overall.Peak_level", SILENCE_DB), 2),
             noise_floor=round(values.get("lavfi.astats.Overall.Noise_floor", SILENCE_DB), 2),
             flatness=round(values.get("lavfi.astats.Overall.Flat_factor", 0.0), 3),
+            momentary=by_window.get(int(seconds // SOUND_WINDOW_SECONDS), []),
         ))
     return measurements
+
+def integrated_lufs(windows: Sequence[SoundMeasurement]) -> Optional[float]:
+    """Integrated loudness over some windows, gated as BS.1770 gates it.
+
+    Args:
+        windows: The per-second measurements over the stretch.
+
+    Returns:
+        The loudness in LUFS, or `None` when no block passes the gates, which
+        is what silence and an analysis made before blocks were kept both give.
+    """
+    energies = [10 ** (block / 10) for window in windows for block in window.momentary
+                if block > ABSOLUTE_GATE_LUFS]
+    if not energies:
+        return None
+    floor = statistics.fmean(energies) * 10 ** (-RELATIVE_GATE_LU / 10)
+    kept = [energy for energy in energies if energy > floor]
+    return round(10 * math.log10(statistics.fmean(kept)), 1)
 
 def sound_note(windows: Sequence[SoundMeasurement]) -> Optional[dict]:
     """Sum up a stretch of per-second sound measurements in a few numbers.
@@ -595,8 +635,11 @@ def sound_note(windows: Sequence[SoundMeasurement]) -> Optional[dict]:
         The levels are in dBFS, named in `unit` so they are not read as LUFS:
         loudness is RMS, peak and noise floor are peak levels. `flatness_max`
         is not one of them: it is decibels of how many samples in a row sit at
-        the waveform's top or bottom, 0 when no two in a row do. Narrow the
-        range and ask again to find where a bad patch is.
+        the waveform's top or bottom, 0 when no two in a row do.
+        `integrated_lufs` is in LUFS, so unlike them it compares with the
+        render's loudness target; it is null where nothing was loud enough to
+        measure, and on an analysis made before it was kept. Narrow the range
+        and ask again to find where a bad patch is.
     """
     if not windows:
         return None
@@ -609,6 +652,7 @@ def sound_note(windows: Sequence[SoundMeasurement]) -> Optional[dict]:
         "noise_floor_median": round(statistics.median(window.noise_floor for window in windows), 2),
         "peak_max": max(window.peak for window in windows),
         "flatness_max": max(window.flatness for window in windows),
+        "integrated_lufs": integrated_lufs(windows),
     }
 
 def scan_media(
@@ -699,7 +743,10 @@ def scan_media(
             _frame_records(os.path.join(work_dir, PICTURE_FILE_NAME)),
             _camera_movement(os.path.join(work_dir, CAMERA_FILE_NAME)) if with_shake else [],
         ),
-        sound=_sound_measurements(_frame_records(os.path.join(work_dir, SOUND_FILE_NAME)), duration),
+        sound=_sound_measurements(
+            _frame_records(os.path.join(work_dir, SOUND_FILE_NAME)), duration,
+            _frame_records(os.path.join(work_dir, LOUDNESS_FILE_NAME)),
+        ),
     )
 
 def scan_photo(
@@ -1502,7 +1549,7 @@ def discard_scratch(work_dir: str) -> None:
         work_dir: The job's working directory.
     """
     faces.discard_frames(work_dir)
-    for name in (PICTURE_FILE_NAME, CAMERA_FILE_NAME, SOUND_FILE_NAME):
+    for name in (PICTURE_FILE_NAME, CAMERA_FILE_NAME, SOUND_FILE_NAME, LOUDNESS_FILE_NAME):
         try:
             os.remove(os.path.join(work_dir, name))
         except OSError:
