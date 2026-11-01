@@ -274,6 +274,13 @@ def test_the_framing_note_says_how_far_the_face_moved() -> None:
     assert framing_note(crossing)["face_x_range"] == [0.1, 0.85]
     assert framing_note([])is None
 
+def test_the_framing_note_says_when_the_largest_face_was_up() -> None:
+    """A printed face is found like a real one, so the note says where to look to tell them apart."""
+    faces = [FaceMeasurement(start=s, end=s + 1, faces=1, face_share=share, face_x=0.5, face_y=0.5)
+             for s, share in enumerate((0.01, 0.3, 0.02))]
+    assert framing_note(faces)["largest_face_at"] == 1
+    assert "largest_face_at" not in framing_note([FaceMeasurement(start=0, end=1, faces=0)])
+
 def test_a_stretch_with_nobody_in_it_still_reports_how_long_it_was() -> None:
     """`with_a_face` of 0 is a measurement. No note at all would not be."""
     empty = [FaceMeasurement(start=s, end=s + 1, faces=0) for s in range(3)]
