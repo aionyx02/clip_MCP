@@ -144,6 +144,9 @@ def start_analysis(asset: Asset, transcribe: bool, transcription: str, language:
         duration=float(asset.duration),
         diarize=with_speech and diarize,
         detect_faces=asset.has_video,
+        # Decided when queued. If the card fails and the worker falls back to the processor, this
+        # is low only during the job's warm-up, after which the scheduler reads real free memory.
+        device=machine.whisper_device() if with_speech else "cpu",
     )
     return runtime.job_manager.start_job(job, {
         "transcribe": transcribe,
