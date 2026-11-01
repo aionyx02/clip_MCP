@@ -286,6 +286,12 @@ def _seek_or_cut(clip_start: Decimal) -> Tuple[Optional[str], Optional[str]]:
     cutting by timestamp afterwards gives the same stretch of sound without
     the loss.
 
+    Further in, the plain seek stays. On a file with a picture it lands within
+    a sample at 22.05, 44.1 and 48 kHz, so sound stays with its picture. On a
+    file of sound alone it lands up to 45 ms early, measured (#176); that is a
+    music bed, nothing is in sync with it to that precision, and cutting after
+    decoding would mean a second way of reading for one kind of clip.
+
     Args:
         clip_start: Where in the source the read begins, in seconds.
 
