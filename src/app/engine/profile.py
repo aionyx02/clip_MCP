@@ -14,7 +14,13 @@ the reading taken when the job started, so a stage that runs after a large
 model was loaded includes that model in its rise; the column is the most
 memory in use during the stage, not what the stage itself added. It is
 therefore an upper bound on the stage's cost, not what the stage would need
-on an idle computer.
+on an idle computer. The other way round, a worker that runs one analysis
+after another keeps its speech model loaded (#110): an analysis that
+transcribes with the model the previous one left starts with that model
+already in memory, so its baseline includes the model, its rise does not,
+and its transcription has no load time in it. Compared with the first, such
+an analysis looks a model cheaper. A model the analysis will not start
+with is let go before its clock starts, so it is not in the baseline.
 
 The numbers are sampled rather than tracked: memory is read every
 `PROFILE_SAMPLE_SECONDS`, so a stage shorter than that can finish without a

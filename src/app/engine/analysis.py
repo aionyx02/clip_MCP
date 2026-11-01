@@ -197,8 +197,11 @@ def _paired_events(log: str, start_pattern: str, end_pattern: str) -> List[tuple
         pairs.append((open_start, None))
     return pairs
 
-# Beside the scan's log, the log of a scan that failed on the card; `get_job` tells the AI from it.
+# Beside the scan's log, the log of a scan that failed on the card once software has read the
+# file; `get_job` tells the AI from it. Until software has, it carries `CARD_TRIED_SUFFIX`, so a
+# file software could not read either is never said to have been decoded in software.
 CARD_LOG_SUFFIX = ".card"
+CARD_TRIED_SUFFIX = ".card-tried"
 
 @dataclass(frozen=True)
 class Scan:
@@ -588,14 +591,18 @@ def sound_note(windows: Sequence[SoundMeasurement]) -> Optional[dict]:
         windows: The per-second measurements overlapping the stretch.
 
     Returns:
-        The summary, in decibels relative to full scale, or `None` when
-        nothing was measured over the stretch. Narrow the range and ask again
-        to find where a bad patch is.
+        The summary, or `None` when nothing was measured over the stretch.
+        The levels are in dBFS, named in `unit` so they are not read as LUFS:
+        loudness is RMS, peak and noise floor are peak levels. `flatness_max`
+        is not one of them: it is decibels of how many samples in a row sit at
+        the waveform's top or bottom, 0 when no two in a row do. Narrow the
+        range and ask again to find where a bad patch is.
     """
     if not windows:
         return None
     return {
         "windows": len(windows),
+        "unit": "dBFS",
         "loudness_min": min(window.loudness for window in windows),
         "loudness_median": round(statistics.median(window.loudness for window in windows), 2),
         "loudness_max": max(window.loudness for window in windows),
@@ -622,13 +629,14 @@ def scan_media(
 
     The picture is decoded on the NVIDIA card where that is faster (see
     `card_decode_args`). A file that fails on the card is scanned once more
-    in software, and the card's log is kept beside the log as `.card`, which
-    is what `get_job` reads to tell the AI. Only when the software scan then
-    succeeds was the card at fault: the card is not used again until the
-    record `stop_decoding_on_card` wrote is deleted. When the software scan
-    fails too, the file is at fault, its failure comes through after being
-    read twice, and the card stays on. The progress starts again from nothing
-    for the second scan.
+    in software, and the card's log is kept beside the log. Only when the
+    software scan then succeeds was the card at fault: the card's log is
+    renamed `.card`, which is what `get_job` reads to tell the AI, and the
+    card is not used again until the record `stop_decoding_on_card` wrote is
+    deleted. When the software scan fails too, the file is at fault, its
+    failure comes through after being read twice, the card's log keeps the
+    name `.card-tried`, and the card stays on. The progress starts again
+    from nothing for the second scan.
 
     Args:
         asset: Asset to scan.
@@ -668,8 +676,9 @@ def scan_media(
         # each scan already under way, not one per file.
         if not card:
             raise
-        os.replace(log_path, log_path + CARD_LOG_SUFFIX)
+        os.replace(log_path, log_path + CARD_TRIED_SUFFIX)
         run_ffmpeg(head + tail, log_path, duration, on_progress, is_cancelled)
+        os.replace(log_path + CARD_TRIED_SUFFIX, log_path + CARD_LOG_SUFFIX)
         stop_decoding_on_card(asset.path, str(exc))
 
     with open(log_path, encoding="utf-8", errors="replace") as log_file:
@@ -1115,27 +1124,26 @@ def _run_whisper(
         RuntimeError: If the machine has less free memory than the model
             needs, or if the device cannot run it.
     """
-    from faster_whisper import BatchedInferencePipeline, WhisperModel
+    from faster_whisper import BatchedInferencePipeline
 
     model_name = model_name or whisper_model_name()
-    # Only on the CPU do the weights sit in system memory; on the GPU they are in VRAM,
-    # and a card that is too small raises its own error and falls back here.
-    needed = resources.whisper_memory_bytes(model_name)
-    available = resources.memory_status() if device == "cpu" else None
-    if available is not None and available[0] < needed:
-        raise RuntimeError(
-            f"{model_name} needs about {needed // resources.MEGABYTE} MB to transcribe and only "
-            f"{available[0] // resources.MEGABYTE} MB is free; close something, or set "
-            "CLIP_MCP_WHISPER_MODEL to a smaller model such as small"
-        )
+
+    def enough_memory() -> None:
+        # Only on the CPU do the weights sit in system memory; on the GPU they are in VRAM,
+        # and a card that is too small raises its own error and falls back here. Checked only
+        # when the model is about to be built: one this worker already holds needs no more.
+        needed = resources.whisper_memory_bytes(model_name)
+        available = resources.memory_status() if device == "cpu" else None
+        if available is not None and available[0] < needed:
+            raise RuntimeError(
+                f"{model_name} needs about {needed // resources.MEGABYTE} MB to transcribe and only "
+                f"{available[0] // resources.MEGABYTE} MB is free; close something, or set "
+                "CLIP_MCP_WHISPER_MODEL to a smaller model such as small"
+            )
+
     # Kept in the workspace rather than in a cache under the user's home directory, so
     # that the project holds everything it needs and deleting it takes the weights with it.
-    model = WhisperModel(
-        model_name,
-        device=device,
-        compute_type="float16" if device == "cuda" else "int8",
-        download_root=models.whisper_dir(),
-    )
+    model = models.speech_model(model_name, device, models.whisper_dir(), before_build=enough_memory)
     began = time.monotonic()
     # Batched decoding on CPU overflows CTranslate2's native stack on Windows, so the CPU decodes one chunk at a time.
     segments, info = BatchedInferencePipeline(model).transcribe(

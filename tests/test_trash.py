@@ -4,6 +4,8 @@ import os
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
+from typing import Tuple
 
 import pytest
 from starlette.testclient import TestClient
@@ -14,6 +16,9 @@ from app.models.job import Job, JobKind, JobStatus
 from app.storage import housekeeping
 from app.workspace import output_dir
 from helpers import build_project, edit, insert, video_track
+
+# Captured at import, before the `room_left_alone` fixture replaces it with a no-op.
+REAL_MAKE_ROOM = rendering._make_room
 
 
 @pytest.fixture
@@ -94,19 +99,45 @@ def test_a_starred_version_keeps_its_finished_video(kept_history, client: TestCl
     assert client.get(f"/api/projects/{project}/storage").json()["other_outputs"] == []
 
 
-def test_caches_give_room_back_oldest_first_when_the_disk_runs_low(tmp_path: Path) -> None:
+def _two_proxies(tmp_path: Path) -> Tuple[Path, Path]:
+    """An old and a new cached proxy of 1000 bytes each, made afresh.
+
+    Returns:
+        `(old, new)`.
+    """
     proxies = tmp_path / "cache" / "proxies"
-    proxies.mkdir(parents=True)
+    proxies.mkdir(parents=True, exist_ok=True)
     old, new = proxies / "old.mp4", proxies / "new.mp4"
     for path, age in ((old, 7200), (new, 10)):
         path.write_bytes(b"x" * 1000)
         os.utime(path, (time.time() - age, time.time() - age))
-    # A floor just above what is free: one file is enough.
-    free = __import__("shutil").disk_usage(tmp_path).free
-    freed = housekeeping.give_cache_back(str(tmp_path), set(), floor=free + 1, headroom=0)
-    assert freed == 1000 and not old.exists() and new.exists()
-    # With room to spare nothing goes.
-    assert housekeeping.give_cache_back(str(tmp_path), set(), floor=0) == 0 and new.exists()
+    return old, new
+
+
+# The disk's free space, said by the tests below rather than read, so another process writing
+# to the same disk cannot change how much has to go.
+FREE = 10 ** 9
+
+
+@pytest.mark.parametrize("floor, headroom, gone", [
+    # Just below the floor: the oldest file is enough.
+    (FREE + 1, 0, ("old",)),
+    # Exactly as far below the floor as one file: still one file, once it reaches the floor.
+    (FREE + 1000, 0, ("old",)),
+    # Headroom past the floor asks for more than one file gives.
+    (FREE + 1, 1000, ("old", "new")),
+    # At the floor, or above it, nothing goes, whatever the headroom.
+    (FREE, 1000, ()),
+    (0, 0, ()),
+])
+def test_caches_give_room_back_oldest_first_when_the_disk_runs_low(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, floor: int, headroom: int, gone: tuple,
+) -> None:
+    old, new = _two_proxies(tmp_path)
+    monkeypatch.setattr(housekeeping.shutil, "disk_usage", lambda path: SimpleNamespace(free=FREE))
+    freed = housekeeping.give_cache_back(str(tmp_path), set(), floor=floor, headroom=headroom)
+    assert freed == 1000 * len(gone)
+    assert {name for name, path in (("old", old), ("new", new)) if not path.exists()} == set(gone)
 
 
 def test_the_ai_files_footage_in_folders_and_deletes_nothing(media: Path) -> None:
@@ -190,6 +221,58 @@ def test_a_broken_project_in_the_trash_stays_there(tmp_path: Path, monkeypatch: 
     with pytest.raises(ValueError):
         upkeep.restore_from_trash(kept.key)
     assert [item.key for item in housekeeping.in_trash(str(tmp_path))] == [kept.key]
+
+
+def _aged_file(path: Path, size: int, age: float) -> Path:
+    """A file of a given size, last used a given number of seconds ago."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"x" * size)
+    os.utime(path, (time.time() - age, time.time() - age))
+    return path
+
+
+def _aged_folder(folder: Path, size: int, age: float) -> Path:
+    """A folder holding one file, last used a given number of seconds ago."""
+    _aged_file(folder / "made.mp4", size, age)
+    os.utime(folder, (time.time() - age, time.time() - age))
+    return folder
+
+
+@pytest.mark.parametrize("kind", ["previews", "sounds"])
+def test_caches_leave_half_written_files_and_running_jobs_alone(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, kind: str,
+) -> None:
+    """A .part file and a busy job's folder stay while the rest give their room back."""
+    ordinary = _aged_file(tmp_path / "cache" / "proxies" / "playback.mp4", 1000, 100)
+    partial = _aged_file(tmp_path / "cache" / "proxies" / "x.mp4.part", 2000, 9000)
+    busy = _aged_folder(tmp_path / "temp" / kind / "project" / "busy-job", 3000, 8000)
+    idle = _aged_folder(tmp_path / "temp" / kind / "project" / "idle-job", 4000, 5000)
+
+    monkeypatch.setattr(housekeeping.shutil, "disk_usage", lambda path: SimpleNamespace(free=FREE))
+    freed = housekeeping.give_cache_back(
+        str(tmp_path), {"busy-job"}, floor=FREE + 10 ** 9, headroom=10 ** 12,
+    )
+
+    assert partial.exists() and busy.exists()
+    assert not ordinary.exists() and not idle.exists()
+    assert freed == 1000 + 4000
+
+
+def test_room_is_made_at_most_once_per_interval(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The real check asks for room once, and not again until `ROOM_CHECK_SECONDS` have passed."""
+    assert REAL_MAKE_ROOM.__name__ == "_make_room"
+    calls = []
+    monkeypatch.setattr(rendering, "_room_checked", time.monotonic() - rendering.ROOM_CHECK_SECONDS - 1)
+    monkeypatch.setattr(rendering.housekeeping, "give_cache_back", lambda *args: calls.append(args))
+    monkeypatch.setattr(runtime.repo, "active_job_ids", lambda: {"job-a", "job-b"})
+
+    REAL_MAKE_ROOM()
+    REAL_MAKE_ROOM()
+    assert calls == [(runtime.WORKSPACE_DIR, {"job-a", "job-b"})]
+
+    monkeypatch.setattr(rendering, "_room_checked", time.monotonic() - rendering.ROOM_CHECK_SECONDS - 1)
+    REAL_MAKE_ROOM()
+    assert len(calls) == 2
 
 
 def test_other_versions_of_a_video_with_no_name_are_not_let_go(media: Path) -> None:

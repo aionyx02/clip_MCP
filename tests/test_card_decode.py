@@ -84,6 +84,11 @@ def test_an_ffmpeg_without_cuda_is_not_used(monkeypatch: pytest.MonkeyPatch) -> 
     assert can_decode_on_card("ffmpeg") is False
     assert card_decode_args("ffmpeg", "clip.mp4", 50.0) == []
 
+def test_cuda_must_be_listed_as_a_method_of_its_own(monkeypatch: pytest.MonkeyPatch) -> None:
+    _cards(monkeypatch, listed="Hardware acceleration methods:\ncuda_like\n")
+    assert can_decode_on_card("ffmpeg") is False
+    assert card_decode_args("ffmpeg", "clip.mp4", 50.0) == []
+
 @pytest.mark.parametrize("failure", [OSError("ffmpeg is not there"), subprocess.TimeoutExpired("ffmpeg", 30)])
 def test_an_ffmpeg_that_will_not_list_its_methods_is_not_used(
     monkeypatch: pytest.MonkeyPatch, failure: Exception,
@@ -130,14 +135,21 @@ def test_a_short_file_is_not_decoded_on_the_card_and_costs_no_probe(monkeypatch:
     assert card_decode_args("ffmpeg", "clip.mp4", CARD_MIN_SECONDS - 0.1) == []
     assert started == []
 
-def test_a_probe_that_fails_means_no_card(monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("said", [
+    None,
+    "not json",
+    json.dumps({"streams": [{"codec_name": "hevc"}], "format": {"bit_rate": "N/A"}}),
+])
+def test_a_probe_that_fails_or_cannot_be_read_means_no_card(monkeypatch: pytest.MonkeyPatch, said) -> None:
     _cards(monkeypatch)
     assert can_decode_on_card("ffmpeg") is True
 
-    def broken(*args, **kwargs):
-        raise subprocess.TimeoutExpired("ffprobe", 30)
+    def probe(*args, **kwargs):
+        if said is None:
+            raise subprocess.TimeoutExpired("ffprobe", 30)
+        return SimpleNamespace(stdout=said, returncode=0)
 
-    monkeypatch.setattr(engine_ffmpeg.subprocess, "run", broken)
+    monkeypatch.setattr(engine_ffmpeg.subprocess, "run", probe)
     assert card_decode_args("ffmpeg", "clip.mp4", 50.0) == []
 
 def test_ffprobe_is_taken_from_beside_an_ffmpeg_given_as_a_path(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -296,7 +308,32 @@ def test_a_file_that_fails_in_software_too_leaves_the_card_on(
         analysis.scan_media(_asset(media), str(tmp_path), lambda fraction: None, lambda: False, FFMPEG)
     assert len(calls) == 2
     assert card_failure() is None
-    assert (tmp_path / (analysis.DETECT_LOG_FILE_NAME + analysis.CARD_LOG_SUFFIX)).exists()
+    # The card's log is kept, but not under the name that says software read the file.
+    assert (tmp_path / (analysis.DETECT_LOG_FILE_NAME + analysis.CARD_TRIED_SUFFIX)).exists()
+    assert not (tmp_path / (analysis.DETECT_LOG_FILE_NAME + analysis.CARD_LOG_SUFFIX)).exists()
+
+def test_a_cancel_during_the_retry_in_software_leaves_the_card_on(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, media: Path
+) -> None:
+    calls: List[List[str]] = []
+
+    def failing_then_cancelled(command, log_path, duration, on_progress, is_cancelled):
+        calls.append(list(command))
+        with open(log_path, "w", encoding="utf-8") as log:
+            log.write("CUDA_ERROR_OUT_OF_MEMORY\n")
+        if "-hwaccel" in command:
+            raise FFmpegFailed("the card ran out of memory")
+        raise OperationCancelled()
+
+    monkeypatch.setattr(analysis, "run_ffmpeg", failing_then_cancelled)
+    monkeypatch.setattr(analysis, "card_decode_args", lambda ffmpeg_bin, path, duration: ["-hwaccel", "cuda"])
+    with pytest.raises(OperationCancelled):
+        analysis.scan_media(_asset(media), str(tmp_path), lambda fraction: None, lambda: False, FFMPEG)
+    assert len(calls) == 2
+    assert card_failure() is None
+    # Software never finished reading the file, so nothing may say it did.
+    assert (tmp_path / (analysis.DETECT_LOG_FILE_NAME + analysis.CARD_TRIED_SUFFIX)).exists()
+    assert not (tmp_path / (analysis.DETECT_LOG_FILE_NAME + analysis.CARD_LOG_SUFFIX)).exists()
 
 def _finished_analysis(work: Path):
     """A finished analysis job working in this folder."""
@@ -325,6 +362,9 @@ def test_the_server_says_when_scans_no_longer_use_the_card() -> None:
     told = machine.describe(found, hour)
     assert "no longer decodes on the card since it failed on clip.mp4: CUDA_ERROR_OUT_OF_MEMORY" in told
     assert engine_ffmpeg.card_failed_path() in told
+    # A record left empty still turns the card off, and says so without naming a file.
+    Path(engine_ffmpeg.card_failed_path()).write_text("", encoding="utf-8")
+    assert "no longer decodes on the card since it failed on a scan" in machine.describe(found, hour)
 
 def test_check_names_the_failure_and_the_record_to_delete(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture,
@@ -361,6 +401,39 @@ def test_get_job_passes_the_card_note_on_beside_any_other(media: Path, tmp_path:
     ]))
     both = job_queue.get_job([done.job_id])["jobs"][0]["note"]
     assert both.startswith("heard 40 different voices") and "; its picture could not be decoded" in both
+
+@pytest.mark.parametrize("status", ["failed", "cancelled"])
+def test_get_job_says_the_card_is_off_for_an_analysis_that_stopped_after_the_scan(
+    media: Path, tmp_path: Path, status: str,
+) -> None:
+    from app import runtime
+    from app.models.job import Job, JobKind, JobStatus
+    from app.tools import catalog, job_queue
+
+    asset = catalog.import_asset(str(media / "wide.mp4"))["id"]
+    work = tmp_path / "job"
+    work.mkdir()
+    (work / (analysis.DETECT_LOG_FILE_NAME + analysis.CARD_LOG_SUFFIX)).write_text("cuda: out of memory\n")
+    engine_ffmpeg.stop_decoding_on_card("clip.mp4", "CUDA_ERROR_OUT_OF_MEMORY")
+    stopped = Job(kind=JobKind.ANALYZE, status=JobStatus(status), asset_id=asset, work_dir=str(work))
+    runtime.repo.add_job(stopped)
+    assert "Tell the user" in job_queue.get_job([stopped.job_id])["jobs"][0]["note"]
+
+def test_get_job_says_nothing_of_the_card_when_software_could_not_read_the_file_either(
+    media: Path, tmp_path: Path,
+) -> None:
+    from app import runtime
+    from app.models.job import Job, JobKind, JobStatus
+    from app.tools import catalog, job_queue
+
+    asset = catalog.import_asset(str(media / "wide.mp4"))["id"]
+    work = tmp_path / "job"
+    work.mkdir()
+    (work / (analysis.DETECT_LOG_FILE_NAME + analysis.CARD_TRIED_SUFFIX)).write_text("cuda: out of memory\n")
+    failed = Job(kind=JobKind.ANALYZE, status=JobStatus.FAILED, asset_id=asset, work_dir=str(work),
+                 error_message="the file cannot be read")
+    runtime.repo.add_job(failed)
+    assert "note" not in job_queue.get_job([failed.job_id])["jobs"][0]
 
 def test_a_record_that_cannot_be_written_does_not_fail_the_scan(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, media: Path

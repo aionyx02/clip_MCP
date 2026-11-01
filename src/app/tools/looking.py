@@ -1,5 +1,6 @@
 """Looking at footage and renders: frames, storyboards, and a close look at each join in a cut."""
 
+import math
 import os
 from pathlib import Path
 from typing import Annotated, List, Literal, Optional, Sequence, Tuple
@@ -12,12 +13,16 @@ from app.models.timeline.parts import Project
 from app.models.job import Job
 from app.engine.delivery import Finding
 from app.engine.joins import HeardWord, Join, joins_in, pause_across, words_heard
-from app.engine.frames import format_timestamp, storyboard_sheet
+from app.engine.frames import Crop, format_timestamp, storyboard_sheet, tile_size_for
 from app.engine.listen import WINDOW_SECONDS, cut_sound, levels_every
 from app.engine.subtitles import place_cues
 from app import runtime
 from app.runtime import mcp
 from app.tools import rendering, shared, versioning
+
+# FFmpeg cannot cut less than this from a picture whose colour is stored at half the size, as
+# yuv420 footage is: a narrower crop rounds to nothing and the decode fails.
+MIN_CROP_PIXELS = 2
 
 @mcp.tool()
 def view_frames(
@@ -25,6 +30,7 @@ def view_frames(
     start: Annotated[float, Field(ge=0)] = 0,
     end: Optional[float] = None,
     count: Annotated[int, Field(ge=1, le=shared.MAX_STORYBOARD_TILES)] = 12,
+    crop: Optional[Crop] = None,
 ) -> ToolResult:
     """Look at frames from one or more assets as one labeled contact sheet image.
 
@@ -37,7 +43,9 @@ def view_frames(
     and `end` are only accepted for a single asset.
 
     Every tile is labeled with its number, its source time, and which file it
-    came from. Works without `analyze_asset`.
+    came from. Works without `analyze_asset`. Fewer frames come out larger,
+    since a sheet is kept to the same pixel budget, and `crop` zooms into part
+    of the frame so small text or numbers can be read.
 
     Args:
         asset_ids: IDs of the assets to sample, in the order to show them.
@@ -45,6 +53,8 @@ def view_frames(
         end: Range end in seconds; one asset only, and the end of the asset
             when omitted.
         count: Number of frames per asset.
+        crop: Part of the frame to zoom into, as fractions of it with `x` and
+            `y` at the top-left corner; one asset only.
 
     Returns:
         A text block listing each tile's asset and source time, followed by
@@ -52,7 +62,8 @@ def view_frames(
 
     Raises:
         ValueError: If an asset does not exist or has no video, the range is
-            empty, a range is given for more than one asset, or the frames
+            empty, a range is given for more than one asset, the crop is
+            outside the frame or given for more than one asset, or the frames
             asked for do not fit on one sheet.
         RuntimeError: If frames cannot be decoded.
     """
@@ -65,13 +76,51 @@ def view_frames(
         )
     if len(asset_ids) > 1 and (start or end is not None):
         raise ValueError("a time range only means something for one asset; drop start and end, or ask about one file")
+    if crop is not None:
+        if len(asset_ids) > 1:
+            raise ValueError("a crop only means something for one asset; drop crop, or ask about one file")
+        if not all(math.isfinite(value) for value in (crop.x, crop.y, crop.width, crop.height)):
+            raise ValueError("crop x, y, width and height must be numbers between 0 and 1")
+        if crop.width <= 0 or crop.height <= 0:
+            raise ValueError(
+                f"crop width and height must be greater than 0, not {crop.width} by {crop.height}; "
+                "give the part of the frame as fractions, such as width 0.5 and height 0.5"
+            )
+        if crop.x < 0 or crop.y < 0:
+            raise ValueError(
+                f"crop x and y must not be negative, not {crop.x} and {crop.y}; "
+                "0 is the left and top edge of the frame"
+            )
+        if crop.x + crop.width > 1:
+            raise ValueError(
+                f"crop runs past the right edge: x {crop.x} plus width {crop.width} is more than 1; "
+                "move x left, or make width smaller"
+            )
+        if crop.y + crop.height > 1:
+            raise ValueError(
+                f"crop runs past the bottom edge: y {crop.y} plus height {crop.height} is more than 1; "
+                "move y up, or make height smaller"
+            )
+
+    assets = [shared.get_asset(asset_id) for asset_id in asset_ids]
+    if crop is not None and assets[0].width and assets[0].height:
+        across, down = assets[0].width * crop.width, assets[0].height * crop.height
+        if across < MIN_CROP_PIXELS or down < MIN_CROP_PIXELS:
+            raise ValueError(
+                f"the crop is {across:.1f} by {down:.1f} pixels of a {assets[0].width}x{assets[0].height} "
+                f"picture; make it at least {MIN_CROP_PIXELS} pixels each way"
+            )
+    aspects = [
+        (asset.width * (crop.width if crop else 1)) / (asset.height * (crop.height if crop else 1))
+        if asset.width and asset.height else 16 / 9
+        for asset in assets
+    ]
 
     shots: List[tuple[str, float, str]] = []
     listing: List[str] = []
-    for asset_id in asset_ids:
-        asset = shared.get_asset(asset_id)
+    for asset in assets:
         if not asset.has_video or asset.duration is None:
-            raise ValueError(f"asset {asset_id} has no video frames to show")
+            raise ValueError(f"asset {asset.id} has no video frames to show")
         duration = float(asset.duration)
         last = duration if end is None else min(end, duration)
         if last <= start:
@@ -86,9 +135,16 @@ def view_frames(
             listing.append(f"#{number}: {name} | {seconds:.3f}s ({format_timestamp(seconds)})")
 
     where = f"asset {asset_ids[0]}" if len(asset_ids) == 1 else f"{len(asset_ids)} assets, {count} frames each"
+    columns, box = tile_size_for(len(shots), aspects)
+    said = [f"Contact sheet of {where}, in reading order:"]
+    if crop is not None:
+        said.append(
+            f"zoomed to x {crop.x:.2f}–{crop.x + crop.width:.2f}, "
+            f"y {crop.y:.2f}–{crop.y + crop.height:.2f} of the frame"
+        )
     return ToolResult(content=[
-        f"Contact sheet of {where}, in reading order:\n" + "\n".join(listing),
-        Image(data=storyboard_sheet(shots), format="jpeg"),
+        "\n".join([*said, *listing]),
+        Image(data=storyboard_sheet(shots, columns=columns, tile_size=box, crop=crop), format="jpeg"),
     ])
 
 @mcp.tool()

@@ -259,8 +259,10 @@ def analysis_memory_bytes(
     """Estimate what analyzing one asset needs.
 
     The stages do not all run at once, so this is the largest of them rather
-    than their sum — except for diarization, which is counted on its own
-    because what it holds is the file itself and not a model.
+    than their sum, with one exception: the speech model. A worker keeps it
+    loaded from the transcription to the end of the file, and on to the next
+    file that transcribes with it (#110), so it is counted alongside the
+    largest of the other stages rather than as one of them.
 
     Args:
         transcribe: Whether speech recognition runs as well as detection.
@@ -274,13 +276,12 @@ def analysis_memory_bytes(
         The estimate in bytes.
     """
     stages = [DETECTION_BYTES]
-    if transcribe:
-        stages.append(whisper_memory_bytes(model_name))
     if detect_faces:
         stages.append(FACE_DETECTION_BYTES)
     if diarize:
         stages.append(DIARIZATION_BYTES + int(max(0.0, duration) * DIARIZATION_BYTES_PER_SECOND))
-    return max(stages)
+    held = whisper_memory_bytes(model_name) if transcribe else 0
+    return held + max(stages)
 
 def render_memory_bytes(input_count: int) -> int:
     """Estimate what rendering a timeline needs.

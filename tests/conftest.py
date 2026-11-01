@@ -269,6 +269,17 @@ def playback_unprepared() -> Iterator[None]:
     rendering.PREPARE_PLAYBACK = kept
 
 @pytest.fixture(autouse=True)
+def room_left_alone() -> Iterator[None]:
+    """Give no cache room back during previews: on a disk with less free than the floor, that
+    would delete the proxies other tests share, depending on the machine the suite runs on.
+    `give_cache_back` is tested on its own, with the disk's free space said by the test."""
+    from app.tools import rendering
+
+    kept, rendering._make_room = rendering._make_room, lambda: None
+    yield
+    rendering._make_room = kept
+
+@pytest.fixture(autouse=True)
 def music_unanalyzed() -> Iterator[None]:
     """Start no analysis when a song is added unless a test turns it on, for the same reason."""
     from app.tools import catalog
@@ -276,3 +287,18 @@ def music_unanalyzed() -> Iterator[None]:
     kept, catalog.ANALYZE_MUSIC_ON_ADD = catalog.ANALYZE_MUSIC_ON_ADD, False
     yield
     catalog.ANALYZE_MUSIC_ON_ADD = kept
+
+@pytest.fixture(autouse=True)
+def no_model_held(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Start every test with no speech model or diarizer held, and none kept.
+
+    A worker keeps its models for the next file, and `renderer.main` turns
+    that on for the rest of the process: a test that runs it would otherwise
+    hand every test after it the model the last one built.
+    """
+    from app.engine import diarize, models
+
+    monkeypatch.setattr(models, "_keep_speech_model", False)
+    monkeypatch.setattr(models, "_speech_model", None)
+    monkeypatch.setattr(models, "_speech_model_key", None)
+    monkeypatch.setattr(diarize, "_engine_cache", None)
