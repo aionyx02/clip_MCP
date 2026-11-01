@@ -118,6 +118,10 @@ LM Studio、Cherry Studio（一鍵安裝連結）。修改前備份為 `<檔名>
 | `CLIP_MCP_MAX_DECODERS` | `4` | 抽幀解碼行程上限 |
 | `CLIP_MCP_HWACCEL` | 開 | `off` 關閉分析掃描的 NVIDIA 顯示卡解碼；開著時只用在高位元率 HEVC（手機、空拍機素材），約快一倍。顯示卡解碼失敗而軟體解碼成功時就會停用並寫下 `<workspace>/card-decode-failed.txt`，分析工作與 `clip-mcp check` 都會提到，刪掉它再試 |
 
+## Benchmark
+
+以成片為單位，評完整度、專業度、流暢度，和人工成片、機械基準盲測比較。規則見 [benchmark/rubric.md](benchmark/rubric.md)，最新結果見 [v0.7.0](benchmark/reports/v0.7.0.md)。
+
 ## 測試
 
 ```bash
