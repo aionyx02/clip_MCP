@@ -591,14 +591,18 @@ def sound_note(windows: Sequence[SoundMeasurement]) -> Optional[dict]:
         windows: The per-second measurements overlapping the stretch.
 
     Returns:
-        The summary, in decibels relative to full scale, or `None` when
-        nothing was measured over the stretch. Narrow the range and ask again
-        to find where a bad patch is.
+        The summary, or `None` when nothing was measured over the stretch.
+        The levels are in dBFS, named in `unit` so they are not read as LUFS:
+        loudness is RMS, peak and noise floor are peak levels. `flatness_max`
+        is not one of them: it is decibels of how many samples in a row sit at
+        the waveform's top or bottom, 0 when no two in a row do. Narrow the
+        range and ask again to find where a bad patch is.
     """
     if not windows:
         return None
     return {
         "windows": len(windows),
+        "unit": "dBFS",
         "loudness_min": min(window.loudness for window in windows),
         "loudness_median": round(statistics.median(window.loudness for window in windows), 2),
         "loudness_max": max(window.loudness for window in windows),
