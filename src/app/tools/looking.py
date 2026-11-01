@@ -1,5 +1,6 @@
 """Looking at footage and renders: frames, storyboards, and a close look at each join in a cut."""
 
+import json
 import math
 import os
 from pathlib import Path
@@ -11,6 +12,7 @@ from pydantic import Field
 
 from app.models.timeline.parts import Project
 from app.models.job import Job
+from app.engine import sound_quality
 from app.engine.delivery import Finding
 from app.engine.joins import HeardWord, Join, joins_in, pause_across, words_heard
 from app.engine.frames import Crop, format_timestamp, storyboard_sheet, tile_size_for
@@ -23,6 +25,70 @@ from app.tools import rendering, shared, versioning
 # FFmpeg cannot cut less than this from a picture whose colour is stored at half the size, as
 # yuv420 footage is: a narrower crop rounds to nothing and the decode fails.
 MIN_CROP_PIXELS = 2
+# Provisional: the longest stretch `inspect_sound` reads at once. A problem with the sound shows in
+# seconds, and a spectrogram of a long stretch is too compressed to read.
+MAX_INSPECT_SECONDS = 60
+
+@mcp.tool()
+def inspect_sound(
+    asset_id: str,
+    start: Annotated[float, Field(ge=0)] = 0,
+    end: Optional[float] = None,
+) -> ToolResult:
+    """Look at how a stretch of a source file sounds: measured numbers and a spectrogram.
+
+    `get_analysis` says how loud a file is. This is for what levels cannot
+    tell: mains hum, steady background noise, a recording that stops short of
+    the high end. The numbers are measured; what they add up to is yours to
+    say. Works without `analyze_asset`.
+
+    The spectrogram is returned to you as a tool result, which means it leaves
+    this machine if you are not running on it, as frames do.
+
+    Args:
+        asset_id: The file.
+        start: Where to start, in seconds.
+        end: Where to end; the end of the file when omitted.
+
+    Returns:
+        A text block with the numbers, followed by the spectrogram as a PNG,
+        time across and frequency up. The numbers are `hum`, null or the mains
+        frequency (`hertz`, 50 or 60) with how far it stands above the sound
+        around it (`above_surroundings_db`); `bandwidth_hz`, where the sound
+        stops, about 20000 for a good recording and lower for a muffled one or
+        an old codec; `noise_floor_dbfs`, the quietest tenth of the stretch
+        from 300 Hz to 3 kHz; `speech_band_snr_db`, how far the loudest tenth
+        stands above that, which needs someone talking in the stretch to mean
+        anything; and `sibilance_db`, the 5 to 9 kHz band relative to 300 Hz
+        to 3 kHz on the loudest tenth, higher when S sounds are sharper. The
+        last three are null for a stretch under a second.
+
+    Raises:
+        ValueError: If the file does not exist or has no sound, or the
+            stretch is empty or longer than `MAX_INSPECT_SECONDS`.
+        RuntimeError: If the sound cannot be read.
+    """
+    asset = shared.get_asset(asset_id)
+    if not asset.has_audio or asset.duration is None:
+        raise ValueError(f"asset {asset_id} has no sound to inspect")
+    duration = float(asset.duration)
+    last = duration if end is None else min(end, duration)
+    if last <= start:
+        raise ValueError(f"empty range: start {start}s must be before end {last}s (asset is {duration}s long)")
+    if last - start > MAX_INSPECT_SECONDS:
+        raise ValueError(
+            f"{last - start:.0f}s is too long to read at once; give a start and end "
+            f"at most {MAX_INSPECT_SECONDS}s apart (the file is {duration:.0f}s long)"
+        )
+    seconds = last - start
+    figures = sound_quality.measure(sound_quality.read_sound(asset.path, start, seconds))
+    return ToolResult(
+        content=[
+            f"Sound of asset {asset_id} from {start:.3f}s to {last:.3f}s: {json.dumps(figures)}",
+            Image(data=sound_quality.spectrogram(asset.path, start, seconds), format="png"),
+        ],
+        structured_content=figures,
+    )
 
 @mcp.tool()
 def view_frames(

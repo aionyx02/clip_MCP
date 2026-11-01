@@ -153,6 +153,13 @@ it agrees with the transcript and is sure, go on; if the two disagree or it
 comes back unsure, give the user its `audio_path` to play and ask, rather
 than picking one yourself.
 
+### How the footage sounds
+
+Levels cannot tell hum, background noise or a muffled recording from each
+other. When the user asks how a file sounds, call `inspect_sound` on a stretch
+of it and read its numbers and spectrogram, which leaves this machine as frames
+do, rather than guessing from `get_analysis`' levels.
+
 ### What the user wrote on a file
 
 A file's `notes` — in `list_assets`, `get_analysis` and a `brief` search —

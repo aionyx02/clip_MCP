@@ -55,7 +55,7 @@ editor (ui/) ──HTTP───────────────────
 |---|---|
 | 影音原檔、預覽、成品 | 檔名、路徑、規格 |
 | 逐字稿、量測、向量索引、模型權重 | 查詢命中的片段文字與量測值 |
-| 專案、計畫、版本歷史 | 模型要求時的縮圖拼貼與音量圖 |
+| 專案、計畫、版本歷史 | 模型要求時的縮圖拼貼、音量圖與頻譜圖 |
 
 - 沒有工具回傳影音本體。模型仍可主動讀取完整逐字稿（`get_analysis`、`query_clips` 的 `brief`、`get_subtitles`）。
 - 回傳內容的去向由客戶端決定；搭配本機模型（如 LM Studio）則完全離線。
@@ -92,7 +92,7 @@ LM Studio、Cherry Studio（一鍵安裝連結）。修改前備份為 `<檔名>
 | 類別 | 工具 |
 |---|---|
 | 素材庫 | `inspect_media` `import_asset` `import_folder` `list_assets` `edit_asset` `organize_library` `move_files` |
-| 分析 | `analyze_asset` `listen_again` `get_analysis` `view_frames` |
+| 分析 | `analyze_asset` `listen_again` `get_analysis` `view_frames` `inspect_sound` |
 | 語意時間軸 | `build_semantic_timeline` `query_clips` `get_semantic_clip` `propose_sections` `set_sections` `frames_for_clips` `set_clip_tags` `list_timelines` `delete_timelines` |
 | 計畫 | `save_plan` `amend_plan` `copy_plan` `get_plan` `validate_plan` `compile_plan` `diff_plan` `preview_plan_diff` `list_plan_versions` `revert_plan` `propose_broll` |
 | 專案 | `create_project` `list_projects` `get_project` `apply_edits` `preview_project` `preview_sound` `offer_songs` `ask_user` `remember_preference` `forget_preference` |
