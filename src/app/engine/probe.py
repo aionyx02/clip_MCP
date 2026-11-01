@@ -184,6 +184,7 @@ def speech_loudness(
     """
     from app.engine.ffmpeg import hidden_window_flags
 
+    # Loudness over a stretch of seconds: a seek up to 25 ms early on some AAC does not change it (#171).
     result = subprocess.run(
         [ffmpeg_bin, "-hide_banner", "-nostats", "-ss", f"{start:.3f}", "-t", f"{duration:.3f}", "-i", filepath,
          "-vn", "-af", "ebur128", "-f", "null", "-"],

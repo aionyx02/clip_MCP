@@ -230,6 +230,7 @@ def _mean_volume(path: str, start: float, seconds: float) -> Optional[float]:
     Returns:
         The mean level in dBFS, or None when it cannot be read or is silent.
     """
+    # A mean level over seconds: a seek up to 25 ms early on some AAC changes nothing that matters (#171).
     result = subprocess.run(
         ["ffmpeg", "-hide_banner", "-nostats", "-ss", f"{start:.3f}", "-t", f"{seconds:.3f}", "-i", path,
          "-vn", "-af", "volumedetect", "-f", "null", "-"],

@@ -69,6 +69,7 @@ def speech_share(path: str, duration: float, ffmpeg_bin: str = "ffmpeg") -> Opti
 
     heard = speech = 0.0
     for start in _stretches(duration):
+        # A share of speech over stretches: a seek up to 25 ms early on some AAC does not move it (#171).
         decoded = subprocess.run(
             [ffmpeg_bin, "-v", "error", "-nostdin", "-ss", f"{start:.3f}", "-t", f"{STRETCH_SECONDS:.3f}",
              "-i", path, "-vn", "-ac", "1", "-ar", str(_RATE), "-f", "s16le", "-"],
