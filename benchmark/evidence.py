@@ -19,6 +19,11 @@ OVERVIEW_SECONDS = 6
 MAX_CUT_PAIRS = 40
 # Provisional: a pause shorter than this between two words is the inside of a sentence.
 SENTENCE_PAUSE_SECONDS = 0.25
+# Provisional: the shortest black stretch and frozen stretch counted, in seconds.
+BLACK_SECONDS = 0.3
+FROZEN_SECONDS = 1
+# Provisional: how far inside a word a cut must land to count, since word times are approximate.
+WORD_EDGE_SECONDS = 0.03
 
 
 def measured(film: str) -> Dict[str, object]:
@@ -44,7 +49,7 @@ def measured(film: str) -> Dict[str, object]:
 def bad_picture(film: str) -> Dict[str, int]:
     """Stretches of black and of frozen picture, which need every frame rather than only the cuts."""
     log = subprocess.run(["ffmpeg", "-hide_banner", "-nostats", "-i", film, "-an",
-                          "-vf", "blackdetect=d=0.3,freezedetect=d=1", "-f", "null", "-"],
+                          "-vf", f"blackdetect=d={BLACK_SECONDS},freezedetect=d={FROZEN_SECONDS}", "-f", "null", "-"],
                          capture_output=True, text=True, encoding="utf-8", errors="replace").stderr
     return {"black_stretches": log.count("black_start"), "frozen_stretches": log.count("freeze_start")}
 
@@ -64,7 +69,7 @@ def cut_signals(cuts: List[float], lines: List[dict]) -> Dict[str, object]:
     words = [word for line in lines for word in line["words"]]
     in_word, in_sentence = [], []
     for cut in cuts:
-        if any(start + 0.03 < cut < end - 0.03 for start, end in words):
+        if any(start + WORD_EDGE_SECONDS < cut < end - WORD_EDGE_SECONDS for start, end in words):
             in_word.append(cut)
         for line in lines:
             pairs = list(zip(line["words"], line["words"][1:]))
@@ -81,8 +86,9 @@ def overview(film: str, folder: Path) -> None:
 
 def cut_pairs(film: str, cuts: List[float], length: float, folder: Path) -> None:
     """The frame before and after each cut, spread over the film when there are many."""
-    step = max(1, len(cuts) // MAX_CUT_PAIRS)
-    chosen = [cut for cut in cuts[::step][:MAX_CUT_PAIRS] if cut + 0.2 < length]
+    usable = [cut for cut in cuts if cut + 0.2 < length]
+    picked = sorted({round(index * len(usable) / MAX_CUT_PAIRS) for index in range(MAX_CUT_PAIRS)})         if len(usable) > MAX_CUT_PAIRS else range(len(usable))
+    chosen = [usable[index] for index in picked]
     (folder / "cuts.json").write_text(json.dumps(chosen), encoding="utf-8")
     for index, cut in enumerate(chosen):
         for name, at in (("a", max(cut - 0.1, 0)), ("b", cut + 0.1)):
