@@ -850,3 +850,11 @@ def test_a_caption_whose_words_would_end_it_before_it_starts_keeps_its_own_times
     })
     found = _seen(caption, {"a": [(0.0, 2.6), (5.0, 6.0)]})
     assert found == ("abc", (5.0, 6.0))
+
+
+def test_words_changed_on_both_sides_of_a_break_that_did_not_move_count_each_line() -> None:
+    # Taken as one text, the two changes touch and read as one; the break between them stayed put.
+    change = compared(project(SHOWN, cues=(cue("a", "我們今天", 0, 4), cue("b", "去海邊", 4, 7))),
+                      project(SHOWN, cues=(cue("c", "我們今晚", 0, 4), cue("d", "上海邊", 4, 7))))
+    assert change["captions"]["rewritten"] == 2
+    assert change["captions"]["rebroken"] == 0
