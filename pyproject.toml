@@ -12,10 +12,10 @@ dependencies = [
     # pure-Python git, since nobody installing this is expected to have git.
     "dulwich>=1.2.17",
     "faster-whisper>=1.2.1",
-    "fastmcp>=4.0.4",
+    "fastmcp>=4.1.2",
     # One writer at a time on that history: the MCP server and the editor are two processes.
     # Already here through faster-whisper; named because the history imports it directly.
-    "filelock>=3.13",
+    "filelock>=4.2.1",
     # Chinese word splitting, so a caption broken into lines is not broken inside a word:
     # the recogniser returns Chinese a character at a time.
     "jieba>=0.42.1",
@@ -30,7 +30,7 @@ dependencies = [
     # Face detection, for its YuNet wrapper. The headless build leaves out the GUI
     # windowing a server has no use for and cannot open anyway.
     "opencv-python-headless>=4.10",
-    "pillow>=12",
+    "pillow>=13",
     "pydantic>=2.13.5",
     # Speaker diarization, on onnxruntime rather than torch: the models are plain
     # files this server fetches and stores itself, and none of them is gated.

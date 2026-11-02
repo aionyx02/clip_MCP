@@ -1030,3 +1030,11 @@ def test_a_caption_with_no_timings_is_shown_a_line_at_a_time_broken_where_a_phra
     lines = [line.text for line in one_line_each(cue, geometry, style)]
     assert len(lines) > 1 and not any(line.startswith(("來越", "越大")) for line in lines)
     assert any(line.endswith("，") for line in lines[:-1])
+
+
+def test_only_chinese_characters_count_as_chinese() -> None:
+    """A look-alike of U+F900 stretched the range over Hangul and everything else up to it."""
+    from app.engine.subtitles import _CJK
+
+    assert _CJK.search("中") and _CJK.search("㐀") and _CJK.search("豈")
+    assert not _CJK.search("한글") and not _CJK.search("") and not _CJK.search("abc")

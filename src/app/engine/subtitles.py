@@ -542,7 +542,7 @@ def _phrased(
             cheapest, chosen = total, breaks[::-1]
     return chosen
 
-_CJK = re.compile(r"[㐀-䶿一-鿿豈-﫿]")
+_CJK = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
 
 @lru_cache(maxsize=1)
 def chinese_words() -> Callable[[str], List[str]]:
@@ -771,7 +771,7 @@ def one_line_each(cue: PlacedCue, geometry: CaptionGeometry, style: CaptionStyle
 
 # One unit a caption with no timings is broken between: a Chinese character, a run of
 # anything else with the space after it, or a space.
-_UNTIMED = re.compile(r"[㐀-䶿一-鿿豈-﫿]|[^\s㐀-䶿一-鿿豈-﫿]+\s*|\s+")
+_UNTIMED = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]|[^\s\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]+\s*|\s+")
 
 def _untimed_lines(text: str, room: float) -> List[str]:
     """Break text with no word timings into lines that fit, where a phrase ends.
