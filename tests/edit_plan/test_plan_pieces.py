@@ -11,9 +11,10 @@ from app.engine.plan.compile import compile_operations
 from app.engine.plan.music import music_beds
 from app.engine.plan.pieces import (
     BREATH_SECONDS, MERGE_GAP_SECONDS, PAUSE_SECONDS, SNAP_SECONDS, TAIL_TRIM_SECONDS, Piece, compiled_duration,
+    without_retakes,
     note_record,
 )
-from app.engine.semantic import build_timeline, clean_cuts
+from app.engine.semantic import CleanCuts, build_timeline, clean_cuts
 from app.models.media import MediaAnalysis, Span, Transcript, TranscriptSegment, TranscriptWord
 from app.models.plan import MusicCue, MusicPlan, Pacing, Selection, Trim, TrimKind
 from app.models.semantic import SemanticTimeline
@@ -339,6 +340,28 @@ def test_two_silent_windows_are_not_taken_for_two_goes_at_a_line() -> None:
     pieces, notes = compiled(said_again(1.0, 4.0, 7.0), which="quiet")
     assert len(pieces) > 1
     assert not any("said again" in note for note in notes)
+
+def test_two_windows_out_of_one_sentence_are_not_two_goes_at_it() -> None:
+    """Both overlap the one long sentence, so they compared as identical and one was dropped (#188)."""
+    cuts = {"a": CleanCuts(sentences=((0.0, 9.0),), said=("今天介紹這個抽杯架它可以放很多杯子",), transcribed=True)}
+    pieces = [Piece(asset_id="a", start=0.0, end=2.94, from_clip_ids=("u1",), beat_id="b1"),
+              Piece(asset_id="a", start=5.46, end=8.64, from_clip_ids=("u1",), beat_id="b1")]
+
+    kept, notes = without_retakes(pieces, cuts)
+
+    assert kept == pieces and notes == []
+
+
+def test_a_line_said_again_is_still_found_past_a_sentence_both_windows_share() -> None:
+    cuts = {"a": CleanCuts(sentences=((0.0, 2.0), (2.0, 4.0), (4.0, 6.0)),
+                           said=("大家好我是小明", "接著我們開始", "大家好我是小明"), transcribed=True)}
+    pieces = [Piece(asset_id="a", start=0.0, end=3.0, from_clip_ids=("u1",), beat_id="b1"),
+              Piece(asset_id="a", start=3.0, end=6.0, from_clip_ids=("u2",), beat_id="b1")]
+
+    kept, notes = without_retakes(pieces, cuts)
+
+    assert [piece.start for piece in kept] == [3.0] and "said again" in notes[0]
+
 
 def test_a_cut_landing_on_black_moves_off_it() -> None:
     made = analysis(

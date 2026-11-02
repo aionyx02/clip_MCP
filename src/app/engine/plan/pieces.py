@@ -503,8 +503,11 @@ def _same_line(first: Piece, second: Piece, cuts: Mapping[str, CleanCuts]) -> bo
     known = cuts.get(first.asset_id)
     if known is None:
         return False
-    said = _bare(known.spoken_between(first.start, first.end))
-    again = _bare(known.spoken_between(second.start, second.end))
+    # Two windows out of one sentence both overlap it, which is one line said once, not twice:
+    # what they share says nothing about whether the rest is said again (#188).
+    earlier, later = known.sentences_between(first.start, first.end), known.sentences_between(second.start, second.end)
+    said = _bare("".join(known.said[index] for index in earlier if index not in later))
+    again = _bare("".join(known.said[index] for index in later if index not in earlier))
     if not said or not again:
         return False
     return SequenceMatcher(None, said, again).ratio() >= RETAKE_SIMILARITY

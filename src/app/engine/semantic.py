@@ -1514,23 +1514,21 @@ class CleanCuts:
             quiet - EDGE_TOLERANCE_SECONDS <= seconds <= loud + EDGE_TOLERANCE_SECONDS for quiet, loud in self.pauses
         )
 
-    def spoken_between(self, start: float, end: float) -> str:
-        """Collect what is said across a window.
+    def sentences_between(self, start: float, end: float) -> List[int]:
+        """Find the sentences a window overlaps.
 
         Args:
             start: Where the window opens, in source seconds.
             end: Where it closes.
 
         Returns:
-            The text of every sentence that overlaps it, joined in order.
-            Empty for a window with nobody talking in it, and also for a file
-            nobody transcribed — which is why the retake pass refuses to act
-            on an empty answer.
+            Their indexes into `sentences` and `said`, in order. Empty for a
+            window with nobody talking in it, and also for a file nobody
+            transcribed — which is why the retake pass refuses to act on an
+            empty answer.
         """
-        return "".join(
-            text for (opened, closed), text in zip(self.sentences, self.said)
-            if opened < end and start < closed
-        )
+        return [index for index, (opened, closed) in enumerate(self.sentences[:len(self.said)])
+                if opened < end and start < closed]
 
     def first_word_in(self, start: float, end: float) -> Optional[float]:
         """Find where the talking starts inside a window.
