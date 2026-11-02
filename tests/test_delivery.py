@@ -531,6 +531,28 @@ def test_a_cut_that_takes_the_edge_off_a_measured_sound_is_found_without_a_trans
     assert checks(project_of(clip("a", "x", 3.5, 6.5, 0)), {"x": heard}) == []
     assert checks(project_of(clip("a", "x", 5.0, 9.0, 0)), {"x": heard}) == []
 
+def test_a_sound_running_into_black_picture_is_not_advice_to_cut_there() -> None:
+    """A hand over the lens: told to keep the sound, the cut then showed the black (#192)."""
+    heard = MediaAnalysis(asset_id="x", duration=10.0, silences=[Span(start=0.0, end=4.0), Span(start=6.0, end=10.0)],
+                          black_frames=[Span(start=5.92, end=10.0)])
+
+    found = checks(project_of(clip("a", "x", 4.0, 5.9, 0)), {"x": heard})
+
+    assert [check for check, _ in found] == ["mid_speech"]
+    assert "End at" not in found[0][1] and "black or frozen from 5.92s" in found[0][1]
+    moved_as_told = checks(project_of(clip("a", "x", 4.0, 6.0, 0)), {"x": heard})
+    assert "bad_picture" in [check for check, _ in moved_as_told]
+
+
+def test_a_sound_at_the_start_behind_frozen_picture_is_not_advice_to_cut_there() -> None:
+    heard = MediaAnalysis(asset_id="x", duration=10.0, silences=[Span(start=0.0, end=4.0), Span(start=6.0, end=10.0)],
+                          frozen_frames=[Span(start=3.0, end=4.2)])
+
+    found = checks(project_of(clip("a", "x", 4.3, 9.0, 0)), {"x": heard})
+
+    assert "Start at" not in found[0][1] and "black or frozen from 4.20s" in found[0][1]
+
+
 def test_the_same_shot_shown_twice_is_found() -> None:
     project = project_of(clip("a", "y", 0, 36, 0), clip("b", "y", 2, 16, 36))
     found = checks(project, {})
