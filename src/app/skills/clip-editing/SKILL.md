@@ -204,7 +204,7 @@ was not there to agree to them.
    `before_clip_id`, each is appended after the last. Give clips short IDs
    such as `intro` or `c1`. Put all operations for one request into a single
    `apply_edits` call.
-5. Add music if requested; see [Background music](#background-music).
+5. Music is the default, part by part; see the editing-intelligence file, and [Background music](#background-music) by hand.
 6. If the user asked for captions, set the caption style first (the platform
    file), because each caption is proposed one line wide for that style. Then
    call `generate_subtitles` and read every line it returns — transcripts
@@ -286,8 +286,8 @@ hand:
 
 ### Where the music comes from
 
-The user's songs are in the library's music half. When they want music and
-have not named a song, `find_music` with what they asked for in English and
+The user's songs are in the library's music half. When they
+have not named a song, `find_music` with what the part wants in English and
 the length of the part as `min_seconds`; read the top two or three back with
 how each sounds (「聽起來偏懷舊、原聲吉他」 — the mood is a model's ear), and
 `offer_songs` them so the user picks by ear under the part itself. Read a

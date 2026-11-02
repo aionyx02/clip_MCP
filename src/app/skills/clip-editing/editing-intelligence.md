@@ -184,6 +184,33 @@ do not say it, it is not known.
 
 ## Music in a plan
 
+Every video gets music unless the user declines, so a `save_plan` with no
+`music` needs their no. Say it in the read-back (「我會配兩段音樂：前段輕快，
+成功之後換溫暖的」) and drop it if they decline. When they said to finish on
+your own, add it without asking and report the songs, and any credit they need,
+with the finished video. Only a library with nothing usable stops this: ask for
+a file the way the main skill says. `find_music` cannot find a song that is
+still `analyzing`, so analyze the songs and look again before saying none fits.
+
+Change the song where the feeling turns, such as a failure becoming a success
+or the work giving way to the ending. Never change it by the clock, and leave
+one song playing where nothing turns. These ceilings are Provisional, not
+targets: one song up to 60 seconds, two or three up to 3 minutes, and about one
+for every 1–2 minutes past that. Each part gets its own song unless coming back
+to one is the point.
+
+Music runs from the first second to the last, ducked under speech. A cue with
+no `asset_id` leaves a part bare, so use it only when the user asked, or when
+you named that part and why in the read-back.
+
+For each part, `find_music` with what that part wants and its length as
+`min_seconds`, and put the closest song in its cue so the preview has music.
+You cannot hear the songs and the match is a guess, so then `offer_songs` with
+that part's `beat_id`. A new offer replaces the last, so offer one part at a
+time: start with the part you are least sure of, or the one the user wants
+changed, and move on when their pick comes back. When they said to finish on
+your own, there is nobody to pick, so skip the offers.
+
 A plan's `music` is a list of `cues`. Each one names the `beat_id` it comes in
 on — the first may leave it out to start with the video — and plays until the
 next cue takes over: 「開場輕快、訪談段不要音樂、結尾換一首」 is three cues, the
@@ -193,8 +220,9 @@ meet end to end, one fading out as the other fades up. For the next song to
 overlap the last, set `crossfade_seconds` on the music: it comes in that much
 early and rises while the other fades, and is still exactly where its cue
 says at the cut. A song coming in from its very top has nothing earlier to
-come in with, so there the one going out runs on past the cut instead. How
-long is taste, so ask rather than choosing.
+come in with, so there the one going out runs on past the cut instead. Use
+2 seconds (Provisional: no length has been compared by ear) unless the user
+says otherwise.
 
 `cut_on_beat` on a cue moves every picture cut under it onto the song's beat.
 It is a style, not a fix: right for a montage or a fast short, wrong for an
