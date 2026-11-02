@@ -8,7 +8,10 @@ import pytest
 from app import runtime
 from app.tools import catalog, examining, rendering
 from app.engine import analysis
-from app.models.media import MediaAnalysis, Transcript, TranscriptSegment, TranscriptWord
+from app.engine.delivery import SpeechEdge, _kept_beside
+from app.models.media import (
+    HeardWord, MediaAnalysis, SecondListen, Span, Transcript, TranscriptSegment, TranscriptWord,
+)
 
 @pytest.fixture
 def heard(media: Path, monkeypatch: pytest.MonkeyPatch) -> dict:
@@ -83,8 +86,6 @@ def test_a_stretch_heard_again_and_kept_is_what_cuts_are_judged_by(heard: dict,
     words = [(word.start, word.end, word.text) for segment in analysis.with_words_heard_again(after).transcript.segments
              for word in segment.words]
     assert words == [(pytest.approx(2.0), pytest.approx(3.0), "怎麼那麼順")]
-    with pytest.raises(ValueError, match="only what a file says is kept"):
-        examining.listen_again(job_id="any", start=0, end=1, keep=True)
 
 def test_a_stretch_where_nobody_was_heard_again_keeps_no_words() -> None:
     made = MediaAnalysis(asset_id="x", duration=10.0, transcript=Transcript(language="zh", model="t", segments=[
@@ -210,3 +211,103 @@ def test_one_word_heard_unsure_keeps_its_own_time_and_not_the_whole_stretch_s(
     [kept] = runtime.repo.get_analysis(asset).heard_again
     assert [(word.text, word.start, word.end) for word in kept.words] == [
         ("錯了", 2.0, 2.7), ("是", 2.8, 3.1), ("晚餐", 3.1, 3.9)]
+
+LINE = [(1.0, 1.2, "真"), (1.2, 1.4, "是"), (1.4, 1.6, "難"), (1.6, 1.8, "受"), (1.8, 2.0, "然"), (2.0, 2.2, "後")]
+
+@pytest.fixture
+def cut_short(heard: dict) -> dict:
+    """「真是難受然後」 stopped at 1.8s, with 「然後」 cut off, and a render of it."""
+    from helpers import build_project, finished, insert, video_track
+
+    runtime.repo.save_analysis(MediaAnalysis(asset_id=heard["asset"], duration=10.0, transcript=Transcript(
+        language="zh", model="test", segments=[TranscriptSegment(start=1.0, end=2.2, text="真是難受然後", words=[
+            TranscriptWord(start=start, end=end, text=text, probability=0.9) for start, end, text in LINE])]),
+        second_listen=SecondListen(model="test", voiced=[Span(start=1.0, end=2.2)], words=[
+            HeardWord(start=start, end=end, text=text, probability=0.9) for start, end, text in LINE])))
+    project = build_project([video_track(), insert("a", heard["asset"], 0, 1.8), insert("b", heard["asset"], 5, 7)],
+                            width=640, height=360)
+    job = finished(rendering.render_project(project, allow=["mid_speech"]))
+    return {**heard, "project": project, "job": job["job_id"]}
+
+def hears_in_turn(*lines, probability: float = 0.93):
+    """A speech model that hears each line in turn, a character every 0.2s from 0.5s in."""
+    waiting = list(lines)
+
+    def model(device, path, duration, language, prompt, on_progress, is_cancelled, on_measured=None,
+              model_name=None):
+        said = waiting.pop(0)
+        return Transcript(language="zh", model="large-v3-turbo", segments=[TranscriptSegment(
+            start=0.5, end=0.5 + 0.2 * len(said), text=said, words=[
+                TranscriptWord(start=0.5 + 0.2 * index, end=0.7 + 0.2 * index, text=text, probability=probability)
+                for index, text in enumerate(said)])])
+    return model
+
+def mid_speech_in(project: str) -> list:
+    return [finding for finding in rendering.check_render(project)["findings"] if finding["check"] == "mid_speech"]
+
+def test_a_cut_heard_whole_in_the_render_stops_being_refused(cut_short: dict, monkeypatch: pytest.MonkeyPatch) -> None:
+    assert len(mid_speech_in(cut_short["project"])) == 1
+    monkeypatch.setattr(analysis, "_run_whisper", hears_in_turn("真是難受", "各位"))
+    found = examining.listen_again(job_id=cut_short["job"], start=0.5, end=3.0, keep=True)
+    assert "真是難受" in found["kept_cuts"][0] and "not_kept" not in found
+    (cut,) = runtime.repo.get_analysis(cut_short["asset"]).heard_cuts
+    assert (cut.at, cut.opens, cut.job_id) == (pytest.approx(1.8), False, cut_short["job"])
+    assert mid_speech_in(cut_short["project"]) == []
+
+def test_a_cut_moved_after_it_was_heard_is_judged_again(cut_short: dict, monkeypatch: pytest.MonkeyPatch) -> None:
+    from test_delivery import checks, clip, project_of
+
+    monkeypatch.setattr(analysis, "_run_whisper", hears_in_turn("真是難受", "各位"))
+    examining.listen_again(job_id=cut_short["job"], start=0.5, end=3.0, keep=True)
+    known = runtime.repo.get_analysis(cut_short["asset"])
+    assert checks(project_of(clip("a", cut_short["asset"], 0, 1.8, 0)), {cut_short["asset"]: known}) == []
+    assert [check for check, _ in checks(project_of(clip("a", cut_short["asset"], 0, 1.75, 0)),
+                                         {cut_short["asset"]: known})] == ["mid_speech"]
+
+def test_a_render_that_lost_a_kept_word_keeps_the_refusal(cut_short: dict, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(analysis, "_run_whisper", hears_in_turn("真是難", "各位"))
+    found = examining.listen_again(job_id=cut_short["job"], start=0.5, end=3.0, keep=True)
+    assert "「真是難」" in found["not_kept"] and "「真是難受」" in found["not_kept"] and "kept_cuts" not in found
+    assert runtime.repo.get_analysis(cut_short["asset"]).heard_cuts == []
+    assert len(mid_speech_in(cut_short["project"])) == 1
+
+def test_the_stray_start_of_the_word_cut_off_keeps_the_refusal(cut_short: dict,
+                                                                monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(analysis, "_run_whisper", hears_in_turn("真是難受然", "各位"))
+    # 「然」 begins just before the cut and is written as running past it.
+    found = examining.listen_again(job_id=cut_short["job"], start=0.45, end=3.0, keep=True)
+    assert "not_kept" in found and runtime.repo.get_analysis(cut_short["asset"]).heard_cuts == []
+
+def test_a_kept_word_heard_unsure_keeps_the_refusal(cut_short: dict, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(analysis, "_run_whisper", hears_in_turn("真是難受", "各位", probability=0.2))
+    found = examining.listen_again(job_id=cut_short["job"], start=0.5, end=3.0, keep=True)
+    assert "unsure" in found["not_kept"] and runtime.repo.get_analysis(cut_short["asset"]).heard_cuts == []
+
+def test_a_render_of_an_older_cut_clears_nothing(cut_short: dict, monkeypatch: pytest.MonkeyPatch) -> None:
+    from helpers import edit
+
+    edit(cut_short["project"], [{"action": "rename_project", "name": "改過"}, {"action": "delete_clip", "track_id": "main", "clip_id": "b"}])
+    monkeypatch.setattr(analysis, "_run_whisper", hears("真是難受"))
+    found = examining.listen_again(job_id=cut_short["job"], start=0.5, end=3.0, keep=True)
+    assert "changed since" in found["not_kept"] and runtime.repo.get_analysis(cut_short["asset"]).heard_cuts == []
+
+def test_a_stretch_without_a_refused_cut_clears_nothing(cut_short: dict, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(analysis, "_run_whisper", hears("各位"))
+    found = examining.listen_again(job_id=cut_short["job"], start=2.0, end=3.0, keep=True)
+    assert "no cut" in found["not_kept"]
+
+def test_a_cut_opening_a_clip_is_heard_from_the_words_after_it() -> None:
+    edge = SpeechEdge("a", "x", 7.0, 3.0, opens=True, kept="各位好")
+    said = [TranscriptWord(start=2.5, end=2.9, text="難受", probability=0.9),
+            TranscriptWord(start=3.1, end=3.3, text="各位", probability=0.9),
+            TranscriptWord(start=3.3, end=3.5, text="好嗎", probability=0.9)]
+    assert examining._cut_heard_wrong(edge, said) is None
+    assert "「好嗎」" in examining._cut_heard_wrong(edge, said[2:])
+
+def test_a_word_across_the_cut_leaves_nothing_to_compare() -> None:
+    made = MediaAnalysis(asset_id="x", duration=10.0, transcript=Transcript(language="zh", model="t", segments=[
+        TranscriptSegment(start=1.0, end=3.0, text="真是難受", words=[
+            TranscriptWord(start=1.0, end=2.0, text="真是"), TranscriptWord(start=2.0, end=3.0, text="難受")])]))
+    assert _kept_beside(made, 2.5, False) == "" and _kept_beside(made, 2.0, False) == "真是"
+    edge = SpeechEdge("a", "x", 2.5, 2.5, opens=False, kept="")
+    assert "nothing to compare" in examining._cut_heard_wrong(edge, [])
