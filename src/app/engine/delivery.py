@@ -474,6 +474,24 @@ def _bitten_sound(analysis: MediaAnalysis, at: float, opens: bool) -> Optional[f
         return None
     return edge
 
+def _bad_picture_before(analysis: MediaAnalysis, at: float, edge: float) -> Optional[float]:
+    """Find black or frozen picture a cut would run into on its way to a sound's edge.
+
+    Args:
+        analysis: The file's analysis.
+        at: Where the cut is, in source seconds.
+        edge: Where the sound begins or ends.
+
+    Returns:
+        Where the bad picture is met, in source seconds, or None when the
+        picture is good all the way.
+    """
+    low, high = min(at, edge), max(at, edge)
+    met = [span for span in [*analysis.black_frames, *analysis.frozen_frames] if span.start < high and span.end > low]
+    if not met:
+        return None
+    return min(span.start for span in met) if edge > at else max(span.end for span in met)
+
 def _speech_cuts(clips: Sequence[Clip], analyses: Mapping[str, MediaAnalysis]) -> List[Finding]:
     """Find cuts on the sequence that land in the middle of somebody talking.
 
@@ -507,10 +525,16 @@ def _speech_cuts(clips: Sequence[Clip], analyses: Mapping[str, MediaAnalysis]) -
                 if edge is not None:
                     where, part, move = ("after a sound begins", "start", "Start") if opens else (
                         "before a sound ends", "end", "End")
+                    # Moved there the cut would only trade this for `bad_picture` (#192).
+                    blocked = _bad_picture_before(analysis, at, edge)
+                    way_out = (f"{move} at {edge:.2f}s of the file to keep all of it" if blocked is None else
+                               f"It reaches {edge:.2f}s of the file, but the picture is black or frozen "
+                               f"{'until' if opens else 'from'} {blocked:.2f}s, so moving the cut would show that instead: leave the cut, and "
+                               "tell the user")
                     found.append(Finding("mid_speech", (
                         f"clip {clip.id} {side} {abs(at - edge):.2f}s {where}, at {clock(landed)} ({at:.2f}s of the "
                         f"file), so the {part} of it is cut off — the transcript may have no word there, but the "
-                        f"sound was measured. {move} at {edge:.2f}s of the file to keep all of it"
+                        f"sound was measured. {way_out}"
                     ), ((landed, landed),)))
                 continue
             known = clean_cuts(analysis)
