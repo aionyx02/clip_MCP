@@ -79,6 +79,20 @@ def test_a_transcript_is_never_made_worse(media: Path) -> None:
         assert bool(upgrading) == (examining.TRANSCRIPTION_RANK[asked] > examining.TRANSCRIPTION_RANK[had])
 
 
+def test_words_asked_for_after_a_scan_need_no_again(media: Path, monkeypatch) -> None:
+    """Scanning first and transcribing the chosen files is the guide's own order (#187)."""
+    asset = runtime.repo.get_assets([catalog.import_asset(str(media / "silent.mp4"))["id"]])
+    asset = next(iter(asset.values())).model_copy(update={"has_audio": True})
+    runtime.repo.save_analysis(MediaAnalysis(asset_id=asset.id, duration=4.0, recipe=analysis_module.current_recipe(None)))
+    monkeypatch.setattr(examining, "is_stale", lambda analysis: False)
+
+    to_start, skipped, _ = examining.plan_analyses([asset], True, "balanced", again=False)
+    assert [chosen for _, chosen in to_start] == ["balanced"] and skipped == []
+
+    to_start, skipped, _ = examining.plan_analyses([asset], False, "balanced", again=False)
+    assert to_start == [] and "current" in skipped[0]["reason"]
+
+
 def test_balanced_costs_more_than_fast_and_less_than_accurate(repo) -> None:  # noqa: F811
     times = {choice: speed.estimate(repo, computer("mid"), {choice: 3600}, False)["transcription_minutes"][0]
              for choice in ("fast", "balanced", "accurate")}
