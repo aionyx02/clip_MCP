@@ -1033,8 +1033,13 @@ def test_a_caption_with_no_timings_is_shown_a_line_at_a_time_broken_where_a_phra
 
 
 def test_only_chinese_characters_count_as_chinese() -> None:
-    """A look-alike of U+F900 stretched the range over Hangul and everything else up to it."""
-    from app.engine.subtitles import _CJK
+    """A look-alike of U+F900 stretched the range from U+8C48, over Hangul and the private use area."""
+    from app.engine.subtitles import _CJK, _UNTIMED
 
-    assert _CJK.search("中") and _CJK.search("㐀") and _CJK.search("豈")
-    assert not _CJK.search("한글") and not _CJK.search("") and not _CJK.search("abc")
+    chinese = [chr(code) for code in (0x3400, 0x4DBF, 0x4E00, 0x9FFF, 0xF900, 0xFAFF)]
+    other = [chr(code) for code in (0xAC00, 0xD55C, 0xE000, 0xF8FF, 0xFB00)] + ["a"]
+    assert all(_CJK.search(character) for character in chinese)
+    assert not any(_CJK.search(character) for character in other)
+    # Each Chinese character is a unit of its own; the rest stay together.
+    hangul = chr(0xD55C) + chr(0xAE00)
+    assert _UNTIMED.findall(chinese[2] * 2 + hangul) == [chinese[2], chinese[2], hangul]
