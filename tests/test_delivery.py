@@ -191,6 +191,41 @@ def test_a_speaker_s_name_is_measured_with_the_line_it_goes_in_front_of() -> Non
     for line in text.split("\\N"):
         assert sum(_display_width(character) for character in line) <= geometry.max_units
 
+def test_a_replaced_preview_says_which_render_took_its_place(media: Path) -> None:
+    """The old job still read completed, with nothing to say its file was gone (#195)."""
+    from app.runtime import job_manager
+    from app.tools.job_queue import get_job
+    from app.tools.rendering import finished_render
+
+    project = build_project([video_track(), insert("a", import_asset(str(media / "wide.mp4"))["id"], 0, 2)],
+                            width=640, height=360)
+    first, second = render_project(project), None
+    finished(first)
+    assert "file_gone" not in get_job([first["job_id"]])["jobs"][0]
+    second = render_project(project, loudness_target=-20.0)
+    finished(second)
+
+    # The second preview is what took the first one's file away.
+    assert not Path(job_manager.get_job(first["job_id"]).output_path).exists()
+    said = get_job([first["job_id"]])["jobs"][0]
+    assert said["status"] == "completed" and second["job_id"] in said["file_gone"]
+    with pytest.raises(ValueError, match=second["job_id"]):
+        finished_render(first["job_id"])
+
+
+def test_a_render_with_nothing_after_it_is_told_to_render_again(media: Path) -> None:
+    from app.runtime import job_manager
+    from app.tools.job_queue import get_job
+
+    project = build_project([video_track(), insert("a", import_asset(str(media / "wide.mp4"))["id"], 0, 2)],
+                            width=640, height=360)
+    job = render_project(project)
+    finished(job)
+    Path(job_manager.get_job(job["job_id"]).output_path).unlink()
+
+    assert "render again" in get_job([job["job_id"]])["jobs"][0]["file_gone"]
+
+
 def test_render_is_refused_until_the_user_says_to_go_ahead(media: Path) -> None:
     asset = import_asset(str(media / "black.mp4"))["id"]
     repo.save_analysis(MediaAnalysis(asset_id=asset, duration=8.0, black_frames=[Span(start=0.0, end=8.0)]))

@@ -46,6 +46,28 @@ NAME_LOOKALIKES = {"<": "＜", ">": "＞", ":": "：", '"': "＂", "/": "／", "
                    "*": "＊"}
 MAX_OUTPUT_NAME = 60
 
+def file_gone(job: Job) -> Optional[str]:
+    """Say what became of a finished render's file, when it is no longer there.
+
+    A preview is replaced by the next one, so a job can have finished and its
+    file have gone; the job's status alone does not say that (#195).
+
+    Args:
+        job: The render.
+
+    Returns:
+        What to do instead, or None when the file is there.
+    """
+    if not job.output_path or os.path.exists(job.output_path):
+        return None
+    later = [other for other in (runtime.repo.renders_of(job.project_id) if job.project_id else [])
+             if other.job_id != job.job_id and other.preview == job.preview and other.created_at > job.created_at
+             and other.output_path and os.path.exists(other.output_path)]
+    if not later:
+        return f"the file render {job.job_id} made is no longer there; render again"
+    newest = max(later, key=lambda other: other.created_at)
+    return f"the file render {job.job_id} made was replaced; render {newest.job_id} is the one to use"
+
 def finished_render(job_id: str) -> Tuple[Job, str]:
     """Find a render that has finished, and the file it made.
 
@@ -63,8 +85,9 @@ def finished_render(job_id: str) -> Tuple[Job, str]:
         raise ValueError(f"render {job_id} not found; `render_project` gives the job ID of one")
     if job.status != JobStatus.COMPLETED:
         raise ValueError(f"render {job_id} is {job.status.value}; wait for it with `get_job` first")
-    if not job.output_path or not os.path.exists(job.output_path):
-        raise ValueError(f"the file render {job_id} made is no longer there; render again")
+    gone = file_gone(job) if job.output_path else f"render {job_id} made no file; render again"
+    if gone:
+        raise ValueError(gone)
     return job, job.output_path
 
 def rendered_from(job: Job) -> Optional[Project]:
