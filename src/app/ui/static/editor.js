@@ -685,6 +685,8 @@
     // The render shown no longer is this cut: back to what is.
     if (E.mode === "exact" && E.shownVersion !== E.project.version) showLive();
     showPlaybackState();
+    // The length shown comes from this description, which arrives after the edit has been drawn.
+    drawTime();
     const described = E.described;
     const unfinished = described && (described.waiting.length || (described.gain_db === null && described.duration > 0));
     if (!described || unfinished) {
