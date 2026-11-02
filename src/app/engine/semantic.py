@@ -42,6 +42,10 @@ MIN_UTTERANCE_SECONDS = 0.4
 # Silence edges and transcript boundaries are both rounded to milliseconds, so a
 # boundary can land a hair outside the silence it was snapped to.
 EDGE_TOLERANCE_SECONDS = 0.02
+
+def bare_words(text: str) -> str:
+    """Text reduced to what is said, for comparing two hearings: no spaces or punctuation."""
+    return re.sub(r"[\s\W_]+", "", text)
 # A cut is clean where the speaker stopped: between two words at least this far apart.
 # Shorter gaps are the spaces inside a phrase, and a cut there sounds like a word bitten
 # off. Provisional.
