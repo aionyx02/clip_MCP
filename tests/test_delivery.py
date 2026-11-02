@@ -648,6 +648,21 @@ def test_how_long_a_caption_has_to_stay_is_the_users_to_change() -> None:
                 if f.check == "captions"]
 
 
+def test_check_render_checks_the_captions_without_being_told(media: Path) -> None:
+    """The render refused what the check had passed, because the check left captions out unless asked (#191)."""
+    asset = import_asset(str(media / "wide.mp4"))["id"]
+    project_id = build_project([video_track(), insert("a", asset, 0, 4)], width=640, height=360)
+    project = repo.get_project(project_id)
+    words = cue("c1", 3.64, 4.0).model_copy(update={"asset_id": asset})
+    repo.update_project(project.model_copy(update={"subtitles": [words]}), project.version)
+
+    assert [finding["check"] for finding in check_render(project_id)["findings"]] == ["captions"]
+    assert check_render(project_id, burn_subtitles=False)["ok"]
+    finished(render_project(project_id, burn_subtitles=True))
+    with pytest.raises(ValueError, match="under the 0.7s"):
+        render_project(project_id, is_preview=False, burn_subtitles=True)
+
+
 def test_two_files_that_look_alike_apart_in_the_cut_are_found() -> None:
     project = project_of(clip("a", "x", 0, 4, 0), clip("b", "y", 0, 4, 4), clip("c", "z", 0, 4, 8),
                          clip("d", "x", 5, 9, 12))

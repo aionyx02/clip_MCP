@@ -886,7 +886,7 @@ def _looks(clips: Sequence[Clip], assets: Mapping[str, Asset]) -> Dict[str, Tupl
 def check_render(
     project_id: str,
     frame: Optional[Literal["landscape", "portrait", "square"]] = None,
-    burn_subtitles: bool = False,
+    burn_subtitles: bool = True,
 ) -> dict:
     """Check a cut for what would be noticed in the finished file, without rendering it.
 
@@ -912,7 +912,9 @@ def check_render(
     Args:
         project_id: ID of the project to check.
         frame: Check it in another shape, as `render_project` would render it.
-        burn_subtitles: Check the captions as they would be burned in.
+        burn_subtitles: Check any captions as they would be burned in. False
+            only for a render that leaves them out: a check that skips them
+            passes what the render then refuses (#191).
 
     Returns:
         A dictionary with `ok` and `findings`, each with its `check` and a
