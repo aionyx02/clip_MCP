@@ -14,7 +14,7 @@ from app.engine.analysis import CARD_LOG_SUFFIX, DETECT_LOG_FILE_NAME
 from app.engine.ffmpeg import card_failed_path, card_failure
 from app import runtime
 from app.runtime import mcp
-from app.tools import looking, shared
+from app.tools import looking, rendering, shared
 
 # Provisional (roadmap §13): the longest `get_job` waits, under the same allowance.
 MAX_JOB_WAIT_SECONDS = 50.0
@@ -40,7 +40,9 @@ def get_job(
     Returns:
         A dictionary with `jobs`, each with its `job_id`, `kind`, `status`,
         `progress` (0.0 to 1.0), the current `stage`, the `asset_id` of an
-        analysis or the `output_path` of a render, `remaining_seconds` once a
+        analysis or the `output_path` of a render, `file_gone` for a finished
+        render whose file was replaced or cleared, saying which render to use
+        instead or to render again, `remaining_seconds` once a
         running job has gone far enough for its pace to say, `ahead` — how
         many queued jobs go before a queued one — for a failed job its
         `error_message`, for a failed or cancelled job its `failure_kind` —
@@ -148,6 +150,9 @@ def _job_states(job_ids: List[str]) -> List[dict]:
         if job.failure_kind:
             entry["failure_kind"] = job.failure_kind.value
         if job.kind == JobKind.RENDER and job.status == JobStatus.COMPLETED:
+            gone = rendering.file_gone(job)
+            if gone:
+                entry["file_gone"] = gone
             if job.spots is None:
                 entry["frames"] = {"not_read": "every frame was not read — the check failed or was stopped — so "
                                                "black, frozen or flashing frames in it are not known"}
