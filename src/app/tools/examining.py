@@ -206,10 +206,10 @@ def plan_analyses(
         had = transcription_kind(existing)
         upgrade = (_transcribed(asset, transcribe) and had is not None
                    and TRANSCRIPTION_RANK[transcription] > TRANSCRIPTION_RANK[had])
-        # Heard as a song, never transcribed; footage now, so it is listened to again for what is said.
-        heard_as_song = (existing is not None and existing.transcript is None and existing.rhythm is not None
-                         and _transcribed(asset, transcribe))
-        if not again and not upgrade and not heard_as_song and existing is not None and not is_stale(existing):
+        # Words asked for and none kept: scanned first, or heard as a song and footage now. A scan
+        # is the first step of working through a folder, so this is no reason to need `again` (#187).
+        never_heard = existing is not None and existing.transcript is None and _transcribed(asset, transcribe)
+        if not again and not upgrade and not never_heard and existing is not None and not is_stale(existing):
             skipped.append({"asset_id": asset.id, "reason": "its analysis is current; again=true to redo it"})
             continue
         if upgrade:

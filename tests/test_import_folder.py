@@ -11,7 +11,7 @@ from app.engine.analysis import current_recipe, whisper_model_name
 from app.engine.diarize import speaker_model_name
 from app.engine.rhythm import rhythm_model_name
 from app.models.job import Job, JobKind, JobStatus
-from app.models.media import MediaAnalysis
+from app.models.media import MediaAnalysis, Transcript
 from app.tools.catalog import import_asset, import_folder, natural_key
 
 def names(result: dict) -> list:
@@ -78,9 +78,10 @@ def test_a_folder_is_analyzed_in_one_call_and_what_is_current_is_left_alone(foot
     started = []
     monkeypatch.setattr(runtime.job_manager, "start_job", lambda job, spec: started.append(job.asset_id) or job)
     assets = [asset["id"] for asset in import_folder(str(footage_folder))["assets"]]
-    runtime.repo.save_analysis(MediaAnalysis(asset_id=assets[1], duration=1.0, recipe=current_recipe(
-        whisper_model_name(), speaker_model=speaker_model_name(), rhythm_model=rhythm_model_name(),
-    )))
+    runtime.repo.save_analysis(MediaAnalysis(
+        asset_id=assets[1], duration=1.0, transcript=Transcript(language="zh", model=whisper_model_name(), segments=[]),
+        recipe=current_recipe(whisper_model_name(), speaker_model=speaker_model_name(), rhythm_model=rhythm_model_name()),
+    ))
 
     result = examining.analyze_asset(assets)
     assert [item["asset_id"] for item in result["skipped"]] == [assets[1]] and "is current" in result["skipped"][0]["reason"]
