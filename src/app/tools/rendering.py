@@ -67,7 +67,7 @@ def file_gone(job: Job) -> Optional[str]:
         return f"the file render {job.job_id} made is no longer there; render again"
     newest = max(later, key=lambda other: other.created_at)
     edited = " (of a later edit of the cut)" if newest.project_version != job.project_version else ""
-    return f"the file render {job.job_id} made was replaced; render {newest.job_id}{edited} is the one to use"
+    return f"the file render {job.job_id} made is no longer there; render {newest.job_id}{edited} is the one to use"
 
 def finished_render(job_id: str) -> Tuple[Job, str]:
     """Find a render that has finished, and the file it made.
