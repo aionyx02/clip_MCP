@@ -213,6 +213,37 @@ def test_a_replaced_preview_says_which_render_took_its_place(media: Path) -> Non
         finished_render(first["job_id"])
 
 
+def test_a_preview_in_another_shape_does_not_stand_in_for_one_that_was_replaced(media: Path) -> None:
+    from app.runtime import job_manager
+    from app.tools.job_queue import get_job
+
+    project = build_project([video_track(), insert("a", import_asset(str(media / "wide.mp4"))["id"], 0, 2)],
+                            width=640, height=360)
+    job = render_project(project)
+    finished(job)
+    other_shape = render_project(project, frame="portrait")
+    finished(other_shape)
+
+    assert not Path(job_manager.get_job(job["job_id"]).output_path).exists()
+    said = get_job([job["job_id"]])["jobs"][0]["file_gone"]
+    assert other_shape["job_id"] not in said and "render again" in said
+
+
+def test_a_replacement_made_from_a_later_edit_says_so(media: Path) -> None:
+    from app.tools.job_queue import get_job
+
+    project = build_project([video_track(), insert("a", import_asset(str(media / "wide.mp4"))["id"], 0, 2)],
+                            width=640, height=360)
+    job = render_project(project)
+    finished(job)
+    edit(project, [{"action": "set_clip_audio", "track_id": "main", "clip_id": "a", "volume": 0.5}])
+    later = render_project(project)
+    finished(later)
+
+    said = get_job([job["job_id"]])["jobs"][0]["file_gone"]
+    assert later["job_id"] in said and "later edit" in said
+
+
 def test_a_render_with_nothing_after_it_is_told_to_render_again(media: Path) -> None:
     from app.runtime import job_manager
     from app.tools.job_queue import get_job

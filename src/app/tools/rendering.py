@@ -61,12 +61,13 @@ def file_gone(job: Job) -> Optional[str]:
     if not job.output_path or os.path.exists(job.output_path):
         return None
     later = [other for other in (runtime.repo.renders_of(job.project_id) if job.project_id else [])
-             if other.job_id != job.job_id and other.preview == job.preview and other.created_at > job.created_at
-             and other.output_path and os.path.exists(other.output_path)]
+             if other.job_id != job.job_id and other.preview == job.preview and other.frame == job.frame
+             and other.created_at > job.created_at and other.output_path and os.path.exists(other.output_path)]
     if not later:
         return f"the file render {job.job_id} made is no longer there; render again"
     newest = max(later, key=lambda other: other.created_at)
-    return f"the file render {job.job_id} made was replaced; render {newest.job_id} is the one to use"
+    edited = " (of a later edit of the cut)" if newest.project_version != job.project_version else ""
+    return f"the file render {job.job_id} made was replaced; render {newest.job_id}{edited} is the one to use"
 
 def finished_render(job_id: str) -> Tuple[Job, str]:
     """Find a render that has finished, and the file it made.
