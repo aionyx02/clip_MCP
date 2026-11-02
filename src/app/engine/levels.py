@@ -220,12 +220,14 @@ def talking_in(
             }
             if placed:
                 gains[track.id] = placed
-    # A track left out of ducking and playing a file from the footage is the sound of a place.
+    # A track left out of ducking and playing a file the picture also comes from is that place's
+    # own sound. A song in a video file is not on the sequence, so it is still checked as music.
+    filmed = {clip.asset_id for clip in (base.clips if base else [])}
     not_music = frozenset(
         clip.id for track in project.tracks
         if track.track_type == TrackType.AUDIO and track.id not in voices and not track.duck_under_speech
         for clip in track.clips
-        if (asset := assets.get(clip.asset_id)) is not None and library_of(asset) != MUSIC
+        if clip.asset_id in filmed and (asset := assets.get(clip.asset_id)) is not None and library_of(asset) != MUSIC
     )
     return Talking(spans=tuple(sorted(spans)), music_gains=gains, clip_gains=clip_gains,
                    footage_spans=tuple(sorted(footage_spans)), not_music=not_music)

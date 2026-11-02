@@ -110,6 +110,17 @@ def test_a_song_on_a_track_that_does_not_duck_is_still_music() -> None:
     assert talking_in(cut, ASSETS, analyses, {}, lambda clip: -12.0).not_music == frozenset()
 
 
+def test_a_song_in_a_video_file_is_still_music() -> None:
+    """Its library says footage, but no picture comes from it, so it is not the sound of a place."""
+    cut = project()
+    cut.tracks.append(Track(id="clip", track_type="audio", clips=[Clip(
+        id="video", asset_id="songvideo", timeline_in=Decimal(0), source_range={"start": 0, "end": 4},
+    )]))
+    assets = {**ASSETS, "songvideo": Asset(id="songvideo", path="s.mp4", duration=Decimal(9), has_video=True, has_audio=True)}
+    analyses = {"cam": MediaAnalysis(asset_id="cam", duration=10, transcript=said((3, 5)), sound=sound(-30))}
+    assert talking_in(cut, assets, analyses, {}, lambda clip: -12.0).not_music == frozenset()
+
+
 def test_talking_in_the_footage_is_told_from_a_narration_over_it() -> None:
     cut = project()
     cut.tracks.append(Track(id="narration", track_type="audio", clips=[Clip(
