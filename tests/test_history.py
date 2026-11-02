@@ -56,6 +56,18 @@ def test_a_change_is_said_in_words() -> None:
     assert describe_project(None, after) == "建立了專案「抽杯架」"
 
 
+def test_trimming_one_clip_counts_as_one_however_many_slide_after_it() -> None:
+    def clip(end: float, at: float) -> dict:
+        return {"asset_id": "a", "source_range": {"start": 0, "end": end}, "timeline_in": at}
+
+    def project(*clips: dict) -> dict:
+        return {"name": "片", "tracks": [{"clips": list(clips)}]}
+
+    before = project(clip(4, 0), clip(4, 4), clip(4, 8))
+    assert describe_project(before, project(clip(3, 0), clip(4, 3), clip(4, 7))) == "調整了 1 段剪接"
+    assert describe_project(before, project(clip(4, 1), clip(4, 5), clip(4, 9))) == "調整了 3 段剪接"
+
+
 def test_every_change_to_a_project_is_a_version_with_who_and_what(kept_history, media: Path) -> None:
     asset = catalog.import_asset(str(media / "wide.mp4"))["id"]
     project = call("create_project", {"name": "版本測試"})["id"]

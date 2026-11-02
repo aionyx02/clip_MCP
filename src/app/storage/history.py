@@ -557,8 +557,13 @@ def describe_project(before: Optional[Mapping], after: Optional[Mapping]) -> str
 
     old, new = clips(before), clips(after)
     if [_clip_key(clip) for clip in old] != [_clip_key(clip) for clip in new]:
-        moved = len(old) != len(new)
-        said.append(f"剪接改成 {len(new)} 段" if moved else f"調整了 {sum(_clip_key(a) != _clip_key(b) for a, b in zip(old, new))} 段剪接")
+        if len(old) != len(new):
+            said.append(f"剪接改成 {len(new)} 段")
+        else:
+            # Trimming one clip slides every clip after it, which is not an edit to those (#185).
+            pairs = list(zip(old, new))
+            changed = sum(_clip_key(a)[:3] != _clip_key(b)[:3] for a, b in pairs)
+            said.append(f"調整了 {changed or sum(_clip_key(a) != _clip_key(b) for a, b in pairs)} 段剪接")
     elif old != new:
         said.append("調整了片段的聲音或畫面")
     before_cues = {cue.get("id"): cue.get("text") for cue in before.get("subtitles", [])}
