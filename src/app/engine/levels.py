@@ -32,6 +32,7 @@ from typing import Callable, Dict, List, Mapping, Optional, Tuple
 from app.engine.builder import Talking
 from app.engine.delivery import _on_timeline
 from app.engine.ffmpeg import exact_stretch_args, hidden_window_flags
+from app.engine.library import MUSIC, library_of
 from app.models.media import Asset, MediaAnalysis
 from app.models.timeline.parts import Clip, Project, TrackType
 
@@ -183,9 +184,10 @@ def talking_in(
         for clip in track.clips if clip.volume != 0
     ]
     spans: List[Tuple[float, float]] = []
+    footage_spans: List[Tuple[float, float]] = []
     spoken: List[float] = []
     transcribed = False
-    for clip, gain in heard:
+    for position, (clip, gain) in enumerate(heard):
         asset = assets.get(clip.asset_id)
         if asset is None or not asset.has_audio:
             continue
@@ -200,6 +202,8 @@ def talking_in(
             landed = _on_timeline(clip, segment.start, segment.end)
             if landed is not None:
                 spans.append((round(landed[0], 3), round(landed[1], 3)))
+                if position < len(sequence):
+                    footage_spans.append(spans[-1])
         low, high = float(clip.source_range.start), float(clip.source_range.end)
         spoken += [level + turned for level in _talk_seconds(analysis, low, high)]
 
@@ -216,7 +220,15 @@ def talking_in(
             }
             if placed:
                 gains[track.id] = placed
-    return Talking(spans=tuple(sorted(spans)), music_gains=gains, clip_gains=clip_gains)
+    # A track left out of ducking and playing a file from the footage is the sound of a place.
+    not_music = frozenset(
+        clip.id for track in project.tracks
+        if track.track_type == TrackType.AUDIO and track.id not in voices and not track.duck_under_speech
+        for clip in track.clips
+        if (asset := assets.get(clip.asset_id)) is not None and library_of(asset) != MUSIC
+    )
+    return Talking(spans=tuple(sorted(spans)), music_gains=gains, clip_gains=clip_gains,
+                   footage_spans=tuple(sorted(footage_spans)), not_music=not_music)
 
 @functools.lru_cache(maxsize=256)
 def _mean_volume(path: str, start: float, seconds: float) -> Optional[float]:

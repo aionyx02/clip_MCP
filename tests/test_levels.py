@@ -90,6 +90,38 @@ def test_music_close_under_the_talking_is_found_before_the_render() -> None:
     # Nothing is said about music that was never brought to the talking.
     assert not check_delivery(loud, {}, talking=Talking(spans=((0.5, 1.5),)))
 
+def test_the_sound_of_a_place_is_not_held_to_where_music_sits() -> None:
+    """A street on its own track is heard under the talking on purpose (#193)."""
+    cut = project()
+    cut.tracks.append(Track(id="place", track_type="audio", clips=[Clip(
+        id="street", asset_id="cam", timeline_in=Decimal(0), source_range={"start": 0, "end": 4},
+    )]))
+    analyses = {"cam": MediaAnalysis(asset_id="cam", duration=10, transcript=said((3, 5)), sound=sound(-30))}
+    talking = talking_in(cut, ASSETS, analyses, {}, lambda clip: -12.0)
+    assert talking.not_music == {"street"}
+    assert not [finding for finding in check_delivery(cut, {}, talking=talking)
+                if finding.check == "music" and "place" in finding.message]
+
+
+def test_a_song_on_a_track_that_does_not_duck_is_still_music() -> None:
+    cut = project()
+    cut.tracks[1].duck_under_speech = False
+    analyses = {"cam": MediaAnalysis(asset_id="cam", duration=10, transcript=said((3, 5)), sound=sound(-30))}
+    assert talking_in(cut, ASSETS, analyses, {}, lambda clip: -12.0).not_music == frozenset()
+
+
+def test_talking_in_the_footage_is_told_from_a_narration_over_it() -> None:
+    cut = project()
+    cut.tracks.append(Track(id="narration", track_type="audio", clips=[Clip(
+        id="n", asset_id="song", timeline_in=Decimal(0), source_range={"start": 0, "end": 1},
+    )]))
+    analyses = {"cam": MediaAnalysis(asset_id="cam", duration=10, transcript=said((3, 5)), sound=sound(-30)),
+                "song": MediaAnalysis(asset_id="song", duration=10, transcript=said((0, 1)), sound=sound(-20))}
+    talking = talking_in(cut, ASSETS, analyses, {"narration": 0.0}, lambda clip: -12.0)
+    assert talking.spans == ((0.0, 1.0), (1.0, 3.0))
+    assert talking.footage_spans == ((1.0, 3.0),)
+
+
 def sequence(*clips: Clip) -> Project:
     """A project whose sequence is these clips."""
     return Project(id="p", tracks=[Track(id="main", track_type="video", clips=list(clips))])

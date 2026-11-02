@@ -120,6 +120,37 @@ def test_ducking_shows_as_the_music_dropping_under_the_voice(talk_over_music: st
     assert spoken.voice is not None and spoken.music_under_voice is not None
     assert quiet.music_alone - spoken.music_under_voice > 6
 
+def test_talking_on_camera_after_a_narration_is_measured_as_a_voice(audio_media: Path, tmp_path: Path) -> None:
+    """With a narration on, the footage was all put with the music, so its talking read as nobody talking (#193)."""
+    from app.engine.builder import FFmpegRenderer, Talking
+    from app.runtime import repo
+    from app.tools.shared import referenced_assets
+
+    talk = import_asset(str(audio_media / "talk.mp4"))["id"]
+    spoken_over = import_asset(str(audio_media / "music.mp3"))["id"]
+    project_id = build_project([
+        video_track(), insert("t", talk, 0, 6),
+        {"action": "add_track", "track_id": "narration", "track_type": "audio"},
+        insert("n", spoken_over, 0, 3, track_id="narration"),
+    ], width=320, height=240)
+    edit(project_id, [{"action": "set_markers", "markers": [
+        {"id": "a", "name": "配音", "timeline_in": 0}, {"id": "b", "name": "鏡頭前", "timeline_in": 3},
+    ]}])
+    project = repo.get_project(project_id)
+    voice, music = tmp_path / "voice.wav", tmp_path / "music.wav"
+    command = FFmpegRenderer().build_sound(
+        project, referenced_assets(project), str(tmp_path / "mix.m4a"), str(voice), str(music),
+        loudness_target=None, voices={"narration": 0.0},
+        talking=Talking(spans=((0.0, 6.0),), footage_spans=((3.0, 6.0),)),
+    )
+    made = subprocess.run(command, capture_output=True)
+    assert made.returncode == 0, made.stderr.decode(errors="replace")[-400:]
+
+    narrated, on_camera = parts_of(project, levels(str(voice)), levels(str(music)))
+    assert narrated.voice is not None and on_camera.voice is not None
+    assert on_camera.music_alone is None and on_camera.music_under_voice is None
+
+
 def test_a_cut_with_no_music_says_so(audio_media: Path) -> None:
     loud = import_asset(str(audio_media / "loud.mp4"))["id"]
     project = build_project([video_track(), insert("l", loud, 0, 4)], width=320, height=240)

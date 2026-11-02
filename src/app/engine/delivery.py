@@ -358,6 +358,8 @@ def _music_over_talking(project: Project, talking: Optional[Talking]) -> List[Fi
             continue
         for clip in track.clips:
             opened, closed = float(clip.timeline_in), float(clip.timeline_out)
+            if clip.id in talking.not_music:
+                continue
             if clip.id not in talking.music_gains[track.id] or clip.volume == 0 or not any(start < closed and end > opened for start, end in talking.spans):
                 continue
             under = -20 * math.log10(clip.volume) + (DUCK_DEPTH_DB if track.duck_under_speech else 0.0)
