@@ -528,8 +528,8 @@ def _speech_cuts(clips: Sequence[Clip], analyses: Mapping[str, MediaAnalysis]) -
                     # Moved there the cut would only trade this for `bad_picture` (#192).
                     blocked = _bad_picture_before(analysis, at, edge)
                     way_out = (f"{move} at {edge:.2f}s of the file to keep all of it" if blocked is None else
-                               f"It reaches {edge:.2f}s of the file, but the picture is black or frozen from "
-                               f"{blocked:.2f}s, so moving the cut would show that instead: leave the cut, and "
+                               f"It reaches {edge:.2f}s of the file, but the picture is black or frozen "
+                               f"{'until' if opens else 'from'} {blocked:.2f}s, so moving the cut would show that instead: leave the cut, and "
                                "tell the user")
                     found.append(Finding("mid_speech", (
                         f"clip {clip.id} {side} {abs(at - edge):.2f}s {where}, at {clock(landed)} ({at:.2f}s of the "

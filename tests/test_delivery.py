@@ -550,7 +550,7 @@ def test_a_sound_at_the_start_behind_frozen_picture_is_not_advice_to_cut_there()
 
     found = checks(project_of(clip("a", "x", 4.3, 9.0, 0)), {"x": heard})
 
-    assert "Start at" not in found[0][1] and "black or frozen from 4.20s" in found[0][1]
+    assert "Start at" not in found[0][1] and "black or frozen until 4.20s" in found[0][1]
 
 
 def test_the_same_shot_shown_twice_is_found() -> None:
