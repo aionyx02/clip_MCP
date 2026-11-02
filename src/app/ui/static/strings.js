@@ -467,6 +467,7 @@ window.T = {
     start: "從素材的",
     end: "到素材的",
     length: "長度",
+    speedHint: (speed) => `這段以 ${+speed.toFixed(2)} 倍速播放：素材改 1 秒，成片長度只變 ${(1 / speed).toFixed(2)} 秒。`,
     madeByAi: "AI 剪的",
     adjusted: "你調整過",
     handBack: "交回給 AI",

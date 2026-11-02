@@ -61,6 +61,25 @@ def test_a_project_whose_footage_is_gone_says_so(client: TestClient, media: Path
     assert listed["missing"] == ["moved.mp4"]
     assert listed["thumb"] == {"asset_id": asset, "t": 1.0}
 
+def test_a_first_shot_under_a_second_long_is_shown_from_inside_it(client: TestClient, media: Path) -> None:
+    asset = catalog.import_asset(str(media / "wide.mp4"))["id"]
+    made = client.post("/api/projects", json={"name": "很短"}).json()
+    client.post(f"/api/projects/{made['id']}/edits", json={
+        "expected_version": runtime.repo.get_project(made["id"]).version, "operations": [
+            {"action": "insert_clip", "track_id": "video", "clip_id": "c1", "asset_id": asset,
+             "source_range": {"start": 2, "end": 2.6}}]})
+    listed = next(item for item in client.get("/api/projects").json()["projects"] if item["id"] == made["id"])
+    assert listed["thumb"] == {"asset_id": asset, "t": 2.3}
+
+def test_the_library_is_in_number_order(client: TestClient, media: Path, tmp_path: Path) -> None:
+    for number in (10, 2, 1):
+        copy = tmp_path / f"{number}.mp4"
+        # Each its own file, or importing would call them one.
+        copy.write_bytes((media / "wide.mp4").read_bytes() + bytes([number]))
+        catalog.import_asset(str(copy))
+    names = [asset["name"] for asset in client.get("/api/assets").json()["assets"]]
+    assert [name for name in names if name in {"1.mp4", "2.mp4", "10.mp4"}] == ["1.mp4", "2.mp4", "10.mp4"]
+
 def test_only_the_apps_own_folders_can_be_opened(client: TestClient, monkeypatch) -> None:
     opened = []
     monkeypatch.setattr(os, "startfile", opened.append, raising=False)
