@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from fractions import Fraction
 from statistics import median
-from typing import Callable, Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Callable, Dict, FrozenSet, List, Mapping, Optional, Sequence, Tuple
 from app.engine import cards, loudness, resources, stills
 from app.engine.ffmpeg import escape_filter_path
 from app.engine.reframe import Framing, crop_filter
@@ -104,11 +104,19 @@ class Talking:
             that brings its talking to the level of the rest, or keeps the
             place it was shot in under that talking. A clip left out plays at
             the level it was recorded.
+        footage_spans: The part of `spans` said in the footage's own sound,
+            which measuring the voice has to tell from the place around it
+            once a narration is on top of both.
+        not_music: Clips on audio tracks that are not music and were not put
+            there as music, such as the sound of a place, by clip ID. They
+            are not held to how far under the talking music should sit.
     """
 
     spans: Tuple[Tuple[float, float], ...] = ()
     music_gains: Mapping[str, Mapping[str, float]] = field(default_factory=dict)
     clip_gains: Mapping[str, float] = field(default_factory=dict)
+    footage_spans: Tuple[Tuple[float, float], ...] = ()
+    not_music: FrozenSet[str] = frozenset()
 
 @dataclass(frozen=True)
 class Segment:
@@ -231,6 +239,22 @@ def _duck_volume(speech: Sequence[Tuple[float, float]]) -> str:
     )
     drop = 1 - 10 ** (-DUCK_DEPTH_DB / 20)
     return f"volume='1-{drop:.4f}*({ramps})':eval=frame"
+
+# FFmpeg evaluates `volume` once per frame of sound, so a stretch is widened by about that much
+# for a frame across its edge to fall inside it. Provisional: comfortably over a 1024-sample frame.
+FRAME_OF_SOUND_SECONDS = 0.05
+
+def _during(spans: Sequence[Tuple[float, float]]) -> str:
+    """Write the expression that is one inside any of some stretches and zero outside them.
+
+    Args:
+        spans: The stretches, as `(start, end)` in timeline seconds.
+
+    Returns:
+        An FFmpeg expression in `t`.
+    """
+    edge = FRAME_OF_SOUND_SECONDS
+    return "min(1," + "+".join(f"between(t,{start - edge:.3f},{end + edge:.3f})" for start, end in spans) + ")"
 
 def _round_half_up(value: Fraction) -> int:
     """Round a fraction to the nearest integer, rounding halves up.
@@ -1132,6 +1156,7 @@ class FFmpegRenderer:
         speech = talking.spans if talking is not None and talking.spans else None
         music_gains = talking.music_gains if talking is not None else {}
         clip_gains = talking.clip_gains if talking is not None else {}
+        footage_speech = talking.footage_spans if talking is not None else ()
         self.check_supported(project, assets)
         segments = self.plan_segments(project)
         if not segments:
@@ -1467,14 +1492,22 @@ class FFmpegRenderer:
 
         if sound_only and stems:
             # Every lane is split, one copy to the mix and one to its stem: who is talking on
-            # one side — the footage's own sound, or the narration when there is one — and
-            # everything else as ducked on the other, which with a narration includes the
-            # place it was spoken over.
+            # one side — the footage's own sound, and any narration — and everything else as
+            # ducked on the other. Under a narration the footage is the place it was spoken
+            # over, except where the transcript has somebody talking in it (#193).
             lanes = {"voice": [], "music": []}
             for index, label in enumerate(mix_labels):
                 kept, stem = f"[mixed{index}]", f"[stem{index}]"
                 filters.append(f"{label}asplit=2{kept}{stem}")
                 mix_labels[index] = kept
+                if narration and index == 0 and footage_speech:
+                    during = _during(footage_speech)
+                    filters.append(f"{stem}asplit=2[footsaid][footplace]")
+                    filters.append(f"[footsaid]volume='{during}':eval=frame[footvoice]")
+                    filters.append(f"[footplace]volume='1-{during}':eval=frame[footrest]")
+                    lanes["voice"].append("[footvoice]")
+                    lanes["music"].append("[footrest]")
+                    continue
                 lanes["voice" if index in spoken else "music"].append(stem)
             for lane, labels in lanes.items():
                 if not labels:
