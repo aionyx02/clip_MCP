@@ -34,7 +34,7 @@ def test_a_photo_moves_the_way_it_was_told() -> None:
 
 def test_a_photo_is_added_as_a_photo(photo: Path) -> None:
     added = catalog.import_asset(str(photo))
-    listed = next(asset for asset in catalog.list_assets()["assets"] if asset["id"] == added["id"])
+    listed = next(asset for asset in catalog.list_assets(text=photo.name)["assets"] if asset["id"] == added["id"])
     assert listed["photo"] is True and listed["duration"] is None
     assert runtime.repo.get_assets([added["id"]])[added["id"]].duration == stills.STILL_LONGEST
 

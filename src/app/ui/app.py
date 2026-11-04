@@ -43,7 +43,7 @@ from app.engine.analysis import transcription_of
 from app.engine.builder import DEFAULT_LOUDNESS_TARGET
 from app.engine.frames import extract_frame
 from app.engine.subtitles import captioned_clips, place_cues
-from app.models.timeline.parts import Project
+from app.models.timeline.parts import Clip, Project
 from app.storage import housekeeping
 from app.engine.library import FOLDER_KINDS as LIBRARY_FOLDERS, FOOTAGE, LIBRARIES, MUSIC, library_of
 from app.storage.repo import FOLDER_KINDS, FolderNotFoundError
@@ -127,13 +127,12 @@ async def projects(request: Request) -> Response:
         used = {clip.asset_id for track in project.tracks for clip in track.clips}
         found = runtime.repo.get_assets(used)
         missing = sorted(os.path.basename(asset.path) for asset in found.values() if not os.path.exists(asset.path))
-        first = clips[0] if clips else None
+        first = min(clips, key=lambda clip: clip.timeline_in, default=None)
         listed.append({
             "id": project.id, "name": project.name, "version": project.version,
             "duration": float(project.duration), "width": project.width, "height": project.height,
             "clips": len(clips),
-            # A frame a second in, so a shot that opens on black still shows what it is.
-            "thumb": {"asset_id": first.asset_id, "t": float(first.source_range.start) + 1.0} if first else None,
+            "thumb": _opening_frame(first),
             "missing": missing,
             "folder_id": filed.get(project.id),
             "versions": counts.get(project.id, 0),
@@ -402,6 +401,14 @@ async def cancel_job(request: Request) -> Response:
         return _error(str(error), 404)
     return JSONResponse(found)
 
+def _opening_frame(first: Optional[Clip]) -> Optional[dict]:
+    """Which frame stands for a project: a second into its first shot, so one that opens on black still
+    shows what it is, or its middle if it is shorter than that, so the frame is one the cut has."""
+    if first is None:
+        return None
+    start, end = float(first.source_range.start), float(first.source_range.end)
+    return {"asset_id": first.asset_id, "t": round(min(start + 1.0, (start + end) / 2), 2)}
+
 async def assets(request: Request) -> Response:
     """Every imported file the page can put on the timeline, and the folder each is filed in.
 
@@ -429,7 +436,7 @@ async def assets(request: Request) -> Response:
                     step = max(1, len(energy) // ENERGY_POINTS)
                     entry["energy"] = [round(max(energy[index:index + step]), 2) for index in range(0, len(energy), step)]
             listed.append(entry)
-    listed.sort(key=lambda asset: asset["name"].lower())
+    listed.sort(key=lambda asset: catalog.natural_key(asset["name"]))
     return JSONResponse({"assets": listed})
 
 # How many bars a song's energy is drawn with on its card.

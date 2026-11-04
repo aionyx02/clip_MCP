@@ -1145,7 +1145,8 @@
         <div class="label">${esc(T.editor.end)}<b>${fmt(num(clip.source_range.end))}</b></div><div class="nudges">${nudges("end")}</div>
         <p class="hint">${esc(T.editor.nudgeHint)}</p>
       </div>
-      <div class="group"><div class="label">${esc(T.editor.length)}<b>${clipLength(clip).toFixed(2)} ${esc(T.editor.seconds)}</b></div></div>
+      <div class="group"><div class="label">${esc(T.editor.length)}<b>${clipLength(clip).toFixed(2)} ${esc(T.editor.seconds)}</b></div>
+        ${(clip.speed || 1) !== 1 ? `<p class="hint">${esc(T.editor.speedHint(clip.speed))}</p>` : ""}</div>
       ${fitGroup(clip, asset)}
       ${motionGroup(clip, asset)}
       ${textsGroup(clip)}
