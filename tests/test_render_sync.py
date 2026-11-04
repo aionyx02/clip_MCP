@@ -12,7 +12,7 @@ import numpy as np
 import pytest
 
 from app import runtime
-from app.engine import renderer, sync
+from app.engine import builder, renderer, sync
 from app.models.job import Job, JobKind, JobStatus
 from app.models.timeline.parts import Clip, TimeRange, TitleCard, Track, TrackType
 from app.runtime import repo
@@ -838,13 +838,18 @@ def test_a_short_side_late_past_its_reach_and_matching_nowhere_records_that_reac
 
 def test_a_render_with_ducked_music_under_it_still_lines_up(tmp_path: Path) -> None:
     # Issue #231: music under the footage, ducked as the render ducks it, leaves the shapes close enough.
+    # Ducked by the render's own compressor keyed on the footage, so the music is back up in every
+    # pause, at the 0.5 the project in the issue had it at.
     source = source_file(tmp_path)
     music = write_sound(tmp_path / "music.wav", np.random.default_rng(9).normal(0.0, 0.1, 6 * sync.SAMPLE_RATE)
                         .astype(np.float32))
     render = tmp_path / "render.wav"
+    ducked = (f"[0:a]asplit=2[voice][key];[1:a]volume=0.5[bed];"
+              f"[bed][key]sidechaincompress=threshold={builder.DUCK_THRESHOLD}:ratio={builder.DUCK_RATIO}:"
+              f"attack={builder.DUCK_ATTACK_MS}:release={builder.DUCK_RELEASE_MS}[under];"
+              f"[voice][under]amix=inputs=2:duration=first:normalize=0")
     ffmpeg("-ss", "1.0", "-t", "4.0", "-i", str(source), "-t", "4.0", "-i", str(music), "-filter_complex",
-           "[1:a]volume=0.32[bed];[0:a][bed]amix=inputs=2:duration=first:normalize=0", "-c:a", "pcm_s16le",
-           str(render))
+           ducked, "-c:a", "pcm_s16le", str(render))
     side = {**check_side(source, 0.0, 2.0, 1.0), "music": True}
     found = sync.check(str(render), [side], {"too_short": 0, "covered": 0, "faded": 0}, FRAME, FFMPEG, "ffprobe")
     assert found["joins"] == [{"at": 0.0, "clip_id": "clip", "side": "after", "lag": 0.0}]
