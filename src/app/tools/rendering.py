@@ -26,7 +26,9 @@ from app.engine.probe import probe_file, speech_loudness
 from app.engine.reframe import Framing, frame_project, placement_at
 from app.engine.builder import DEFAULT_LOUDNESS_TARGET, Talking, voice_keys
 from app.engine.levels import song_level, talking_in
-from app.engine.delivery import CHECKS, chapter_metadata, chapters, check_delivery, light_steps, look_candidates
+from app.engine.delivery import (
+    CHECKS, chapter_metadata, chapters, check_delivery, light_steps, look_candidates, run_on_cuts,
+)
 from app.engine.frames import format_timestamp, storyboard_sheet
 from app.engine.subtitles import build_ass, place_cues
 from app.storage import housekeeping
@@ -922,7 +924,10 @@ def check_render(
     which no amount of turning down undoes; `music`, music heard too close
     under somebody talking; `mid_speech`, a cut that lands
     inside a word or between two words of one phrase, or takes the start or
-    the end off a sound the microphone measured, with where to move it; `repeated`, the same stretch of a file shown twice;
+    the end off a sound the microphone measured, with where to move it — a
+    cut between two sentences is not one, even with no pause between them,
+    where the transcript ends the first on 。！？ or a closing particle such
+    as 吧 or 啊; `repeated`, the same stretch of a file shown twice;
     `look_alike`, two clips from different files that look so alike, with
     nothing said or written over them, that a viewer could not tell which is
     which; `continuity`, a clip put on by hand between two shot at another
@@ -948,7 +953,11 @@ def check_render(
         in brightness or colour from one shot to the next within a part, with
         the adjustment that would even it out. `light` never stops a render:
         a jump may be the point. Offer the adjustment, and check again once
-        it is set.
+        it is set. And `run_on`, the cuts let through for ending a sentence
+        that the next follows with no pause: nothing is cut off as the
+        transcript has it, but only listening to the render tells whether the
+        next sentence's first sound carries across. It never stops a render
+        either.
 
     Raises:
         ValueError: If the project does not exist.
@@ -968,6 +977,10 @@ def check_render(
     light = light_steps(project, analyses_of(project))
     if light:
         checked["light"] = light
+    base = project.base_video_track
+    run_on = run_on_cuts(base.clips, analyses_of(project, listened=True))
+    if run_on:
+        checked["run_on"] = run_on
     return checked
 
 # Whether edits start making what the browser needs to play them. Off where nobody will
