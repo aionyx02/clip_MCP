@@ -151,3 +151,12 @@ def test_a_new_stage_is_on_the_job_before_the_next_heartbeat(store: Repository, 
     # Not entered: no heartbeat runs, so only the report itself can have written it.
     context.report(0.88, "telling the voices apart")
     assert store.get_job(job.job_id).stage == "telling the voices apart"
+
+@pytest.mark.skipif(not os.path.isdir("/proc"), reason="a zombie is told by its /proc state, which only Linux has")
+def test_a_worker_that_ended_and_was_never_waited_on_is_gone() -> None:
+    child = subprocess.Popen([sys.executable, "-c", "pass"])
+    # Ended, not waited on: a zombie, which answers kill(0) as if it were running.
+    deadline = datetime.now() + timedelta(seconds=10)
+    while datetime.now() < deadline and not Path(f"/proc/{child.pid}/stat").read_text().split(")")[-1].split()[0] == "Z":
+        pass
+    assert not renderer._process_alive(child.pid)

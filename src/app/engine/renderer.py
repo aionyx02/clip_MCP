@@ -86,6 +86,13 @@ def _process_alive(pid: int) -> bool:
         finally:
             kernel32.CloseHandle(handle)
     try:
+        # A worker this server started and nobody has waited on stays as a zombie after it
+        # ends, and a zombie answers kill(0); waiting on it, without blocking, sees it has ended.
+        if os.waitpid(pid, os.WNOHANG)[0] == pid:
+            return False
+    except ChildProcessError:
+        pass  # Not this server's child: kill(0) is all that can be asked.
+    try:
         os.kill(pid, 0)
     except ProcessLookupError:
         return False
