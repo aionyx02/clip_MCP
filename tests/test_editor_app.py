@@ -492,6 +492,18 @@ def test_a_job_can_be_stopped_from_the_editor(client: TestClient, ended_after: l
     ended = {job["job_id"]: job for job in client.get("/api/jobs/active").json()["ended"]}
     assert ended[waiting.job_id]["status"] == "cancelled"
 
+def test_the_job_poll_tells_the_page_when_the_ai_made_or_changed_a_project(client: TestClient) -> None:
+    stamp = lambda: client.get("/api/jobs/active").json()["projects"]
+    before = stamp()
+    assert stamp() == before
+    made = editing.create_project(name="AI 做的")
+    after_made = stamp()
+    assert after_made != before
+    editing.apply_edits(made["id"], made["version"], planning.OPERATIONS.validate_python([
+        {"action": "add_track", "track_id": "video", "track_type": "video"},
+    ]))
+    assert stamp() != after_made
+
 
 def test_offered_songs_are_heard_in_place_of_the_music_and_the_pick_comes_back_as_a_comment(
     client: TestClient, media: Path,
