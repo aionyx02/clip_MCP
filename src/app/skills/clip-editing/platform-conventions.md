@@ -72,7 +72,9 @@ turning it down does not undo it), `music` (music too close under somebody
 talking — `set_music_level` down, or let it duck), `mid_speech` (a cut inside a word or a
 phrase; it names the nearest pause — move the cut there, or, when the words
 there sound clear of the cut, hear the stretch with `listen_again` and `keep`
-so its word times replace the transcript's, then check again; to take a word off the
+so its word times replace the transcript's, then check again; when the cut itself sounds
+clean in a render, hear the render across it with `listen_again` and `keep`, and the server
+compares the words beside the cut and stops refusing it if they are whole; to take a word off the
 front of a line — 「各位」, 「呃」 — start exactly where the transcript starts the next
 word, and the cut stays there), `repeated` (the same
 stretch of a file shown twice), `look_alike` (two different files a viewer could

@@ -6,14 +6,13 @@ Also songs as they were heard, which the library, plans and the music tools all 
 import difflib
 import math
 import os
-import re
 import subprocess
 from datetime import datetime, timezone
 from typing import Annotated, Dict, Iterable, List, Literal, Mapping, Optional, Sequence, Tuple
 
 from pydantic import Field
 
-from app.models.media import Asset, HeardAgain, MediaAnalysis, Transcript, TranscriptWord
+from app.models.media import Asset, HeardAgain, HeardCut, MediaAnalysis, Transcript, TranscriptWord
 from app.models.timeline.parts import Project, TrackType
 from app.models.job import Job, JobKind
 from app.engine import clap, machine, resources, speed
@@ -26,7 +25,8 @@ from app.engine.analysis import (
 from app.engine.diarize import speaker_model_name
 from app.engine.rhythm import rhythm_model_name
 from app.engine.faces import framing_note
-from app.engine.semantic import EDGE_TOLERANCE_SECONDS, was_made_up
+from app.engine.delivery import SpeechEdge, speech_edges
+from app.engine.semantic import EDGE_TOLERANCE_SECONDS, bare_words, was_made_up
 from app.engine.ffmpeg import hidden_window_flags
 from app.engine.library import MUSIC, SPEECH_SHARE, classify, library_of, speech_share
 from app.engine import music as music_energy
@@ -429,10 +429,6 @@ def _music_heard(assets: Iterable[Asset]) -> List[dict]:
 # inside the time most AI clients allow a tool call.
 LISTEN_AGAIN_SECONDS = 30.0
 
-def bare_words(text: str) -> str:
-    """Text reduced to what is said, for comparing two hearings: no spaces or punctuation."""
-    return re.sub(r"[\s\W_]+", "", text)
-
 @mcp.tool()
 def listen_again(
     start: float,
@@ -456,7 +452,15 @@ def listen_again(
     heard is kept, never a time you write; the plans stay valid. A hearing
     that does not say the same words as the transcript, or is unsure of any,
     is not kept — `not_kept` says why; play `audio_path` to the user and ask.
-    Start and end the stretch in a pause, so it holds whole words.
+    Start and end the stretch in a pause, so it holds whole words; with
+    `keep`, an edge that falls inside a word is moved out to that word's
+    edge, and `widened` says so.
+
+    When a cut is refused for landing in somebody talking and the words kept
+    beside it may well be whole, hear the render across it with `keep`. The
+    server compares what the render says beside the cut with what the cut
+    keeps; only if they match, for sure, does the cut stop being refused. Only
+    that cut, where it stands: move it and it is judged again.
 
     Given a render's `job_id` instead of a file, it hears what the viewer
     will, a shot at a time so the words after a cut are not lost to the ones
@@ -470,7 +474,8 @@ def listen_again(
         asset_id: The file to hear. Give this or `job_id`.
         language: Spoken language code; omit to detect it.
         job_id: A finished render to hear, preview or full.
-        keep: For a file: keep these word times over the transcript's.
+        keep: For a file: keep these word times over the transcript's. For a
+            render: stop refusing the cuts in the stretch heard whole.
 
     Returns:
         A dictionary with `heard`, the new hearing with unsure words in ⟦ ⟧;
@@ -484,7 +489,10 @@ def listen_again(
         no time, one word looping), and `made_up` is then true — and, when
         `keep` was given, `kept` or `not_kept` — kept word by word where
         only some of it was heard alike and for sure, with `kept_words` and
-        `left_as_transcribed`; for a render, `captions`, the ones on screen in
+        `left_as_transcribed`; `widened`, when `keep` moved the stretch out
+        to take in words running across its edges, with the `start` and
+        `end` heard, the stretch `asked` and the words `across`; or for a
+        render, `kept_cuts`, the cuts heard whole; for a render, `captions`, the ones on screen in
         the stretch, `changed_since`, true when the project has been edited
         since it was rendered, and `unheard`, where it is loud enough to be
         talking with no word heard — hear that stretch again on its own, or
@@ -496,10 +504,8 @@ def listen_again(
     """
     if (asset_id is None) == (job_id is None):
         raise ValueError("give either asset_id, to hear a file, or job_id, to hear a render")
-    if keep and job_id is not None:
-        raise ValueError("only what a file says is kept; a render is the cut, and is heard to check it")
     if job_id is not None:
-        return _listen_to_render(job_id, start, end, language)
+        return _listen_to_render(job_id, start, end, language, keep)
     asset = shared.get_asset(asset_id)
     if not asset.has_audio:
         raise ValueError(f"asset {asset_id} has no sound to hear again")
@@ -510,6 +516,22 @@ def listen_again(
     transcript = known.transcript if known is not None else None
     if keep and transcript is None:
         raise ValueError(f"asset {asset_id} has no transcript to correct; analyze it first")
+    widened = None
+    if keep:
+        # A word half in the stretch would be kept twice: its outside part from the transcript,
+        # and the whole of it as heard. So the stretch is heard out to that word's edges (#233).
+        asked = {"start": start, "end": end}
+        start, end, across = _out_to_whole_words(transcript, start, end)
+        if across:
+            widened = {"start": start, "end": end, "asked": asked, "across": across}
+            if end - start > LISTEN_AGAIN_SECONDS:
+                # Rounded outward, so the stretch said takes the words in; snapped first, so a time
+                # already in whole milliseconds is not pushed into the next word.
+                opens = math.floor(round(start * 1000, 6)) / 1000
+                closes = math.ceil(round(end * 1000, 6)) / 1000
+                raise ValueError(f"the transcript has {'、'.join(across)} running across the edge of the stretch, "
+                                 f"and taking it in makes {opens:.3f}s to {closes:.3f}s, longer than "
+                                 f"{LISTEN_AGAIN_SECONDS:g} seconds; hear a stretch that starts and ends in a pause")
     keep_as = os.path.join(runtime.WORKSPACE_DIR, "temp", "listen", f"{asset_id[:8]}-{start:.2f}-{end:.2f}.wav")
     fresh = listen_again_in_file(
         asset.path, start, end, language or (transcript.language if transcript else None), keep_as,
@@ -531,6 +553,8 @@ def listen_again(
     }
     if made_up:
         result["made_up"] = True
+    if widened:
+        result["widened"] = widened
     if keep:
         heard_words = [word for segment in fresh.segments for word in segment.words]
         result.update(_keep_hearing(known, HeardAgain(start=start, end=end, words=heard_words), result["agrees"],
@@ -612,6 +636,31 @@ def _alike_times(
                 changed = True
     return out, apart, doubted, [stored[index].text.strip() for index in sorted(retimed)]
 
+def _out_to_whole_words(transcript: Transcript, start: float, end: float) -> Tuple[float, float, List[str]]:
+    """Move a stretch's edges out to the edges of the transcript's words running across them.
+
+    Args:
+        transcript: The file's transcript.
+        start: Where the stretch starts.
+        end: Where it ends.
+
+    Returns:
+        `(start, end, across)`: the stretch holding only whole words, and the
+        words that ran across its edges as asked, empty when none did.
+    """
+    words = [word for segment in transcript.segments for word in segment.words]
+    across: List[str] = []
+    moved = True
+    while moved:
+        # Again after each move, since the word taken in may overlap one before or after it.
+        moved = False
+        for word in words:
+            if word.start < start < word.end or word.start < end < word.end:
+                across.append(word.text.strip())
+                start, end = min(start, word.start), max(end, word.end)
+                moved = True
+    return start, end, across
+
 def _keep_hearing(known: MediaAnalysis, stretch: HeardAgain, agrees: bool, made_up: bool = False) -> dict:
     """Keep a stretch heard again over the transcript's word times, when it can be believed.
 
@@ -627,18 +676,6 @@ def _keep_hearing(known: MediaAnalysis, stretch: HeardAgain, agrees: bool, made_
         two say different words, the times of the ones they agree on are
         kept and the rest stay the transcript's (#87).
     """
-    # A word half in the stretch would be kept twice: its outside part from the transcript,
-    # and the whole of it as heard. The stretch is moved to take it in or leave it out.
-    across = [word for segment in known.transcript.segments for word in segment.words
-              if word.start < stretch.start < word.end or word.start < stretch.end < word.end]
-    if across:
-        opens = min([stretch.start, *(word.start for word in across if word.start < stretch.start < word.end)])
-        closes = max([stretch.end, *(word.end for word in across if word.start < stretch.end < word.end)])
-        # Rounded outward, so the stretch said takes the word in however long the file is; snapped
-        # first, so a time already in whole milliseconds is not pushed into the next word.
-        opens, closes = math.floor(round(opens * 1000, 6)) / 1000, math.ceil(round(closes * 1000, 6)) / 1000
-        return {"not_kept": f"the transcript has {'、'.join(word.text.strip() for word in across)} running across the "
-                            f"edge of the stretch; hear {opens:.3f}s to {closes:.3f}s again with keep"}
     partly, listed = "", {}
     unsure = unsure_words(stretch.words)
     if not agrees or unsure:
@@ -721,7 +758,84 @@ UNHEARD_LOUD_SECONDS = 1.0
 # belongs to rather than on its own: too short to hold a word. Provisional.
 MIN_HEARD_SECONDS = 0.3
 
-def _listen_to_render(job_id: str, start: float, end: float, language: Optional[str]) -> dict:
+def _cut_heard_wrong(edge: SpeechEdge, words: Sequence[TranscriptWord]) -> Optional[str]:
+    """Compare what a render says beside a cut with what the cut keeps.
+
+    Args:
+        edge: The cut.
+        words: The words heard in the stretch, in seconds of the render.
+
+    Returns:
+        Why the hearing does not clear the cut, or None when the kept words
+        were heard whole, for sure, right up to it.
+    """
+    where = f"clip {edge.clip_id} at {format_timestamp(edge.landed)}"
+    if not edge.kept:
+        return f"{where}: the transcript has a word across this cut, or none beside it, so there is nothing to compare"
+    # By which side a word begins on, not where it ends: a stray start of the word cut off,
+    # written as running past the cut, is still something heard before it.
+    side = [word for word in words if (word.end > edge.landed if edge.opens else word.start < edge.landed)]
+    beside: List[TranscriptWord] = []
+    for word in side if edge.opens else reversed(side):
+        beside.append(word)
+        if sum(len(bare_words(heard.text)) for heard in beside) >= len(edge.kept):
+            break
+    if not edge.opens:
+        beside.reverse()
+    said = bare_words("".join(word.text for word in beside))
+    if not (said.startswith(edge.kept) if edge.opens else said.endswith(edge.kept)):
+        return f"{where}: the render says 「{said}」 where the cut keeps 「{edge.kept}」"
+    doubted = unsure_words(beside)
+    if doubted:
+        return f"{where}: unsure of {'、'.join(doubted)} beside the cut"
+    return None
+
+def _keep_cuts(job: Job, project: Optional[Project], fresh: Transcript, start: float, end: float) -> dict:
+    """Stop refusing the cuts in a stretch of a render that were heard whole.
+
+    The server compares; the words the AI thinks it heard never come into it.
+
+    Args:
+        job: The render.
+        project: What it was rendered from.
+        fresh: The hearing, in seconds of the render.
+        start: Where the stretch starts.
+        end: Where it ends.
+
+    Returns:
+        `kept_cuts`, when any was heard whole, and `not_kept`, the reasons for
+        any that was not.
+    """
+    base = project.base_video_track if project is not None else None
+    if base is None or rendering.changed_since(job):
+        return {"not_kept": "the project has changed since this render, so it is not the cut any more; render it and "
+                            "hear that"}
+    if any(was_made_up(segment) for segment in fresh.segments):
+        return {"not_kept": "this hearing has the marks of a line the recogniser makes up; play `audio_path` to the "
+                            "user and ask"}
+    edges = [edge for edge in speech_edges(base.clips, rendering.analyses_of(project, listened=True))
+             if start <= edge.landed <= end]
+    if not edges:
+        return {"not_kept": "no cut in this stretch is refused for landing in somebody talking"}
+    words = [word for segment in fresh.segments for word in segment.words]
+    kept, wrong = [], []
+    for edge in edges:
+        reason = _cut_heard_wrong(edge, words)
+        if reason is not None:
+            wrong.append(reason)
+            continue
+        known = runtime.repo.get_analysis(edge.asset_id)
+        runtime.repo.save_analysis(known.model_copy(update={"heard_cuts": [
+            *known.heard_cuts, HeardCut(at=edge.at, opens=edge.opens, job_id=job.job_id)]}))
+        kept.append(f"clip {edge.clip_id} at {format_timestamp(edge.landed)}: 「{edge.kept}」 heard whole")
+    result: dict = {}
+    if kept:
+        result["kept_cuts"] = kept
+    if wrong:
+        result["not_kept"] = "; ".join(wrong) + "; play `audio_path` to the user and ask"
+    return result
+
+def _listen_to_render(job_id: str, start: float, end: float, language: Optional[str], keep: bool = False) -> dict:
     """`listen_again` over a finished render rather than a file.
 
     Args:
@@ -729,10 +843,11 @@ def _listen_to_render(job_id: str, start: float, end: float, language: Optional[
         start: Where the stretch starts, in seconds of the render.
         end: Where it ends.
         language: Spoken language code, or None for the footage's own.
+        keep: Stop refusing the cuts in the stretch that were heard whole.
 
     Returns:
         What `_heard` says, with the `captions` on screen in the stretch and
-        `changed_since`.
+        `changed_since`, and when `keep` was given, `_keep_cuts`.
     """
     job, path = rendering.finished_render(job_id)
     _hearable(start, end)
@@ -785,6 +900,8 @@ def _listen_to_render(job_id: str, start: float, end: float, language: Optional[
     unheard = loud_without_words(loud, start, fresh)
     if unheard:
         result["unheard"] = ", ".join(f"{opened:.1f}–{closed:.1f}s" for opened, closed in unheard)
+    if keep:
+        result.update(_keep_cuts(job, project, fresh, start, end))
     return result
 
 def _voice_of_render(job: Job, project: Optional[Project]) -> Optional[str]:

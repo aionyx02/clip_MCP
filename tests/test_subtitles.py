@@ -913,10 +913,36 @@ def test_a_muted_shot_keeps_the_caption_written_for_its_picture_but_not_its_spee
     project = build_project([video_track(), insert("a", spoken, 0.0, 9.0, volume=0.0)])
     stored = repo.get_project(project)
     written = SubtitleCue(id="t", asset_id=spoken, source_start=Decimal("0.5"), source_end=Decimal("2.5"),
-                          text="原本的杯子區")
+                          text="原本的杯子區", typed=True)
     said = SubtitleCue(id="s", asset_id=spoken, source_start=Decimal("4.0"), source_end=Decimal("6.0"),
                        text="第二句", words=[CueWord(start=Decimal("4.0"), end=Decimal("6.0"), text="第二句")])
     assert [cue.cue_id for cue in place_cues(stored, [written, said])] == ["t"]
+
+def test_a_corrected_caption_stays_off_a_muted_copy_of_its_footage(spoken: str) -> None:
+    # #226: a card's background taken from the same talking footage, turned down. Correcting
+    # a line so it no longer matches its word timings drops them, and that is not the same
+    # as the line having been typed for the picture.
+    project = build_project([
+        video_track(), insert("card", spoken, 0.0, 4.0, volume=0.0), insert("a", spoken, 0.0, 9.0),
+    ])
+    caption(project)
+    first = repo.get_project(project).subtitles[0]
+    edit(project, [{"action": "edit_subtitle", "cue_id": first.id, "text": "第一句改得更長了"}])
+    stored = repo.get_project(project)
+    assert next(cue for cue in stored.subtitles if cue.id == first.id).words == []
+    # Placed once, where it is heard (the clip after the four-second card), not on the card too.
+    placed = [cue for cue in place_cues(stored, stored.subtitles) if cue.cue_id == first.id]
+    assert [(cue.start, cue.end) for cue in placed] == [(Decimal("5.000"), Decimal("7.000"))]
+
+def test_a_caption_typed_for_footage_that_is_heard_elsewhere_shows_only_where_it_is_heard(spoken: str) -> None:
+    # A line the transcript missed, added by hand: the copy turned down under a card does not say it.
+    project = build_project([
+        video_track(), insert("card", spoken, 0.0, 4.0, volume=0.0), insert("a", spoken, 0.0, 9.0),
+    ])
+    edit(project, [{"action": "add_subtitle", "asset_id": spoken, "source_start": 0.2, "source_end": 0.9,
+                    "text": "漏掉的一句"}])
+    stored = repo.get_project(project)
+    assert [cue.start for cue in place_cues(stored, stored.subtitles)] == [Decimal("4.200")]
 
 def test_captions_are_stored_and_come_back_one_line_each(spoken: str) -> None:
     project = build_project([video_track(), insert("a", spoken, 0.0, 9.0)])

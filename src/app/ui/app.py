@@ -383,6 +383,9 @@ def _jobs_to_show() -> dict:
     return {
         "jobs": [_job_card(job, names, ahead.get(job.job_id, 0), now) for job in active],
         "ended": [_job_card(job, names, 0, now) for job in ended],
+        # Changes whenever a project is made, edited or deleted, by the AI or here, so the projects
+        # page can redraw itself without being reloaded.
+        "projects": hashlib.sha1(repr(runtime.repo.project_versions()).encode("utf-8")).hexdigest()[:12],
     }
 
 async def active_jobs(request: Request) -> Response:

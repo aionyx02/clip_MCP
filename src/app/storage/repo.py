@@ -573,6 +573,14 @@ class Repository:
         """
         return [Project.model_validate_json(row[0]) for row in self._query("SELECT data FROM projects ORDER BY rowid")]
 
+    def project_versions(self) -> List[Tuple[str, int]]:
+        """Every project's ID and version, without reading the projects themselves.
+
+        Returns:
+            `(id, version)` pairs in the order the projects were stored.
+        """
+        return [(row[0], int(row[1])) for row in self._query("SELECT id, version FROM projects ORDER BY rowid")]
+
     def update_project(self, project: Project, expected_version: int) -> None:
         """Replace a stored project if it is still at the expected version.
 
