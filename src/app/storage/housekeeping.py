@@ -159,16 +159,24 @@ def _size(path: str) -> int:
     """Bytes under a path, file or folder; zero when it is not there."""
     if os.path.isfile(path):
         return os.path.getsize(path)
+    # Read from the folder listing itself: on Windows it already holds each file's size, where asking
+    # each file for it was most of what the projects page waited on.
     total = 0
-    for root, _, files in os.walk(path):
-        for name in files:
+    try:
+        entries = list(os.scandir(path))
+    except OSError:
+        return 0
+    for entry in entries:
+        try:
             # Model caches link one stored file under several names; count it where it is stored.
-            file = os.path.join(root, name)
-            try:
-                if not os.path.islink(file):
-                    total += os.path.getsize(file)
-            except OSError:
-                pass
+            if entry.is_symlink():
+                continue
+            if entry.is_dir():
+                total += _size(entry.path)
+            elif entry.is_file():
+                total += entry.stat().st_size
+        except OSError:
+            pass
     return total
 
 def size_of(path: str) -> int:
