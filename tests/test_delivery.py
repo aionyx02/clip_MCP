@@ -24,6 +24,7 @@ from app.engine.delivery import (
     frames_around,
     light_steps,
     look_candidates,
+    run_on_cuts,
 )
 from app.engine.interchange import left_behind, write_edl, write_fcpxml, write_otio, write_srt
 from app.engine.subtitles import build_ass, caption_overflow
@@ -661,6 +662,100 @@ def test_a_cut_in_a_real_silence_is_clean_whatever_the_word_timings_say() -> Non
     analysis.silences = [Span(start=2.1, end=2.6)]
     analysis.transcript.segments[0].words[2].start = 2.05
     assert checks(project_of(clip("a", "x", 0, 2.4, 0)), {"x": analysis}) == []
+
+def running_on(*lines: str, start: float = 1.0) -> MediaAnalysis:
+    """Analyze talking that never stops: one long transcribed sentence, a character a word.
+
+    The shape Whisper gives continuous Chinese: half a minute in one segment, a
+    word per character laid end to end, and as often as not no punctuation.
+    Each character takes 0.2s, the next one starting as it ends.
+
+    Args:
+        *lines: What is said, in order; a line may carry its own punctuation,
+            which stays on the character before it as the transcriber puts it.
+        start: Where the talking starts.
+
+    Returns:
+        The analysis.
+    """
+    from app.models.media import Transcript, TranscriptSegment, TranscriptWord
+
+    words, at = [], start
+    for character in "".join(lines):
+        if character in "。，！？":
+            words[-1].text += character
+            continue
+        words.append(TranscriptWord(text=character, start=round(at, 2), end=round(at + 0.2, 2)))
+        at += 0.2
+    text = "".join(word.text for word in words)
+    return MediaAnalysis(asset_id="x", duration=at + 1.0, transcript=Transcript(language="zh", model="t", segments=[
+        TranscriptSegment(start=start, end=words[-1].end, text=text, words=words)]))
+
+def end_of(analysis: MediaAnalysis, said: str) -> float:
+    """Where a stretch of the talking ends, in seconds of the file."""
+    text = "".join(word.text.rstrip("。，！？") for word in analysis.transcript.segments[0].words)
+    return analysis.transcript.segments[0].words[text.index(said) + len(said) - 1].end
+
+@pytest.mark.parametrize("said, sentence", [
+    ("今天的進度差不多結案了吧", "那我們明天再來處理剩下的部分"),
+    ("這趟真的收穫滿滿啊", "掰掰下次見"),
+])
+def test_a_cut_at_a_sentence_end_with_no_pause_after_it_is_not_mid_speech(said: str, sentence: str) -> None:
+    """#230: a sentence ending on a particle, the next running straight on, was refused for no pause."""
+    analysis = running_on(said, sentence)
+    at = end_of(analysis, said)
+    ends = project_of(clip("a", "x", 0, at, 0))
+    assert checks(ends, {"x": analysis}) == []
+    [note] = run_on_cuts(ends.base_video_track.clips, {"x": analysis})
+    assert f"ends at 0:0{int(at)}" in note and f"「{said[-8:]}」 ends a sentence" in note
+    # A clip opening on the next sentence there takes whole words off the front, as it always could.
+    starts = project_of(clip("a", "x", at, analysis.duration - 0.5, 0))
+    assert checks(starts, {"x": analysis}) == []
+
+def test_a_sentence_ended_by_its_punctuation_is_an_end_whatever_its_last_word() -> None:
+    analysis = running_on("我們今天就先拍到這裡。", "下禮拜再來")
+    at = end_of(analysis, "這裡")
+    assert checks(project_of(clip("a", "x", 0, at, 0)), {"x": analysis}) == []
+
+@pytest.mark.parametrize("said, sentence, cut_after", [
+    # Nothing marks an end: 了 sits inside a sentence as often as at its end.
+    ("差不多結案了", "吧那我們明天再來", "結案了"),
+    # A comma parts a sentence without ending it.
+    ("我們先去吃飯，", "然後再去看電影", "吃飯"),
+    # 吧 the end of a word, not a particle.
+    ("我們晚上去酒吧", "喝一杯好不好", "酒吧"),
+    ("先坐在吧", "台那邊等一下", "坐在吧"),
+])
+def test_a_cut_between_words_with_no_sentence_end_marked_is_still_mid_speech(
+        said: str, sentence: str, cut_after: str) -> None:
+    analysis = running_on(said, sentence)
+    project = project_of(clip("a", "x", 0, end_of(analysis, cut_after), 0))
+    found = checks(project, {"x": analysis})
+    assert [check for check, _ in found] == ["mid_speech"]
+    assert "nothing in the transcript ends a sentence here" in found[0][1] and "`listen_again`" in found[0][1]
+    assert run_on_cuts(project.base_video_track.clips, {"x": analysis}) == []
+
+def test_a_cut_inside_the_particle_that_ends_a_sentence_is_still_mid_speech() -> None:
+    analysis = running_on("今天的進度差不多結案了吧", "那我們明天再來處理")
+    at = end_of(analysis, "結案了吧") - 0.1
+    found = checks(project_of(clip("a", "x", 0, at, 0)), {"x": analysis})
+    assert [check for check, _ in found] == ["mid_speech"]
+    assert "ends a sentence here" not in found[0][1]
+
+def test_a_sentence_end_does_not_clear_a_word_the_second_listen_heard_cut_off() -> None:
+    from app.models.media import HeardWord, SecondListen
+
+    # The transcript ends a sentence on 吧, but the second listen, which never read it,
+    # heard 那我們 run on from it, and the transcript has no word for that stretch.
+    analysis = running_on("今天的進度差不多結案了吧", "那我們明天再來處理")
+    at = end_of(analysis, "結案了吧")
+    analysis.transcript.segments[0].words = [
+        word for word in analysis.transcript.segments[0].words if word.end <= at + 0.01 or word.start >= at + 0.6]
+    analysis.second_listen = SecondListen(model="t", voiced=[Span(start=1.0, end=at + 0.4)], words=[
+        HeardWord(text="吧", start=at - 0.2, end=at, probability=0.9),
+        HeardWord(text="那我們", start=at + 0.02, end=at + 0.4, probability=0.9)])
+    found = checks(project_of(clip("a", "x", 0, at, 0)), {"x": analysis})
+    assert [check for check, _ in found] == ["mid_speech"]
 
 def test_a_cut_that_takes_off_a_start_the_transcript_missed_is_found() -> None:
     # The second sentence really starts at 5.6, where the silence ends; the transcript says
