@@ -580,7 +580,7 @@ def apply_operation(project: Project, op: EditOperation, assets: Mapping[str, As
             asset_id, source_start, source_end = op.asset_id, op.source_start, op.source_end
         added = SubtitleCue(
             id=f"c{number}", asset_id=asset_id, source_start=source_start, source_end=source_end,
-            text=op.text, secondary=op.secondary, speaker=op.speaker, local=not op.for_all_projects,
+            text=op.text, secondary=op.secondary, speaker=op.speaker, local=not op.for_all_projects, typed=True,
         )
         project.subtitles = sorted([*project.subtitles, added], key=cue_order)
         # A caption put back by hand where one was deleted is wanted there after all.
