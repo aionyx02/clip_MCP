@@ -131,6 +131,12 @@ _MIGRATIONS: List[List[str]] = [
         "CREATE TABLE IF NOT EXISTS trials (id TEXT PRIMARY KEY, project_id TEXT NOT NULL, data TEXT NOT NULL)",
         "CREATE INDEX IF NOT EXISTS trials_project ON trials (project_id)",
     ],
+    [
+        # Every sound of a cut the user has heard with a sound check, by the fingerprint of what
+        # decides it, so a final render after a change to the music alone asks for no new preview.
+        "CREATE TABLE IF NOT EXISTS heard_sounds (project_id TEXT NOT NULL, sound TEXT NOT NULL, "
+        "PRIMARY KEY (project_id, sound))",
+    ],
 ]
 # Footage and music are filed apart, each in folders of its own; projects in theirs.
 FOLDER_KINDS = ("assets", "music", "projects")
@@ -649,6 +655,16 @@ class Repository:
             (project_id,),
         )
         return sorted((Job.model_validate_json(data) for (data,) in rows), key=lambda job: job.created_at)
+
+    def hear_sound(self, project_id: str, sound: str) -> None:
+        """Note that a sound of a project's cut, named by its fingerprint, has been heard."""
+        with self._transaction() as conn:
+            conn.execute("INSERT OR IGNORE INTO heard_sounds (project_id, sound) VALUES (?, ?)", (project_id, sound))
+
+    def heard_sounds(self, project_id: str) -> Set[str]:
+        """The fingerprints of every sound of a project's cut that has been heard."""
+        return {sound for (sound,) in self._query("SELECT sound FROM heard_sounds WHERE project_id = ?",
+                                                   (project_id,))}
 
     def version_marks(self, project_id: str) -> Dict[str, Set[str]]:
         """Read how the versions of a project are marked.

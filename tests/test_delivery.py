@@ -281,11 +281,44 @@ def test_a_final_render_waits_for_a_preview_of_the_cut_as_it_is_now(media: Path)
     finished(render_project(project))
     with pytest.raises(ValueError, match="no preview of the cut as it is now, portrait, has finished"):
         render_project(project, is_preview=False, frame="portrait", allow=anything)
-    edit(project, [{"action": "rename_project", "name": "改過"}])
-    with pytest.raises(ValueError, match="no preview"):
+    edit(project, [{"action": "set_clip_look", "track_id": "main", "clip_id": "a", "video_fade_in": 0.5}])
+    with pytest.raises(ValueError, match="the picture has changed since the last preview that finished"):
         render_project(project, is_preview=False, allow=anything)
     finished(render_project(project))
     assert finished(render_project(project, is_preview=False, allow=anything))["status"] == "completed"
+
+# Every kind of finding, so these renders are held back by the preview and nothing else.
+ANYTHING = ["bad_picture", "clipping", "music", "mid_speech", "repeated", "look_alike", "continuity", "unplanned",
+            "captions", "length"]
+
+def test_a_cut_changed_and_changed_back_needs_no_new_preview(media: Path) -> None:
+    asset = import_asset(str(media / "wide.mp4"))["id"]
+    project = build_project([video_track(), insert("a", asset, 0, 2)], width=640, height=360)
+    finished(render_project(project))
+    edit(project, [{"action": "set_clip_audio", "track_id": "main", "clip_id": "a", "volume": 0.5}])
+    edit(project, [{"action": "set_clip_audio", "track_id": "main", "clip_id": "a", "volume": 1.0}])
+    # Nor does a new name, which is not in the video at all.
+    edit(project, [{"action": "rename_project", "name": "改過"}])
+    assert finished(render_project(project, is_preview=False, allow=ANYTHING))["status"] == "completed"
+
+def test_when_only_the_sound_changed_hearing_it_is_enough(media: Path) -> None:
+    from app.tools.planning import preview_sound
+
+    asset = import_asset(str(media / "wide.mp4"))["id"]
+    song = import_asset(str(media / "song.mp3"))["id"]
+    project = build_project([
+        video_track(), insert("a", asset, 0, 2),
+        {"action": "add_track", "track_id": "music", "track_type": "audio", "duck_under_speech": True},
+        insert("m", song, 0, 2, track_id="music"),
+    ], width=640, height=360)
+    finished(render_project(project))
+    # The song comes in somewhere else: the same picture, another sound.
+    edit(project, [{"action": "trim_clip", "track_id": "music", "clip_id": "m",
+                    "new_source_range": {"start": 5, "end": 7}}])
+    with pytest.raises(ValueError, match="only the sound has changed .*preview_sound"):
+        render_project(project, is_preview=False, allow=ANYTHING)
+    preview_sound(project)
+    assert finished(render_project(project, is_preview=False, allow=ANYTHING))["status"] == "completed"
 
 def test_the_chapters_are_carried_inside_the_rendered_file(media: Path, tmp_path: Path) -> None:
     from app.engine.builder import FFmpegRenderer

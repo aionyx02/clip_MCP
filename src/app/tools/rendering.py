@@ -4,6 +4,7 @@ Also what a render needs to know about a project first: who is talking where, ho
 file is framed for the shape asked for, and the analyses it leans on.
 """
 
+import hashlib
 import json
 import os
 import time
@@ -108,6 +109,34 @@ def changed_since(job: Job) -> bool:
     """
     project = rendered_from(job)
     return project is not None and job.project_version is not None and project.version != job.project_version
+
+# What a clip carries that only its sound hears; `playback.mix_key` covers all of it.
+SOUND_ONLY = {"volume", "audio_fade_in", "audio_fade_out", "audio_lead", "audio_lag", "cleanup", "keep_level",
+              "preserve_pitch"}
+# What says where a project or a clip came from, or what it is called, and is in no video made of it.
+NOT_RENDERED = {"id", "name", "branched_from", "version", "deleted_subtitles"}
+CLIP_BOOKKEEPING = {"id", "from_plan_id", "from_clip_ids", "pinned"}
+
+def picture_key(project: Project) -> str:
+    """Name a cut's picture by everything that decides what is on screen.
+
+    Two versions of a project with the same key show the same thing, however
+    many edits lie between them. Together with `playback.mix_key`, which names
+    the sound, it covers all a render is made from but the shape and size it
+    is rendered at, which a render records apart.
+
+    Args:
+        project: The project.
+
+    Returns:
+        The key.
+    """
+    picture = project.model_dump(mode="json", exclude=NOT_RENDERED | {"tracks"})
+    picture["tracks"] = [
+        [clip.model_dump(mode="json", exclude=SOUND_ONLY | CLIP_BOOKKEEPING) for clip in track.clips]
+        for track in project.video_tracks
+    ]
+    return hashlib.sha256(json.dumps(picture, sort_keys=True).encode("utf-8")).hexdigest()[:32]
 
 @mcp.tool()
 def preview_project(
@@ -471,8 +500,12 @@ def render_project(
 
     Before a final render, read skill://clip-editing/platform-conventions.md;
     after any render, look at it with `view_render` and `inspect_join`. A
-    final render is refused until a preview of the cut as it is now, in the
-    same shape, has finished: that preview is what was looked at.
+    final render is refused until a preview of the cut's picture as it is
+    now, in the same shape, has finished: that preview is what was looked at.
+    What is compared is what the video would contain, not how many edits were
+    made, so an edit undone or a new name asks for nothing. When only the
+    sound changed — the music moved, a level — hearing it with
+    `preview_sound` is enough.
 
     Before anything is rendered the cut is checked the way `check_render`
     checks it, and a full render is refused while it finds anything: black
@@ -536,35 +569,52 @@ def render_project(
 
     Raises:
         ValueError: If the project does not exist, contains no clips, uses an
-            unsupported feature, has no finished preview of this version in
-            this shape for a final render, or the check found something not
-            allowed.
+            unsupported feature, has no finished preview of its picture as it
+            is now in this shape for a final render, or its sound as it is now
+            has been neither previewed nor heard, or the check found something
+            not allowed.
     """
-    if not is_preview and not _previewed(project_id, frame):
-        raise ValueError(
-            "no preview of the cut as it is now" + (f", {frame}," if frame else "") + " has finished: render one "
-            "with is_preview: true, look at it with view_render and inspect_join, then render the final cut"
-        )
+    unseen = None if is_preview else _unseen(project_id, frame)
+    if unseen:
+        raise ValueError(unseen)
     return start_render(
         project_id, is_preview, loudness_target, burn_subtitles, frame, follow_faces, allow, PREVIEW_SHORT_SIDE,
     )
 
-def _previewed(project_id: str, frame: Optional[str]) -> bool:
-    """Whether a preview of a project as it is now, in one shape, has finished.
+def _unseen(project_id: str, frame: Optional[str]) -> Optional[str]:
+    """Say what of a project as it is now nobody has looked at or heard, before a final render.
+
+    The picture has to have been previewed in this shape. The sound has to
+    have been previewed in any shape, since a shape does not change it, or
+    heard with `preview_sound`; so after a change to the music alone the
+    sound check, which takes a fraction of a preview, is all that is asked.
 
     Args:
         project_id: The project.
         frame: The shape, or None for the project's own.
 
     Returns:
-        True when there is one; False too when the project does not exist,
+        Why the final render is refused and the quickest way past it; None
+        when there is nothing unseen, or when the project does not exist,
         which rendering says in its own words.
     """
     project = runtime.repo.get_project(project_id)
-    return project is not None and any(
-        job.preview and job.project_version == project.version and job.frame == frame
-        for job in runtime.repo.renders_of(project_id)
-    )
+    if project is None:
+        return None
+    previews = [job for job in runtime.repo.renders_of(project_id) if job.preview]
+    shaped = [job for job in previews if job.frame == frame]
+    shape = f", {frame}," if frame else ""
+    if not shaped:
+        return (f"no preview of the cut as it is now{shape} has finished: render one with is_preview: true, look "
+                "at it with view_render and inspect_join, then render the final cut")
+    if not any(job.picture == picture_key(project) for job in shaped):
+        return (f"the picture has changed since the last preview that finished{shape}: render a preview with "
+                "is_preview: true, look at it with view_render and inspect_join, then render the final cut")
+    sound = playback.mix_key(project)
+    if any(job.sound == sound for job in previews) or sound in runtime.repo.heard_sounds(project_id):
+        return None
+    return ("only the sound has changed since the last preview that finished; the picture is the same: hear it "
+            "with preview_sound, then render the final cut (a new preview with is_preview: true does as well)")
 
 def start_render(
     project_id: str,
@@ -592,6 +642,8 @@ def start_render(
     project = runtime.repo.get_project(project_id)
     if not project:
         raise ValueError(f"project {project_id} not found")
+    # Taken before the project is reshaped or sized down, so a final render compares the cut it is asked of.
+    picture, sound = picture_key(project), playback.mix_key(project)
 
     project = reshaped(project, frame)
     findings = check_findings(project, burn_subtitles)
@@ -612,8 +664,8 @@ def start_render(
     if is_preview:
         _make_room()
     housekeeping.sweep_renders(runtime.WORKSPACE_DIR, _delivered)
-    job = Job(kind=JobKind.RENDER, project_id=project_id, project_version=project.version, captioned=burn_subtitles,
-              preview=is_preview, frame=frame)
+    job = Job(kind=JobKind.RENDER, project_id=project_id, project_version=project.version, picture=picture,
+              sound=sound, captioned=burn_subtitles, preview=is_preview, frame=frame)
     delivered: Optional[str] = None
     if is_preview:
         job.work_dir = os.path.join(housekeeping.preview_dir(runtime.WORKSPACE_DIR, project_id), job.job_id)
