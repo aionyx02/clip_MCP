@@ -732,7 +732,7 @@ def test_a_cut_between_words_with_no_sentence_end_marked_is_still_mid_speech(
     project = project_of(clip("a", "x", 0, end_of(analysis, cut_after), 0))
     found = checks(project, {"x": analysis})
     assert [check for check, _ in found] == ["mid_speech"]
-    assert "nothing in the transcript ends a sentence here" in found[0][1] and "`listen_again`" in found[0][1]
+    assert "marks no sentence end between these words" in found[0][1] and "`listen_again`" in found[0][1]
     assert run_on_cuts(project.base_video_track.clips, {"x": analysis}) == []
 
 def test_a_cut_inside_the_particle_that_ends_a_sentence_is_still_mid_speech() -> None:
@@ -740,7 +740,7 @@ def test_a_cut_inside_the_particle_that_ends_a_sentence_is_still_mid_speech() ->
     at = end_of(analysis, "結案了吧") - 0.1
     found = checks(project_of(clip("a", "x", 0, at, 0)), {"x": analysis})
     assert [check for check, _ in found] == ["mid_speech"]
-    assert "ends a sentence here" not in found[0][1]
+    assert "marks no sentence end" not in found[0][1]
 
 def test_a_sentence_end_does_not_clear_a_word_the_second_listen_heard_cut_off() -> None:
     from app.models.media import HeardWord, SecondListen
@@ -756,6 +756,17 @@ def test_a_sentence_end_does_not_clear_a_word_the_second_listen_heard_cut_off() 
         HeardWord(text="那我們", start=at + 0.02, end=at + 0.4, probability=0.9)])
     found = checks(project_of(clip("a", "x", 0, at, 0)), {"x": analysis})
     assert [check for check, _ in found] == ["mid_speech"]
+    # The second listen is the reason; the transcript does end a sentence here, so it is not said that it does not.
+    assert "heard on a second listen" in found[0][1] and "marks no sentence end" not in found[0][1]
+
+def test_a_cut_in_talking_with_no_word_timings_does_not_say_what_the_words_mark() -> None:
+    analysis = running_on("今天的進度差不多結案了", "那我們明天再來處理")
+    at = end_of(analysis, "結案了")
+    for segment in analysis.transcript.segments:
+        segment.words = []
+    found = checks(project_of(clip("a", "x", 0, at, 0)), {"x": analysis})
+    assert [check for check, _ in found] == ["mid_speech"]
+    assert "marks no sentence end" not in found[0][1]
 
 def test_a_cut_that_takes_off_a_start_the_transcript_missed_is_found() -> None:
     # The second sentence really starts at 5.6, where the silence ends; the transcript says

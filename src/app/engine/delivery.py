@@ -56,6 +56,8 @@ CLEAN_SEARCH_SECONDS = 3.0
 # Particles that close a sentence in speech, where a transcript of continuous talking often
 # has no punctuation: 「差不多結案了吧」, 「收穫滿滿啊」 (#230). Not 的 or 了, which as often
 # sit inside a sentence as at its end. Provisional: picked by ear, not counted in any transcripts.
+# 啊喔哦 are also FILLERS (plan/checks.py), the sound before a sentence; a cut after an opening
+# 「啊」 is let through as an end too, and only `run_on` asks for it to be heard.
 SENTENCE_PARTICLES = "吧呢嗎嘛囉啦呀啊喔哦"
 # Words that end on one of those characters without it being a particle.
 NOT_CLOSING = ("酒吧", "網吧", "貼吧")
@@ -461,6 +463,21 @@ def _sentence_end_at(analysis: MediaAnalysis, at: float) -> str:
                 return said[-SENTENCE_TAIL_CHARACTERS:]
     return ""
 
+def _between_words(analysis: MediaAnalysis, at: float) -> bool:
+    """Say whether a cut sits between two words of one transcribed sentence.
+
+    Args:
+        analysis: The file's analysis.
+        at: The cut, in source seconds.
+
+    Returns:
+        True when it does, so the words on either side can say whether a
+        sentence ends there; False with no word timings to go by.
+    """
+    tolerance = EDGE_TOLERANCE_SECONDS
+    return any(before.end - tolerance <= at <= after.start + tolerance
+               for segment in _said(analysis) for before, after in zip(segment.words, segment.words[1:]))
+
 def _inside_speech(analysis: MediaAnalysis, at: float, opens: bool, sentence_ends: bool = True) -> bool:
     """Tell whether a cut at one moment of a file lands in the middle of somebody talking.
 
@@ -713,11 +730,12 @@ def _speech_cuts(clips: Sequence[Clip], analyses: Mapping[str, MediaAnalysis]) -
                 f"; the nearest pause is at {min(near, key=lambda point: abs(point - at)):.2f}s of the file"
                 if near else f"; there is no pause within {CLEAN_SEARCH_SECONDS:g}s"
             )
-            if not known.splits_a_word(at):
+            if not lost and not known.splits_a_word(at) and _between_words(analysis, at):
                 # Between two words with no pause, the words themselves are all there is to go on (#230).
-                advice += (", and nothing in the transcript ends a sentence here — no 。！？ and no closing "
-                           "particle such as 吧 or 啊; if one does end here, hear a render across the cut with "
-                           "`listen_again` and `keep`")
+                # Not when a second listen refused it, which is its own reason, nor with no words to read.
+                advice += (", and the transcript marks no sentence end between these words — no 。！？ and no "
+                           "closing particle such as 吧 or 啊; if one does end here, hear a render across the cut "
+                           "with `listen_again` and `keep`")
         found.append(Finding("mid_speech", (
             f"clip {clip.id} {side} in the middle of somebody talking, at {clock(landed)} "
             f"({at:.2f}s of the file)"
