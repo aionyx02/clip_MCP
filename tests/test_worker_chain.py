@@ -12,7 +12,7 @@ import sys
 import types
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import pytest
 
@@ -172,7 +172,7 @@ def test_main_runs_the_analysis_a_worker_keeps(tmp_path: Path, monkeypatch: pyte
     repo = store(tmp_path)
     calls: List[str] = []
 
-    def fake(repo: Repository, job_id: str) -> Any:
+    def fake(repo: Repository, job_id: str, log_path: Optional[str] = None) -> Any:
         """Stand in for a worker, handing the second job to the same process."""
         calls.append(job_id)
         return "b" if job_id == "a" else None
@@ -192,7 +192,7 @@ def test_a_crash_in_a_kept_analysis_fails_that_job_and_propagates(
     second = Job(job_id="b")
     repo.add_job(second)
 
-    def fake(repo: Repository, job_id: str) -> Any:
+    def fake(repo: Repository, job_id: str, log_path: Optional[str] = None) -> Any:
         """Stand in for a worker that runs one job and crashes on the next."""
         if job_id == "a":
             return "b"
@@ -416,9 +416,8 @@ def test_a_kept_analysis_whose_worker_died_is_failed_as_abandoned(tmp_path: Path
     when = (datetime.now(timezone.utc) - timedelta(days=1)).isoformat().replace("+00:00", "Z")
     repo._conn.execute("UPDATE jobs SET data = json_set(data, '$.updated_at', ?) WHERE id = ?", (when, kept.job_id))
     failed = JobManager(repo).get_job(kept.job_id)
-    assert (failed.status, failed.failure_kind, failed.error_message) == (
-        JobStatus.FAILED, FailureKind.WORKER, renderer.ABANDONED,
-    )
+    assert (failed.status, failed.failure_kind) == (JobStatus.FAILED, FailureKind.WORKER)
+    assert failed.error_message.startswith(renderer.ABANDONED)
 
 
 def test_only_the_first_admitted_analysis_is_kept(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

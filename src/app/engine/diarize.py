@@ -246,6 +246,10 @@ def find_speakers(
             on_progress(min(done / total, 1.0))
         return 0
 
+    # Said before the engine starts: its first pass, over the whole file, calls nothing back and
+    # holds Python's lock meanwhile — 45 s on a 13-minute file (#232) — so until its first callback
+    # the job would still read as whatever stage came before.
+    on_progress(0.0)
     result = engine.process(samples, callback=report)
     if is_cancelled():
         raise OperationCancelled()
