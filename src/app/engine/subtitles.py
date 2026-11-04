@@ -214,8 +214,9 @@ def place_cues(project: Project, cues: Sequence[SubtitleCue]) -> List[PlacedCue]
     split across two clips is placed twice, because they are said twice. Each
     placement is clipped to the window it lands in, so a line never runs past
     the cut that ends it. A clip turned all the way down shows only captions
-    written by hand for its picture, the ones with no word timings: nobody
-    hears what was said on it.
+    typed by hand, and of those only the ones whose seconds no audible clip
+    plays: nobody hears what was said on it, and a line heard elsewhere in the
+    cut belongs there rather than on a silent copy of the same footage (#226).
 
     A caption on screen for less than the style's `min_seconds` cannot be
     read, so it is held on — still inside its own window, and never over the
@@ -240,22 +241,34 @@ def place_cues(project: Project, cues: Sequence[SubtitleCue]) -> List[PlacedCue]
     # Where each placement's window ends on the timeline, as far as a short caption may be held.
     room: Dict[int, Decimal] = {}
     heard = captioned_clips(project)
-    # A shot turned all the way down says nothing, but a caption written for its picture —
-    # one with no word timings, typed rather than transcribed — still belongs on it.
+    # A shot turned all the way down says nothing, but a caption typed for its picture still
+    # belongs on it. Typed, not merely without word timings: correcting a transcribed line
+    # drops those too, and it is still speech (#226).
     muted = [
         clip for clip in (project.base_video_track.clips if project.base_video_track else [])
         if clip.volume == 0
     ]
+
+    def heard_elsewhere(asset_id: str, first: Decimal, last: Decimal) -> bool:
+        """Say whether an audible clip plays these seconds of the file, so the line is heard there."""
+        return any(
+            clip.asset_id == asset_id
+            and min(last, clip.source_range.end) - max(first, clip.source_range.start) > MINIMUM_CUE
+            for clip in heard
+        )
+
     for clip in sorted([*heard, *muted], key=lambda clip: clip.timeline_in):
         speed = Decimal(str(clip.speed))
         window_start, window_end = clip.source_range.start, clip.source_range.end
         for cue in by_asset.get(clip.asset_id, ()):
-            if clip.volume == 0 and cue.words:
+            if clip.volume == 0 and not cue.typed:
                 continue
             written = words_as_written(cue.words, cue.text)
             first = max(cue.source_start, window_start)
             last = min(cue.source_end, window_end)
             if last - first <= MINIMUM_CUE:
+                continue
+            if clip.volume == 0 and heard_elsewhere(cue.asset_id, first, last):
                 continue
             room[len(placed)] = _at(clip.timeline_in, window_end - window_start, speed)
             placed.append(PlacedCue(

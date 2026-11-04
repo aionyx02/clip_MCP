@@ -452,7 +452,9 @@ def listen_again(
     heard is kept, never a time you write; the plans stay valid. A hearing
     that does not say the same words as the transcript, or is unsure of any,
     is not kept — `not_kept` says why; play `audio_path` to the user and ask.
-    Start and end the stretch in a pause, so it holds whole words.
+    Start and end the stretch in a pause, so it holds whole words; with
+    `keep`, an edge that falls inside a word is moved out to that word's
+    edge, and `widened` says so.
 
     When a cut is refused for landing in somebody talking and the words kept
     beside it may well be whole, hear the render across it with `keep`. The
@@ -487,8 +489,10 @@ def listen_again(
         no time, one word looping), and `made_up` is then true — and, when
         `keep` was given, `kept` or `not_kept` — kept word by word where
         only some of it was heard alike and for sure, with `kept_words` and
-        `left_as_transcribed`, or for a render, `kept_cuts`, the cuts heard
-        whole; for a render, `captions`, the ones on screen in
+        `left_as_transcribed`; `widened`, when `keep` moved the stretch out
+        to take in words running across its edges, with the `start` and
+        `end` heard, the stretch `asked` and the words `across`; or for a
+        render, `kept_cuts`, the cuts heard whole; for a render, `captions`, the ones on screen in
         the stretch, `changed_since`, true when the project has been edited
         since it was rendered, and `unheard`, where it is loud enough to be
         talking with no word heard — hear that stretch again on its own, or
@@ -512,6 +516,22 @@ def listen_again(
     transcript = known.transcript if known is not None else None
     if keep and transcript is None:
         raise ValueError(f"asset {asset_id} has no transcript to correct; analyze it first")
+    widened = None
+    if keep:
+        # A word half in the stretch would be kept twice: its outside part from the transcript,
+        # and the whole of it as heard. So the stretch is heard out to that word's edges (#233).
+        asked = {"start": start, "end": end}
+        start, end, across = _out_to_whole_words(transcript, start, end)
+        if across:
+            widened = {"start": start, "end": end, "asked": asked, "across": across}
+            if end - start > LISTEN_AGAIN_SECONDS:
+                # Rounded outward, so the stretch said takes the words in; snapped first, so a time
+                # already in whole milliseconds is not pushed into the next word.
+                opens = math.floor(round(start * 1000, 6)) / 1000
+                closes = math.ceil(round(end * 1000, 6)) / 1000
+                raise ValueError(f"the transcript has {'、'.join(across)} running across the edge of the stretch, "
+                                 f"and taking it in makes {opens:.3f}s to {closes:.3f}s, longer than "
+                                 f"{LISTEN_AGAIN_SECONDS:g} seconds; hear a stretch that starts and ends in a pause")
     keep_as = os.path.join(runtime.WORKSPACE_DIR, "temp", "listen", f"{asset_id[:8]}-{start:.2f}-{end:.2f}.wav")
     fresh = listen_again_in_file(
         asset.path, start, end, language or (transcript.language if transcript else None), keep_as,
@@ -533,6 +553,8 @@ def listen_again(
     }
     if made_up:
         result["made_up"] = True
+    if widened:
+        result["widened"] = widened
     if keep:
         heard_words = [word for segment in fresh.segments for word in segment.words]
         result.update(_keep_hearing(known, HeardAgain(start=start, end=end, words=heard_words), result["agrees"],
@@ -614,6 +636,31 @@ def _alike_times(
                 changed = True
     return out, apart, doubted, [stored[index].text.strip() for index in sorted(retimed)]
 
+def _out_to_whole_words(transcript: Transcript, start: float, end: float) -> Tuple[float, float, List[str]]:
+    """Move a stretch's edges out to the edges of the transcript's words running across them.
+
+    Args:
+        transcript: The file's transcript.
+        start: Where the stretch starts.
+        end: Where it ends.
+
+    Returns:
+        `(start, end, across)`: the stretch holding only whole words, and the
+        words that ran across its edges as asked, empty when none did.
+    """
+    words = [word for segment in transcript.segments for word in segment.words]
+    across: List[str] = []
+    moved = True
+    while moved:
+        # Again after each move, since the word taken in may overlap one before or after it.
+        moved = False
+        for word in words:
+            if word.start < start < word.end or word.start < end < word.end:
+                across.append(word.text.strip())
+                start, end = min(start, word.start), max(end, word.end)
+                moved = True
+    return start, end, across
+
 def _keep_hearing(known: MediaAnalysis, stretch: HeardAgain, agrees: bool, made_up: bool = False) -> dict:
     """Keep a stretch heard again over the transcript's word times, when it can be believed.
 
@@ -629,18 +676,6 @@ def _keep_hearing(known: MediaAnalysis, stretch: HeardAgain, agrees: bool, made_
         two say different words, the times of the ones they agree on are
         kept and the rest stay the transcript's (#87).
     """
-    # A word half in the stretch would be kept twice: its outside part from the transcript,
-    # and the whole of it as heard. The stretch is moved to take it in or leave it out.
-    across = [word for segment in known.transcript.segments for word in segment.words
-              if word.start < stretch.start < word.end or word.start < stretch.end < word.end]
-    if across:
-        opens = min([stretch.start, *(word.start for word in across if word.start < stretch.start < word.end)])
-        closes = max([stretch.end, *(word.end for word in across if word.start < stretch.end < word.end)])
-        # Rounded outward, so the stretch said takes the word in however long the file is; snapped
-        # first, so a time already in whole milliseconds is not pushed into the next word.
-        opens, closes = math.floor(round(opens * 1000, 6)) / 1000, math.ceil(round(closes * 1000, 6)) / 1000
-        return {"not_kept": f"the transcript has {'、'.join(word.text.strip() for word in across)} running across the "
-                            f"edge of the stretch; hear {opens:.3f}s to {closes:.3f}s again with keep"}
     partly, listed = "", {}
     unsure = unsure_words(stretch.words)
     if not agrees or unsure:

@@ -96,12 +96,32 @@ def test_a_stretch_where_nobody_was_heard_again_keeps_no_words() -> None:
     (segment,) = analysis.with_words_heard_again(made).transcript.segments
     assert [word.text for word in segment.words] == ["前面", "後面"]
 
-def test_a_stretch_with_a_word_across_its_edge_is_not_kept(heard: dict, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(analysis, "_run_whisper", hears("怎麼那麼順"))
+def test_a_stretch_with_a_word_across_its_edge_is_widened_to_take_it_in(
+        heard: dict, monkeypatch: pytest.MonkeyPatch) -> None:
+    asked = []
+
+    def model(device, path, duration, language, prompt, on_progress, is_cancelled, on_measured=None,
+              model_name=None):
+        asked.append(round(duration, 2))
+        return hears("怎麼那麼順")(device, path, duration, language, prompt, on_progress, is_cancelled)
+
+    monkeypatch.setattr(analysis, "_run_whisper", model)
     found = examining.listen_again(asset_id=heard["asset"], start=3.0, end=4.5, keep=True)
-    # 「怎麼那麼順」 runs 2.0–4.0s: kept, it would be there twice, cut back to 3.0s and as heard.
-    assert found["not_kept"].endswith("hear 2.000s to 4.500s again with keep")
-    assert runtime.repo.get_analysis(heard["asset"]).heard_again == []
+    # 「怎麼那麼順」 runs 2.0–4.0s: kept from 3.0s, it would be there twice, cut back to 3.0s and as heard.
+    # So the stretch is heard from where the word starts, and the answer says so.
+    assert asked == [2.5]
+    assert found["widened"] == {"start": 2.0, "end": 4.5, "asked": {"start": 3.0, "end": 4.5}, "across": ["怎麼那麼順"]}
+    assert "kept" in found
+    assert [(item.start, item.end) for item in runtime.repo.get_analysis(heard["asset"]).heard_again] == [(2.0, 4.5)]
+
+def test_a_stretch_widened_past_what_is_heard_at_once_names_the_range(heard: dict) -> None:
+    with pytest.raises(ValueError, match="2.000s to 32.500s"):
+        examining.listen_again(asset_id=heard["asset"], start=3.0, end=32.5, keep=True)
+
+def test_a_stretch_heard_only_to_listen_to_is_not_widened(heard: dict, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(analysis, "_run_whisper", hears("怎麼那麼順"))
+    found = examining.listen_again(asset_id=heard["asset"], start=3.0, end=4.5)
+    assert "widened" not in found
 
 def test_a_sentence_that_ends_inside_a_kept_stretch_still_ends_there() -> None:
     made = MediaAnalysis(asset_id="x", duration=10.0, transcript=Transcript(language="zh", model="t", segments=[

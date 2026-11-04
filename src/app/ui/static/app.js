@@ -205,6 +205,9 @@ function chooseFolder(folders, title, current, blocked = new Set()) {
 //   remove(ids, items) takes things out for good; resolves to whether it did
 //   removeLabel what the button that does it says (「移除」 for files, 「刪除」 for projects)
 //   empty      what to show when there are no things and no folders at all
+// The list page on screen, so the job poll can redraw it when something changed elsewhere.
+let shownList = null;
+
 async function folderPage(page, folderId, config) {
   const { kind } = config;
   const chosen = new Set();
@@ -212,9 +215,14 @@ async function folderPage(page, folderId, config) {
   const opened = new Set();
   let folders = [], items = [];
   const refresh = async () => {
-    [folders, items] = await Promise.all([api(`/api/folders?kind=${kind}`).then((data) => data.folders), config.load()]);
+    const loaded = await Promise.all([api(`/api/folders?kind=${kind}`).then((data) => data.folders), config.load()]);
+    // The user may have moved to another page while this was loading.
+    if (shownList !== mine) return;
+    [folders, items] = loaded;
     draw();
   };
+  const mine = { kind, refresh };
+  shownList = mine;
 
   const fileAway = async (ids, target) => {
     const where = target ? folders.find((folder) => folder.id === target)?.name : T.folders.top;
@@ -868,6 +876,7 @@ const PAGES = { projects: projectsPage, media: mediaPage, music: musicPage, ai: 
 async function route() {
   // A song being listened to on the music page stops when the page is left.
   listening.audio?.pause();
+  shownList = null;
   const [, name = "", id] = location.hash.replace(/^#/, "").split("/");
   const key = name === "project" ? "project" : (PAGES[name] ? name : "projects");
   document.querySelectorAll(".nav-item").forEach((item) => {
@@ -1019,6 +1028,7 @@ function watchJobs() {
   panel.hidden = true;
   document.body.append(panel);
   let told = null;
+  let projectsSeen = null;
   // Asked even while the window is in the background, so a job that ends then is still announced.
   const poll = async () => {
     let found;
@@ -1028,6 +1038,11 @@ function watchJobs() {
     for (const job of found.ended) {
       if (!told.has(job.job_id)) { told.add(job.job_id); announce(job); }
     }
+    // A project the AI made, edited or deleted shows up without reloading the page.
+    if (projectsSeen !== null && found.projects !== projectsSeen && shownList?.kind === "projects") {
+      await shownList.refresh().catch(() => {});
+    }
+    projectsSeen = found.projects;
     markCards(found.jobs);
     panel.hidden = !found.jobs.length;
     if (!found.jobs.length) return;
