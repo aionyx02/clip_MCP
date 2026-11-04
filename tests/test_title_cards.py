@@ -45,6 +45,22 @@ def test_a_card_is_changed_and_stays_silent(media: Path) -> None:
         edit(project, [{"action": "set_title_card", "track_id": "main", "clip_id": "a", "title": "x"}])
 
 
+def test_a_card_is_moved_to_another_moment_of_its_shot(media: Path) -> None:
+    asset = catalog.import_asset(str(media / "wide.mp4"))["id"]
+    project = build_project([video_track(), insert("a", asset, 0, 3), card(before_clip_id="a")], name="換一格")
+    edit(project, [{"action": "set_title_card", "track_id": "main", "clip_id": "t", "at": 2.5, "seconds": 3}])
+    made, after = clips_of(project, "main")
+    assert made["card"]["at"] == 2.5 and made["asset_id"] == asset and float(after["timeline_in"]) == 3
+
+
+def test_a_card_has_no_speed(media: Path) -> None:
+    asset = catalog.import_asset(str(media / "wide.mp4"))["id"]
+    project = build_project([video_track(), insert("a", asset, 0, 3), card(before_clip_id="a")], name="不變速")
+    # It holds one frame, so a speed would only stretch it; its length is said in seconds instead.
+    with pytest.raises(ValueError, match="seconds"):
+        edit(project, [{"action": "set_clip_speed", "track_id": "main", "clip_id": "t", "speed": 0.47}])
+
+
 def test_a_card_renders_its_words_over_a_dark_blur(media: Path, tmp_path: Path) -> None:
     asset = catalog.import_asset(str(media / "wide.mp4"))["id"]
     project = build_project([video_track(), insert("a", asset, 0, 2), card(before_clip_id="a", subtitle="副標")],

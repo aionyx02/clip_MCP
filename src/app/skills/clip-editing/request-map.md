@@ -50,7 +50,7 @@ feedback are mapped in their own files.
 | 「這段往左一點」「拉近一點」 / move or zoom the crop | `set_clip_look` with `fit: {"mode": "fill", "center_x": 0.3}` or `"zoom": 1.5` |
 | 「放這張照片」 / put a photo in | `insert_clip` with `source_range` `{start: 0, end: 4}`; longer when asked |
 | 「開頭加個標題」「每段前面加標題卡」 / add a title card | `add_title_card` with `title` (and `subtitle`), `before_clip_id` the shot it leads into; 2.5 s unless `seconds` says |
-| 「標題卡改成黑底／用這張照片當底」「標題留久一點」 / change a card | `set_title_card` with `background: "colour"` and `colour`, `photo_asset_id`, `seconds`, `title` or `subtitle` (`""` removes it) |
+| 「標題卡改成黑底／用這張照片當底」「標題留久一點」「底換成後面那一格」 / change a card | `set_title_card` with `background: "colour"` and `colour`, `photo_asset_id`, `at` (the second of the file behind it), `seconds`, `title` or `subtitle` (`""` removes it). A card holds one frame: not `trim_clip` or `set_clip_speed`. A card the plan made: change its `title_card` with `set_beat_title` instead, so a recompile keeps it |
 | 「這裡打上他的名字」「標一下這是哪裡」 / a name or a place | `add_text` on the clip with `style: "name"` (`second`: their role) or `"place"`, `timeline_start`/`timeline_end` where it should show |
 | 「這句話用大字打出來」 / a headline | `add_text` with `style: "headline"` over that stretch |
 | 「字移到右上」「名字晚一點出來」「字拿掉」 / change words | `set_text` with `x`, `y` (it keeps its style; a new `style` alone puts it back where that style goes); or `timeline_start`; `remove_text` |

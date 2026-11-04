@@ -185,7 +185,8 @@ def _card_changes(one: Clip, other: Clip) -> List[str]:
     length = float(other.timeline_duration) - float(one.timeline_duration)
     if abs(length) > NOTICED_SECONDS:
         changes.append(f"{where}{'加長' if length > 0 else '縮短'} {_seconds(abs(length))}")
-    if (other.card.background, other.card.colour, other.asset_id) != (one.card.background, one.card.colour, one.asset_id):
+    if ((other.card.background, other.card.colour, other.asset_id, other.card.at)
+            != (one.card.background, one.card.colour, one.asset_id, one.card.at)):
         changes.append(f"{where}換了底")
     return changes
 

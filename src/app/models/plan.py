@@ -259,7 +259,15 @@ class PlanTitleCard(BaseModel):
         default=None, description="Null: `picture` with a photo, else the part's first shot blurred",
     )
     colour: Optional[str] = Field(default=None, pattern=COLOUR)
-    photo_asset_id: Optional[str] = Field(default=None, description="A photo from the library to put behind it")
+    photo_asset_id: Optional[str] = Field(
+        default=None, description="A photo from the library to put behind it, or other footage with `at`",
+    )
+    at: Optional[float] = Field(
+        default=None, ge=0,
+        description="Which second of the file behind it is shown: of `photo_asset_id`, else of the part's first "
+                    "shot's file. Null: the photo's start, or the frame that shot starts on. A card holds this one "
+                    "frame for its `seconds`, so it has no range or speed of its own to set",
+    )
 
 class PlanText(BaseModel):
     """Words over a selected piece of footage, written into the plan."""

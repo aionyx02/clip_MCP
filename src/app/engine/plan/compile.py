@@ -106,7 +106,8 @@ def _with_cards(plan: EditPlan, pieces: List[Piece], project: Optional[Project])
                     card=TitleCard(
                         title=wanted.title, subtitle=wanted.subtitle,
                         background=card_background(wanted.background, photo),
-                        at=0 if photo else piece.start, beat_id=piece.beat_id,
+                        at=wanted.at if wanted.at is not None else 0 if photo else piece.start,
+                        beat_id=piece.beat_id,
                         **({"colour": wanted.colour} if wanted.colour else {}),
                     ),
                 )
