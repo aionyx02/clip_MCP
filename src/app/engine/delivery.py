@@ -55,7 +55,7 @@ MUSIC_UNDER_TALKING_DB = 12.0
 CLEAN_SEARCH_SECONDS = 3.0
 # Particles that close a sentence in speech, where a transcript of continuous talking often
 # has no punctuation: 「差不多結案了吧」, 「收穫滿滿啊」 (#230). Not 的 or 了, which as often
-# sit inside a sentence as at its end.
+# sit inside a sentence as at its end. Provisional: picked by ear, not counted in any transcripts.
 SENTENCE_PARTICLES = "吧呢嗎嘛囉啦呀啊喔哦"
 # Words that end on one of those characters without it being a particle.
 NOT_CLOSING = ("酒吧", "網吧", "貼吧")
