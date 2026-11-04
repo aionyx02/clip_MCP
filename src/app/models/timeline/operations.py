@@ -390,7 +390,13 @@ class SetTitleCardOp(BaseModel):
     )
     background: Optional[CardBackground] = None
     colour: Optional[str] = Field(default=None, pattern=COLOUR)
-    photo_asset_id: Optional[str] = Field(default=None, description="A photo from the library to put behind it")
+    photo_asset_id: Optional[str] = Field(
+        default=None, description="A photo from the library to put behind it, or other footage with `at`",
+    )
+    at: Optional[Decimal] = Field(
+        default=None, ge=0,
+        description="Which second of the file behind it to show: the card holds that one frame for its length",
+    )
 
 class TextTimes(BaseModel):
     """When a text layer shows: seconds of the clip's file, or seconds of the cut."""
