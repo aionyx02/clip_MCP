@@ -7,7 +7,7 @@ from datetime import timedelta
 from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 
 from app.engine.continuity import Shot, backward_steps, strays
-from app.engine.plan.beats import beginnings, compile_pieces, picture_needed, plan_pieces, song_entry
+from app.engine.plan.beats import beginnings, compile_pieces, on_the_beat, picture_needed, plan_pieces, song_entry
 from app.engine.plan.broll import Cover, broll_covers
 from app.engine.plan.music import Bed, music_fit_notes
 from app.engine.plan.pieces import (
@@ -19,7 +19,7 @@ from app.engine.semantic import CLEAN_SILENCE_SECONDS, EDGE_TOLERANCE_SECONDS, C
 from app.models.media import Asset
 from app.models.plan import STRUCTURES, Beat, BeatRole, EditPlan, Structure, TrimKind
 from app.models.semantic import ClipKind, SemanticClip, SemanticTimeline
-from app.models.timeline.parts import MAX_SPEED, MIN_SPEED, Clip, Project
+from app.models.timeline.parts import MAX_SPEED, MIN_SPEED, Clip, Project, TitleCard, card_background
 
 
 # `query_clips` reads a clip's range back to the hundredth, so evidence copied from it can sit
@@ -954,7 +954,9 @@ def check_plan(
                     f"the {cue.start:g}s asked for, so the cuts it sets the beat for are counted from a beat",
                     "music_enters_on_a_beat", beat_id=cue.beat_id, seconds=entry,
                 ))
-        notes.extend(music_fit_notes(plan, pieces, assets, cuts))
+        # Against the cut as it will play, title cards in: a song started to end with the video
+        # has to end with the cards too (#228).
+        notes.extend(music_fit_notes(plan, with_cards(plan, pieces, assets, cuts, None), assets, cuts))
         _, covering, said = broll_covers(plan, pieces, clips, assets, cuts)
         problems.extend(covering)
         notes.extend(said)
@@ -1054,6 +1056,106 @@ def as_left(pieces: Sequence[Piece], project: Optional[Project]) -> Tuple[List[P
             "left_out_for_a_hand_edit", clip_ids=first_clips(gone), look=True,
         ))
     return out, notes
+
+def with_cards(
+    plan: EditPlan,
+    pieces: Sequence[Piece],
+    assets: Mapping[str, Asset],
+    cuts: Optional[Mapping[str, CleanCuts]],
+    project: Optional[Project],
+) -> List[Piece]:
+    """Put the title cards into a compile's windows, where they will play.
+
+    A card is a window of its own, so everything laid out by where windows
+    fall — markers, B-roll, music, and what is said about any of them before
+    the compile — makes room for it. A part the plan gives
+    a card opens on it, and the part's transition comes in on the card. A
+    card that was on the cut already and made by hand, or made by a plan and
+    changed by hand since, comes back as it was: the plan's in front of its
+    part, one made by hand next to the shot whose frame it shows — in front
+    of it, or after it when it shows the shot's end — or failing that
+    wherever it was nearest. Another plan's cards nobody touched go with
+    that plan.
+
+    Args:
+        plan: The plan being compiled.
+        pieces: Its windows, as laid out.
+        assets: The files they play from, songs included, keyed by asset ID.
+        cuts: What is known about each file, keyed by asset ID.
+        project: What is on the timeline now, or None for a plan checked on
+            its own, which has only its own cards.
+
+    Returns:
+        The windows with the cards among them, the cuts after each card put
+        on the beat again where the music asks for it.
+    """
+    beats = {beat.id: beat for beat in plan.beats}
+    old = sorted((clip for track_id, clip in compiled_clips(project)
+                  if track_id == VIDEO_TRACK_ID and clip.card is not None), key=lambda clip: clip.timeline_in)
+    held = {clip.card.beat_id: clip for clip in old
+            if clip.from_plan_id == plan.id and clip.pinned and clip.card.beat_id in beats}
+    # Made by hand, or a plan's card somebody changed: kept. Another plan's untouched cards are
+    # that plan's work, rebuilt by nobody now, and go with it.
+    by_hand = [clip for clip in old if clip not in held.values() and (clip.from_plan_id is None or clip.pinned)]
+
+    def from_clip(clip: Clip, beat_id: str) -> Piece:
+        length = float(clip.timeline_duration)
+        return Piece(asset_id=clip.asset_id, start=0.0, end=length, from_clip_ids=(), beat_id=beat_id,
+                     card=clip.card, card_from=(clip.from_plan_id, clip.pinned))
+
+    out: List[Piece] = []
+    opened: set = set()
+    for piece in pieces:
+        beat = beats.get(piece.beat_id)
+        if beat is not None and piece.beat_id not in opened:
+            opened.add(piece.beat_id)
+            card: Optional[Piece] = None
+            if piece.beat_id in held:
+                card = from_clip(held[piece.beat_id], piece.beat_id)
+            elif beat.title_card is not None:
+                wanted = beat.title_card
+                photo = wanted.photo_asset_id
+                card = Piece(
+                    asset_id=photo or piece.asset_id, start=0.0, end=wanted.seconds, from_clip_ids=(),
+                    beat_id=piece.beat_id,
+                    card=TitleCard(
+                        title=wanted.title, subtitle=wanted.subtitle,
+                        background=card_background(wanted.background, photo),
+                        at=0 if photo else piece.start, beat_id=piece.beat_id,
+                        **({"colour": wanted.colour} if wanted.colour else {}),
+                    ),
+                )
+            if card is not None:
+                # The part comes in on its card, and its first shot follows the card on a cut.
+                out.append(replace(card, transition=piece.transition))
+                piece = replace(piece, transition=None)
+        out.append(piece)
+
+    for clip in by_hand:
+        at = float(clip.card.at)
+        shows = next((index for index, piece in enumerate(out) if piece.card is None
+                      and piece.asset_id == clip.asset_id and piece.start - 0.05 <= at <= piece.end + 0.05), None)
+        found = shows is not None
+        if shows is None:
+            starts, position = [], 0.0
+            for piece in out:
+                starts.append(position)
+                position += piece.played
+            was = float(clip.timeline_in)
+            shows = min(range(len(out)), key=lambda index: abs(starts[index] - was)) if out else 0
+        beat_id = out[shows].beat_id if shows < len(out) else ""
+        # A card showing the end of its shot came after it — the closing card of a part — and goes back there.
+        # Only for the shot it shows: `at` is a second of that file, and means nothing against another's.
+        if found and abs(at - out[shows].end) < abs(at - out[shows].start):
+            shows += 1
+        out.insert(shows, from_clip(clip, beat_id))
+    if any(piece.card is not None for piece in out):
+        # The beat was found for the cut without its cards; with them in, everything after a
+        # card is that much later against the music, so the cuts are put on the beat again.
+        pinned = {tuple(clip.from_clip_ids) for track_id, clip in compiled_clips(project)
+                  if track_id == VIDEO_TRACK_ID and clip.pinned and clip.card is None}
+        out, _ = on_the_beat(plan, out, assets, cuts, pinned)
+    return out
 
 def _shots(
     plan: EditPlan,
