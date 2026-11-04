@@ -323,6 +323,13 @@ class HeardAgain(BaseModel):
     end: float = Field(..., gt=0, description="Where it ends")
     words: List[TranscriptWord] = Field(default_factory=list, description="What was heard there; none is nobody")
 
+class HeardCut(BaseModel):
+    """A cut the words kept beside it were heard whole across, in the render it was made in."""
+
+    at: float = Field(..., ge=0, description="Where the cut is, in seconds of the file")
+    opens: bool = Field(..., description="True for a cut that starts a clip, false for one that ends it")
+    job_id: str = Field(..., description="The render it was heard in")
+
 class MediaAnalysis(BaseModel):
     """Machine-readable description of an asset's content, used to plan edits."""
 
@@ -353,6 +360,11 @@ class MediaAnalysis(BaseModel):
         description="Stretches heard again with `listen_again` and kept: where a cut may go is judged by these "
                     "word times rather than the transcript's. Not part of what a timeline is built from, so "
                     "keeping one leaves the plans written against the footage as they are",
+    )
+    heard_cuts: List[HeardCut] = Field(
+        default_factory=list,
+        description="Cuts in this file heard whole in a render with `listen_again`: they are no longer found to "
+                    "land in somebody talking. A cut moved at all is a different cut, and is judged again",
     )
     second_listen: Optional[SecondListen] = Field(
         default=None,

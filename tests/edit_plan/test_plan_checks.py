@@ -240,6 +240,38 @@ def test_music_lengthened_by_hand_into_the_next_stretch_is_refused() -> None:
     problems = check_recompile(plan, project, pieces, (), music_beds(plan, pieces, assets))
     assert any("lengthened by hand" in problem for problem in problems)
 
+def test_the_song_start_said_to_end_with_the_video_counts_its_title_cards() -> None:
+    """It used to be worked out on the cut without its cards, so the song ended that much after the video (#228)."""
+    import re
+
+    from app.engine.plan.music import CleanCuts
+    from app.models.plan import PlanTitleCard
+
+    plan, by_id, assets = parts()
+    plan = plan.model_copy(update={"music": MusicPlan(cues=[MusicCue(asset_id=SONG)])})
+    assets = {**assets, SONG: song_of(None, 200.0)[0]}
+    cuts = {SONG: CleanCuts(energy=tuple([1.0] * 200), beats=None)}
+
+    def cut_off(plan: EditPlan):
+        problems, notes = checked(plan, by_id, assets, cuts)
+        assert problems == []
+        [note] = [note for note in notes if getattr(note, "kind", None) == "music_cut_off"]
+        start = float(re.search(r"start the cue at ([\d.]+)s", note).group(1))
+        return note.seconds, start
+
+    without, start_without = cut_off(plan)
+    carded = plan.model_copy(update={"beats": [
+        beat.model_copy(update={"title_card": PlanTitleCard(title=beat.name, seconds=3.0)}) for beat in plan.beats
+    ]})
+    length, start = cut_off(carded)
+    # Three cards of 3s each: the video ends 9s later, so the song has to come in 9s earlier.
+    assert length == pytest.approx(without + 9.0)
+    assert start == pytest.approx(start_without - 9.0, abs=0.11)
+    # And the length said is the one the compile lays out.
+    operations, _ = compile_operations(carded, by_id, {}, assets, None, cuts)
+    laid = [op for op in operations if op.get("track_id") == "main" and op["action"] == "insert_clip"]
+    assert length == pytest.approx(sum(op["source_range"]["end"] - op["source_range"]["start"] for op in laid), abs=0.01)
+
 def test_a_cross_fade_longer_than_the_part_it_leaves_is_refused() -> None:
     plan, by_id, assets = parts()
     plan = plan.model_copy(update={"music": MusicPlan(crossfade_seconds=9.0, cues=[

@@ -84,6 +84,12 @@ class SubtitleCue(BaseModel):
         description="Word timings inside this caption, in source seconds, for captions that light up word by "
                     "word. Empty is normal: a caption written by hand has none, and one lights up whole instead",
     )
+    typed: bool = Field(
+        default=False,
+        description="Written by hand with `add_subtitle` rather than transcribed, so it can be text for a picture "
+                    "and shows over a shot turned all the way down. A transcribed caption stays off such a shot "
+                    "even after its text is corrected and its word timings are gone",
+    )
     remembered_in: Optional[str] = Field(
         default=None,
         description="For a caption remembered against its file: the ID of the project it was written in",

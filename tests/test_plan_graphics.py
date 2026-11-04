@@ -2,6 +2,7 @@
 
 from typing import List
 
+import pytest
 from pydantic import TypeAdapter
 
 from app.engine.plan.compile import compile_operations
@@ -9,7 +10,7 @@ from app.models.plan import Beat, PlanText, PlanTitleCard, Selection, SetBeatTit
 from app.models.timeline.apply import apply_operation
 from app.models.timeline.operations import EditOperation
 from app.models.timeline.parts import Project
-from edit_plan.shared import beats_plan, footage, speech_of
+from edit_plan.shared import beats_plan, footage, sourced, speech_of
 
 OPERATIONS = TypeAdapter(List[EditOperation])
 
@@ -55,6 +56,35 @@ def test_a_part_opens_on_its_card_and_everything_after_makes_room() -> None:
     assert float(project.duration) == float(plain.duration) + 2
     assert [float(marker.timeline_in) for marker in project.markers] == [
         0.0, float(next(m for m in plain.markers if m.id == "body").timeline_in) + 2]
+
+
+def test_the_plan_says_which_moment_is_behind_a_card_and_a_recompile_keeps_it() -> None:
+    by_id, children, assets, clips = footage()
+    plan = two_parts(by_id, clips, title_card=PlanTitleCard(title="開場", seconds=3.8, at=5.5))
+    project = compiled(plan, by_id, children, assets)
+    again = compiled(plan, by_id, children, assets, project)
+    for cut in (project, again):
+        card = next(clip for clip in cut.base_video_track.clips if clip.card)
+        # The moment and the length are the plan's, so nothing has to be set by hand and pinned to last.
+        assert float(card.card.at) == 5.5 and float(card.timeline_duration) == 3.8 and not card.pinned
+
+
+def test_a_card_can_stand_on_a_moment_of_other_footage() -> None:
+    by_id, children, assets, clips = footage()
+    other = sourced("drone", 10.0)
+    assets = {**assets, other.id: other}
+    plan = two_parts(by_id, clips, title_card=PlanTitleCard(title="開場", photo_asset_id=other.id, at=2))
+    card = next(clip for clip in compiled(plan, by_id, children, assets).base_video_track.clips if clip.card)
+    assert card.asset_id == other.id and float(card.card.at) == 2 and card.card.background == "picture"
+
+
+def test_a_moment_past_the_end_of_the_file_is_refused() -> None:
+    from app.models.timeline.validate import validate_project
+
+    by_id, children, assets, clips = footage()
+    plan = two_parts(by_id, clips, title_card=PlanTitleCard(title="開場", at=999))
+    with pytest.raises(ValueError, match="the card shows 999"):
+        validate_project(compiled(plan, by_id, children, assets), assets)
 
 
 def test_words_in_the_plan_land_on_the_footage_they_belong_to() -> None:

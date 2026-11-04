@@ -17,15 +17,15 @@ import os
 import statistics
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Dict, List, Mapping, Optional, Sequence, Tuple
+from typing import Dict, Iterator, List, Mapping, Optional, Sequence, Tuple
 
 from app.engine.builder import DUCK_DEPTH_DB, Talking
 from app.engine.continuity import Shot, stray_runs
 from app.engine.looks import alike
-from app.engine.plan.checks import LENGTH_TOLERANCE
+from app.engine.plan.checks import LENGTH_TOLERANCE, NOT_PARTICLES, SENTENCE_END_PUNCTUATION
 from app.engine.library import MUSIC, library_of
 from app.engine.semantic import (
-    CLEAN_GAP_SECONDS, CLEAN_SILENCE_SECONDS, EDGE_TOLERANCE_SECONDS, clean_cuts, combined_over, join_voices,
+    CLEAN_GAP_SECONDS, CLEAN_SILENCE_SECONDS, EDGE_TOLERANCE_SECONDS, bare_words, clean_cuts, combined_over, join_voices,
     share_covered, was_audible, was_made_up,
 )
 from app.engine.subtitles import caption_overflow, captioned_clips
@@ -53,6 +53,16 @@ CHECKS = (
 MUSIC_UNDER_TALKING_DB = 12.0
 # How far either side of a cut to look for a clean one to offer instead. Provisional.
 CLEAN_SEARCH_SECONDS = 3.0
+# Particles that close a sentence in speech, where a transcript of continuous talking often
+# has no punctuation: 「差不多結案了吧」, 「收穫滿滿啊」 (#230). Not 的 or 了, which as often
+# sit inside a sentence as at its end. Provisional: picked by ear, not counted in any transcripts.
+# 啊喔哦 are also FILLERS (plan/checks.py), the sound before a sentence; a cut after an opening
+# 「啊」 is let through as an end too, and only `run_on` asks for it to be heard.
+SENTENCE_PARTICLES = "吧呢嗎嘛囉啦呀啊喔哦"
+# Words that end on one of those characters without it being a particle.
+NOT_CLOSING = ("酒吧", "網吧", "貼吧")
+# How much of a sentence to quote back, enough to find it in the transcript.
+SENTENCE_TAIL_CHARACTERS = 8
 # How much of the same stretch of a file has to come back before it is the same shot shown
 # twice rather than two neighbouring moments. Provisional.
 REPEAT_SECONDS = 1.0
@@ -409,20 +419,83 @@ def _clean_points(analysis: MediaAnalysis) -> List[float]:
                 points.append((before.end + after.start) / 2)
     return sorted(points)
 
-def _inside_speech(analysis: MediaAnalysis, at: float, opens: bool) -> bool:
+def _ends_sentence(words: Sequence, index: int) -> bool:
+    """Say whether a transcribed word ends a sentence, going by what it says.
+
+    Args:
+        words: The words of one transcribed sentence, in order.
+        index: The word, by its place in `words`; the next one follows it.
+
+    Returns:
+        True when it ends on 。！？ or the like, or on a particle that closes a
+        sentence and is not part of a word with its neighbours: 「了吧」 but
+        not 「酒吧」 or 「吧台」.
+    """
+    text = words[index].text.strip()
+    if text.endswith(tuple(SENTENCE_END_PUNCTUATION)):
+        return True
+    said = bare_words(text)
+    if not said or said[-1] not in SENTENCE_PARTICLES:
+        return False
+    before = bare_words("".join(word.text for word in words[max(0, index - 1):index])) + said
+    after = said[-1] + (bare_words(words[index + 1].text) if index + 1 < len(words) else "")
+    return not before.endswith(NOT_CLOSING) and not after.startswith(NOT_PARTICLES)
+
+def _sentence_end_at(analysis: MediaAnalysis, at: float) -> str:
+    """Find the end of a sentence a cut sits on, where the next follows with no pause.
+
+    Args:
+        analysis: The file's analysis.
+        at: The cut, in source seconds.
+
+    Returns:
+        The last few characters of the sentence that ends there, bare; empty
+        when the cut is not between two words of one transcribed sentence
+        closer together than a pause, the first of them ending a sentence.
+    """
+    tolerance = EDGE_TOLERANCE_SECONDS
+    for segment in _said(analysis):
+        words = segment.words
+        for index, (before, after) in enumerate(zip(words, words[1:])):
+            if (before.end - tolerance <= at <= after.start + tolerance
+                    and after.start - before.end < CLEAN_GAP_SECONDS and _ends_sentence(words, index)):
+                said = bare_words("".join(word.text for word in words[:index + 1]))
+                return said[-SENTENCE_TAIL_CHARACTERS:]
+    return ""
+
+def _between_words(analysis: MediaAnalysis, at: float) -> bool:
+    """Say whether a cut sits between two words of one transcribed sentence.
+
+    Args:
+        analysis: The file's analysis.
+        at: The cut, in source seconds.
+
+    Returns:
+        True when it does, so the words on either side can say whether a
+        sentence ends there; False with no word timings to go by.
+    """
+    tolerance = EDGE_TOLERANCE_SECONDS
+    return any(before.end - tolerance <= at <= after.start + tolerance
+               for segment in _said(analysis) for before, after in zip(segment.words, segment.words[1:]))
+
+def _inside_speech(analysis: MediaAnalysis, at: float, opens: bool, sentence_ends: bool = True) -> bool:
     """Tell whether a cut at one moment of a file lands in the middle of somebody talking.
 
     Args:
         analysis: The file's analysis.
         at: The moment, in source seconds.
         opens: Whether the cut starts a clip rather than ending one.
+        sentence_ends: Whether a sentence the transcript says ends at the cut
+            clears it. False only to tell whether that is what cleared it.
 
     Returns:
         True inside a word, or between two words of one sentence closer
         together than a pause, or where sound the transcript missed runs
         right up to the cut on the side it keeps out. Never inside a measured
         silence of `CLEAN_SILENCE_SECONDS` or more, nor where the second
-        listen hears nobody, whatever the word timings say.
+        listen hears nobody, whatever the word timings say; nor between two
+        words where the first ends a sentence, by its punctuation or a
+        particle that closes one, though the next follows with no pause (#230).
     """
     if any(span.start <= at <= span.end and span.end - span.start >= CLEAN_SILENCE_SECONDS
            for span in analysis.silences):
@@ -434,6 +507,8 @@ def _inside_speech(analysis: MediaAnalysis, at: float, opens: bool) -> bool:
     if (known.sound_before(at) if opens else known.sound_after(at)) is not None:
         return True
     if known.quiet_on_second_listen(at):
+        return False
+    if sentence_ends and _sentence_end_at(analysis, at):
         return False
     for segment in _said(analysis):
         if not segment.start < at < segment.end:
@@ -494,12 +569,102 @@ def _bad_picture_before(analysis: MediaAnalysis, at: float, edge: float) -> Opti
         return None
     return min(span.start for span in met) if edge > at else max(span.end for span in met)
 
+# How much of what a cut keeps beside it has to be heard whole in the render for the cut to stand:
+# enough to tell the words are there, few enough to be the words right at the cut. Provisional.
+KEPT_BESIDE_CHARACTERS = 4
+
+@dataclass(frozen=True)
+class SpeechEdge:
+    """A cut found to land in somebody talking, and what a hearing of the render has to find beside it."""
+
+    clip_id: str
+    asset_id: str
+    at: float
+    landed: float
+    opens: bool
+    kept: str
+
+def _made_cuts(
+    clips: Sequence[Clip], analyses: Mapping[str, MediaAnalysis],
+) -> Iterator[Tuple[Clip, MediaAnalysis, str, float, float]]:
+    """Walk the cuts somebody made in a sequence's sound.
+
+    Args:
+        clips: The sequence's clips.
+        analyses: Analyses by asset ID.
+
+    Yields:
+        `(clip, analysis, side, at, landed)`: `side` is "starts" or "ends",
+        `at` the cut in seconds of the file, `landed` in seconds of the
+        sequence. The start and end of a recording are left out: they are where
+        the camera started and stopped, not a decision.
+    """
+    for clip in sorted(clips, key=lambda item: item.timeline_in):
+        analysis = analyses.get(clip.asset_id)
+        if clip.volume == 0 or analysis is None:
+            continue
+        ends = (
+            ("starts", float(clip.audio_source_start), float(clip.audio_timeline_in)),
+            ("ends", float(clip.audio_source_end), float(clip.audio_timeline_out)),
+        )
+        for side, at, landed in ends:
+            if 0 < at < analysis.duration:
+                yield clip, analysis, side, at, landed
+
+def _heard_whole(analysis: MediaAnalysis, at: float, opens: bool) -> bool:
+    """Tell whether this very cut was heard whole in a render; a cut moved at all has not been."""
+    return any(heard.opens == opens and round(heard.at, 3) == round(at, 3) for heard in analysis.heard_cuts)
+
+def _kept_beside(analysis: MediaAnalysis, at: float, opens: bool) -> str:
+    """Say which words a cut keeps right beside it, to listen for them in the render.
+
+    Args:
+        analysis: The file's analysis.
+        at: The cut, in source seconds.
+        opens: Whether it starts a clip rather than ending one.
+
+    Returns:
+        Up to `KEPT_BESIDE_CHARACTERS` characters of the sentence the cut is in,
+        on the side it keeps, nearest the cut, bare. Empty when the transcript
+        has a word across the cut, or none on that side: there is then nothing
+        a hearing could confirm.
+    """
+    for segment in _said(analysis):
+        if not segment.start - EDGE_TOLERANCE_SECONDS <= at <= segment.end + EDGE_TOLERANCE_SECONDS:
+            continue
+        if any(word.start < at - EDGE_TOLERANCE_SECONDS and word.end > at + EDGE_TOLERANCE_SECONDS
+               for word in segment.words):
+            return ""
+        beside = bare_words("".join(
+            word.text for word in segment.words
+            if (word.start >= at - EDGE_TOLERANCE_SECONDS if opens else word.end <= at + EDGE_TOLERANCE_SECONDS)
+        ))
+        if beside:
+            return beside[:KEPT_BESIDE_CHARACTERS] if opens else beside[-KEPT_BESIDE_CHARACTERS:]
+    return ""
+
+def speech_edges(clips: Sequence[Clip], analyses: Mapping[str, MediaAnalysis]) -> List[SpeechEdge]:
+    """List the cuts found to land in somebody talking that a hearing of the render could clear.
+
+    Args:
+        clips: The sequence's clips.
+        analyses: Analyses by asset ID.
+
+    Returns:
+        One edge per cut inside words, less those already heard whole.
+    """
+    return [
+        SpeechEdge(clip.id, clip.asset_id, at, landed, side == "starts", _kept_beside(analysis, at, side == "starts"))
+        for clip, analysis, side, at, landed in _made_cuts(clips, analyses)
+        if analysis.transcript is not None and _inside_speech(analysis, at, side == "starts")
+        and not _heard_whole(analysis, at, side == "starts")
+    ]
+
 def _speech_cuts(clips: Sequence[Clip], analyses: Mapping[str, MediaAnalysis]) -> List[Finding]:
     """Find cuts on the sequence that land in the middle of somebody talking.
 
-    Only cuts somebody made: the start and end of a recording are where the
-    camera started and stopped, not a decision. And the cut is where the
-    sound is cut, which a J or an L cut moves away from the picture's.
+    Only cuts somebody made, and not one heard whole in a render. The cut is
+    where the sound is cut, which a J or an L cut moves away from the picture's.
 
     Args:
         clips: The sequence's clips.
@@ -510,75 +675,100 @@ def _speech_cuts(clips: Sequence[Clip], analyses: Mapping[str, MediaAnalysis]) -
         is one close by.
     """
     found: List[Finding] = []
-    for clip in sorted(clips, key=lambda item: item.timeline_in):
-        analysis = analyses.get(clip.asset_id)
-        if clip.volume == 0 or analysis is None:
+    for clip, analysis, side, at, landed in _made_cuts(clips, analyses):
+        opens = side == "starts"
+        if _heard_whole(analysis, at, opens):
             continue
-        ends = (
-            ("starts", float(clip.audio_source_start), float(clip.audio_timeline_in)),
-            ("ends", float(clip.audio_source_end), float(clip.audio_timeline_out)),
+        if analysis.transcript is None or not _inside_speech(analysis, at, opens):
+            edge = _bitten_sound(analysis, at, opens)
+            if edge is not None:
+                where, part, move = ("after a sound begins", "start", "Start") if opens else (
+                    "before a sound ends", "end", "End")
+                # Moved there the cut would only trade this for `bad_picture` (#192).
+                blocked = _bad_picture_before(analysis, at, edge)
+                way_out = (f"{move} at {edge:.2f}s of the file to keep all of it" if blocked is None else
+                           f"It reaches {edge:.2f}s of the file, but the picture is black or frozen "
+                           f"{'until' if opens else 'from'} {blocked:.2f}s, so moving the cut would show that instead: leave the cut, and "
+                           "tell the user")
+                found.append(Finding("mid_speech", (
+                    f"clip {clip.id} {side} {abs(at - edge):.2f}s {where}, at {clock(landed)} ({at:.2f}s of the "
+                    f"file), so the {part} of it is cut off — the transcript may have no word there, but the "
+                    f"sound was measured. {way_out}"
+                ), ((landed, landed),)))
+            continue
+        known = clean_cuts(analysis)
+        really = known.sound_before(at) if opens else known.sound_after(at)
+        lost = known.heard_cut_off(at, opens)
+        # The word the transcript has right against the cut on the side it keeps out, with the
+        # talking running on into it: the cut was put on its edge, and the compiler will not move
+        # a cut into a word, so a place inside it is no advice at all (#87).
+        words = [word for segment in _said(analysis) for word in segment.words]
+        far = next((word for word in words if known.placed(word.start, word.end) and (
+            (really is not None and really < word.end <= at + EDGE_TOLERANCE_SECONDS
+             and word.end >= at - EDGE_TOLERANCE_SECONDS) if opens else
+            (really is not None and at - EDGE_TOLERANCE_SECONDS <= word.start < really
+             and word.start <= at + EDGE_TOLERANCE_SECONDS))), None)
+        if far is not None:
+            advice = (f"; it runs straight {'out of' if opens else 'on into'} 「{far.text.strip()}」 with no pause "
+                      f"to cut in — {'start' if opens else 'end'} on another sentence's "
+                      f"{'start' if opens else 'end'}, or leave it")
+        elif really is not None:
+            # What the sound says beats the nearest pause in a transcript that got this wrong. Where
+            # that is itself inside talking, the clean point past it is offered, so that moving the
+            # cut where this says is never refused by this same check.
+            advice = f"; the talking really {'starts' if opens else 'stops'} at {really:.2f}s of the file"
+            if _inside_speech(analysis, really, opens):
+                beyond = [point for point in _clean_points(analysis)
+                          if (point <= really if opens else point >= really)
+                          and abs(point - really) <= CLEAN_SEARCH_SECONDS]
+                if beyond:
+                    clean = max(beyond) if opens else min(beyond)
+                    advice += f"; {'start' if opens else 'end'} at {clean:.2f}s to keep all of it"
+        else:
+            near = [point for point in _clean_points(analysis) if abs(point - at) <= CLEAN_SEARCH_SECONDS]
+            advice = (
+                f"; the nearest pause is at {min(near, key=lambda point: abs(point - at)):.2f}s of the file"
+                if near else f"; there is no pause within {CLEAN_SEARCH_SECONDS:g}s"
+            )
+            if not lost and not known.splits_a_word(at) and _between_words(analysis, at):
+                # Between two words with no pause, the words themselves are all there is to go on (#230).
+                # Not when a second listen refused it, which is its own reason, nor with no words to read.
+                advice += (", and the transcript marks no sentence end between these words — no 。！？ and no "
+                           "closing particle such as 吧 or 啊; if one does end here, hear a render across the cut "
+                           "with `listen_again` and `keep`")
+        found.append(Finding("mid_speech", (
+            f"clip {clip.id} {side} in the middle of somebody talking, at {clock(landed)} "
+            f"({at:.2f}s of the file)"
+            + (f", and takes 「{lost}」 off, heard on a second listen" if lost else "")
+            + advice
+        ), ((landed, landed),)))
+    return found
+
+def run_on_cuts(clips: Sequence[Clip], analyses: Mapping[str, MediaAnalysis]) -> List[str]:
+    """Find the cuts let through for ending a sentence that the next follows with no pause.
+
+    Not refused: the transcript says a sentence ends there. But with no pause
+    the next one's first sound may be heard across the cut, which only
+    listening tells.
+
+    Args:
+        clips: The sequence's clips.
+        analyses: Analyses by asset ID.
+
+    Returns:
+        One line per such cut, saying where and which sentence ends there.
+    """
+    found: List[str] = []
+    for clip, analysis, side, at, landed in _made_cuts(clips, analyses):
+        opens = side == "starts"
+        if (analysis.transcript is None or _heard_whole(analysis, at, opens) or _inside_speech(analysis, at, opens)
+                or not _inside_speech(analysis, at, opens, sentence_ends=False)):
+            continue
+        found.append(
+            f"clip {clip.id} {side} at {clock(landed)} ({at:.2f}s of the file), where 「{_sentence_end_at(analysis, at)}」 "
+            "ends a sentence and the next starts with no pause between them: listen that nothing of the "
+            f"{'sentence before' if opens else 'next sentence'} is heard across the cut"
         )
-        for side, at, landed in ends:
-            if at <= 0 or at >= analysis.duration:
-                continue
-            opens = side == "starts"
-            if analysis.transcript is None or not _inside_speech(analysis, at, opens):
-                edge = _bitten_sound(analysis, at, opens)
-                if edge is not None:
-                    where, part, move = ("after a sound begins", "start", "Start") if opens else (
-                        "before a sound ends", "end", "End")
-                    # Moved there the cut would only trade this for `bad_picture` (#192).
-                    blocked = _bad_picture_before(analysis, at, edge)
-                    way_out = (f"{move} at {edge:.2f}s of the file to keep all of it" if blocked is None else
-                               f"It reaches {edge:.2f}s of the file, but the picture is black or frozen "
-                               f"{'until' if opens else 'from'} {blocked:.2f}s, so moving the cut would show that instead: leave the cut, and "
-                               "tell the user")
-                    found.append(Finding("mid_speech", (
-                        f"clip {clip.id} {side} {abs(at - edge):.2f}s {where}, at {clock(landed)} ({at:.2f}s of the "
-                        f"file), so the {part} of it is cut off — the transcript may have no word there, but the "
-                        f"sound was measured. {way_out}"
-                    ), ((landed, landed),)))
-                continue
-            known = clean_cuts(analysis)
-            really = known.sound_before(at) if opens else known.sound_after(at)
-            lost = known.heard_cut_off(at, opens)
-            # The word the transcript has right against the cut on the side it keeps out, with the
-            # talking running on into it: the cut was put on its edge, and the compiler will not move
-            # a cut into a word, so a place inside it is no advice at all (#87).
-            words = [word for segment in _said(analysis) for word in segment.words]
-            far = next((word for word in words if known.placed(word.start, word.end) and (
-                (really is not None and really < word.end <= at + EDGE_TOLERANCE_SECONDS
-                 and word.end >= at - EDGE_TOLERANCE_SECONDS) if opens else
-                (really is not None and at - EDGE_TOLERANCE_SECONDS <= word.start < really
-                 and word.start <= at + EDGE_TOLERANCE_SECONDS))), None)
-            if far is not None:
-                advice = (f"; it runs straight {'out of' if opens else 'on into'} 「{far.text.strip()}」 with no pause "
-                          f"to cut in — {'start' if opens else 'end'} on another sentence's "
-                          f"{'start' if opens else 'end'}, or leave it")
-            elif really is not None:
-                # What the sound says beats the nearest pause in a transcript that got this wrong. Where
-                # that is itself inside talking, the clean point past it is offered, so that moving the
-                # cut where this says is never refused by this same check.
-                advice = f"; the talking really {'starts' if opens else 'stops'} at {really:.2f}s of the file"
-                if _inside_speech(analysis, really, opens):
-                    beyond = [point for point in _clean_points(analysis)
-                              if (point <= really if opens else point >= really)
-                              and abs(point - really) <= CLEAN_SEARCH_SECONDS]
-                    if beyond:
-                        clean = max(beyond) if opens else min(beyond)
-                        advice += f"; {'start' if opens else 'end'} at {clean:.2f}s to keep all of it"
-            else:
-                near = [point for point in _clean_points(analysis) if abs(point - at) <= CLEAN_SEARCH_SECONDS]
-                advice = (
-                    f"; the nearest pause is at {min(near, key=lambda point: abs(point - at)):.2f}s of the file"
-                    if near else ""
-                )
-            found.append(Finding("mid_speech", (
-                f"clip {clip.id} {side} in the middle of somebody talking, at {clock(landed)} "
-                f"({at:.2f}s of the file)"
-                + (f", and takes 「{lost}」 off, heard on a second listen" if lost else "")
-                + advice
-            ), ((landed, landed),)))
     return found
 
 def _out_of_time(project: Project, recorded: Mapping[str, datetime]) -> List[Finding]:

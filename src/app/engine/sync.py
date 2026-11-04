@@ -23,7 +23,7 @@ import numpy as np
 
 from app.engine.ffmpeg import FFmpegFailed, hidden_window_flags
 from app.engine.probe import probe_file
-from app.models.timeline.parts import Clip, Track
+from app.models.timeline.parts import Clip, Track, TrackType
 
 SYNC_FILE_NAME = "sync.json"
 # How far, in seconds either side of a join, the sound is compared. Provisional.
@@ -143,14 +143,20 @@ def sides(project_tracks: Sequence[Track], base_clips: Sequence[Clip],
 
     A join has two sides, the clip before it and the clip after it. Each side
     is compared over `JOIN_WINDOW_SECONDS` on its own side of the join, cut
-    down to where that clip is the only sound playing: music or another
-    picture track over it, and the neighbouring clip's own lead or lag, cut
-    the window into pieces, and the nearest piece of at least
-    `MIN_SIDE_SECONDS + MIN_REACH_SECONDS` is used, so it has room to be
-    moved while `MIN_SIDE_SECONDS` is still compared. The clip's own fades
-    are taken off as well, since a fade changes the loudness's shape, so it
-    is not compared. A clip whose asset has no sound makes none, so it
-    neither offers a side nor counts as other sound.
+    down to where that clip is the only sound playing: another picture
+    track's sound over it, an audio track that does not duck under speech,
+    and the neighbouring clip's own lead or lag, cut the window into pieces,
+    and the nearest piece of at least `MIN_SIDE_SECONDS + MIN_REACH_SECONDS`
+    is used, so it has room to be moved while `MIN_SIDE_SECONDS` is still
+    compared. Music on a track that ducks under speech does not cut a side:
+    it plays under the whole of most cuts, so cutting it out leaves no side
+    to compare at all, and once ducked it is quiet enough under the
+    footage's own sound that the shapes still follow each other. A side it
+    plays under says so, and whether that side lines up is left to how
+    closely the shapes follow. The clip's own fades are taken off as well,
+    since a fade changes the loudness's shape, so it is not compared. A clip
+    whose asset has no sound makes none, so it neither offers a side nor
+    counts as other sound.
 
     Args:
         project_tracks: Every track of the project, so that sound from a
@@ -161,22 +167,28 @@ def sides(project_tracks: Sequence[Track], base_clips: Sequence[Clip],
     Returns:
         The sides offered to the check, in timeline order with `before` before
         `after` at one join: `{at, clip_id, side, start, end, path,
-        source_start, speed}`, where `source_start` is the second of the file
-        that plays at `start`; and how many sides were left out, as
-        `{too_short, faded}`.
+        source_start, speed, music}`, where `source_start` is the second of
+        the file that plays at `start` and `music` is whether music that ducks
+        under speech plays over any of the side; and how many sides were left
+        out, as `{too_short, covered, faded}`: `too_short` when the clip's own
+        sound on that side is too short, `covered` when it is long enough but
+        other sound leaves too little of it alone, `faded` when the clip's own
+        fade leaves too little.
     """
-    counts = {"too_short": 0, "faded": 0}
+    counts = {"too_short": 0, "covered": 0, "faded": 0}
     offered: List[dict] = []
     ordered = sorted(base_clips, key=lambda clip: clip.timeline_in)
-    heard = [clip for track in project_tracks for clip in track.clips
+    heard = [(clip, track.track_type == TrackType.AUDIO and track.duck_under_speech)
+             for track in project_tracks for clip in track.clips
              if clip.volume > 0 and clip.card is None and clip.asset_id in sources]
+    beds = [_sound_span(clip) for clip, ducks in heard if ducks]
     for before, after in zip(ordered, ordered[1:]):
         at = float(after.timeline_in)
         for side, clip in (("before", before), ("after", after)):
             if clip.volume <= 0 or clip.card is not None or clip.asset_id not in sources:
                 continue
             window = (at - JOIN_WINDOW_SECONDS, at) if side == "before" else (at, at + JOIN_WINDOW_SECONDS)
-            others = [_sound_span(other) for other in heard if other is not clip]
+            others = [_sound_span(other) for other, ducks in heard if other is not clip and not ducks]
             pieces = _clear_stretch(window, at, others, side)
             own_start, own_end = _sound_span(clip)
             fade_in, fade_out = float(clip.audio_fade_in), float(clip.audio_fade_out)
@@ -192,14 +204,19 @@ def sides(project_tracks: Sequence[Track], base_clips: Sequence[Clip],
                     chosen = clear
                     break
             if chosen is None:
-                counts["faded" if without_fades is not None else "too_short"] += 1
+                if without_fades is not None:
+                    counts["faded"] += 1
+                elif min(window[1], own_end) - max(window[0], own_start) >= MIN_SIDE_SECONDS + MIN_REACH_SECONDS:
+                    counts["covered"] += 1
+                else:
+                    counts["too_short"] += 1
                 continue
             start, end = chosen
             source_start = float(clip.audio_source_start) + (start - float(clip.audio_timeline_in)) * float(clip.speed)
             offered.append({
                 "at": round(at, 3), "clip_id": clip.id, "side": side, "start": round(start, 3),
                 "end": round(end, 3), "path": sources[clip.asset_id], "source_start": round(source_start, 3),
-                "speed": float(clip.speed),
+                "speed": float(clip.speed), "music": any(low < end and high > start for low, high in beds),
             })
     return offered, counts
 
@@ -383,19 +400,21 @@ def check(render_path: str, offered_sides: Sequence[dict], left_out: Mapping[str
         `streams`, what `stream_mismatch` found or None; `joins`, `{at,
         clip_id, side, lag}` for each side that could be lined up;
         `sides_asked`, how many sides were offered to the check; `unlined`,
-        `{weak, beyond_reach, searched}`: how many of those could not be
-        lined up because their sound did not follow the file's closely
-        enough, or their file could not be read, and how many because the
+        `{weak, music, unreadable, beyond_reach, searched}`: how many of
+        those could not be lined up because their sound did not follow the
+        file's closely enough (`music` for the sides music played over, so
+        the music may be what changed the shape, `weak` for the rest), how
+        many because their file could not be read, and how many because the
         best shift was at the edge of the search; `searched` gives, for each
-        of the two, `[least, most]` seconds those sides were searched each way
+        of those, `[least, most]` seconds those sides were searched each way
         (a short side searches less than `MAX_LAG_SECONDS`), or None when
         there are none; `left_out`, how many were left out
         before the check and why; and `frame`, rounded to four places.
     """
     streams = stream_mismatch(probe_file(render_path, ffprobe_bin), frame)
     lags: List[dict] = []
-    unlined: Dict[str, object] = {"weak": 0, "beyond_reach": 0}
-    searched: Dict[str, List[float]] = {"weak": [], "beyond_reach": []}
+    unlined: Dict[str, object] = {"weak": 0, "music": 0, "unreadable": 0, "beyond_reach": 0}
+    searched: Dict[str, List[float]] = {"weak": [], "music": [], "unreadable": [], "beyond_reach": []}
     if offered_sides:
         render = _read_stretch(render_path, 0.0, None, ffmpeg_bin)
         for side in offered_sides:
@@ -405,7 +424,7 @@ def check(render_path: str, offered_sides: Sequence[dict], left_out: Mapping[str
             try:
                 source = _read_stretch(side["path"], read_start, length, ffmpeg_bin)
             except (FFmpegFailed, OSError):
-                searched["weak"].append(reach(side))
+                searched["unreadable"].append(reach(side))
                 continue
             lag = lag_at(render, 0.0, source, side, source_origin=read_start)
             if lag == BEYOND_REACH:
@@ -413,7 +432,7 @@ def check(render_path: str, offered_sides: Sequence[dict], left_out: Mapping[str
             elif lag is not None:
                 lags.append({"at": side["at"], "clip_id": side["clip_id"], "side": side["side"], "lag": lag})
             else:
-                searched["weak"].append(reach(side))
+                searched["music" if side.get("music") else "weak"].append(reach(side))
     for kind, reaches in searched.items():
         unlined[kind] = len(reaches)
     unlined["searched"] = {kind: [min(reaches), max(reaches)] if reaches else None

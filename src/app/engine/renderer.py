@@ -1,3 +1,4 @@
+import faulthandler
 import json
 import os
 import subprocess
@@ -17,6 +18,16 @@ from app.storage.repo import Repository
 
 HEARTBEAT_INTERVAL_SECONDS = 1.0
 STALE_AFTER = timedelta(seconds=30)
+# A worker whose process is still running is waited for this long without a word before
+# it is given up on: a native call that holds Python's lock silences the heartbeat without
+# the work having stopped. The voice separation's first pass held it 45 s on a 12:47 file
+# (#232), so about 3.5 s a minute of footage. Provisional: covers files to about two and a
+# half hours at that rate, and nothing longer has been measured.
+HUNG_AFTER = timedelta(minutes=10)
+# How much of a gone worker's error output its failure carries. Provisional: enough for a
+# Python traceback's last frames and its error line.
+LOG_TAIL_LINES = 6
+LOG_TAIL_BYTES = 4096
 # A worker that has just been launched has not claimed its memory yet, so until it has
 # had this long its whole estimate is counted against what the machine reports as free.
 WARMUP = timedelta(seconds=60)
@@ -45,9 +56,49 @@ def _detached_process_options(breakaway: bool = True) -> Dict[str, Any]:
         return {"creationflags": flags | (subprocess.CREATE_BREAKAWAY_FROM_JOB if breakaway else 0)}
     return {"start_new_session": True}
 
-ABANDONED = "worker stopped reporting; it may have been terminated"
+ABANDONED = "worker stopped reporting"
 # What a background preparation says while an export runs.
 EXPORT_FIRST = "waiting for the export to finish"
+
+def _process_alive(pid: int) -> bool:
+    """Whether a process is still running.
+
+    Args:
+        pid: Its ID.
+
+    Returns:
+        False once it has ended. A process that cannot be asked about is
+        counted as running, so a worker is never failed on a guess.
+    """
+    if os.name == "nt":
+        import ctypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not handle:
+            # 5 is access denied: there is a process, it is only not ours to ask about.
+            return ctypes.get_last_error() == 5
+        try:
+            code = ctypes.c_ulong()
+            if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+                return True
+            return code.value == 259  # STILL_ACTIVE
+        finally:
+            kernel32.CloseHandle(handle)
+    try:
+        # A worker this server started and nobody has waited on stays as a zombie after it
+        # ends, and a zombie answers kill(0); waiting on it, without blocking, sees it has ended.
+        if os.waitpid(pid, os.WNOHANG)[0] == pid:
+            return False
+    except ChildProcessError:
+        pass  # Not this server's child: kill(0) is all that can be asked.
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        return True
+    return True
 
 def _abandoned(job: Job, now: datetime) -> bool:
     """Whether a job's worker is gone: it was running, or let in to run, and has gone quiet.
@@ -55,16 +106,103 @@ def _abandoned(job: Job, now: datetime) -> bool:
     A job still waiting for a slot has no worker, and is never abandoned for
     being quiet. Running without `admitted_at` is a job written before jobs
     were admitted; it has a worker like any other, and loses it the same way.
+    A quiet worker whose process is still running is busy, not gone (#232),
+    until it has been quiet for `HUNG_AFTER`.
 
     Args:
         job: The job.
         now: The time to judge by.
 
     Returns:
-        True when nothing has written to it for longer than `STALE_AFTER`.
+        True when nothing has written to it for longer than `STALE_AFTER` and
+        its worker's process has ended or was never recorded, or for longer
+        than `HUNG_AFTER` whatever its process is doing.
     """
     started = job.status == JobStatus.RUNNING or (job.status.is_active and job.admitted_at is not None)
-    return started and now - job.updated_at > STALE_AFTER
+    if not started:
+        return False
+    quiet = now - job.updated_at
+    if quiet > HUNG_AFTER:
+        return True
+    return quiet > STALE_AFTER and not (job.worker_pid is not None and _process_alive(job.worker_pid))
+
+def _log_tail(path: Optional[str]) -> str:
+    """The last lines a worker wrote to its error output, leaving out OpenCV's warnings that every analysis writes.
+
+    Args:
+        path: The worker's log, if it is known.
+
+    Returns:
+        Up to `LOG_TAIL_LINES` lines joined by " | ", or "" when there are none.
+    """
+    if not path:
+        return ""
+    try:
+        with open(path, "rb") as log:
+            log.seek(0, os.SEEK_END)
+            log.seek(max(0, log.tell() - LOG_TAIL_BYTES))
+            text = log.read().decode("utf-8", errors="replace")
+    except OSError:
+        return ""
+    lines = [line.strip() for line in text.splitlines()
+             if line.strip() and not line.lstrip().startswith("[ WARN")]
+    return " | ".join(lines[-LOG_TAIL_LINES:])
+
+def _gone_message(job: Job, now: datetime) -> str:
+    """Say where a job's worker stopped, what it last wrote, and what can be done about it.
+
+    The worker's exit code is not in it: a server that restarted is no longer
+    the worker's parent, and a worker that runs several analyses was started
+    for the first of them, so nobody here can ask for it. A worker that
+    crashed in native code leaves Python's traceback in its log instead
+    (`main`), and that is in the message.
+
+    Args:
+        job: The job whose worker is gone.
+        now: The time it was judged gone.
+
+    Returns:
+        The job's error message, starting with `ABANDONED`.
+    """
+    where = f"{job.stage or 'starting'} at {round(job.progress * 100)}%"
+    if job.worker_pid is not None and _process_alive(job.worker_pid):
+        minutes = int((now - job.updated_at).total_seconds() // 60)
+        what = (f"{ABANDONED} while {where}: nothing for {minutes} minutes, though its process "
+                f"({job.worker_pid}) is still running, so it was given up on")
+    elif job.worker_pid is not None:
+        what = f"{ABANDONED} while {where}; its process is gone"
+    else:
+        what = f"{ABANDONED} while {where}; it may have been terminated"
+    tail = _log_tail(job.worker_log)
+    if tail:
+        what += f". It last wrote: {tail}"
+    if job.kind == JobKind.ANALYZE:
+        todo = ("Start the analysis again. If another analysis was running at the same time, start it again "
+                "once it has finished, since two at once share the graphics card's memory. If it stops at the "
+                "same place again, analyze with transcribe false to have everything but the speech")
+    elif job.kind == JobKind.RENDER:
+        todo = "Start the render again; if it stops at the same place again, start it once nothing else is running"
+    else:
+        todo = "Ask for it again"
+    return f"{what}. {todo}."
+
+def _fail_if_abandoned(now: datetime) -> Callable[[Job], None]:
+    """Build a job change that fails a job whose worker is gone, judged again inside the transaction.
+
+    Judged again so that a heartbeat written between the look and the change
+    keeps the job alive.
+
+    Args:
+        now: The time to judge by.
+
+    Returns:
+        A change function for `Repository.update_job`.
+    """
+    def change(job: Job) -> None:
+        """Fail the job, or cancel it when that was asked for, if its worker is gone."""
+        if _abandoned(job, now):
+            _fail_if_active(_gone_message(job, now))(job)
+    return change
 
 def _fail_if_active(message: str) -> Callable[[Job], None]:
     """Build a job change that marks an unfinished job as failed for want of its worker.
@@ -211,7 +349,7 @@ class JobManager:
         changed = []
         for job in jobs:
             if _abandoned(job, now):
-                _fail_if_active(ABANDONED)(job)
+                _fail_if_abandoned(now)(job)
                 changed.append(job.job_id)
         running = [
             job for job in jobs
@@ -304,7 +442,7 @@ class JobManager:
         def fail(jobs: List[Job]) -> List[str]:
             gone = [job for job in jobs if _abandoned(job, now)]
             for job in gone:
-                _fail_if_active(ABANDONED)(job)
+                _fail_if_abandoned(now)(job)
             return [job.job_id for job in gone]
 
         self.repo.update_active_jobs(fail)
@@ -330,8 +468,9 @@ class JobManager:
         job = self.repo.get_job(job_id)
         if job is None:
             return None
-        if _abandoned(job, datetime.now(timezone.utc)):
-            self.repo.update_job(job_id, _fail_if_active(ABANDONED))
+        now = datetime.now(timezone.utc)
+        if _abandoned(job, now):
+            self.repo.update_job(job_id, _fail_if_abandoned(now))
         self.launch_ready()
         return self.repo.get_job(job_id)
 
@@ -438,6 +577,10 @@ class JobContext:
         """Record progress to include in the next heartbeat.
 
         Progress never decreases and stays below 1.0 until the job finishes.
+        A new stage is written at once rather than with the next heartbeat:
+        a stage that starts with a native call holding Python's lock would
+        otherwise go unrecorded until that call returned (#232), and a worker
+        that dies in it would be reported in the stage before.
 
         Args:
             progress: Fraction of the work completed.
@@ -446,11 +589,18 @@ class JobContext:
         """
         self._progress = max(self._progress, min(progress, 0.99))
         if stage is not None:
+            changed = stage != self._stage
             self._stage = stage
             if self._clock is not None:
                 try:
                     self._clock.mark(stage)
                 except Exception:
+                    pass
+            if changed:
+                try:
+                    self._repo.update_job(self._job_id, self._write)
+                except Exception:
+                    # The heartbeat writes it a second later; a stage is no reason to fail a job.
                     pass
 
     def is_cancelled(self) -> bool:
@@ -461,16 +611,16 @@ class JobContext:
         """
         return self._cancelled.is_set()
 
+    def _write(self, job: Job) -> None:
+        """Copy the latest progress and stage onto the job."""
+        job.progress = max(job.progress, self._progress)
+        if self._stage is not None:
+            job.stage = self._stage
+
     def _heartbeat(self) -> None:
         """Write progress and poll for cancellation until the context exits."""
-        def write(job: Job) -> None:
-            """Copy the latest progress and stage onto the job."""
-            job.progress = max(job.progress, self._progress)
-            if self._stage is not None:
-                job.stage = self._stage
-
         while True:
-            job = self._repo.update_job(self._job_id, write)
+            job = self._repo.update_job(self._job_id, self._write)
             if job is not None and job.cancel_requested:
                 self._cancelled.set()
             if self._stopped.wait(HEARTBEAT_INTERVAL_SECONDS):
@@ -734,7 +884,7 @@ def _let_go_of_unused_models(spec: Dict[str, Any]) -> None:
     if not (with_speech and spec.get("diarize", True)):
         diarize.release_engine()
 
-def run_worker(repo: Repository, job_id: str) -> Optional[str]:
+def run_worker(repo: Repository, job_id: str, log_path: Optional[str] = None) -> Optional[str]:
     """Run a queued job to completion and record its outcome.
 
     Returns without doing anything if the job is missing or no longer queued.
@@ -748,6 +898,8 @@ def run_worker(repo: Repository, job_id: str) -> Optional[str]:
     Args:
         repo: Repository that stores the job.
         job_id: ID of the job to run.
+        log_path: Where this process's error output goes, recorded on the
+            job with the process's ID so a failure can say what it last wrote.
 
     Returns:
         The ID of the next analysis to run in this process, or None when this
@@ -766,6 +918,7 @@ def run_worker(repo: Repository, job_id: str) -> Optional[str]:
         nonlocal started
         if current.status == JobStatus.QUEUED and not current.cancel_requested:
             current.status = JobStatus.RUNNING
+            current.worker_pid, current.worker_log = os.getpid(), log_path
             started = True
 
     repo.update_job(job_id, start)
@@ -855,13 +1008,19 @@ def main(argv: Optional[List[str]] = None) -> None:
             `sys.argv[1:]`.
     """
     db_path, job_id = argv if argv is not None else sys.argv[1:]
+    # A crash in native code — a speech model, the voice separation — ends the process with no
+    # Python error to record; this leaves where it was in the log the failure quotes (#232).
+    faulthandler.enable()
     repo = Repository(db_path)
+    first = repo.get_job(job_id)
+    log_path = (os.path.join(first.work_dir, WORKER_LOG_FILE_NAME)
+                if first is not None and first.work_dir is not None else None)
     # Only a worker keeps the speech model loaded between analyses; the server does not.
     models.keep_speech_model()
     current: Optional[str] = job_id
     while current is not None:
         try:
-            current = run_worker(repo, current)
+            current = run_worker(repo, current, log_path)
         except Exception as exc:
             repo.update_job(current, _fail_if_active(f"worker crashed: {exc}"))
             raise

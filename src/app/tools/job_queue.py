@@ -70,9 +70,10 @@ def get_job(
         each for a stream that starts or runs elsewhere than the picture and for a side of a
         join where the sound is heard early or late, naming the clip and the side; `not_compared`
         when some sides of joins could not be lined up, saying how many and why — left out before
-        the check for too little of their own sound or for their own fade, their sound did not follow
-        the file's closely enough within the shifts searched, their file could not be read, or their
-        sound may be further off than was searched, each naming how far it was searched;
+        the check for too little of their own sound, for other sound over it or for their own fade,
+        their sound did not follow the file's closely enough within the shifts searched (apart when
+        music played over them), their file could not be read, or their sound may be further off
+        than was searched, each naming how far it was searched;
         or `not_checked`
         when the check could not be run, which says nothing about the sound; and a summary
         over all of them: `finished` and
@@ -280,10 +281,11 @@ def _sound_out_of_step(job: Job) -> Dict[str, object]:
         more than a frame, or two envelope steps, early or late, naming the
         clip and which side of the join it is; and `not_compared` when some sides
         could not be lined up, saying how many and why — sides left out
-        before the check for too little of their own sound or for their own
-        fade, sides whose sound did not follow the file's closely enough or
-        whose file could not be read, and sides whose sound may be further off
-        than was searched. How far those sides were searched is said as it
+        before the check for too little of their own sound, for other sound
+        over it or for their own fade, sides whose sound did not follow the
+        file's closely enough (counted apart when music played over them),
+        sides whose file could not be read, and sides whose sound may be
+        further off than was searched. How far those sides were searched is said as it
         was: a short side searches less than `MAX_LAG_SECONDS`.
         Empty when every side that was compared lines up and none were left out.
     """
@@ -312,29 +314,36 @@ def _sound_out_of_step(job: Job) -> Dict[str, object]:
     if lines:
         found["out_of_step"] = lines
     sides_asked = int(job.sync["sides_asked"])
-    too_short = int(job.sync["left_out"]["too_short"])
-    faded = int(job.sync["left_out"]["faded"])
-    weak = int(job.sync["unlined"]["weak"])
-    beyond_reach = int(job.sync["unlined"]["beyond_reach"])
-    unknown = too_short + faded + weak + beyond_reach
-    total = sides_asked + too_short + faded
+    left_out, unlined = job.sync["left_out"], job.sync["unlined"]
+    # A check kept before a count was split out has none of it.
+    too_short, covered, faded = (int(left_out.get(kind, 0)) for kind in ("too_short", "covered", "faded"))
+    weak, music, unreadable, beyond_reach = (int(unlined.get(kind, 0))
+                                             for kind in ("weak", "music", "unreadable", "beyond_reach"))
+    unknown = too_short + covered + faded + weak + music + unreadable + beyond_reach
+    total = sides_asked + too_short + covered + faded
     if unknown > 0:
         reasons: List[str] = []
+        least = f"{sync.MIN_SIDE_SECONDS + sync.MIN_REACH_SECONDS:g}s"
         if too_short:
-            reasons.append(f"{too_short} with less than "
-                           f"{sync.MIN_SIDE_SECONDS + sync.MIN_REACH_SECONDS:g}s of their own sound "
-                           "clear of other sound")
+            reasons.append(f"{too_short} whose clip has less than {least} of its own sound on that side")
+        if covered:
+            reasons.append(f"{covered} where other sound over the clip — the neighbouring clip's sound "
+                           "reaching across the join, a picture over it with sound, or an audio track that does "
+                           f"not duck under speech — leaves less than {least} of its own sound alone")
         if faded:
-            reasons.append(f"{faded} where the clip's own fade leaves less than "
-                           f"{sync.MIN_SIDE_SECONDS + sync.MIN_REACH_SECONDS:g}s to compare")
-        searched = job.sync["unlined"]["searched"]
+            reasons.append(f"{faded} where the clip's own fade leaves less than {least} to compare")
+        searched = unlined.get("searched", {})
         if weak:
             # At no shift searched did the shapes agree: the sound may be further off than the search, or
-            # changed too much (quiet room tone under the loudness levelling) to be followed; a file that
-            # could not be read is counted here too.
+            # changed too much (quiet room tone under the loudness levelling) to be followed.
             reasons.append(f"{weak} whose sound followed the file's closely enough at no shift within "
-                           f"{_searched(searched['weak'])}: further off, too changed to compare, "
-                           "or its file unreadable")
+                           f"{_searched(searched['weak'])}: further off, or too changed to compare")
+        if music:
+            reasons.append(f"{music} under music whose sound followed the file's closely enough at no shift "
+                           f"within {_searched(searched['music'])}: the music over the clip's own sound may have "
+                           "changed its shape too much, or it is further off")
+        if unreadable:
+            reasons.append(f"{unreadable} whose file could not be read")
         if beyond_reach:
             reasons.append(f"{beyond_reach} whose sound may be further off than the "
                            f"{_searched(searched['beyond_reach'])} searched")

@@ -61,6 +61,25 @@ def test_a_project_whose_footage_is_gone_says_so(client: TestClient, media: Path
     assert listed["missing"] == ["moved.mp4"]
     assert listed["thumb"] == {"asset_id": asset, "t": 1.0}
 
+def test_a_first_shot_under_a_second_long_is_shown_from_inside_it(client: TestClient, media: Path) -> None:
+    asset = catalog.import_asset(str(media / "wide.mp4"))["id"]
+    made = client.post("/api/projects", json={"name": "很短"}).json()
+    client.post(f"/api/projects/{made['id']}/edits", json={
+        "expected_version": runtime.repo.get_project(made["id"]).version, "operations": [
+            {"action": "insert_clip", "track_id": "video", "clip_id": "c1", "asset_id": asset,
+             "source_range": {"start": 2, "end": 2.6}}]})
+    listed = next(item for item in client.get("/api/projects").json()["projects"] if item["id"] == made["id"])
+    assert listed["thumb"] == {"asset_id": asset, "t": 2.3}
+
+def test_the_library_is_in_number_order(client: TestClient, media: Path, tmp_path: Path) -> None:
+    for number in (10, 2, 1):
+        copy = tmp_path / f"{number}.mp4"
+        # Each its own file, or importing would call them one.
+        copy.write_bytes((media / "wide.mp4").read_bytes() + bytes([number]))
+        catalog.import_asset(str(copy))
+    names = [asset["name"] for asset in client.get("/api/assets").json()["assets"]]
+    assert [name for name in names if name in {"1.mp4", "2.mp4", "10.mp4"}] == ["1.mp4", "2.mp4", "10.mp4"]
+
 def test_only_the_apps_own_folders_can_be_opened(client: TestClient, monkeypatch) -> None:
     opened = []
     monkeypatch.setattr(os, "startfile", opened.append, raising=False)
@@ -491,6 +510,18 @@ def test_a_job_can_be_stopped_from_the_editor(client: TestClient, ended_after: l
     assert runtime.repo.get_job(waiting.job_id).status.value == "cancelled"
     ended = {job["job_id"]: job for job in client.get("/api/jobs/active").json()["ended"]}
     assert ended[waiting.job_id]["status"] == "cancelled"
+
+def test_the_job_poll_tells_the_page_when_the_ai_made_or_changed_a_project(client: TestClient) -> None:
+    stamp = lambda: client.get("/api/jobs/active").json()["projects"]
+    before = stamp()
+    assert stamp() == before
+    made = editing.create_project(name="AI 做的")
+    after_made = stamp()
+    assert after_made != before
+    editing.apply_edits(made["id"], made["version"], planning.OPERATIONS.validate_python([
+        {"action": "add_track", "track_id": "video", "track_type": "video"},
+    ]))
+    assert stamp() != after_made
 
 
 def test_offered_songs_are_heard_in_place_of_the_music_and_the_pick_comes_back_as_a_comment(

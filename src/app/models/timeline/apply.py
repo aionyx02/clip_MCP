@@ -580,7 +580,7 @@ def apply_operation(project: Project, op: EditOperation, assets: Mapping[str, As
             asset_id, source_start, source_end = op.asset_id, op.source_start, op.source_end
         added = SubtitleCue(
             id=f"c{number}", asset_id=asset_id, source_start=source_start, source_end=source_end,
-            text=op.text, secondary=op.secondary, speaker=op.speaker, local=not op.for_all_projects,
+            text=op.text, secondary=op.secondary, speaker=op.speaker, local=not op.for_all_projects, typed=True,
         )
         project.subtitles = sorted([*project.subtitles, added], key=cue_order)
         # A caption put back by hand where one was deleted is wanted there after all.
@@ -687,6 +687,8 @@ def apply_operation(project: Project, op: EditOperation, assets: Mapping[str, As
         if op.photo_asset_id is not None:
             clip.asset_id, card.at = _card_backdrop(track, None, op.photo_asset_id, assets)
             card.background = "picture"
+        if op.at is not None:
+            card.at = op.at
         if op.background is not None:
             card.background = op.background
         if op.colour is not None:
@@ -847,6 +849,9 @@ def apply_operation(project: Project, op: EditOperation, assets: Mapping[str, As
             clip.cleanup = clip.cleanup.model_copy(update=op.cleanup.model_dump(exclude_unset=True))
     elif isinstance(op, SetClipSpeedOp):
         clip = _find_clip(track, op.clip_id)
+        if clip.card is not None:
+            raise ValueError(f"clip {clip.id} is a title card: it holds one frame, so a speed would only stretch it; "
+                             "give its length in seconds with set_title_card, or the plan's title_card")
         was = clip.timeline_out
         clip.speed = op.speed
         if op.preserve_pitch is not None:
