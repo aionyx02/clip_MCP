@@ -125,6 +125,16 @@ class Job(BaseModel):
         default=None,
         description="When a worker was launched for this job; null while it waits for a free slot",
     )
+    worker_pid: Optional[int] = Field(
+        default=None,
+        description="The process running the job, so a quiet worker can be told from a gone one; null until "
+                    "a worker starts it",
+    )
+    worker_log: Optional[str] = Field(
+        default=None,
+        description="Where the worker running the job writes its errors; a worker that runs several analyses "
+                    "keeps the log of the first",
+    )
     updated_at: datetime = Field(default_factory=_utc_now, description="Last time the job record was written")
 
     def remaining_seconds(self, now: datetime) -> Optional[int]:
