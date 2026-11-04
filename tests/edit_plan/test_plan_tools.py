@@ -446,6 +446,51 @@ def test_a_sped_up_cut_compiles_to_the_length_the_plan_says(planned: dict) -> No
     compile_plan(project_id=project, expected_version=1, plan_id=saved["plan_id"])
     assert float(get_project(project)["duration"]) == pytest.approx(expected, abs=0.01)
 
+def carded(planned: dict, **fields) -> dict:
+    """Save the planned cut again with a title card opening it.
+
+    Args:
+        planned: The saved plan.
+        **fields: Other plan fields to change.
+
+    Returns:
+        What `save_plan` returned.
+    """
+    from app.models.plan import PlanTitleCard
+
+    stored = EditPlan.model_validate(get_plan(planned["plan_id"])["plan"])
+    beats = [stored.beats[0].model_copy(update={"title_card": PlanTitleCard(title="開場", seconds=3.0)})]
+    saved = save_plan(stored.model_copy(update={"beats": beats, **fields}))
+    assert saved["problems"] == [], saved["problems"]
+    return saved
+
+def test_a_plan_with_title_cards_checks_out_at_the_length_it_compiles_to(planned: dict) -> None:
+    """The check used to leave the cards out, so it said the cut was shorter than it came out (#246)."""
+    saved = carded(planned)
+    checked = validate_plan(saved["plan_id"])
+    project = create_project(name="測試", width=640, height=360)["id"]
+    made = compile_plan(project_id=project, expected_version=1, plan_id=saved["plan_id"])
+    assert checked["duration"] == pytest.approx(made["duration"], abs=0.01)
+    assert checked["clips"] == made["clips"]
+
+def test_music_pinned_past_where_the_cut_would_end_without_its_cards_survives_a_recompile(
+    planned: dict, tmp_path: Path,
+) -> None:
+    """The recompile check laid the music under the cut without its cards, so it ran out a pass short (#246)."""
+    song = tone(tmp_path, "short.mp3", 700, seconds=1)
+    bare = validate_plan(planned["plan_id"])["duration"]
+    saved = carded(planned, music=MusicPlan(cues=[MusicCue(asset_id=song, fade_in=0, fade_out=0)]))
+    project = create_project(name="測試", width=640, height=360)["id"]
+    compile_plan(project_id=project, expected_version=1, plan_id=saved["plan_id"])
+    music = next(track for track in get_project(project)["tracks"] if track["id"] == "music")["clips"]
+    last = max(music, key=lambda clip: float(clip["timeline_in"]))
+    # Only a pass the cards make room for: the cut without them ends before it starts.
+    assert float(last["timeline_in"]) >= bare
+    apply_edits(project, get_project(project)["version"], ops({
+        "action": "set_clip_pinned", "track_id": "music", "clip_id": last["id"], "pinned": True,
+    }))
+    compile_plan(project_id=project, expected_version=get_project(project)["version"], plan_id=saved["plan_id"])
+
 def test_a_clip_lengthened_by_hand_over_the_next_one_is_not_played_twice(planned: dict) -> None:
     project = compiled_project(planned)
     first, second = main_clips(project)
