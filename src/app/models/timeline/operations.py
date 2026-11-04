@@ -1,7 +1,7 @@
 """The edits a project takes, a class for each, and EditOperation, the union an edit is read into."""
 
 from decimal import Decimal
-from typing import Annotated, Dict, List, Literal, Optional, Tuple, Union
+from typing import Annotated, Dict, List, Literal, Optional, Tuple, Union, get_args
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 from pydantic.json_schema import SkipJsonSchema
@@ -644,3 +644,8 @@ EditOperation = Annotated[
     ],
     Field(discriminator="action"),
 ]
+
+# What each edit is called; they read like tools, and are not.
+OPERATION_NAMES = frozenset(
+    operation.model_fields["action"].default for operation in get_args(get_args(EditOperation)[0])
+)
