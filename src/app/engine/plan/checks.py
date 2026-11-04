@@ -927,7 +927,10 @@ def check_plan(
 
     if not problems:
         pieces, cleaned = compile_pieces(plan, clips, children, assets, cuts)
-        duration = compiled_duration(pieces)
+        # The cut as it will play, title cards in: its length and the song under it are the
+        # compile's, cards and all (#228, #246). A plan checked on its own has only its own cards.
+        played = with_cards(plan, pieces, assets, cuts, None)
+        duration = compiled_duration(played)
         edges, ending_notes, stopped = _edge_problems(plan, pieces, cuts)
         notes.extend(_cut_notes(
             pieces,
@@ -954,9 +957,8 @@ def check_plan(
                     f"the {cue.start:g}s asked for, so the cuts it sets the beat for are counted from a beat",
                     "music_enters_on_a_beat", beat_id=cue.beat_id, seconds=entry,
                 ))
-        # Against the cut as it will play, title cards in: a song started to end with the video
-        # has to end with the cards too (#228).
-        notes.extend(music_fit_notes(plan, with_cards(plan, pieces, assets, cuts, None), assets, cuts))
+        # A song started to end with the video has to end with the cards too (#228).
+        notes.extend(music_fit_notes(plan, played, assets, cuts))
         _, covering, said = broll_covers(plan, pieces, clips, assets, cuts)
         problems.extend(covering)
         notes.extend(said)
@@ -974,7 +976,7 @@ def check_plan(
             chosen = [selection for selection in plan.selections if selection.beat_id == beat.id]
             in_beat = compiled_duration(plan_pieces(
                 plan.model_copy(update={"selections": chosen}), clips, children, assets, cuts,
-            ))
+            )) + compiled_duration([piece for piece in played if piece.card is not None and piece.beat_id == beat.id])
             if abs(in_beat - beat.target_seconds) / beat.target_seconds > LENGTH_TOLERANCE:
                 notes.append(Note(f"beat {beat.id} ({beat.name}) runs {in_beat:.1f}s against {beat.target_seconds:g}s",
                                   "length_off_target", beat_id=beat.id, seconds=in_beat, look=True))

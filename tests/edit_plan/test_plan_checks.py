@@ -182,6 +182,24 @@ def test_a_cut_that_misses_its_target_length_is_worth_saying() -> None:
     assert problems == []
     assert any("against a target of 90s" in note for note in notes)
 
+def test_the_length_said_against_the_target_counts_the_title_cards() -> None:
+    """It used to be the cut without its cards, so a carded cut on target was said to fall short (#246)."""
+    from app.engine.plan.beats import plan_pieces
+    from app.engine.plan.pieces import compiled_duration
+    from app.models.plan import PlanTitleCard
+
+    by_id, children, assets, clips = footage()
+    plain = plan_for([Selection(clip_id=speech_of(clips)[0].id, beat_id="b1")])
+    bare = compiled_duration(plan_pieces(plain, by_id, children, assets))
+    card = PlanTitleCard(title="開場", seconds=3.0)
+    plan = plain.model_copy(update={
+        "beats": [plain.beats[0].model_copy(update={"title_card": card, "target_seconds": bare + 3.0})],
+        "target": PlanTarget(seconds=bare + 3.0),
+    })
+    problems, notes = context_for(plan, by_id, children, assets)
+    assert problems == []
+    assert not [note for note in notes if getattr(note, "kind", None) == "length_off_target"], notes
+
 def test_music_without_sound_is_refused() -> None:
     by_id, children, assets, clips = footage()
     assets = {**assets, "silent-song": asset("silent-song", has_audio=False)}
