@@ -549,3 +549,58 @@ def test_two_windows_of_one_file_played_out_of_order_stay_two() -> None:
     # And a window lost anyway is said.
     [lost] = _left_out([later, earlier], [later], [])
     assert lost.kind == "selections_lost" and lost.clip_ids == ("u0002",) and lost.look
+
+# #229: a window turned all the way down is there for its picture, so nothing anybody would
+# hear moves its cuts. Each stage that cuts by the sound is checked on its own.
+
+def test_a_muted_clip_is_not_moved_out_to_where_its_sound_ends() -> None:
+    from app.engine.plan.pieces import on_the_sound
+
+    # 「…」 ends at 7.95 in the transcript and is drawn out until the room goes quiet at 8.4.
+    known = CleanCuts(words=((5.0, 7.95),), sentences=((5.0, 7.95),), transcribed=True,
+                      pauses=((0.0, 4.9), (8.4, 12.0)))
+    heard = Piece(asset_id="x", start=4.9, end=7.95, from_clip_ids=("u0005",))
+    muted = replace(heard, gain=0.0)
+    assert on_the_sound([heard], {"x": known})[0][0].end > 7.95
+    out, notes = on_the_sound([muted], {"x": known})
+    assert out == [muted] and notes == []
+
+def test_a_muted_clip_has_no_run_up_or_wind_down_trimmed_off() -> None:
+    from app.engine.plan.pieces import trimmed_ends
+
+    known = CleanCuts(words=((5.0, 7.5),), sentences=((5.0, 7.5),), transcribed=True,
+                      pauses=((0.0, 4.5), (8.2, 12.0)))
+    muted = Piece(asset_id="x", start=3.0, end=9.5, from_clip_ids=("u0005",), gain=0.0)
+    assert trimmed_ends([muted], {"x": known}) == ([muted], [])
+
+def test_a_muted_clip_keeps_the_quiet_in_the_middle_of_it() -> None:
+    from app.engine.plan.pieces import without_pauses
+
+    known = CleanCuts(words=((1.0, 2.0), (5.0, 6.0)), sentences=((1.0, 2.0), (5.0, 6.0)), transcribed=True,
+                      pauses=((2.0, 5.0),))
+    muted = Piece(asset_id="x", start=0.8, end=6.2, from_clip_ids=("u0005",), gain=0.0)
+    assert without_pauses([muted], {"x": known}) == ([muted], [])
+
+def test_a_muted_clip_saying_a_line_again_is_not_a_retake() -> None:
+    made = analysis(duration=20.0, segments=[(1.0, 3.0, "今天我們去爬山"), (4.0, 6.0, "今天我們去爬山")])
+    first = Piece(asset_id=ASSET_ID, start=1.0, end=3.0, from_clip_ids=("u0001",), gain=0.0)
+    second = Piece(asset_id=ASSET_ID, start=4.0, end=6.0, from_clip_ids=("u0002",), gain=0.0)
+    cuts = {ASSET_ID: clean_cuts(made)}
+    assert len(without_retakes([replace(first, gain=1.0), replace(second, gain=1.0)], cuts)[0]) == 1
+    assert without_retakes([first, second], cuts) == ([first, second], [])
+
+def test_a_muted_clip_s_trim_is_not_snapped_off_a_word() -> None:
+    made = spoken_words(*SENTENCE)
+    assets = {ASSET_ID: sourced()}
+    _, clips = build_timeline(assets, {ASSET_ID: made})
+    spoken = next(clip for clip in clips if clip.text)
+    # 2.5s of a sentence starting at 2.0 ends at 4.5, inside 就起床, where a heard trim is snapped to 4.0.
+    plan = plan_for([Selection(
+        clip_id=spoken.id, beat_id="b1", trim=Trim(kind=TrimKind.HEAD, seconds=2.5), volume=0,
+    )])
+    pieces, _ = compile_pieces(plan, {clip.id: clip for clip in clips}, {}, assets, {ASSET_ID: clean_cuts(made)})
+    assert pieces[0].end == pytest.approx(4.5)
+    timeline = SemanticTimeline(id="tl_test", asset_ids=[], input_hash="hash", derivation_version=6)
+    _, said = check_plan(plan, timeline, {clip.id: clip for clip in clips}, {}, assets,
+                         {ASSET_ID: clean_cuts(made)})
+    assert not any(getattr(note, "kind", None) == "cuts_moved_off_words" for note in said)

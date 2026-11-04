@@ -455,6 +455,9 @@ def selected_pieces(
         asset = assets.get(clip.asset_id) if clip is not None else None
         if clip is None or asset is None:
             continue
+        # A selection turned all the way down splits no word anybody hears, so its trim lands
+        # where it was asked for rather than on a word edge (#229).
+        known = None if cuts is None or selection.volume == 0 else cuts.get(clip.asset_id)
         pieces.extend(
             replace(
                 piece,
@@ -465,8 +468,7 @@ def selected_pieces(
                 excused=(bool(selection.edge_reason),),
             )
             for piece in _selection_pieces(
-                selection, clip, children.get(clip.id, []), asset,
-                None if cuts is None else cuts.get(clip.asset_id), pace_of(plan).breath,
+                selection, clip, children.get(clip.id, []), asset, known, pace_of(plan).breath,
             )
         )
     return pieces
@@ -498,7 +500,8 @@ def _same_line(first: Piece, second: Piece, cuts: Mapping[str, CleanCuts]) -> bo
         talking are never a retake: they would compare as identical for having
         nothing to compare, and silent B-roll is not a stammer.
     """
-    if first.asset_id != second.asset_id:
+    # A window turned all the way down says nothing to anybody, so it says nothing twice either.
+    if first.asset_id != second.asset_id or first.gain <= 0 or second.gain <= 0:
         return False
     known = cuts.get(first.asset_id)
     if known is None:
@@ -548,7 +551,9 @@ def on_the_sound(
     far_in: List[Piece] = []
     for piece in pieces:
         known = cuts.get(piece.asset_id)
-        if known is None:
+        # A window turned all the way down is there for its picture: where its sound starts
+        # or stops is nothing anybody hears, so its cuts stay where they were asked for (#229).
+        if known is None or piece.gain <= 0:
             out.append(piece)
             continue
         start, end = piece.start, piece.end
@@ -703,7 +708,9 @@ def without_pauses(
     spoken_over: List[Piece] = []
     for piece in pieces:
         known = cuts.get(piece.asset_id)
-        dead = known.pauses_inside(piece.start, piece.end, pace.pause) if known is not None else ()
+        # Quiet in a window turned all the way down is quiet in a window nobody hears.
+        heard = known is not None and piece.gain > 0
+        dead = known.pauses_inside(piece.start, piece.end, pace.pause) if heard else ()
         opened = piece.start
         for quiet, loud in dead:
             # The silence came from the detector and the words came from the
@@ -798,8 +805,9 @@ def trimmed_ends(
         notes.append(Note(said, "ends_trimmed", beat_id=piece.beat_id or None, clip_ids=first_clips([piece]),
                           seconds=taken))
 
+    # A window turned all the way down has no run-up or wind-down anybody hears, only picture.
     head = out[0]
-    known = cuts.get(head.asset_id)
+    known = cuts.get(head.asset_id) if head.gain > 0 else None
     first_word = known.first_word_in(head.start, head.end) if known is not None else None
     if first_word is not None:
         # Where the talking really starts, when the transcript put its first word late.
@@ -811,7 +819,7 @@ def trimmed_ends(
             out[0] = replace(head, start=opening)
 
     tail = out[-1]
-    known = cuts.get(tail.asset_id)
+    known = cuts.get(tail.asset_id) if tail.gain > 0 else None
     last_word = known.last_word_in(tail.start, tail.end) if known is not None else None
     if last_word is not None:
         last_word = known.sound_after(last_word) or last_word
