@@ -780,6 +780,8 @@ def apply_operation(project: Project, op: EditOperation, assets: Mapping[str, As
             color=clip.color,
             layout=clip.layout,
             fit=clip.fit,
+            keep_level=clip.keep_level,
+            stabilize=clip.stabilize,
             motion=clip.motion,
             card=clip.card,
             texts=[text.model_copy() for text in clip.texts],
