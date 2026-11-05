@@ -33,7 +33,8 @@ from app.engine.ffmpeg import OperationCancelled
 from app.engine.diarize import find_speakers
 from app.engine.faces import _per_second, detect_faces, framing_note, frames_dir
 from app.engine.semantic import (
-    LONE_VOICE_DISTANCE, SPEAKER_MAJORITY, VOICE_DISTANCE, build_timeline, join_voices, speaker_at, voice_seconds,
+    LONE_VOICE_DISTANCE, SAME_FILE_VOICE_DISTANCE, SPEAKER_MAJORITY, VOICE_DISTANCE, build_timeline, join_voices,
+    speaker_at, voice_seconds,
 )
 from app.models.media import (
     Asset,
@@ -555,12 +556,30 @@ def test_a_lone_voice_a_little_further_off_is_still_the_same_person() -> None:
     joined = join_voices({"one": alone("one", [1.0, 0.0]), "two": pair})
     assert joined[("two", "S1")] != joined[("one", "S1")]
 
-def test_two_voices_one_file_told_apart_are_never_joined_into_one() -> None:
-    both = MediaAnalysis(asset_id="b", duration=10.0, voices=[
-        Voice(speaker="S1", embedding=[1.0, 0.0], seconds=5.0), Voice(speaker="S2", embedding=[1.0, 0.01], seconds=5.0)])
+def test_two_voices_one_file_told_apart_are_joined_only_when_they_sit_as_close_as_one_person() -> None:
+    """#190: a 7.5-minute talk between two people came back from the speaker split as 40 labels."""
+    def at(distance: float) -> List[float]:
+        """A point this far, in cosine distance, from [1, 0]."""
+        angle = math.acos(1 - distance)
+        return [math.cos(angle), math.sin(angle)]
+
+    near, apart = SAME_FILE_VOICE_DISTANCE / 2, VOICE_DISTANCE * 0.95
+    talk = MediaAnalysis(asset_id="b", duration=10.0, voices=[
+        Voice(speaker="S1", embedding=[1.0, 0.0], seconds=20.0), Voice(speaker="S2", embedding=at(near), seconds=5.0),
+        Voice(speaker="S3", embedding=at(apart), seconds=5.0)])
     joined = join_voices({"a": MediaAnalysis(asset_id="a", duration=10.0, voices=[
-        Voice(speaker="S1", embedding=[1.0, 0.0], seconds=5.0)]), "b": both})
-    assert joined[("b", "S1")] != joined[("b", "S2")]
+        Voice(speaker="S1", embedding=[1.0, 0.0], seconds=5.0)]), "b": talk})
+    assert joined[("b", "S1")] == joined[("b", "S2")] == joined[("a", "S1")]
+    # Near enough to be one person across two files, but not as near as one person sits to themselves in one.
+    assert joined[("b", "S3")] != joined[("b", "S1")]
+
+
+def test_the_longest_voice_in_a_file_is_placed_first() -> None:
+    """A two-second fragment's print is mostly the room; it should not decide where the voice it belongs to goes."""
+    talk = MediaAnalysis(asset_id="a", duration=10.0, voices=[
+        Voice(speaker="S1", embedding=[0.0, 1.0], seconds=1.0),
+        Voice(speaker="S2", embedding=[1.0, 0.0], seconds=20.0)])
+    assert join_voices({"a": talk}) == {("a", "S2"): "V1", ("a", "S1"): "V2"}
 
 def test_a_voice_heard_briefly_is_pointed_out_as_maybe_the_main_one() -> None:
     """#82: one person on two microphones came back as V1 for 223s and V2 for 17s."""

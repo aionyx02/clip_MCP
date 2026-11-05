@@ -35,7 +35,8 @@ from app.models.semantic import ClipKind, ClipLevel, SemanticClip, SemanticTimel
 # version are recognised as out of date rather than silently reused.
 # 8: lines the recogniser made up are told by more than their confidence, a stretch
 # without speech has no speaker, and voices join across files by their average.
-DERIVATION_VERSION = 8
+# 9: two labels in one file join when they sit as close as one person does to themselves.
+DERIVATION_VERSION = 9
 # A stretch without speech shorter than this is not a thing on its own; it is the
 # breath between two sentences, and it is already described by their headroom.
 MIN_UTTERANCE_SECONDS = 0.4
@@ -105,6 +106,14 @@ VOICE_DISTANCE = 0.45
 # vlogger alone on a street measured 0.5 from themselves on another day, so a single
 # voice is given more room than one of several. Provisional.
 LONE_VOICE_DISTANCE = 0.6
+# How close two labels in the same file have to sit before they are one person the speaker
+# split cut in pieces. It cuts a long talk finely: a 7.5-minute talk between two people came
+# back as 40 labels (#190). Measured there: one person's voice in 11 files sat 0.09–0.30 from
+# where those files sit on average, and the two people's longest labels sat 0.52–0.76 from each
+# other; joined at this distance, the 40 labels came out as those two people and 15 fragments of
+# under 7 s. Tighter than `VOICE_DISTANCE`, because in one room two people sit nearer each other
+# than across rooms. Provisional: one conversation's worth of evidence.
+SAME_FILE_VOICE_DISTANCE = 0.3
 # A voice talking less than this share of all the talking is worth asking about: one person
 # heard on another microphone comes back as a voice of its own, a few seconds long beside
 # the hours of the one it is (#82). Provisional.
@@ -659,10 +668,13 @@ def join_voices(analyses: Mapping[str, MediaAnalysis]) -> Dict[Tuple[str, str], 
     where they are joined up: each voice is compared with the ones already
     seen, and lands with the nearest of them when it is near enough.
 
-    Walked in a fixed order — files by ID, labels within a file by name — so
-    the same footage always produces the same joined labels. Assigning them by
-    who speaks first would make the answer depend on the order the analyses
-    happened to be read in.
+    Walked in a fixed order — files by ID, labels within a file by how much
+    talking they were measured over and then by name — so the same footage
+    always produces the same joined labels. Assigning them by who speaks first
+    would make the answer depend on the order the analyses happened to be read
+    in. The longest go first because a fragment of a second or two measures
+    the room as much as the speaker, and should not be what a voice is placed
+    by.
 
     Greedy rather than a proper clustering: with a handful of voices the two
     agree, and a greedy pass can be read straight through. Each joined voice
@@ -672,7 +684,9 @@ def join_voices(analyses: Mapping[str, MediaAnalysis]) -> Dict[Tuple[str, str], 
     one voice in it is given more room, up to `LONE_VOICE_DISTANCE`: a person
     alone with a camera on a noisy street is further from themselves than two
     people in one room are from each other, and there is nobody else in the
-    file for them to be.
+    file for them to be. Two labels in one file are joined only when they sit
+    within `SAME_FILE_VOICE_DISTANCE`: the speaker split told them apart, and
+    it takes a voice as close as one person is to themselves to overrule it.
 
     Args:
         analyses: The analyses to join, keyed by asset ID.
@@ -689,14 +703,11 @@ def join_voices(analyses: Mapping[str, MediaAnalysis]) -> Dict[Tuple[str, str], 
         voices = analyses[asset_id].voices
         reach = LONE_VOICE_DISTANCE if len(voices) == 1 else VOICE_DISTANCE
         taken: set[str] = set()
-        for voice in sorted(voices, key=lambda item: item.speaker):
+        for voice in sorted(voices, key=lambda item: (-item.seconds, item.speaker)):
             nearest, distance = None, reach
             for index, (label, total, _) in enumerate(known):
-                if label in taken:
-                    # Two voices the speaker split told apart in one file are two people.
-                    continue
                 apart = _cosine_distance(voice.embedding, total)
-                if apart < distance:
+                if apart < distance and (label not in taken or apart < SAME_FILE_VOICE_DISTANCE):
                     nearest, distance = index, apart
             if nearest is None:
                 known.append((f"V{len(known) + 1}", [0.0] * len(voice.embedding), 0.0))
@@ -729,22 +740,52 @@ def maybe_one_person(analyses: Mapping[str, MediaAnalysis], seconds: Mapping[str
         return []
     whole = sum(seconds.values())
     main = max(seconds, key=lambda label: seconds[label])
-    prints: Dict[str, List[float]] = {}
-    for (asset_id, speaker), label in join_voices(analyses).items():
-        voice = next((item for item in analyses[asset_id].voices if item.speaker == speaker), None)
-        if voice is None:
-            continue
-        held = prints.setdefault(label, [0.0] * len(voice.embedding))
-        if len(held) == len(voice.embedding):
-            prints[label] = [value + part * voice.seconds for value, part in zip(held, voice.embedding)]
+    joined = join_voices(analyses)
     found = []
     for label, talked in seconds.items():
         if label == main or talked >= MINOR_VOICE_SHARE * whole:
             continue
-        apart = (_cosine_distance(prints[label], prints[main]) if label in prints and main in prints else None)
-        found.append({"voice": label, "seconds": talked, "like": main,
-                      "distance": None if apart is None or apart >= 2.0 else round(apart, 2)})
+        apart, _ = voice_likeness(analyses, joined, label, main)
+        found.append({"voice": label, "seconds": talked, "like": main, "distance": apart})
     return sorted(found, key=lambda item: (item["distance"] is None, item["distance"] or 0.0))
+
+def voice_likeness(
+    analyses: Mapping[str, MediaAnalysis], joined: Mapping[Tuple[str, str], str], label: str, like: str,
+) -> Tuple[Optional[float], Optional[float]]:
+    """Measure how near one joined voice sits to another, beside how near that other sits to itself.
+
+    The second number is what gives the first a scale: a voice 0.35 from the
+    main one says little until it is known that the main one's own files sit
+    up to 0.30 from it.
+
+    Args:
+        analyses: The analyses the voices were joined over, keyed by asset ID.
+        joined: The joined labels, as `join_voices` gives them.
+        label: The voice to place.
+        like: The voice to place it against.
+
+    Returns:
+        `(distance, spread)`, rounded to hundredths: the cosine distance
+        between the two voices' prints, each the average of its labels
+        weighted by how much talking they were measured over, and the furthest
+        any one of `like`'s labels sits from its print. Either is None when it
+        cannot be measured — a voice never measured, or one heard in a single
+        label, which has no spread.
+    """
+    prints: Dict[str, List[float]] = {}
+    members: Dict[str, List[List[float]]] = {}
+    for (asset_id, speaker), joined_as in joined.items():
+        voice = next((item for item in analyses[asset_id].voices if item.speaker == speaker), None)
+        if voice is None or joined_as not in (label, like):
+            continue
+        held = prints.setdefault(joined_as, [0.0] * len(voice.embedding))
+        if len(held) == len(voice.embedding):
+            prints[joined_as] = [value + part * voice.seconds for value, part in zip(held, voice.embedding)]
+            members.setdefault(joined_as, []).append(voice.embedding)
+    apart = _cosine_distance(prints[label], prints[like]) if label in prints and like in prints else 2.0
+    spread = (max(_cosine_distance(member, prints[like]) for member in members[like])
+              if len(members.get(like, [])) > 1 else None)
+    return (None if apart >= 2.0 else round(apart, 2)), (None if spread is None else round(spread, 2))
 
 def voice_seconds(clips: Sequence[SemanticClip]) -> Dict[str, float]:
     """Add up how long each joined voice talks, so one person split in several is plain to see.

@@ -446,6 +446,51 @@ def test_a_sped_up_cut_compiles_to_the_length_the_plan_says(planned: dict) -> No
     compile_plan(project_id=project, expected_version=1, plan_id=saved["plan_id"])
     assert float(get_project(project)["duration"]) == pytest.approx(expected, abs=0.01)
 
+def carded(planned: dict, **fields) -> dict:
+    """Save the planned cut again with a title card opening it.
+
+    Args:
+        planned: The saved plan.
+        **fields: Other plan fields to change.
+
+    Returns:
+        What `save_plan` returned.
+    """
+    from app.models.plan import PlanTitleCard
+
+    stored = EditPlan.model_validate(get_plan(planned["plan_id"])["plan"])
+    beats = [stored.beats[0].model_copy(update={"title_card": PlanTitleCard(title="開場", seconds=3.0)})]
+    saved = save_plan(stored.model_copy(update={"beats": beats, **fields}))
+    assert saved["problems"] == [], saved["problems"]
+    return saved
+
+def test_a_plan_with_title_cards_checks_out_at_the_length_it_compiles_to(planned: dict) -> None:
+    """The check used to leave the cards out, so it said the cut was shorter than it came out (#246)."""
+    saved = carded(planned)
+    checked = validate_plan(saved["plan_id"])
+    project = create_project(name="測試", width=640, height=360)["id"]
+    made = compile_plan(project_id=project, expected_version=1, plan_id=saved["plan_id"])
+    assert checked["duration"] == pytest.approx(made["duration"], abs=0.01)
+    assert checked["clips"] == made["clips"]
+
+def test_music_pinned_past_where_the_cut_would_end_without_its_cards_survives_a_recompile(
+    planned: dict, tmp_path: Path,
+) -> None:
+    """The recompile check laid the music under the cut without its cards, so it ran out a pass short (#246)."""
+    song = tone(tmp_path, "short.mp3", 700, seconds=1)
+    bare = validate_plan(planned["plan_id"])["duration"]
+    saved = carded(planned, music=MusicPlan(cues=[MusicCue(asset_id=song, fade_in=0, fade_out=0)]))
+    project = create_project(name="測試", width=640, height=360)["id"]
+    compile_plan(project_id=project, expected_version=1, plan_id=saved["plan_id"])
+    music = next(track for track in get_project(project)["tracks"] if track["id"] == "music")["clips"]
+    last = max(music, key=lambda clip: float(clip["timeline_in"]))
+    # Only a pass the cards make room for: the cut without them ends before it starts.
+    assert float(last["timeline_in"]) >= bare
+    apply_edits(project, get_project(project)["version"], ops({
+        "action": "set_clip_pinned", "track_id": "music", "clip_id": last["id"], "pinned": True,
+    }))
+    compile_plan(project_id=project, expected_version=get_project(project)["version"], plan_id=saved["plan_id"])
+
 def test_a_clip_lengthened_by_hand_over_the_next_one_is_not_played_twice(planned: dict) -> None:
     project = compiled_project(planned)
     first, second = main_clips(project)
@@ -568,11 +613,49 @@ def test_a_song_picked_by_ear_under_the_plan_s_music_is_written_into_its_cue(pla
     compile_plan(project_id=project, expected_version=1, plan_id=planned["plan_id"])
     offer_songs(project, [OfferedSong(asset_id=song, start=2)])
     # Heard as the plan's cue would play it.
-    offer = runtime_repo.song_offer(project)
+    [offer] = runtime_repo.song_offers(project)
     assert (offer.volume, offer.fade_in) == (0.3, 0.4)
     trial = song_trial(runtime_repo.get_project(project), offer, 1)
     assert any(clip.asset_id == song and float(clip.audio_fade_in) == 0.4 for track in trial.tracks for clip in track.clips)
-    picked = pick_song(project, 1)
+    picked = pick_song(project, offer.part, 1)
     assert "已寫進計畫" in picked["text"]
     cue = get_plan(planned["plan_id"])["plan"]["music"]["cues"][0]
     assert (cue["asset_id"], cue["start"], cue["volume"]) == (song, 2, 0.3)
+
+def test_songs_offered_for_every_part_at_once_are_each_written_into_their_own_cue(planned: dict, media: Path) -> None:
+    from app.models.offer import OfferedSong
+    from app.tools.catalog import set_asset_library
+    from app.tools.soundtrack import offer_songs, pick_song
+
+    song = import_asset(str(media / "song.mp3"))["id"]
+    jingle = import_asset(str(media / "jingle.wav"))["id"]
+    set_asset_library([song, jingle], "music")
+    stored = EditPlan.model_validate(get_plan(planned["plan_id"])["plan"])
+    clips = planned["clips"]
+    saved = save_plan(with_a_fact(stored.model_copy(update={
+        "beats": [Beat(id="b1", name="開場", role=BeatRole.TURN), Beat(id="b2", name="結尾", role=BeatRole.PAYOFF)],
+        "selections": [Selection(clip_id=clips[0]["clip_id"], beat_id="b1"),
+                       Selection(clip_id=clips[2]["clip_id"], beat_id="b2")],
+        # The first cue leaves its part out, to start with the video.
+        "music": MusicPlan(cues=[MusicCue(asset_id=jingle), MusicCue(beat_id="b2", asset_id=jingle)]),
+    }), 1.5, 2.5))
+    assert saved["problems"] == [], saved["problems"]
+    project = create_project(name="兩段", width=640, height=360)["id"]
+    compile_plan(project_id=project, expected_version=1, plan_id=saved["plan_id"])
+    opening = offer_songs(project, [OfferedSong(asset_id=song, start=1)], beat_id="b1")
+    ending = offer_songs(project, [OfferedSong(asset_id=song, start=3), OfferedSong(asset_id=jingle)], beat_id="b2")
+    assert (opening["part"], ending["part"]) == ("b1", "b2")
+    # Every part's songs are read back numbered, so the user can answer in the conversation too.
+    assert [(part["part"], [(entry["number"], entry["name"], entry["asset_id"], entry["start"]) for entry in part["songs"]])
+            for part in ending["waiting"]] == [
+        ("b1", [(1, "song.mp3", song, 1)]), ("b2", [(1, "song.mp3", song, 3), (2, "jingle.wav", jingle, 0)])]
+    assert "已寫進計畫" in pick_song(project, "b2", 1)["text"]
+    cues = get_plan(planned["plan_id"])["plan"]["music"]["cues"]
+    assert [(cue["beat_id"], cue["asset_id"], cue["start"]) for cue in cues] == [(None, jingle, 0), ("b2", song, 3)]
+    assert [offer.part for offer in runtime_repo.song_offers(project)] == ["b1"]
+    # The first part's songs go into the cue that starts the video, though it names no part.
+    plan = get_plan(planned["plan_id"])["plan"]
+    assert "已寫進計畫" in pick_song(project, "b1", 1)["text"]
+    cues = get_plan(planned["plan_id"])["plan"]["music"]["cues"]
+    assert [(cue["beat_id"], cue["asset_id"], cue["start"]) for cue in cues] == [(None, song, 1), ("b2", song, 3)]
+    assert plan["version"] < get_plan(planned["plan_id"])["plan"]["version"]

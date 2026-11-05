@@ -471,7 +471,9 @@ class BrollShot(BaseModel):
     compiler's to decide.
     """
 
-    clip_id: str = Field(..., description="Semantic clip the covering picture comes from, played from its start")
+    clip_id: str = Field(
+        ..., description="Semantic clip the covering picture comes from, played from `from_seconds` into it",
+    )
     over_clip_id: str = Field(
         ..., description="Semantic clip in the cut this starts over; the shot cuts in where that clip begins",
     )
@@ -481,6 +483,11 @@ class BrollShot(BaseModel):
         description="How far into `over_clip_id` in the cut it cuts in, for covering a moment partway through: a "
                     "frame gone black or frozen while somebody talks. Partway through a sentence only over such "
                     "a frame; 0 cuts in where that clip begins",
+    )
+    from_seconds: float = Field(
+        default=0, ge=0,
+        description="How far into `clip_id` the covering picture starts, for showing a moment partway through a "
+                    "long take — the thing working, not the hands setting it up. 0 plays it from its start",
     )
     rationale: str = Field(default="", description="What this picture is doing here")
 

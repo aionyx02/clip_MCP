@@ -4,6 +4,7 @@ Also what a render needs to know about a project first: who is talking where, ho
 file is framed for the shape asked for, and the analyses it leans on.
 """
 
+import hashlib
 import json
 import os
 import time
@@ -20,16 +21,16 @@ from app.models.media import Asset, MediaAnalysis
 from app.models.plan import EditPlan
 from app.models.timeline.parts import Clip, Project, TrackType
 from app.models.job import Job, JobKind, JobStatus
-from app.engine import cards, looks, playback, resources, sync, texts
+from app.engine import cards, legibility, looks, playback, resources, sync, texts
 from app.engine.analysis import second_listen, with_words_heard_again
 from app.engine.probe import probe_file, speech_loudness
-from app.engine.reframe import Framing, frame_project, placement_at
+from app.engine.reframe import Framing, centred_note, frame_project, placement_at
 from app.engine.builder import DEFAULT_LOUDNESS_TARGET, Talking, voice_keys
 from app.engine.levels import song_level, talking_in
 from app.engine.delivery import (
     CHECKS, chapter_metadata, chapters, check_delivery, half_sentences, light_steps, look_candidates, run_on_cuts,
 )
-from app.engine.frames import format_timestamp, storyboard_sheet
+from app.engine.frames import format_timestamp, still, storyboard_sheet
 from app.engine.subtitles import build_ass, place_cues
 from app.storage import housekeeping
 from app.workspace import output_dir
@@ -108,6 +109,34 @@ def changed_since(job: Job) -> bool:
     """
     project = rendered_from(job)
     return project is not None and job.project_version is not None and project.version != job.project_version
+
+# What a clip carries that only its sound hears; `playback.mix_key` covers all of it.
+SOUND_ONLY = {"volume", "audio_fade_in", "audio_fade_out", "audio_lead", "audio_lag", "cleanup", "keep_level",
+              "preserve_pitch"}
+# What says where a project or a clip came from, or what it is called, and is in no video made of it.
+NOT_RENDERED = {"id", "name", "branched_from", "version", "deleted_subtitles"}
+CLIP_BOOKKEEPING = {"id", "from_plan_id", "from_clip_ids", "pinned"}
+
+def picture_key(project: Project) -> str:
+    """Name a cut's picture by everything that decides what is on screen.
+
+    Two versions of a project with the same key show the same thing, however
+    many edits lie between them. Together with `playback.mix_key`, which names
+    the sound, it covers all a render is made from but the shape and size it
+    is rendered at, which a render records apart.
+
+    Args:
+        project: The project.
+
+    Returns:
+        The key.
+    """
+    picture = project.model_dump(mode="json", exclude=NOT_RENDERED | {"tracks"})
+    picture["tracks"] = [
+        [clip.model_dump(mode="json", exclude=SOUND_ONLY | CLIP_BOOKKEEPING) for clip in track.clips]
+        for track in project.video_tracks
+    ]
+    return hashlib.sha256(json.dumps(picture, sort_keys=True).encode("utf-8")).hexdigest()[:32]
 
 @mcp.tool()
 def preview_project(
@@ -300,6 +329,9 @@ def preview_project(
     )
     if omitted:
         header += f" {omitted} clip(s) were skipped: the project has more clips than tiles."
+    unplaced = centred_note(framing)
+    if unplaced:
+        header += f" {unplaced}."
     return ToolResult(content=[
         "\n".join([header, *listing]),
         Image(data=storyboard_sheet(shots, aspect=project.width / project.height), format="jpeg"),
@@ -471,8 +503,12 @@ def render_project(
 
     Before a final render, read skill://clip-editing/platform-conventions.md;
     after any render, look at it with `view_render` and `inspect_join`. A
-    final render is refused until a preview of the cut as it is now, in the
-    same shape, has finished: that preview is what was looked at.
+    final render is refused until a preview of the cut's picture as it is
+    now, in the same shape, has finished: that preview is what was looked at.
+    What is compared is what the video would contain, not how many edits were
+    made, so an edit undone or a new name asks for nothing. When only the
+    sound changed — the music moved, a level — hearing it with
+    `preview_sound` is enough.
 
     Before anything is rendered the cut is checked the way `check_render`
     checks it, and a full render is refused while it finds anything: black
@@ -533,38 +569,57 @@ def render_project(
         render went ahead in spite of. The parts of the video, where it has
         markers, are carried in the file as chapters. A preview also says how
         many clip `pictures` it `rendered` and how many it `reused`.
+        `framing` names any clip told to fill the frame that had no face to
+        follow, so was cropped from the middle.
 
     Raises:
         ValueError: If the project does not exist, contains no clips, uses an
-            unsupported feature, has no finished preview of this version in
-            this shape for a final render, or the check found something not
-            allowed.
+            unsupported feature, has no finished preview of its picture as it
+            is now in this shape for a final render, or its sound as it is now
+            has been neither previewed nor heard, or the check found something
+            not allowed.
     """
-    if not is_preview and not _previewed(project_id, frame):
-        raise ValueError(
-            "no preview of the cut as it is now" + (f", {frame}," if frame else "") + " has finished: render one "
-            "with is_preview: true, look at it with view_render and inspect_join, then render the final cut"
-        )
+    unseen = None if is_preview else _unseen(project_id, frame)
+    if unseen:
+        raise ValueError(unseen)
     return start_render(
         project_id, is_preview, loudness_target, burn_subtitles, frame, follow_faces, allow, PREVIEW_SHORT_SIDE,
     )
 
-def _previewed(project_id: str, frame: Optional[str]) -> bool:
-    """Whether a preview of a project as it is now, in one shape, has finished.
+def _unseen(project_id: str, frame: Optional[str]) -> Optional[str]:
+    """Say what of a project as it is now nobody has looked at or heard, before a final render.
+
+    The picture has to have been previewed in this shape. The sound has to
+    have been previewed in any shape, since a shape does not change it, or
+    heard with `preview_sound`; so after a change to the music alone the
+    sound check, which takes a fraction of a preview, is all that is asked.
 
     Args:
         project_id: The project.
         frame: The shape, or None for the project's own.
 
     Returns:
-        True when there is one; False too when the project does not exist,
+        Why the final render is refused and the quickest way past it; None
+        when there is nothing unseen, or when the project does not exist,
         which rendering says in its own words.
     """
     project = runtime.repo.get_project(project_id)
-    return project is not None and any(
-        job.preview and job.project_version == project.version and job.frame == frame
-        for job in runtime.repo.renders_of(project_id)
-    )
+    if project is None:
+        return None
+    previews = [job for job in runtime.repo.renders_of(project_id) if job.preview]
+    shaped = [job for job in previews if job.frame == frame]
+    shape = f", {frame}," if frame else ""
+    if not shaped:
+        return (f"no preview of the cut as it is now{shape} has finished: render one with is_preview: true, look "
+                "at it with view_render and inspect_join, then render the final cut")
+    if not any(job.picture == picture_key(project) for job in shaped):
+        return (f"the picture has changed since the last preview that finished{shape}: render a preview with "
+                "is_preview: true, look at it with view_render and inspect_join, then render the final cut")
+    sound = playback.mix_key(project)
+    if any(job.sound == sound for job in previews) or sound in runtime.repo.heard_sounds(project_id):
+        return None
+    return ("only the sound has changed since the last preview that finished; the picture is the same: hear it "
+            "with preview_sound, then render the final cut (a new preview with is_preview: true does as well)")
 
 def start_render(
     project_id: str,
@@ -592,6 +647,8 @@ def start_render(
     project = runtime.repo.get_project(project_id)
     if not project:
         raise ValueError(f"project {project_id} not found")
+    # Taken before the project is reshaped or sized down, so a final render compares the cut it is asked of.
+    picture, sound = picture_key(project), playback.mix_key(project)
 
     project = reshaped(project, frame)
     findings = check_findings(project, burn_subtitles)
@@ -612,8 +669,8 @@ def start_render(
     if is_preview:
         _make_room()
     housekeeping.sweep_renders(runtime.WORKSPACE_DIR, _delivered)
-    job = Job(kind=JobKind.RENDER, project_id=project_id, project_version=project.version, captioned=burn_subtitles,
-              preview=is_preview, frame=frame)
+    job = Job(kind=JobKind.RENDER, project_id=project_id, project_version=project.version, picture=picture,
+              sound=sound, captioned=burn_subtitles, preview=is_preview, frame=frame)
     delivered: Optional[str] = None
     if is_preview:
         job.work_dir = os.path.join(housekeeping.preview_dir(runtime.WORKSPACE_DIR, project_id), job.job_id)
@@ -716,6 +773,9 @@ def start_render(
         **renamed(project),
         "findings": [{"check": finding.check, "message": finding.message} for finding in findings],
     }
+    unplaced = centred_note(framing)
+    if unplaced:
+        result["framing"] = unplaced
     if is_preview:
         result["pictures"] = {"rendered": len(pieces), "reused": pictures - len(pieces)}
     return result
@@ -908,6 +968,76 @@ def _looks(clips: Sequence[Clip], assets: Mapping[str, Asset]) -> Dict[str, Tupl
             runtime.repo.save_looks(asset_id, new)
     return found
 
+def contrast_notes(project: Project) -> List[str]:
+    """Measure the white words of a cut against the picture behind them, and say where they are hard to read.
+
+    A title card is measured on its background as the render treats it — the
+    frame at its `at`, blurred, darkened or replaced by its colour — and words
+    over the footage on the frame in the middle of the stretch they show for,
+    through the name bar's box where they have one. Words on a picture laid
+    over the sequence are left out: what is behind them moves about the frame.
+
+    Args:
+        project: The cut, at the size and shape it will be rendered at.
+
+    Returns:
+        One line for each card or text below `legibility.LOW_CONTRAST`.
+    """
+    base = project.base_video_track
+    clips = sorted(base.clips, key=lambda clip: clip.timeline_in) if base else []
+    if not any(clip.card is not None or clip.shown_texts for clip in clips):
+        return []
+    assets = shared.referenced_assets(project)
+    framing = framing_of(project, assets)
+    fps = Fraction(project.fps_num, project.fps_den)
+    width, height = project.width, project.height
+
+    def frame_at(clip: Clip, seconds: float):
+        asset = assets.get(clip.asset_id)
+        if asset is None or not asset.has_video or not os.path.exists(asset.path):
+            return None
+        try:
+            return still(asset.path, seconds, width, height, placement_at(framing.get(clip.id), clip, seconds, fps))
+        except RuntimeError:
+            return None
+
+    notes = []
+    floor = f"{legibility.LOW_CONTRAST:g}:1"
+    for clip in clips:
+        when = format_timestamp(float(clip.timeline_in))
+        if clip.card is not None:
+            picture = frame_at(clip, float(clip.card.at))
+            if picture is None:
+                continue
+            ratio = legibility.words_contrast(cards.backdrop_image(picture, clip.card),
+                                              cards.placed(clip, width, height)["rows"])
+            if ratio < legibility.LOW_CONTRAST:
+                notes.append(
+                    f"title card {clip.id} 「{clip.card.title}」 at {when}: its white words stand {ratio:.1f}:1 against "
+                    f"the {clip.card.background} background behind them (from {float(clip.card.at):g}s of its file), "
+                    f"under the {floor} that large words need to read. Show another moment with `at` in "
+                    "set_title_card, or put them on a dark `colour`"
+                )
+            continue
+        for text in clip.shown_texts:
+            shown = texts.shown(clip, text)
+            if shown is None:
+                continue
+            middle = (max(text.start, clip.source_range.start) + min(text.end, clip.source_range.end)) / 2
+            picture = frame_at(clip, float(middle))
+            if picture is None:
+                continue
+            rows = texts.placed(text, width, height, project.caption_style)
+            ratio = legibility.words_contrast(picture, rows, texts.BOX_OPACITY)
+            if ratio < legibility.LOW_CONTRAST:
+                notes.append(
+                    f"words {text.id} 「{text.text}」 on clip {clip.id} at {format_timestamp(shown[0])}: white, they "
+                    f"stand {ratio:.1f}:1 against the picture behind them at {float(middle):g}s of its file, under the "
+                    f"{floor} that large words need to read. Move them with `x` and `y` in set_text to a darker "
+                    "part of the frame, or make them a `name`, which has a dark box behind it"
+                )
+    return notes
+
 @mcp.tool()
 def check_render(
     project_id: str,
@@ -965,6 +1095,10 @@ def check_render(
         clip, in seconds of the file. A sentence the transcriber ended on
         anything else is not one, punctuated or not. It never stops a render:
         only the user can tell whether the line stands.
+        And `contrast`, the title cards and words over the footage
+        whose white letters stand out too little from the picture behind
+        them, measured on that picture as the render shows it, with what to
+        change. It never stops a render: the words still have their shadow.
 
     Raises:
         ValueError: If the project does not exist.
@@ -992,6 +1126,9 @@ def check_render(
     half = half_sentences(base.clips, listened, place_cues(project, project.subtitles) if project.subtitles else None)
     if half:
         checked["half_sentence"] = half
+    contrast = contrast_notes(reshaped(project, frame))
+    if contrast:
+        checked["contrast"] = contrast
     return checked
 
 # Whether edits start making what the browser needs to play them. Off where nobody will

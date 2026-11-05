@@ -39,3 +39,16 @@ class SongOffer(BaseModel):
     songs: List[OfferedSong]
     offered_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     beat_id: Optional[str] = Field(default=None, description="The part of the plan the stretch is, if it is one")
+
+    @property
+    def part(self) -> str:
+        """Which part of the cut the songs are for: the plan's part, or else the stretch in seconds.
+
+        A project has one set of songs waiting per part, so every part can be
+        heard and picked in whatever order the user likes.
+        """
+        return self.beat_id or f"{self.start:g}-{self.end:g}s"
+
+    def overlaps(self, other: "SongOffer") -> bool:
+        """Whether the two are heard under any of the same seconds, which can hold only one song."""
+        return self.start < other.end and other.start < self.end

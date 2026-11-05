@@ -81,7 +81,9 @@ def _in_cut(clip: SemanticClip, placed: Sequence[Tuple[Piece, float]]) -> Option
 
     The first window that shows any of it, because that is where it cuts in.
     A clip split across two windows by the pause stage is therefore reported
-    from its first half, which is where it starts on screen.
+    from its first half, which is where it starts on screen. A title card is
+    not one: it borrows a frame of a file and plays none of it, so a clip near
+    the start of that file is not found at the card.
 
     Args:
         clip: The semantic clip to locate.
@@ -92,7 +94,7 @@ def _in_cut(clip: SemanticClip, placed: Sequence[Tuple[Piece, float]]) -> Option
         this clip at all.
     """
     for piece, at in placed:
-        if piece.asset_id != clip.asset_id:
+        if piece.asset_id != clip.asset_id or piece.card is not None:
             continue
         opened = max(piece.start, clip.source_range.start)
         closed = min(piece.end, clip.source_range.end)
@@ -109,11 +111,12 @@ def _under(placed: Sequence[Tuple[Piece, float]], seconds: float) -> Optional[Tu
         seconds: The second to look at.
 
     Returns:
-        The window and where it starts, or None past the end of the cut.
+        The window and where it starts, or None past the end of the cut or
+        on a title card, which plays no footage to ask about.
     """
     for piece, at in placed:
         if at <= seconds < round(at + piece.played, 3):
-            return piece, at
+            return None if piece.card is not None else (piece, at)
     return None
 
 def _splits_a_sentence(
@@ -184,7 +187,9 @@ def broll_covers(
 
     Args:
         plan: Plan whose B-roll is being laid out.
-        pieces: The compiled windows of the main sequence, in order.
+        pieces: The compiled windows of the main sequence, in order, with the
+            title cards among them: the cut as it plays, so a shot is laid
+            where the compile will put it and never over a card.
         clips: The timeline's clips, keyed by ID.
         assets: The assets they play from, keyed by asset ID.
         cuts: What is known about each file, keyed by asset ID, for saying when
@@ -207,9 +212,13 @@ def broll_covers(
         if selection.hold_picture and span is not None:
             held.append((selection.clip_id, *span))
 
+    # A card is words to be read over a still frame: covering it hides them, and its seconds
+    # are not footage a beat could have covered.
+    cards = [(at, round(at + piece.played, 3), piece.beat_id) for piece, at in placed if piece.card is not None]
     in_beat: Dict[str, float] = {}
     for piece in pieces:
-        in_beat[piece.beat_id] = in_beat.get(piece.beat_id, 0.0) + piece.played
+        if piece.card is None:
+            in_beat[piece.beat_id] = in_beat.get(piece.beat_id, 0.0) + piece.played
 
     covers: List[Cover] = []
     covered_in_beat: Dict[str, float] = {}
@@ -242,9 +251,13 @@ def broll_covers(
                 "may run; under that it reads as a flicker, over it the viewer loses what is being said"
             )
             continue
-        if shot.seconds > source.duration:
+        if shot.from_seconds + shot.seconds > source.duration:
             problems.append(
                 f"{where}: {shot.clip_id} runs {source.duration:.1f}s, which is not the {shot.seconds:g}s asked for"
+                if not shot.from_seconds else
+                f"{where}: {shot.clip_id} runs {source.duration:.1f}s, which has "
+                f"{max(0.0, source.duration - shot.from_seconds):.1f}s left after {shot.from_seconds:g}s, "
+                f"not the {shot.seconds:g}s asked for"
             )
             continue
 
@@ -259,6 +272,13 @@ def broll_covers(
         if closed > total:
             problems.append(
                 f"{where}: would run to {closed:.1f}s of a cut that is {total:.1f}s long"
+            )
+            continue
+        carded = [beat_id for starts, ends, beat_id in cards if starts < closed and opened < ends]
+        if carded:
+            problems.append(
+                f"{where}: runs from {opened:.1f}s to {closed:.1f}s, over the title card of beat {carded[0]}, "
+                "which would hide its words; end it before the card or start it after"
             )
             continue
         clashes = [
@@ -306,8 +326,8 @@ def broll_covers(
         covers.append(Cover(
             clip_id=shot.clip_id,
             asset_id=source.asset_id,
-            start=round(source.source_range.start, 3),
-            end=round(source.source_range.start + shot.seconds, 3),
+            start=round(source.source_range.start + shot.from_seconds, 3),
+            end=round(source.source_range.start + shot.from_seconds + shot.seconds, 3),
             timeline_in=opened,
             over_clip_id=shot.over_clip_id,
         ))
@@ -354,7 +374,7 @@ def broll_slots(
 
     Args:
         plan: Plan to read, for which shots are held and which beats exist.
-        pieces: The compiled windows, in order.
+        pieces: The compiled windows, in order, title cards among them.
         clips: The timeline's clips, keyed by ID.
         cuts: What is known about each file, keyed by asset ID. Given them, a
             place where a shot would cut in partway through a sentence is not
@@ -378,14 +398,18 @@ def broll_slots(
     # first, which is a real cut whatever the framing was.
     runs: List[List[Tuple[Piece, float]]] = []
     for piece, at in placed:
-        last = runs[-1][-1][0] if runs else None
+        if piece.card is not None:
+            # A card is a change of picture, and nothing to cover: the run before it ends there.
+            runs.append([])
+            continue
+        last = runs[-1][-1][0] if runs and runs[-1] else None
         if last is not None and last.asset_id == piece.asset_id and piece.start >= last.end:
             runs[-1].append((piece, at))
         else:
             runs.append([(piece, at)])
 
     slots: List[dict] = []
-    for run in runs:
+    for run in filter(None, runs):
         opened = run[0][1]
         closed = round(run[-1][1] + run[-1][0].played, 3)
         seconds = round(closed - opened, 3)

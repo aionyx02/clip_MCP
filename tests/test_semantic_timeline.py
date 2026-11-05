@@ -393,6 +393,22 @@ def test_a_workspace_from_before_the_semantic_timeline_upgrades_in_place(tmp_pat
     upgraded.save_semantic_timeline(timeline, clips)
     assert upgraded.query_semantic_clips(timeline.id)
 
+def test_songs_offered_before_they_were_kept_by_part_are_dropped_on_upgrade(tmp_path: Path, monkeypatch) -> None:
+    database = str(tmp_path / "old.db")
+    shipped = repo_module._MIGRATIONS
+    step = next(index for index, statements in enumerate(shipped) if any("song_offers_by_part" in s for s in statements))
+    monkeypatch.setattr(repo_module, "_MIGRATIONS", shipped[:step])
+    monkeypatch.setattr(repo_module, "SCHEMA_VERSION", step)
+    older = Repository(database)
+    with older._transaction() as conn:
+        conn.execute("INSERT INTO song_offers (project_id, data) VALUES ('p', '{}')")
+
+    monkeypatch.undo()
+    upgraded = Repository(database)
+    # An offer is a question still waiting; the AI asks it again rather than it being converted.
+    assert upgraded.song_offers("p") == []
+    assert not upgraded._query("SELECT name FROM sqlite_master WHERE name = 'song_offers'")
+
 @pytest.fixture
 def analyzed(media: Path) -> str:
     """Import a real file and give it an analysis, without running speech recognition.
