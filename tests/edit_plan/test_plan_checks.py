@@ -22,7 +22,7 @@ from test_semantic_timeline import ASSET_ID, analysis, asset
 
 from edit_plan.shared import (
     BROLL_ASSET, FOOTAGE, SENTENCE, SONG, beats_plan, checked, covered, footage, joined_plan, music_by_hand, parts,
-    plan_for, sectioned, song_of, sourced, speech_of, spoken_words,
+    plan_for, sectioned, song_of, sourced, speech_of, spoken_words, with_a_fact,
 )
 
 
@@ -181,6 +181,24 @@ def test_a_cut_that_misses_its_target_length_is_worth_saying() -> None:
     problems, notes = context_for(plan, by_id, children, assets)
     assert problems == []
     assert any("against a target of 90s" in note for note in notes)
+
+def test_the_length_said_against_the_target_counts_the_title_cards() -> None:
+    """It used to be the cut without its cards, so a carded cut on target was said to fall short (#246)."""
+    from app.engine.plan.beats import plan_pieces
+    from app.engine.plan.pieces import compiled_duration
+    from app.models.plan import PlanTitleCard
+
+    by_id, children, assets, clips = footage()
+    plain = plan_for([Selection(clip_id=speech_of(clips)[0].id, beat_id="b1")])
+    bare = compiled_duration(plan_pieces(plain, by_id, children, assets))
+    card = PlanTitleCard(title="開場", seconds=3.0)
+    plan = plain.model_copy(update={
+        "beats": [plain.beats[0].model_copy(update={"title_card": card, "target_seconds": bare + 3.0})],
+        "target": PlanTarget(seconds=bare + 3.0),
+    })
+    problems, notes = context_for(plan, by_id, children, assets)
+    assert problems == []
+    assert not [note for note in notes if getattr(note, "kind", None) == "length_off_target"], notes
 
 def test_music_without_sound_is_refused() -> None:
     by_id, children, assets, clips = footage()
@@ -605,3 +623,20 @@ def test_tightening_one_sentence_is_refused_rather_than_doing_nothing() -> None:
     plan = plan_for([Selection(clip_id=speech_of(clips)[0].id, beat_id="b1", trim=Trim(kind=TrimKind.TIGHTEN))])
     problems, _ = checked(plan, by_id, assets)
     assert any("`tighten`" in problem and "`range`" in problem for problem in problems)
+
+def test_covering_picture_is_checked_against_the_cut_with_its_title_cards() -> None:
+    """Checked without the cards, a shot over a card passed here and only failed at compile (#234)."""
+    from app.models.plan import BrollShot, PlanTitleCard
+
+    by_id, children, assets, clips = covered()
+    speech, quiet = speech_of(clips), next(clip for clip in clips if clip.asset_id == BROLL_ASSET)
+    plan = plan_for(
+        [Selection(clip_id=clip.id, beat_id=beat) for clip, beat in zip(speech, ["b1", "b1", "b2", "b2"])],
+        broll=[BrollShot(clip_id=quiet.id, over_clip_id=speech[1].id, seconds=1.65)],
+    )
+    plan = plan.model_copy(update={"structure": Structure.PROBLEM_SOLUTION, "beats": [
+        Beat(id="b1", name="前", role=BeatRole.PROBLEM),
+        Beat(id="b2", name="後", role=BeatRole.SOLUTION, title_card=PlanTitleCard(title="後半", seconds=3.0)),
+    ]})
+    problems, _ = context_for(with_a_fact(plan, 1.0, 3.0), by_id, children, assets)
+    assert any("title card of beat b2" in problem for problem in problems), problems

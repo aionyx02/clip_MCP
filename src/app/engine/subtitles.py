@@ -213,10 +213,12 @@ def place_cues(project: Project, cues: Sequence[SubtitleCue]) -> List[PlacedCue]
     cut out is placed nowhere and simply does not appear; one whose words were
     split across two clips is placed twice, because they are said twice. Each
     placement is clipped to the window it lands in, so a line never runs past
-    the cut that ends it. A clip turned all the way down shows only captions
-    typed by hand, and of those only the ones whose seconds no audible clip
-    plays: nobody hears what was said on it, and a line heard elsewhere in the
-    cut belongs there rather than on a silent copy of the same footage (#226).
+    the cut that ends it, and shows only the words heard in that window, where
+    its word timings say which those are (#256). A clip turned all the way
+    down shows only captions typed by hand, and of those only the ones whose
+    seconds no audible clip plays: nobody hears what was said on it, and a
+    line heard elsewhere in the cut belongs there rather than on a silent copy
+    of the same footage (#226).
 
     A caption on screen for less than the style's `min_seconds` cannot be
     read, so it is held on — still inside its own window, and never over the
@@ -270,24 +272,34 @@ def place_cues(project: Project, cues: Sequence[SubtitleCue]) -> List[PlacedCue]
                 continue
             if clip.volume == 0 and heard_elsewhere(cue.asset_id, first, last):
                 continue
+            # Only the words this clip plays: a caption cut in half shows and lights up the
+            # half that is heard here, and the rest belongs to the other placement, if any
+            # (#256). A word belongs to the clip its middle falls in, so a word cut through
+            # is shown where most of it is heard, and on exactly one side of a cut between
+            # two clips of one take. Half is a rule, not a measurement. Provisional.
+            kept = [word for word in written if first <= (word.start + word.end) / 2 < last]
+            text = cue.text
+            if written:
+                # Typed or corrected to another length, a caption has no timings to cut it by
+                # and is shown whole; the cut through it is `mid_speech`'s to find.
+                text = "".join(word.text for word in kept).strip()
+                if not text:
+                    continue
             room[len(placed)] = _at(clip.timeline_in, window_end - window_start, speed)
             placed.append(PlacedCue(
                 cue_id=cue.id,
                 start=_at(clip.timeline_in, first - window_start, speed),
                 end=_at(clip.timeline_in, last - window_start, speed),
-                text=cue.text,
+                text=text,
                 secondary=cue.secondary,
                 speaker=cue.speaker,
-                # Only the words still on screen: a caption cut in half lights up the
-                # half that survived, and the rest belongs to the other placement.
                 words=[
                     CueWord(
                         start=_at(clip.timeline_in, max(word.start, first) - window_start, speed),
                         end=_at(clip.timeline_in, min(word.end, last) - window_start, speed),
                         text=word.text,
                     )
-                    for word in written
-                    if word.end > first and word.start < last
+                    for word in kept
                 ],
             ))
     order = sorted(range(len(placed)), key=lambda index: (placed[index].start, placed[index].end))

@@ -15,10 +15,10 @@ from app.models.plan import (
 from app.models.semantic import SemanticClip
 from app.models.timeline.operations import EditOperation
 from app.models.timeline.parts import Project
-from app.engine import loudness
+from app.engine import loudness, playback
 from app.engine.plan.beats import plan_pieces
 from app.engine.plan.broll import broll_covers, broll_slots
-from app.engine.plan.checks import COMPILED_TRACKS, as_left, check_plan, check_recompile
+from app.engine.plan.checks import COMPILED_TRACKS, as_left, check_plan, check_recompile, with_cards
 from app.engine.plan.compile import compile_operations
 from app.engine.plan.diff import diff_plans, piece_changes
 from app.engine.plan.music import music_beds
@@ -562,7 +562,9 @@ def validate_plan(plan_id: Optional[str] = None) -> dict:
     plan = _require_plan(plan_id)
     timeline, clips, children, assets, cuts = _plan_context(plan)
     problems, notes = check_plan(plan, timeline, clips, children, assets, cuts)
-    pieces = [] if problems else plan_pieces(plan, clips, children, assets, cuts)
+    # Title cards in, as the compile lays them: only the plan's own, with no project to say
+    # what else is on the cut.
+    pieces = [] if problems else with_cards(plan, plan_pieces(plan, clips, children, assets, cuts), assets, cuts, None)
     return {
         "ok": not problems,
         "problems": problems,
@@ -626,8 +628,13 @@ def compile_plan(project_id: str, expected_version: int, plan_id: Optional[str] 
         raise ValueError(f"project {project_id} not found")
     pieces, left_out = as_left(plan_pieces(plan, clips, children, assets, cuts), project)
     notes = notes + left_out
-    covers, _, _ = broll_covers(plan, pieces, clips, assets, cuts)
-    blocked = check_recompile(plan, project, pieces, covers, music_beds(plan, pieces, assets, cuts))
+    # The B-roll and the music as the compile lays them, over and under the cut with its title
+    # cards: without them the music runs short, and a stretch pinned past where the cut would end
+    # is taken for one the plan dropped.
+    played = with_cards(plan, pieces, assets, cuts, project)
+    covers, _, _ = broll_covers(plan, played, clips, assets, cuts)
+    beds = music_beds(plan, played, assets, cuts)
+    blocked = check_recompile(plan, project, pieces, covers, beds)
     if blocked:
         raise ValueError("compiling would undo work already on this project:\n- " + "\n- ".join(blocked))
 
@@ -783,6 +790,8 @@ def preview_sound(
     heard, played = levels(voice), levels(music)
     for leftover in (voice, music, graph):
         os.remove(leftover)
+    # A final render after a change to the sound alone asks for this rather than a new preview.
+    runtime.repo.hear_sound(project_id, playback.mix_key(project))
     lines = [f"The mix is at {mix}.", *describe(parts_of(project, heard, played))]
     return ToolResult(content=["\n".join(lines), Image(data=chart(project, heard, played), format="png")])
 
@@ -912,5 +921,5 @@ def propose_broll(plan_id: Optional[str] = None) -> dict:
     """
     plan = _require_plan(plan_id)
     _, clips, children, assets, cuts = _plan_context(plan)
-    pieces = plan_pieces(plan, clips, children, assets, cuts)
+    pieces = with_cards(plan, plan_pieces(plan, clips, children, assets, cuts), assets, cuts, None)
     return {"plan_id": plan.id, "slots": broll_slots(plan, pieces, clips, cuts)}

@@ -122,3 +122,17 @@ def test_the_tools_report_space_and_never_tidy_without_being_told(tmp_path: Path
     listed = tidy_old_outputs()
     assert [Path(item["to"]).name for item in listed["keep"]] == ["舊片.mp4"]
     assert (legacy / "舊片_output.mp4").exists()
+
+
+def test_a_folder_s_size_counts_every_file_inside_once_and_not_its_links(tmp_path: Path) -> None:
+    (tmp_path / "a" / "b").mkdir(parents=True)
+    (tmp_path / "top.bin").write_bytes(b"x" * 10)
+    (tmp_path / "a" / "one.bin").write_bytes(b"x" * 100)
+    (tmp_path / "a" / "b" / "two.bin").write_bytes(b"x" * 1000)
+    try:
+        os.symlink(tmp_path / "a" / "one.bin", tmp_path / "linked.bin")
+    except OSError:
+        pass  # Windows without the right to make links: the rest still holds.
+    assert housekeeping.size_of(str(tmp_path)) == 1110
+    assert housekeeping.size_of(str(tmp_path / "top.bin")) == 10
+    assert housekeeping.size_of(str(tmp_path / "missing")) == 0

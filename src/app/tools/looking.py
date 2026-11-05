@@ -12,7 +12,7 @@ from pydantic import Field
 
 from app.models.timeline.parts import Project
 from app.models.job import Job
-from app.engine import sound_quality
+from app.engine import cards, sound_quality, texts
 from app.engine.delivery import Finding
 from app.engine.joins import HeardWord, Join, joins_in, pause_across, words_heard
 from app.engine.frames import Crop, format_timestamp, storyboard_sheet, tile_size_for
@@ -213,6 +213,42 @@ def view_frames(
         Image(data=storyboard_sheet(shots, columns=columns, tile_size=box, crop=crop), format="jpeg"),
     ])
 
+# Words coming or going in a cut: (start, end, fade_in, fade_out, what), in seconds of the cut.
+Fading = Tuple[float, float, float, float, str]
+
+def words_fading(project: Project) -> List[Fading]:
+    """When each title card and each text over the footage in a cut comes and goes."""
+    found: List[Fading] = [(float(clip.timeline_in), float(clip.timeline_out), cards.TEXT_FADE_SECONDS,
+                            cards.TEXT_FADE_SECONDS, f"title card 「{clip.card.title}」")
+                           for clip in cards.cards_of(project)]
+    for event in texts.drawn(project, project.caption_style)["events"]:
+        found.append((event["start"], event["end"], event["fade_in"], event["fade_out"],
+                      f"words 「{event['rows'][0]['text']}」"))
+    return found
+
+def mid_fade(seconds: float, fading: Sequence[Fading]) -> Optional[Tuple[Fading, str]]:
+    """The words at `seconds` that are not fully shown, and whether they are `fading in` or `fading out`."""
+    for words in fading:
+        start, end, fade_in, fade_out, _ = words
+        if start <= seconds < min(start + fade_in, end):
+            return words, "fading in"
+        if max(end - fade_out, start) < seconds < end:
+            return words, "fading out"
+    return None
+
+def fully_shown(seconds: float, words: Fading, frame: float, opened: float, closed: float) -> Optional[float]:
+    """The moment nearest `seconds` that `words` are fully shown, a frame clear of their fades.
+
+    The middle of them when they are too short to be fully shown for long.
+    None when that moment is outside `opened` to `closed`, the stretch being looked at.
+    """
+    start, end, fade_in, fade_out, _ = words
+    lit, dims = start + fade_in + frame, end - fade_out - frame
+    if lit > dims:
+        lit = dims = (start + end) / 2
+    lit, dims = max(lit, opened), min(dims, closed)
+    return None if lit > dims else min(max(seconds, lit), dims)
+
 @mcp.tool()
 def view_render(
     job_id: str,
@@ -247,7 +283,14 @@ def view_render(
 
     Returns:
         A text block naming each tile's time and what it is, then the frames
-        as one JPEG. It says so when the project has changed since the render,
+        as one JPEG. `even` keeps its frames off a title card's or words'
+        fade in and out, where the words are faint: a frame that would land
+        there is taken at the nearest moment they are fully shown, its
+        listed time the one taken, and said so. A frame asked for that lands
+        in a fade, or an `even` one whose words are not fully shown anywhere
+        in the stretch, is taken as asked and said to be mid-fade. Neither is done
+        when the version rendered is no longer kept, since where the words
+        fade is then not known. It says so when the project has changed since the render,
         when a render has no captions burned in, or when more frames were
         wanted than one sheet holds.
 
@@ -292,6 +335,22 @@ def view_render(
         wanted = wanted[:shared.MAX_STORYBOARD_TILES]
     if rendering.changed_since(job):
         said.append("the project has been edited since this render, so it may no longer show what the cut is now")
+    as_rendered, exact = project_as_rendered(job)
+    fading = words_fading(as_rendered) if exact else []
+    if fading:
+        frame = as_rendered.fps_den / as_rendered.fps_num
+        moved = []
+        for seconds, what in wanted:
+            found = mid_fade(seconds, fading)
+            settled = (fully_shown(seconds, found[0], frame, start, math.inf if last is None else last)
+                       if found is not None and at == "even" and not times else None)
+            if settled is not None:
+                what = f"{found[0][4]} {found[1]}, moved from {seconds:.2f}s"
+                seconds = settled
+            elif found is not None:
+                what = "; ".join(filter(None, [what, f"{found[0][4]} {found[1]}"]))
+            moved.append((seconds, what))
+        wanted = moved
     if length is not None:
         wanted = [(min(seconds, length - 0.05), what) for seconds, what in wanted]
     if not wanted:

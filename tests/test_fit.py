@@ -43,8 +43,9 @@ def test_a_shot_decides_for_itself_unless_told() -> None:
 def test_what_the_shot_was_told_wins() -> None:
     fps = Fraction(30)
     assert place_clip(shot(ClipFit(mode="whole")), WIDE, TALL, face_at(0.5), fps).whole
-    # Cropped anyway, and with no face, from the middle.
-    assert place_clip(shot(ClipFit(mode="fill")), WIDE, TALL, [], fps) is None
+    # Cropped anyway, and with no face, from the middle, marked as such.
+    unplaced = place_clip(shot(ClipFit(mode="fill")), WIDE, TALL, [], fps)
+    assert unplaced.centred and unplaced.positions == ((0, 0.5),) and not unplaced.whole
     # Put somewhere by hand: it stays there, whatever the face does.
     pinned = place_clip(shot(ClipFit(mode="fill", center_x=0.2)), WIDE, TALL, face_at(0.9), fps)
     assert pinned.positions == ((0, 0.2),) and pinned.zoom == 1
@@ -91,3 +92,36 @@ def test_the_ai_and_the_editor_set_how_a_shot_sits(media: Path) -> None:
     with pytest.raises(ValueError, match="either fit or clear_fit"):
         edit(project, [{"action": "set_clip_look", "track_id": "main", "clip_id": "a",
                         "fit": {"mode": "whole"}, "clear_fit": True}])
+
+
+def test_a_vertical_shot_told_to_fill_a_landscape_frame_follows_the_face_down_it() -> None:
+    fps = Fraction(30)
+    # The face high in a vertical shot: the strip that fills the wide frame is moved up to it.
+    followed = place_clip(shot(ClipFit(mode="fill")), TALL, WIDE, face_at(0.5), fps)
+    assert followed.axis == "y" and not followed.whole and followed.positions == ((0, 0.4),)
+    assert not followed.centred
+    # Hands at work, no face: still filled, from the middle, and the framing says nothing was followed.
+    unplaced = place_clip(shot(ClipFit(mode="fill")), TALL, WIDE, [], fps)
+    assert unplaced.axis == "y" and not unplaced.whole and unplaced.centred
+    assert unplaced.positions == ((0, 0.5),)
+    # Drawn exactly as a crop from the middle would be.
+    assert crop_filter(1920, 1080, unplaced) == r"crop=1920:1080:y=max(0\,min(ih-oh\,0.5*ih-oh/2))"
+    # Left to decide for itself, the same shot is still shown whole over its blur.
+    assert place_clip(shot(), TALL, WIDE, [], fps).whole
+
+
+def test_a_shot_told_to_fill_with_nothing_to_follow_is_said(media: Path) -> None:
+    asset = catalog.import_asset(str(media / "tall.mp4"))["id"]
+    project = build_project([video_track(), insert("a", asset, 0, 2)], width=640, height=360, name="填滿")
+    edit(project, [{"action": "set_clip_look", "track_id": "main", "clip_id": "a", "fit": {"mode": "fill"}}])
+    stored = runtime.repo.get_project(project)
+    framing = rendering.framing_of(stored, shared.referenced_assets(stored))
+    assert framing["a"].centred
+    listing = rendering.preview_project(project, count=1).content[0].text
+    assert "clip a" in listing and "no face was seen" in listing
+
+
+def test_a_shot_told_to_fill_is_not_said_to_have_no_face_when_faces_were_not_followed() -> None:
+    # Following faces turned off: the middle is what was asked for, not a guess for want of a face.
+    unfollowed = place_clip(shot(ClipFit(mode="fill")), TALL, WIDE, face_at(0.5), Fraction(30), follow_faces=False)
+    assert unfollowed.positions == ((0, 0.5),) and not unfollowed.centred

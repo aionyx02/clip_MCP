@@ -289,3 +289,71 @@ def test_covering_picture_may_cut_in_partway_through_a_sentence_only_over_a_blac
             assert problems == [] and len(covers) == 1
         else:
             assert covers == [] and any("partway through a sentence" in problem for problem in problems)
+
+def test_covering_picture_can_play_from_partway_into_its_clip() -> None:
+    """#234: the moment worth showing — a mechanism working — is often well into a long take."""
+    by_id, children, assets, clips = covered()
+    speech, quiet = speech_of(clips), next(clip for clip in clips if clip.asset_id == BROLL_ASSET)
+    plan = plan_for([Selection(clip_id=clip.id, beat_id="b1") for clip in speech],
+                    broll=[BrollShot(clip_id=quiet.id, over_clip_id=speech[0].id, seconds=2.0, from_seconds=12.5)])
+    covers, problems, _ = broll_covers(plan, plan_pieces(plan, by_id, children, assets), by_id, assets)
+    assert problems == []
+    assert (covers[0].start, covers[0].end) == (12.5, 14.5)
+    # Where it lands is still where the words are; only what it shows has moved.
+    assert covers[0].timeline_in == 0.1
+
+def test_a_shot_asking_for_more_than_is_left_of_its_clip_is_refused() -> None:
+    by_id, children, assets, clips = covered()
+    speech, quiet = speech_of(clips), next(clip for clip in clips if clip.asset_id == BROLL_ASSET)
+    plan = plan_for([Selection(clip_id=clip.id, beat_id="b1") for clip in speech],
+                    broll=[BrollShot(clip_id=quiet.id, over_clip_id=speech[0].id, seconds=2.0, from_seconds=19.0)])
+    covers, problems, _ = broll_covers(plan, plan_pieces(plan, by_id, children, assets), by_id, assets)
+    assert covers == []
+    assert any("1.0s left after 19s" in problem for problem in problems)
+
+def _carded(beat_of: List[str], card_on: str) -> tuple:
+    """The four sentences over one or two beats, with a title card opening one of them.
+
+    Args:
+        beat_of: The beat each of the four sentences goes in.
+        card_on: The beat that opens on a three-second card.
+
+    Returns:
+        `(plan, clips_by_id, children, assets, speech, cover_source)`; the plan has no B-roll yet.
+    """
+    from app.models.plan import Beat, PlanTitleCard
+
+    by_id, children, assets, clips = covered()
+    speech, quiet = speech_of(clips), next(clip for clip in clips if clip.asset_id == BROLL_ASSET)
+    beats = [Beat(id=beat_id, name=beat_id, title_card=PlanTitleCard(title="開場", seconds=3.0)
+                  if beat_id == card_on else None) for beat_id in dict.fromkeys(beat_of)]
+    plan = plan_for([Selection(clip_id=clip.id, beat_id=beat) for clip, beat in zip(speech, beat_of)])
+    return plan.model_copy(update={"beats": beats}), by_id, children, assets, speech, quiet
+
+def test_covering_picture_lands_after_a_title_card_not_on_it() -> None:
+    """The card borrows a frame of the file the shot after it plays from, so it was taken for that shot."""
+    from app.engine.plan.checks import with_cards
+    from app.engine.plan.compile import compile_operations
+
+    plan, by_id, children, assets, speech, quiet = _carded(["b1"] * 4, "b1")
+    plan = plan.model_copy(update={"broll": [BrollShot(clip_id=quiet.id, over_clip_id=speech[0].id, seconds=2.0)]})
+    pieces = with_cards(plan, plan_pieces(plan, by_id, children, assets), assets, None, None)
+    covers, problems, _ = broll_covers(plan, pieces, by_id, assets)
+    assert problems == []
+    # Three seconds of card, then the window that opens at 0.9 with the sentence at 1.0.
+    assert covers[0].timeline_in == 3.1
+    operations, _ = compile_operations(plan, by_id, children, assets)
+    laid = [operation for operation in operations if operation.get("track_id") == "broll" and "timeline_in" in operation]
+    assert [operation["timeline_in"] for operation in laid] == [3.1]
+
+def test_a_shot_that_would_run_over_a_title_card_is_refused() -> None:
+    from app.engine.plan.checks import with_cards
+
+    plan, by_id, children, assets, speech, quiet = _carded(["b1", "b1", "b2", "b2"], "b2")
+    # The first beat is one window, 0.9 to 5.1 of the file, so the card opening the second
+    # starts 4.2s in; this shot starts over the second sentence at 2.6s and runs past it.
+    plan = plan.model_copy(update={"broll": [BrollShot(clip_id=quiet.id, over_clip_id=speech[1].id, seconds=1.65)]})
+    pieces = with_cards(plan, plan_pieces(plan, by_id, children, assets), assets, None, None)
+    covers, problems, _ = broll_covers(plan, pieces, by_id, assets)
+    assert covers == []
+    assert any("title card of beat b2" in problem for problem in problems)

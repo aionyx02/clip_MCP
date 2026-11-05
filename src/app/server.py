@@ -1,11 +1,12 @@
 import threading
 import time
 
-from fastmcp.exceptions import ToolError
+from fastmcp.exceptions import NotFoundError, ToolError
 from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
 from fastmcp.tools import ToolResult
 from mcp.types import TextContent
 from app.models.plan import short_clip_ids
+from app.models.timeline.operations import OPERATION_NAMES
 from app import runtime
 # By name, unlike everything else from runtime: every tool is registered with it, and it is never swapped out.
 from app.runtime import mcp
@@ -132,6 +133,37 @@ class AssetNames(Middleware):
         return await call_next(context)
 
 mcp.add_middleware(AssetNames())
+
+class OperationsAreNotTools(Middleware):
+    """Say where an edit is when it is called as if it were a tool of its own.
+
+    `set_caption_style` reads like a tool, and the client's own answer to it,
+    `Unknown tool`, leaves the AI guessing at what it can call instead.
+    """
+
+    async def on_call_tool(self, context: MiddlewareContext, call_next: CallNext) -> ToolResult:
+        """Run the tool, and turn not finding one that is an edit into the way to make that edit.
+
+        Args:
+            context: The call.
+            call_next: The rest of the chain, ending in the tool.
+
+        Returns:
+            What the tool returned.
+
+        Raises:
+            ToolError: If the name is an operation of `apply_edits`.
+        """
+        try:
+            return await call_next(context)
+        except NotFoundError as exc:
+            name = context.message.name
+            if name not in OPERATION_NAMES:
+                raise
+            raise ToolError(f"{name} is not a tool: it is an operation of apply_edits. Call apply_edits with "
+                            f"{{\"action\": \"{name}\", ...}} in its `operations`") from exc
+
+mcp.add_middleware(OperationsAreNotTools())
 
 # What each tool that changes things is doing, for a version saved without the user's words.
 DOING = {

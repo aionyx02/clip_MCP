@@ -129,3 +129,58 @@ def test_a_join_shows_the_captions_on_screen_around_it(rendered: dict) -> None:
     text = looking.inspect_join(rendered["job_id"], joins=[1]).content[0].text
     # The captions are what somebody read and could correct; they sit beside the words.
     assert "captions: +1.00 第二句" in text
+
+
+@pytest.fixture(scope="module")
+def carded(media: Path) -> dict:
+    """A 1.5s title card, then a shot with a name over it from 2s to 3s of the cut, rendered as a preview."""
+    asset = catalog.import_asset(str(media / "wide.mp4"))["id"]
+    project = build_project([
+        video_track(), insert("a", asset, 0, 2),
+        {"action": "add_title_card", "track_id": "main", "clip_id": "t", "title": "八月卅一日",
+         "before_clip_id": "a", "seconds": 1.5},
+        {"action": "add_text", "track_id": "main", "clip_id": "a", "text_id": "n", "text": "王小明",
+         "timeline_start": 2, "timeline_end": 3},
+    ], name="字卡抽格")
+    job = rendering.render_project(project, is_preview=True)
+    return {"project": project, "job_id": finished(job)}
+
+
+def _listed(text: str) -> list:
+    """The seconds of each tile a listing names."""
+    return [float(line.split(": ")[1].split("s ")[0]) for line in text.splitlines() if line.startswith("#")]
+
+
+def test_an_even_look_moves_off_words_coming_and_going(carded: dict) -> None:
+    # Every quarter second from 0.125s: 0.125s is in the card's fade in (0–0.3s), 1.375s in its
+    # fade out (1.2–1.5s), 2.125s in the name's fade in (2–2.2s), 2.875s in its fade out (2.8–3s).
+    text = looking.view_render(carded["job_id"], count=14).content[0].text
+    seen = _listed(text)
+    assert len(seen) == 14
+    for begin, finish in ((0, 0.3), (1.2, 1.5), (2.0, 2.2), (2.8, 3.0)):
+        assert not any(begin <= seconds < finish for seconds in seen), (begin, finish, seen)
+    assert seen[0] == 0.33 and seen[5] == 1.17 and seen[8] == 2.23 and seen[11] == 2.77
+    assert "title card 「八月卅一日」 fading in, moved from 0.12s" in text
+    assert "words 「王小明」 fading out, moved from 2.88s" in text
+
+
+def test_a_time_asked_for_is_kept_and_said_to_be_mid_fade(carded: dict) -> None:
+    text = looking.view_render(carded["job_id"], times=[0.1, 0.75]).content[0].text
+    assert _listed(text) == [0.1, 0.75]
+    assert "#1: 0.10s (00:00.1) | title card 「八月卅一日」 fading in" in text
+    assert "fading" not in text.splitlines()[-1]
+
+
+def test_where_the_words_fade_is_not_guessed_when_the_render_is_not_the_cut(
+        carded: dict, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(looking, "project_as_rendered", lambda job: (runtime.repo.get_project(carded["project"]),
+                                                                     False))
+    text = looking.view_render(carded["job_id"], count=14).content[0].text
+    assert _listed(text)[0] == 0.12 and "fading" not in text
+
+
+def test_an_even_look_stays_in_the_stretch_asked_for(carded: dict) -> None:
+    # 1.3s and 1.4s are in the card's fade out; its words are last fully shown before 1.2s, outside the stretch.
+    text = looking.view_render(carded["job_id"], start=1.25, end=1.45, count=2).content[0].text
+    assert _listed(text) == [1.3, 1.4]
+    assert "#1: 1.30s (00:01.3) | title card 「八月卅一日」 fading out" in text and "moved" not in text

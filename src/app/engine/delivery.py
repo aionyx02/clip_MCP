@@ -26,7 +26,7 @@ from app.engine.plan.checks import LENGTH_TOLERANCE, NOT_PARTICLES, SENTENCE_END
 from app.engine.library import MUSIC, library_of
 from app.engine.semantic import (
     CLEAN_GAP_SECONDS, CLEAN_SILENCE_SECONDS, EDGE_TOLERANCE_SECONDS, bare_words, clean_cuts, combined_over, join_voices,
-    share_covered, was_audible, was_made_up,
+    share_covered, voice_likeness, was_audible, was_made_up,
 )
 from app.engine.subtitles import caption_overflow, captioned_clips
 from app.models.media import Asset, MediaAnalysis
@@ -1228,10 +1228,24 @@ def rights_facts(
             (float(clip.timeline_in), float(clip.timeline_out)) for clip in unchecked)))
     if len(talk) > 1:
         main = max(talk, key=lambda label: sum(end - start for start, end in talk[label]))
+        # How long each voice talks in the whole of its files, not only in the cut: a voice heard for a
+        # second in the cut and for minutes outside it is a person; one heard for a second in all
+        # of it may be a fragment of the main one (#190).
+        talked: dict = {}
+        for asset_id, analysis in analyses.items():
+            for turn in analysis.speakers:
+                label = joined.get((asset_id, turn.speaker), f"{asset_id}:{turn.speaker}")
+                talked[label] = talked.get(label, 0.0) + turn.end - turn.start
         for label, stretches in talk.items():
-            if label != main:
-                facts.append(RightsFact("other_voice", label, _joined_spans(stretches),
-                                        (f"the main speaker is {main}",)))
+            if label == main:
+                continue
+            known = [f"the main speaker is {main}",
+                     f"talks {talked.get(label, 0.0):.1f} s in the whole of the files the cut uses"]
+            apart, spread = voice_likeness(analyses, joined, label, main)
+            if apart is not None:
+                known.append(f"sits {apart:.2f} from {main}" + (
+                    "" if spread is None else f", whose own recordings sit up to {spread:.2f} from them"))
+            facts.append(RightsFact("other_voice", label, _joined_spans(stretches), tuple(known)))
 
     crowded = []
     base = project.base_video_track

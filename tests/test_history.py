@@ -49,6 +49,68 @@ def test_writing_what_is_already_there_keeps_no_version(tmp_path: Path) -> None:
     assert len(history.versions(["a.json"])) == 1
 
 
+def added_on(monkeypatch) -> list:
+    """Note what each count after the first did: added onto the last (a dict) or counted from the start (None)."""
+    seen = []
+    adding = History._count_since
+
+    def noting(self, *args):
+        seen.append(adding(self, *args))
+        return seen[-1]
+
+    monkeypatch.setattr(History, "_count_since", noting)
+    return seen
+
+
+def test_counting_versions_after_a_commit_counts_only_what_is_new_and_agrees_with_a_full_count(
+        tmp_path: Path, monkeypatch) -> None:
+    seen = added_on(monkeypatch)
+    root = str(tmp_path / "history")
+    history = History(root)
+    first = "projects/片A-11111111-1111-1111-1111-111111111111.json"
+    second = "projects/片B-22222222-2222-2222-2222-222222222222.json"
+    a, b = "11111111-1111-1111-1111-111111111111", "22222222-2222-2222-2222-222222222222"
+
+    def agrees() -> dict:
+        counted = history.counts("projects/")
+        # A History that never counted before walks everything: what the remembered count must match.
+        assert counted == History(root).counts("projects/")
+        return counted
+
+    history.write(first, b"1\n")
+    history.write(second, b"1\n")
+    assert agrees() == {a: 1, b: 1}
+    history.write(first, b"2\n")
+    assert agrees() == {a: 2, b: 1}
+    with history.step("編輯器"):
+        history.write(first, b"3\n")
+        history.write(second, b"2\n")
+    history.write("library.json", b"{}\n")
+    assert agrees() == {a: 3, b: 2}
+    # A project deleted is one more change to it; one put back as it was is one more again.
+    history.write(second, None)
+    assert agrees() == {a: 3, b: 3}
+    history.write(second, b"2\n")
+    assert agrees() == {a: 3, b: 4}
+    assert len(seen) == 4 and None not in seen
+
+
+def test_a_history_started_again_is_counted_from_the_start(tmp_path: Path, monkeypatch) -> None:
+    import shutil
+
+    seen = added_on(monkeypatch)
+    root = tmp_path / "history"
+    history = History(str(root))
+    for content in (b"1\n", b"2\n", b"3\n"):
+        history.write("projects/a-1.json", content)
+    assert history.counts("projects/") == {"a-1": 3}
+    # Made again from nothing, the commit last counted at is not in it: adding on would count what is gone.
+    shutil.rmtree(root)
+    history.write("projects/a-1.json", b"1\n")
+    assert history.counts("projects/") == {"a-1": 1}
+    assert seen == [None]
+
+
 def test_a_change_is_said_in_words() -> None:
     before = {"name": "抽杯架", "tracks": [], "subtitles": [{"id": "c1", "text": "第三版"}]}
     after = {"name": "抽杯架", "tracks": [], "subtitles": [{"id": "c1", "text": "第三、四版"}]}

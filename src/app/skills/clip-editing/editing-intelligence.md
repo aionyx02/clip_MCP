@@ -173,11 +173,15 @@ picture holds too long — one shot held on, or several in a row from the same
 file. Then find something that belongs over those words with `query_clips`,
 and add a shot with `add_broll`: the `clip_id` it plays from, the
 `over_clip_id` it starts over, and how many `seconds` it runs. The sound
-underneath keeps running, which is the whole point.
+underneath keeps running, which is the whole point. The picture plays from the
+start of `clip_id`; when the moment to show is partway into a long take — the
+mechanism working, not the hands reaching for it — find it with `view_frames`
+and set `from_seconds` to where it begins.
 
 The server enforces the rest and refuses with a reason: a shot runs 1 to 6
 seconds, no more than 40% of a beat may be covered, two shots may not overlap,
-and a selection marked `hold_picture` may not be covered at all. Set
+none may run over a title card, and a selection marked `hold_picture` may not
+be covered at all. Set
 `hold_picture` on the shots where what the speaker is doing has to be seen —
 pointing at something, holding something up. Nothing measures that, so if you
 do not say it, it is not known.
@@ -206,10 +210,15 @@ you named that part and why in the read-back.
 For each part, `find_music` with what that part wants and its length as
 `min_seconds`, and put the closest song in its cue so the preview has music.
 You cannot hear the songs and the match is a guess, so then `offer_songs` with
-that part's `beat_id`. A new offer replaces the last, so offer one part at a
-time: start with the part you are least sure of, or the one the user wants
-changed, and move on when their pick comes back. When they said to finish on
-your own, there is nobody to pick, so skip the offers.
+that part's `beat_id`, once for every part, before telling the user: each part
+keeps its own songs, and they hear them in whatever order they like. Offering a
+part again replaces only that part's songs. Tell them once, from the last
+call's `waiting`: the songs are in the editor, or they can answer here by part
+and number. A pick in the editor comes back as a comment and is already in the
+cue; one given in the conversation you write yourself, with `amend_plan`
+`set_music_cue` on that part's `beat_id` (left out for the part that starts the
+video) and the song's `asset_id` and `start`. When they said to finish on your
+own, there is nobody to pick, so skip the offers.
 
 A plan's `music` is a list of `cues`. Each one names the `beat_id` it comes in
 on — the first may leave it out to start with the video — and plays until the
