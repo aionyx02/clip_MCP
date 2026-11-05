@@ -4,7 +4,9 @@ from decimal import Decimal
 from pathlib import Path
 
 from app.engine.delivery import rights_facts
-from app.models.media import Asset, FaceMeasurement, MediaAnalysis, Source, Transcript, TranscriptSegment
+from app.models.media import (
+    Asset, FaceMeasurement, MediaAnalysis, Source, SpeakerTurn, Transcript, TranscriptSegment, Voice,
+)
 from app.models.timeline.parts import Clip, Project, TimeRange, Track, TrackType
 from app.runtime import repo
 from app.tools.catalog import import_asset, set_asset_library
@@ -69,3 +71,25 @@ def test_notices_are_written_beside_the_video_with_every_fact_under_them(media: 
     # What the user said about the file is kept with it, even when it is imported again.
     import_asset(str(media / "song.mp3"))
     assert repo.get_assets([song])[song].licence == "Kevin MacLeod, CC BY 4.0"
+
+
+def test_another_voice_says_how_much_it_talks_and_how_near_the_main_one_it_sits() -> None:
+    """#190: six voices were pointed out with nothing to tell a second person from a fragment of the first."""
+    project = Project(id="p", width=1080, height=1920, tracks=[
+        Track(id="main", track_type=TrackType.VIDEO, clips=[clip("a", "v", 0, 10, 0), clip("b", "w", 0, 10, 10)]),
+    ])
+    assets = {name: Asset(id=name, path=f"/footage/{name}.mp4", has_video=True, has_audio=True) for name in ("v", "w")}
+    analyses = {
+        "v": MediaAnalysis(asset_id="v", duration=10.0, speakers=[
+            SpeakerTurn(start=0.0, end=8.0, speaker="S1"), SpeakerTurn(start=8.0, end=10.0, speaker="S2")], voices=[
+            Voice(speaker="S1", embedding=[1.0, 0.0], seconds=8.0),
+            Voice(speaker="S2", embedding=[0.4, 0.8], seconds=2.0)]),
+        "w": MediaAnalysis(asset_id="w", duration=10.0, speakers=[SpeakerTurn(start=0.0, end=9.0, speaker="S1")],
+                           voices=[Voice(speaker="S1", embedding=[0.96, 0.28], seconds=8.0)]),
+    }
+    other = next(fact for fact in rights_facts(project, analyses, assets, {}) if fact.kind == "other_voice")
+    assert other.subject == "V2"
+    assert other.detail == (
+        "the main speaker is V1", "talks 2.0 s in the whole of the files the cut uses",
+        "sits 0.43 from V1, whose own recordings sit up to 0.01 from them",
+    )
