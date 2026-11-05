@@ -490,7 +490,8 @@ class SetClipLookOp(BaseModel):
     clear_fit: bool = Field(default=False, description="Let the shot decide again: crop around a face, else show it whole")
     motion: Optional[Motion] = Field(
         default=None,
-        description="For a photo: how it moves while on screen — `push`, `pull`, `pan_left`, `pan_right` or `none`",
+        description="For a photo: how it moves while on screen — `push`, `pull`, `pan_left`, `pan_right` or `none`. "
+                    "Refused on a video clip; for a closer view of video use `fit` with `zoom`",
     )
 
     @model_validator(mode="after")
