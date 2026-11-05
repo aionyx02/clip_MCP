@@ -537,16 +537,65 @@ def test_offered_songs_are_heard_in_place_of_the_music_and_the_pick_comes_back_a
         {"action": "insert_clip", "track_id": "music", "clip_id": "m", "asset_id": jingle,
          "source_range": {"start": 0, "end": 4}, "timeline_in": 0},
     ]))
-    assert client.get(f"/api/projects/{made['id']}/songs").json() == {"offer": None}
+    assert client.get(f"/api/projects/{made['id']}/songs").json() == {"offers": []}
     soundtrack.offer_songs(made["id"], [OfferedSong(asset_id=song, start=2, why="輕快")], start=1, end=5)
-    offer = client.get(f"/api/projects/{made['id']}/songs").json()["offer"]
+    [offer] = client.get(f"/api/projects/{made['id']}/songs").json()["offers"]
     assert (offer["start"], offer["end"]) == (1, 5) and offer["songs"][0]["name"] == "song.mp3"
-    played = client.get(f"/api/projects/{made['id']}/songs/1").json()
+    part = offer["part"]
+    played = client.get(f"/api/projects/{made['id']}/songs/{part}/1").json()
     music = next(track for track in played["tracks"] if track["id"] == "music")
     # The jingle under the stretch is taken off, and the song plays there from its second second.
     assert [(clip["asset_id"], clip["timeline_in"], clip["source_start"]) for clip in music["clips"]] == [(song, 1, 2)]
-    picked = client.post(f"/api/projects/{made['id']}/songs/1", json={}).json()
+    picked = client.post(f"/api/projects/{made['id']}/songs/{part}/1", json={}).json()
     assert "song.mp3" in picked["text"] and "2 秒" in picked["text"]
-    assert client.get(f"/api/projects/{made['id']}/songs").json() == {"offer": None}
+    assert client.get(f"/api/projects/{made['id']}/songs").json() == {"offers": []}
     # The project itself was never changed by hearing it.
     assert [clip.asset_id for clip in runtime.repo.get_project(made["id"]).tracks[1].clips] == [jingle]
+
+
+def test_each_part_keeps_its_own_songs_and_a_pick_in_one_leaves_the_others_waiting(
+    client: TestClient, media: Path,
+) -> None:
+    made = client.post("/api/projects", json={"name": "兩段配樂", "width": 640, "height": 360}).json()
+    wide = catalog.import_asset(str(media / "wide.mp4"))["id"]
+    song = catalog.import_asset(str(media / "song.mp3"))["id"]
+    jingle = catalog.import_asset(str(media / "jingle.wav"))["id"]
+    editing.apply_edits(made["id"], runtime.repo.get_project(made["id"]).version, planning.OPERATIONS.validate_python([
+        {"action": "insert_clip", "track_id": "video", "clip_id": "a", "asset_id": wide,
+         "source_range": {"start": 0, "end": 6}},
+    ]))
+    first = soundtrack.offer_songs(made["id"], [OfferedSong(asset_id=song)], start=0, end=3)
+    second = soundtrack.offer_songs(made["id"], [OfferedSong(asset_id=jingle), OfferedSong(asset_id=song, start=1)],
+                                    start=3, end=6)
+    # The second offer leaves the first waiting, and says both are.
+    assert first["part"] != second["part"] and not second["replaced"]
+    assert [part["part"] for part in second["waiting"]] == [first["part"], second["part"]]
+    # Offering the same stretch again replaces only that part's songs.
+    again = soundtrack.offer_songs(made["id"], [OfferedSong(asset_id=jingle)], start=0, end=3)
+    assert again["part"] == first["part"] and again["replaced"] == [first["part"]]
+    offers = client.get(f"/api/projects/{made['id']}/songs").json()["offers"]
+    assert [(offer["start"], [entry["name"] for entry in offer["songs"]]) for offer in offers] == [
+        (0, ["jingle.wav"]), (3, ["jingle.wav", "song.mp3"])]
+    # Each part plays under its own stretch.
+    played = client.get(f"/api/projects/{made['id']}/songs/{second['part']}/2").json()
+    music = next(track for track in played["tracks"] if track.get("id") == "music")
+    assert [(clip["asset_id"], clip["timeline_in"]) for clip in music["clips"]] == [(song, 3)]
+    client.post(f"/api/projects/{made['id']}/songs/{second['part']}/2", json={})
+    assert [offer["part"] for offer in client.get(f"/api/projects/{made['id']}/songs").json()["offers"]] == [first["part"]]
+    assert client.get(f"/api/projects/{made['id']}/songs/{second['part']}/1").status_code == 404
+
+
+def test_an_offer_over_seconds_another_part_was_offered_for_replaces_it(client: TestClient, media: Path) -> None:
+    made = client.post("/api/projects", json={"name": "重疊", "width": 640, "height": 360}).json()
+    wide = catalog.import_asset(str(media / "wide.mp4"))["id"]
+    song = catalog.import_asset(str(media / "song.mp3"))["id"]
+    editing.apply_edits(made["id"], runtime.repo.get_project(made["id"]).version, planning.OPERATIONS.validate_python([
+        {"action": "insert_clip", "track_id": "video", "clip_id": "a", "asset_id": wide,
+         "source_range": {"start": 0, "end": 6}},
+    ]))
+    early = soundtrack.offer_songs(made["id"], [OfferedSong(asset_id=song)], start=0, end=3)
+    late = soundtrack.offer_songs(made["id"], [OfferedSong(asset_id=song)], start=3, end=6)
+    # One stretch of music has one song: the seconds both cover cannot hold two picks.
+    across = soundtrack.offer_songs(made["id"], [OfferedSong(asset_id=song)], start=2, end=4)
+    assert sorted(across["replaced"]) == sorted([early["part"], late["part"]])
+    assert [part["part"] for part in across["waiting"]] == [across["part"]]

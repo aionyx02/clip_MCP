@@ -210,10 +210,15 @@ you named that part and why in the read-back.
 For each part, `find_music` with what that part wants and its length as
 `min_seconds`, and put the closest song in its cue so the preview has music.
 You cannot hear the songs and the match is a guess, so then `offer_songs` with
-that part's `beat_id`. A new offer replaces the last, so offer one part at a
-time: start with the part you are least sure of, or the one the user wants
-changed, and move on when their pick comes back. When they said to finish on
-your own, there is nobody to pick, so skip the offers.
+that part's `beat_id`, once for every part, before telling the user: each part
+keeps its own songs, and they hear them in whatever order they like. Offering a
+part again replaces only that part's songs. Tell them once, from the last
+call's `waiting`: the songs are in the editor, or they can answer here by part
+and number. A pick in the editor comes back as a comment and is already in the
+cue; one given in the conversation you write yourself, with `amend_plan`
+`set_music_cue` on that part's `beat_id` (left out for the part that starts the
+video) and the song's `asset_id` and `start`. When they said to finish on your
+own, there is nobody to pick, so skip the offers.
 
 A plan's `music` is a list of `cues`. Each one names the `beat_id` it comes in
 on — the first may leave it out to start with the video — and plays until the

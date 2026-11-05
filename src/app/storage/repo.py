@@ -137,6 +137,14 @@ _MIGRATIONS: List[List[str]] = [
         "CREATE TABLE IF NOT EXISTS heard_sounds (project_id TEXT NOT NULL, sound TEXT NOT NULL, "
         "PRIMARY KEY (project_id, sound))",
     ],
+    [
+        # The songs put to the user, one set for each part of a cut, so every part can be heard
+        # at once. Songs offered while a project had one set are dropped rather than converted:
+        # an offer is a question still waiting, and the AI asks it again.
+        "CREATE TABLE IF NOT EXISTS song_offers_by_part (project_id TEXT NOT NULL, part TEXT NOT NULL, "
+        "data TEXT NOT NULL, PRIMARY KEY (project_id, part))",
+        "DROP TABLE IF EXISTS song_offers",
+    ],
 ]
 # Footage and music are filed apart, each in folders of its own; projects in theirs.
 FOLDER_KINDS = ("assets", "music", "projects")
@@ -744,18 +752,29 @@ class Repository:
         with self._transaction() as conn:
             return conn.execute("DELETE FROM preferences WHERE id = ?", (preference_id,)).rowcount > 0
 
-    def song_offer(self, project_id: str) -> Optional[SongOffer]:
-        """Read the songs put to the user for a project, if any are."""
-        rows = self._query("SELECT data FROM song_offers WHERE project_id = ?", (project_id,))
+    def song_offers(self, project_id: str) -> List[SongOffer]:
+        """Read the songs put to the user for a project, a set per part, in the order the parts play."""
+        rows = self._query("SELECT data FROM song_offers_by_part WHERE project_id = ?", (project_id,))
+        return sorted((SongOffer.model_validate_json(row[0]) for row in rows), key=lambda offer: offer.start)
+
+    def song_offer(self, project_id: str, part: str) -> Optional[SongOffer]:
+        """Read the songs put to the user for one part of a project, if any are."""
+        rows = self._query("SELECT data FROM song_offers_by_part WHERE project_id = ? AND part = ?", (project_id, part))
         return SongOffer.model_validate_json(rows[0][0]) if rows else None
 
-    def save_song_offer(self, offer: Optional[SongOffer], project_id: str) -> None:
-        """Put songs to the user for a project, in place of any before; None takes them away."""
+    def save_song_offer(self, offer: SongOffer, replacing: Iterable[str] = ()) -> None:
+        """Put songs to the user for one part, in place of that part's and those of the parts `replacing` names."""
         with self._transaction() as conn:
-            conn.execute("DELETE FROM song_offers WHERE project_id = ?", (project_id,))
-            if offer is not None:
-                conn.execute("INSERT INTO song_offers (project_id, data) VALUES (?, ?)",
-                             (project_id, offer.model_dump_json()))
+            for part in {offer.part, *replacing}:
+                conn.execute("DELETE FROM song_offers_by_part WHERE project_id = ? AND part = ?",
+                             (offer.project_id, part))
+            conn.execute("INSERT INTO song_offers_by_part (project_id, part, data) VALUES (?, ?, ?)",
+                         (offer.project_id, offer.part, offer.model_dump_json()))
+
+    def drop_song_offer(self, project_id: str, part: str) -> None:
+        """Take one part's songs away, once the user has picked."""
+        with self._transaction() as conn:
+            conn.execute("DELETE FROM song_offers_by_part WHERE project_id = ? AND part = ?", (project_id, part))
 
     def save_comment(self, comment: Comment, said: str) -> None:
         """Keep a comment, new or changed, and the project's comments in the history.
