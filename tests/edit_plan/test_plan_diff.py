@@ -1,7 +1,7 @@
 """Tests for what changed between two plans."""
 
 from app.engine.plan.diff import diff_plans
-from app.models.plan import MusicCue, MusicPlan, Selection, Trim, TrimKind
+from app.models.plan import BrollShot, MusicCue, MusicPlan, Selection, Trim, TrimKind
 
 from edit_plan.shared import SONG, footage, parts, plan_for, speech_of
 
@@ -35,3 +35,13 @@ def test_a_diff_names_the_music_that_changed() -> None:
     lines = diff_plans(before, after)["music"]
     assert "music from beat b3: other" in lines
     assert "music from the start: song → song, now cutting on the beat" in lines
+
+def test_a_diff_says_when_covering_picture_now_plays_from_further_into_its_clip() -> None:
+    by_id, children, assets, clips = footage()
+    first, second = speech_of(clips)[:2]
+    shot = BrollShot(clip_id=second.id, over_clip_id=first.id, seconds=2.0)
+    before = plan_for([Selection(clip_id=first.id, beat_id="b1")], broll=[shot])
+    after = before.model_copy(update={"broll": [shot.model_copy(update={"from_seconds": 4.0})]})
+    assert diff_plans(before, after)["broll"] == [
+        f"changed the cover over {first.id}: {second.id} for 2s → {second.id} from 4s for 2s"
+    ]

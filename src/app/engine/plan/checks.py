@@ -959,7 +959,8 @@ def check_plan(
                 ))
         # A song started to end with the video has to end with the cards too (#228).
         notes.extend(music_fit_notes(plan, played, assets, cuts))
-        _, covering, said = broll_covers(plan, pieces, clips, assets, cuts)
+        # Laid where the compile lays them, cards and all: a shot over a card is refused here, not at compile.
+        _, covering, said = broll_covers(plan, played, clips, assets, cuts)
         problems.extend(covering)
         notes.extend(said)
         if plan.target.seconds:

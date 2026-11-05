@@ -173,11 +173,15 @@ picture holds too long — one shot held on, or several in a row from the same
 file. Then find something that belongs over those words with `query_clips`,
 and add a shot with `add_broll`: the `clip_id` it plays from, the
 `over_clip_id` it starts over, and how many `seconds` it runs. The sound
-underneath keeps running, which is the whole point.
+underneath keeps running, which is the whole point. The picture plays from the
+start of `clip_id`; when the moment to show is partway into a long take — the
+mechanism working, not the hands reaching for it — find it with `view_frames`
+and set `from_seconds` to where it begins.
 
 The server enforces the rest and refuses with a reason: a shot runs 1 to 6
 seconds, no more than 40% of a beat may be covered, two shots may not overlap,
-and a selection marked `hold_picture` may not be covered at all. Set
+none may run over a title card, and a selection marked `hold_picture` may not
+be covered at all. Set
 `hold_picture` on the shots where what the speaker is doing has to be seen —
 pointing at something, holding something up. Nothing measures that, so if you
 do not say it, it is not known.
