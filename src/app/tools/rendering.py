@@ -28,7 +28,7 @@ from app.engine.reframe import Framing, centred_note, frame_project, placement_a
 from app.engine.builder import DEFAULT_LOUDNESS_TARGET, Talking, voice_keys
 from app.engine.levels import song_level, talking_in
 from app.engine.delivery import (
-    CHECKS, chapter_metadata, chapters, check_delivery, light_steps, look_candidates, run_on_cuts,
+    CHECKS, chapter_metadata, chapters, check_delivery, half_sentences, light_steps, look_candidates, run_on_cuts,
 )
 from app.engine.frames import format_timestamp, still, storyboard_sheet
 from app.engine.subtitles import build_ass, place_cues
@@ -1087,7 +1087,15 @@ def check_render(
         that the next follows with no pause: nothing is cut off as the
         transcript has it, but only listening to the render tells whether the
         next sentence's first sound carries across. It never stops a render
-        either. And `contrast`, the title cards and words over the footage
+        either. And `half_sentence`, the clips whose sound stops in a pause,
+        so nothing is cut off, before what is being said is finished: the
+        transcribed sentence goes on after the cut with nothing marking an end,
+        or stops on a word that leads into more, such as 大概 or 因為. Each
+        names the caption read last and the nearest earlier sentence end in the
+        clip, in seconds of the file. A sentence the transcriber ended on
+        anything else is not one, punctuated or not. It never stops a render:
+        only the user can tell whether the line stands.
+        And `contrast`, the title cards and words over the footage
         whose white letters stand out too little from the picture behind
         them, measured on that picture as the render shows it, with what to
         change. It never stops a render: the words still have their shadow.
@@ -1111,9 +1119,13 @@ def check_render(
     if light:
         checked["light"] = light
     base = project.base_video_track
-    run_on = run_on_cuts(base.clips, analyses_of(project, listened=True))
+    listened = analyses_of(project, listened=True)
+    run_on = run_on_cuts(base.clips, listened)
     if run_on:
         checked["run_on"] = run_on
+    half = half_sentences(base.clips, listened, place_cues(project, project.subtitles) if project.subtitles else None)
+    if half:
+        checked["half_sentence"] = half
     contrast = contrast_notes(reshaped(project, frame))
     if contrast:
         checked["contrast"] = contrast
