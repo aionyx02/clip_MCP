@@ -3,15 +3,17 @@
 import os
 import subprocess
 import uuid
-from typing import Annotated, List, Literal, Optional
+from typing import Annotated, List, Literal, Optional, Tuple
 
 from fastmcp.tools import ToolResult
 from fastmcp.utilities.types import Image
 from pydantic import Field, TypeAdapter
 
 from app.models.plan import (
-    EditPlan, PlanAmendment, Trim, TrimKind, apply_amendment, describe_amendment, with_whole_clip_ids,
+    EditPlan, MusicCue, PlanAmendment, SetMusicCueOp, Trim, TrimKind, apply_amendment, describe_amendment,
+    with_whole_clip_ids,
 )
+from app.models.offer import SongOffer
 from app.models.semantic import SemanticClip
 from app.models.timeline.operations import EditOperation
 from app.models.timeline.parts import Project
@@ -361,8 +363,9 @@ def amend_plan(plan_id: str, expected_version: int, amendments: list[PlanAmendme
     own amendments rather than a trim to every selection: `set_pacing` for
     「整體節奏太慢」 (shorter pauses, less air around every cut),
     `set_music_level` for 「音樂太大聲」 (everywhere, or from one beat),
-    `set_music_cue` to change one cue's start, volume, fades or cutting on
-    its beat without sending the plan again,
+    `set_music_cue` to change one cue's song, start, volume, fades or cutting
+    on its beat without sending the plan again (setting one of the songs
+    offered for that part takes the part's offer out of the editor),
     `set_target` for a new length or platform, and `drop_beat` for
     「這整段不要」, which files every selection in it under the rejections.
     What the viewer has to know is `set_facts` for the plan and
@@ -406,6 +409,9 @@ def amend_plan(plan_id: str, expected_version: int, amendments: list[PlanAmendme
         amended.model_copy(update={"timeline_input_hash": timeline.input_hash}),
         f"{note} — {done}" if note and done else note or done,
     )
+    for amendment in amendments:
+        if isinstance(amendment, SetMusicCueOp) and amendment.asset_id is not None:
+            _drop_picked_offers(stored, amendment)
     problems, notes = check_plan(stored, *_plan_context(stored))
     return {
         "plan_id": stored.id,
@@ -414,6 +420,34 @@ def amend_plan(plan_id: str, expected_version: int, amendments: list[PlanAmendme
         "problems": problems,
         "notes": [note_record(note) for note in notes],
     }
+
+def offered_cue(project: Project, offer: SongOffer) -> Optional[Tuple[EditPlan, MusicCue]]:
+    """The music cue of the plan the cut was compiled from that the offered stretch is, if it is one."""
+    plan = rendering.compiled_plan(project)
+    if plan is None or plan.music is None or (offer.beat_id is None and offer.start > 0):
+        return None
+    cue = next((cue for cue in plan.music.cues if cue.beat_id == offer.beat_id), None)
+    if cue is None and offer.start == 0:
+        # The first part is the cue that starts with the video, which may name no part.
+        cue = next((cue for cue in plan.music.cues if cue.beat_id is None), None)
+    return (plan, cue) if cue is not None else None
+
+def _drop_picked_offers(plan: EditPlan, amendment: SetMusicCueOp) -> None:
+    """Take away the songs offered for the cue a song was just set on, when it is one of them.
+
+    A pick given in the conversation settles the part as one made in the
+    editor does. Only membership is checked: a song that was not offered for
+    the part leaves the offer standing.
+    """
+    for project_id in runtime.repo.offered_project_ids():
+        project = runtime.repo.get_project(project_id)
+        if project is None:
+            continue
+        for offer in runtime.repo.song_offers(project_id):
+            found = offered_cue(project, offer)
+            if (found is not None and found[0].id == plan.id and found[1].beat_id == amendment.beat_id
+                    and any(song.asset_id == amendment.asset_id for song in offer.songs)):
+                runtime.repo.drop_song_offer(project_id, offer.part)
 
 def _plan_at(plan_id: str, version: Optional[int]) -> EditPlan:
     """Fetch a plan as it is now, or as it was at one version.
