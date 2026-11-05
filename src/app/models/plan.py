@@ -413,6 +413,11 @@ class Selection(BaseModel):
         description="Leave this piece's talking at the level it was recorded instead of bringing it to the level "
                     "of the rest: a whisper, a shout, somebody far from the microphone on purpose",
     )
+    stabilize: bool = Field(
+        default=False,
+        description="Steady this piece's handheld picture. The picture is enlarged a little to hide the moving "
+                    "edges, so leave it off where the shake is wanted or the edges of the frame matter",
+    )
     texts: List[PlanText] = Field(
         default_factory=list,
         description="Words over this piece — a name, a place, a headline. Only when the user asked for them",
@@ -730,6 +735,13 @@ class SetPlaybackOp(BaseModel):
     volume: Optional[float] = Field(default=None, ge=0, le=4, description="As on a selection; null for as recorded")
     keep_level: bool = Field(default=False, description="As on a selection")
 
+class SetStabilizeOp(BaseModel):
+    """Amendment that steadies one selection's picture, or leaves it as shot, for 「這段太晃」."""
+
+    action: Literal["set_stabilize"] = "set_stabilize"
+    clip_id: str = Field(..., description="Semantic clip whose selection is steadied")
+    stabilize: bool = Field(default=True, description="As on a selection; false leaves it as shot")
+
 class SetBeatJoinOp(BaseModel):
     """Amendment that changes how the picture and the sound pass into a beat from the one before."""
 
@@ -772,7 +784,7 @@ PlanAmendment = Annotated[
     Union[
         SetTrimOp, SetRationaleOp, AddSelectionOp, DropSelectionOp, AddBrollOp, DropBrollOp,
         SetPacingOp, SetMusicLevelOp, SetMusicCueOp, SetTargetOp, DropBeatOp, SetPlaybackOp, SetBeatJoinOp,
-        SetBeatTitleOp, SetSelectionTextsOp, SetFactsOp, SetKnowledgeOp,
+        SetStabilizeOp, SetBeatTitleOp, SetSelectionTextsOp, SetFactsOp, SetKnowledgeOp,
     ],
     Field(discriminator="action"),
 ]
@@ -810,6 +822,8 @@ def describe_amendment(op: "PlanAmendment") -> str:
         return f"music from {op.beat_id or 'the start'}: {changed or 'unchanged'}"
     if isinstance(op, SetPlaybackOp):
         return f"{op.clip_id} plays at x{op.speed or 1:g}, volume {1 if op.volume is None else op.volume:g}"
+    if isinstance(op, SetStabilizeOp):
+        return f"{op.clip_id} {'steadied' if op.stabilize else 'left as shot'}"
     if isinstance(op, SetBeatJoinOp):
         joined = op.transition_in.kind if op.transition_in else "a straight cut"
         return (f"{op.beat_id} comes in on {joined}" + (f", sound {op.sound_lead:g}s early" if op.sound_lead else "")
@@ -887,6 +901,10 @@ def apply_amendment(plan: EditPlan, op: PlanAmendment) -> None:
     if isinstance(op, SetPlaybackOp):
         selection = plan.selections[_selection_index(plan, op.clip_id)]
         selection.speed, selection.volume, selection.keep_level = op.speed, op.volume, op.keep_level
+        return
+
+    if isinstance(op, SetStabilizeOp):
+        plan.selections[_selection_index(plan, op.clip_id)].stabilize = op.stabilize
         return
 
     if isinstance(op, SetBeatTitleOp):

@@ -22,7 +22,7 @@ from typing import Dict, Iterator, List, Mapping, Optional, Sequence, Tuple
 from app.engine.builder import DUCK_DEPTH_DB, Talking
 from app.engine.continuity import Shot, stray_runs
 from app.engine.looks import alike
-from app.engine.plan.checks import LENGTH_TOLERANCE, NOT_PARTICLES, SENTENCE_END_PUNCTUATION
+from app.engine.plan.checks import LENGTH_TOLERANCE, NOT_PARTICLES, SENTENCE_END_PUNCTUATION, SHAKY
 from app.engine.library import MUSIC, library_of
 from app.engine.semantic import (
     CLEAN_GAP_SECONDS, CLEAN_SILENCE_SECONDS, EDGE_TOLERANCE_SECONDS, bare_words, clean_cuts, combined_over, join_voices,
@@ -834,6 +834,38 @@ def _repeats(clips: Sequence[Clip]) -> List[Finding]:
 LIGHT_STEP = 0.12
 # And this far apart in colour cast. Provisional.
 WARMTH_STEP = 0.03
+
+def shaky_clips(project: Project, analyses: Mapping[str, MediaAnalysis]) -> List[str]:
+    """Find the clips on screen the camera shook in, left as shot.
+
+    Never stops a render: a handheld shake may be the point of a vlog. The
+    shake is the worst of the measured shots the clip's range reaches into,
+    since a viewer notices the shakiest moment, not the mean.
+
+    Args:
+        project: The cut.
+        analyses: The analyses of its files, keyed by asset ID.
+
+    Returns:
+        One line per clip, with how much it shook and how to steady it.
+    """
+    found: List[str] = []
+    for track in project.video_tracks:
+        for clip in sorted(track.clips, key=lambda clip: clip.timeline_in):
+            analysis = analyses.get(clip.asset_id)
+            if clip.stabilize or clip.card is not None or analysis is None:
+                continue
+            start, end = float(clip.source_range.start), float(clip.source_range.end)
+            shakes = [shot.shake for shot in analysis.shots
+                      if shot.shake is not None and shot.start < end and shot.end > start]
+            if not shakes or max(shakes) <= SHAKY:
+                continue
+            found.append(
+                f"clip {clip.id} at {clock(float(clip.timeline_in))}: the camera shakes {max(shakes):.3f}, against "
+                f"{SHAKY:g} for a steady shot. If the shake is not wanted, stabilize steadies it at the cost of "
+                "enlarging the picture a little — set_stabilize in the plan, or set_clip_look for a clip made by hand"
+            )
+    return found
 
 def light_steps(project: Project, analyses: Mapping[str, MediaAnalysis]) -> List[str]:
     """Find where the picture jumps in brightness or colour from one shot to the next within a part.

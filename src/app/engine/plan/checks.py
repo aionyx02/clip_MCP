@@ -1204,7 +1204,10 @@ def _shots(
 SHAKY = 0.01
 
 def _shaky_notes(plan: EditPlan, clips: Mapping[str, SemanticClip]) -> List[Note]:
-    """Say which chosen clips the camera shook in, with how much, so a steadier one can be looked for.
+    """Say which chosen clips the camera shook in, with how much, so they can be steadied or replaced.
+
+    A selection already steadied is not named again: what was measured is the
+    shake before it was taken out.
 
     Args:
         plan: The plan.
@@ -1216,14 +1219,15 @@ def _shaky_notes(plan: EditPlan, clips: Mapping[str, SemanticClip]) -> List[Note
     shaky = []
     for selection in plan.selections:
         clip = clips.get(selection.clip_id)
-        shake = clip.scores.get("shake") if clip is not None else None
+        shake = clip.scores.get("shake") if clip is not None and not selection.stabilize else None
         if shake is not None and shake > SHAKY:
             shaky.append((selection.clip_id, shake))
     if not shaky:
         return []
     listed = ", ".join(f"{clip_id} ({shake:.3f})" for clip_id, shake in sorted(shaky, key=lambda item: -item[1]))
     return [Note(f"the camera shakes in {listed}, against {SHAKY:g} for a steady shot; if a shake is not wanted, "
-                 "query_clips with max_scores {\"shake\": " + f"{SHAKY:g}" + "} finds steadier footage of the same",
+                 "set_stabilize steadies a piece at the cost of enlarging it a little, or query_clips with "
+                 "max_scores {\"shake\": " + f"{SHAKY:g}" + "} finds steadier footage of the same",
                  "shaky", clip_ids=[clip_id for clip_id, _ in shaky], look=True)]
 
 # A number a file's name starts with, before a separator: `1-`, `01_`, `1.`, `1 `, `1、`, `(1)`.

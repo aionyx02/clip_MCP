@@ -576,3 +576,21 @@ def test_a_song_picked_by_ear_under_the_plan_s_music_is_written_into_its_cue(pla
     assert "已寫進計畫" in picked["text"]
     cue = get_plan(planned["plan_id"])["plan"]["music"]["cues"][0]
     assert (cue["asset_id"], cue["start"], cue["volume"]) == (song, 2, 0.3)
+
+def test_a_piece_the_plan_steadies_is_steadied_on_the_timeline_and_kept_through_a_hand_edit(planned: dict) -> None:
+    second = planned["clips"][2]["clip_id"]
+    result = amend_plan(planned["plan_id"], 1, amendments({"action": "set_stabilize", "clip_id": second}))
+    assert result["problems"] == []
+    assert [selection.get("stabilize", False) for selection in get_plan(planned["plan_id"])["plan"]["selections"]] \
+        == [False, True]
+    project = compiled_project(planned)
+    assert [clip["stabilize"] for clip in main_clips(project)] == [False, True]
+    # Pinned by a hand edit, then compiled again: the steadying stays with the clip.
+    made = main_clips(project)[1]
+    apply_edits(project, get_project(project)["version"], ops(
+        {"action": "set_clip_audio", "track_id": "main", "clip_id": made["id"], "volume": 0.5},
+    ))
+    compile_plan(project_id=project, expected_version=get_project(project)["version"], plan_id=planned["plan_id"])
+    assert [clip["stabilize"] for clip in main_clips(project)] == [False, True]
+    amend_plan(planned["plan_id"], 2, amendments({"action": "set_stabilize", "clip_id": second, "stabilize": False}))
+    assert get_plan(planned["plan_id"])["plan"]["selections"][1].get("stabilize", False) is False

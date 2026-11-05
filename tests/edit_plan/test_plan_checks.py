@@ -507,6 +507,11 @@ def test_a_chosen_clip_the_camera_shook_in_is_noted_with_how_much() -> None:
                           timeline, by_id, children, assets)
     [shaky] = [note for note in notes if note.kind == "shaky"]
     assert f"{walk.id} (0.040)" in shaky and first.id not in shaky and shaky.clip_ids == (walk.id,)
+    assert "stabilize" in shaky
+    _, notes = check_plan(plan_for([Selection(clip_id=first.id, beat_id="b1"),
+                                    Selection(clip_id=walk.id, beat_id="b1", stabilize=True)]),
+                          timeline, by_id, children, assets)
+    assert [note for note in notes if note.kind == "shaky"] == []
 
 def knowing(plan: EditPlan, by_id: dict, *said: dict) -> EditPlan:
     """Say, piece by piece in playing order, what each establishes and relies on.

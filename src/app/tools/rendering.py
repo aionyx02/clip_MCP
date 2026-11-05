@@ -27,7 +27,7 @@ from app.engine.reframe import Framing, frame_project, placement_at
 from app.engine.builder import DEFAULT_LOUDNESS_TARGET, Talking, voice_keys
 from app.engine.levels import song_level, talking_in
 from app.engine.delivery import (
-    CHECKS, chapter_metadata, chapters, check_delivery, light_steps, look_candidates, run_on_cuts,
+    CHECKS, chapter_metadata, chapters, check_delivery, light_steps, look_candidates, run_on_cuts, shaky_clips,
 )
 from app.engine.frames import format_timestamp, storyboard_sheet
 from app.engine.subtitles import build_ass, place_cues
@@ -674,9 +674,12 @@ def start_render(
             if argument.startswith(cache) and os.path.exists(argument):
                 os.utime(argument)
     else:
-        command = runtime.renderer.build_command(
+        # The camera movement measured to steady a clip is kept with the preview pictures, so a
+        # preview's measuring is not done again for the finished video.
+        command, pieces = runtime.renderer.build_render(
             project, assets, render_path, loudness_target=loudness_target, subtitle_path=subtitle_path,
             framing=framing, chapters_path=chapters_path, voices=voices, talking=talking,
+            transforms_dir=_picture_cache(),
         )
     # One input per clip, all opened at once, is what a render's memory use is made of.
     job.memory_estimate = resources.render_memory_bytes(command.count("-i"))
@@ -717,7 +720,8 @@ def start_render(
         "findings": [{"check": finding.check, "message": finding.message} for finding in findings],
     }
     if is_preview:
-        result["pictures"] = {"rendered": len(pieces), "reused": pictures - len(pieces)}
+        rendered = sum(1 for piece in pieces if piece.get("kind") != "transforms")
+        result["pictures"] = {"rendered": rendered, "reused": pictures - rendered}
     return result
 
 def talking_of(project: Project, voices: Mapping[str, float]) -> Optional[Talking]:
@@ -957,7 +961,9 @@ def check_render(
         that the next follows with no pause: nothing is cut off as the
         transcript has it, but only listening to the render tells whether the
         next sentence's first sound carries across. It never stops a render
-        either.
+        either. And `shaky`, the clips the camera shook in that are left as
+        shot, with how to steady them; a shake may be wanted, so it never
+        stops a render — ask before steadying, since it enlarges the picture.
 
     Raises:
         ValueError: If the project does not exist.
@@ -977,6 +983,9 @@ def check_render(
     light = light_steps(project, analyses_of(project))
     if light:
         checked["light"] = light
+    shaky = shaky_clips(project, analyses_of(project))
+    if shaky:
+        checked["shaky"] = shaky
     base = project.base_video_track
     run_on = run_on_cuts(base.clips, analyses_of(project, listened=True))
     if run_on:
