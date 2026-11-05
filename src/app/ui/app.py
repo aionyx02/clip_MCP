@@ -534,28 +534,29 @@ async def comments(request: Request) -> Response:
     return JSONResponse(made)
 
 async def songs(request: Request) -> Response:
-    """The songs the AI put to the user to hear under a stretch, each with its name, or none."""
+    """The songs the AI put to the user, a set for each part of the cut, each song with its name."""
     project_id = request.path_params["project_id"]
-    offer = await run_in_threadpool(runtime.repo.song_offer, project_id)
-    if offer is None:
-        return JSONResponse({"offer": None})
-    listed = []
-    for number, song in enumerate(offer.songs, start=1):
-        asset = (await run_in_threadpool(runtime.repo.get_assets, [song.asset_id])).get(song.asset_id)
-        listed.append({"number": number, "name": os.path.basename(asset.path) if asset else song.asset_id,
-                       "start": song.start, "why": song.why})
-    return JSONResponse({"offer": {"start": offer.start, "end": offer.end, "songs": listed}})
+    offers = []
+    for offer in await run_in_threadpool(runtime.repo.song_offers, project_id):
+        listed = []
+        for number, song in enumerate(offer.songs, start=1):
+            asset = (await run_in_threadpool(runtime.repo.get_assets, [song.asset_id])).get(song.asset_id)
+            listed.append({"number": number, "name": os.path.basename(asset.path) if asset else song.asset_id,
+                           "start": song.start, "why": song.why})
+        offers.append({"part": offer.part, "start": offer.start, "end": offer.end, "songs": listed})
+    return JSONResponse({"offers": offers})
 
 async def song(request: Request) -> Response:
-    """The cut with one offered song in place of its music, to play (GET); or that song picked (POST)."""
-    project_id, number = request.path_params["project_id"], int(request.path_params["number"])
+    """The cut with one of a part's offered songs in place of its music, to play (GET); or it picked (POST)."""
+    project_id, part = request.path_params["project_id"], request.path_params["part"]
+    number = int(request.path_params["number"])
     if request.method == "POST":
         try:
-            return JSONResponse(await run_in_threadpool(soundtrack.pick_song, project_id, number))
+            return JSONResponse(await run_in_threadpool(soundtrack.pick_song, project_id, part, number))
         except ValueError as error:
             return _error(str(error), 400)
     project = await run_in_threadpool(runtime.repo.get_project, project_id)
-    offer = await run_in_threadpool(runtime.repo.song_offer, project_id)
+    offer = await run_in_threadpool(runtime.repo.song_offer, project_id, part)
     if project is None or offer is None or not 1 <= number <= len(offer.songs):
         return _error("no such song is offered", 404)
     trial = await run_in_threadpool(soundtrack.song_trial, project, offer, number)
@@ -1133,7 +1134,7 @@ def create_app() -> Starlette:
         Route("/api/projects/{project_id}/versions/merge", merge_versions, methods=["POST"]),
         Route("/api/projects/{project_id}/comments/{comment_id}", comment, methods=["POST"]),
         Route("/api/projects/{project_id}/songs", songs),
-        Route("/api/projects/{project_id}/songs/{number:int}", song, methods=["GET", "POST"]),
+        Route("/api/projects/{project_id}/songs/{part:path}/{number:int}", song, methods=["GET", "POST"]),
         Route("/api/projects/{project_id}/storage", project_storage),
         Route("/api/projects/{project_id}/storage/trim", trim, methods=["POST"]),
         Route("/api/trash", trash, methods=["GET", "POST"]),
