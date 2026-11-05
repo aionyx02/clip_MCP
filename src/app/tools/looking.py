@@ -236,14 +236,18 @@ def mid_fade(seconds: float, fading: Sequence[Fading]) -> Optional[Tuple[Fading,
             return words, "fading out"
     return None
 
-def fully_shown(seconds: float, words: Fading, frame: float) -> float:
+def fully_shown(seconds: float, words: Fading, frame: float, opened: float, closed: float) -> Optional[float]:
     """The moment nearest `seconds` that `words` are fully shown, a frame clear of their fades.
 
     The middle of them when they are too short to be fully shown for long.
+    None when that moment is outside `opened` to `closed`, the stretch being looked at.
     """
     start, end, fade_in, fade_out, _ = words
     lit, dims = start + fade_in + frame, end - fade_out - frame
-    return (start + end) / 2 if lit > dims else min(max(seconds, lit), dims)
+    if lit > dims:
+        lit = dims = (start + end) / 2
+    lit, dims = max(lit, opened), min(dims, closed)
+    return None if lit > dims else min(max(seconds, lit), dims)
 
 @mcp.tool()
 def view_render(
@@ -283,7 +287,8 @@ def view_render(
         fade in and out, where the words are faint: a frame that would land
         there is taken at the nearest moment they are fully shown, its
         listed time the one taken, and said so. A frame asked for that lands
-        in a fade is taken as asked and said to be mid-fade. Neither is done
+        in a fade, or an `even` one whose words are not fully shown anywhere
+        in the stretch, is taken as asked and said to be mid-fade. Neither is done
         when the version rendered is no longer kept, since where the words
         fade is then not known. It says so when the project has changed since the render,
         when a render has no captions burned in, or when more frames were
@@ -336,12 +341,13 @@ def view_render(
         frame = as_rendered.fps_den / as_rendered.fps_num
         moved = []
         for seconds, what in wanted:
-            found = mid_fade(seconds, fading) if at == "even" and not times else None
-            if found is not None:
-                (words, how), asked = found, seconds
-                seconds = fully_shown(seconds, words, frame)
-                what = f"{words[4]} {how}, moved from {asked:.2f}s"
-            elif (found := mid_fade(seconds, fading)) is not None:
+            found = mid_fade(seconds, fading)
+            settled = (fully_shown(seconds, found[0], frame, start, math.inf if last is None else last)
+                       if found is not None and at == "even" and not times else None)
+            if settled is not None:
+                what = f"{found[0][4]} {found[1]}, moved from {seconds:.2f}s"
+                seconds = settled
+            elif found is not None:
                 what = "; ".join(filter(None, [what, f"{found[0][4]} {found[1]}"]))
             moved.append((seconds, what))
         wanted = moved

@@ -177,3 +177,10 @@ def test_where_the_words_fade_is_not_guessed_when_the_render_is_not_the_cut(
                                                                      False))
     text = looking.view_render(carded["job_id"], count=14).content[0].text
     assert _listed(text)[0] == 0.12 and "fading" not in text
+
+
+def test_an_even_look_stays_in_the_stretch_asked_for(carded: dict) -> None:
+    # 1.3s and 1.4s are in the card's fade out; its words are last fully shown before 1.2s, outside the stretch.
+    text = looking.view_render(carded["job_id"], start=1.25, end=1.45, count=2).content[0].text
+    assert _listed(text) == [1.3, 1.4]
+    assert "#1: 1.30s (00:01.3) | title card 「八月卅一日」 fading out" in text and "moved" not in text
