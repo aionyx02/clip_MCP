@@ -828,6 +828,15 @@ def test_a_clip_that_stops_on_a_word_leading_into_more_is_a_half_sentence() -> N
     alone = project_of(clip("a", "x", 1.0, end, 0))
     assert len(half_sentences(alone.base_video_track.clips, {"x": analysis})) == 1
 
+def test_a_clip_that_starts_partway_through_the_word_it_stops_on_names_that_word() -> None:
+    # The clip keeps only 「概」 of 「大概」: the sentence still stops on 大概, and saying so
+    # must not depend on how much of it the clip kept.
+    analysis = spoken("可以看一下它的機構這樣抽下來大概", 1.9, "就這樣")
+    end = said_until(analysis, "大概")
+    project = project_of(clip("a", "x", end - 0.2, end, 0))
+    [note] = half_sentences(project.base_video_track.clips, {"x": analysis})
+    assert "stops on 「大概」" in note
+
 def test_a_clip_that_stops_where_the_transcribed_sentence_goes_on_is_a_half_sentence() -> None:
     # A breath inside one sentence is a clean place to cut the sound, but the sentence goes on.
     analysis = spoken("早安今天天氣很好。", 0.8, "我們今天要去", 0.3, "台南吃牛肉湯", 1.0, "出發")

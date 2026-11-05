@@ -857,7 +857,9 @@ def half_sentences(
             if closes is not None:
                 why += f"; it runs on to {closes[0][closes[1]].end:.2f}s of the file"
         else:
-            leaning = next(ending for ending in LEANING_ENDINGS if so_far.endswith(ending))
+            # Read from the whole sentence, as `_ends_thought` did: the clip may keep only part of the word.
+            said = bare_words("".join(word.text for word in words))
+            leaning = next((ending for ending in LEANING_ENDINGS if said.endswith(ending)), said[-2:])
             why = f"it stops on 「{leaning}」, which leads into more than it says"
         shown = [cue for cue in placed or () if float(cue.start) < landed
                  and float(cue.end) <= landed + tolerance and float(cue.end) > float(clip.timeline_in)]
