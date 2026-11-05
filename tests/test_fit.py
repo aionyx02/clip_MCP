@@ -119,3 +119,9 @@ def test_a_shot_told_to_fill_with_nothing_to_follow_is_said(media: Path) -> None
     assert framing["a"].centred
     listing = rendering.preview_project(project, count=1).content[0].text
     assert "clip a" in listing and "no face was seen" in listing
+
+
+def test_a_shot_told_to_fill_is_not_said_to_have_no_face_when_faces_were_not_followed() -> None:
+    # Following faces turned off: the middle is what was asked for, not a guess for want of a face.
+    unfollowed = place_clip(shot(ClipFit(mode="fill")), TALL, WIDE, face_at(0.5), Fraction(30), follow_faces=False)
+    assert unfollowed.positions == ((0, 0.5),) and not unfollowed.centred

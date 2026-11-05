@@ -281,8 +281,9 @@ def place_clip(
         return followed
     if fit is not None:
         # Told to fill and nothing to follow. No other measure of where the subject is exists,
-        # so the middle it is, marked so that the preview and the render can say so.
-        return Framing(axis=axis, positions=((0, 0.5),), centred=True)
+        # so the middle it is, marked so that the preview and the render can say so — but only
+        # when faces were looked for: with following turned off, the middle is what was asked.
+        return Framing(axis=axis, positions=((0, 0.5),), centred=follow_faces)
     seen = any(second.faces for second in faces
                if second.end > float(clip.video_source_start) and second.start < float(clip.source_range.end))
     if not seen and span < WHOLE_BELOW_SPAN:
