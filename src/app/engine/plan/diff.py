@@ -4,7 +4,7 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional, Sequence, Tuple
 
 from app.engine.plan.pieces import Piece, pace_of, piece_starts
-from app.models.plan import EditPlan, MusicCue
+from app.models.plan import BrollShot, EditPlan, MusicCue
 
 
 @dataclass(frozen=True)
@@ -138,14 +138,15 @@ def diff_plans(before: EditPlan, after: EditPlan) -> Dict[str, List[str]]:
 
     laid_before = {shot.over_clip_id: shot for shot in before.broll}
     laid_after = {shot.over_clip_id: shot for shot in after.broll}
-    broll = [
-        f"covered {over} with {laid_after[over].clip_id} for {laid_after[over].seconds:g}s"
-        for over in laid_after.keys() - laid_before.keys()
-    ]
+
+    def shown(shot: BrollShot) -> str:
+        """Say what a shot of B-roll plays, and for how long."""
+        return f"{shot.clip_id}{f' from {shot.from_seconds:g}s' if shot.from_seconds else ''} for {shot.seconds:g}s"
+
+    broll = [f"covered {over} with {shown(laid_after[over])}" for over in laid_after.keys() - laid_before.keys()]
     broll += [f"uncovered {over}" for over in laid_before.keys() - laid_after.keys()]
     broll += [
-        f"changed the cover over {over}: {laid_before[over].clip_id} for "
-        f"{laid_before[over].seconds:g}s → {laid_after[over].clip_id} for {laid_after[over].seconds:g}s"
+        f"changed the cover over {over}: {shown(laid_before[over])} → {shown(laid_after[over])}"
         for over in laid_before.keys() & laid_after.keys() if laid_before[over] != laid_after[over]
     ]
     if broll:
