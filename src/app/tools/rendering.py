@@ -24,7 +24,7 @@ from app.models.job import Job, JobKind, JobStatus
 from app.engine import cards, legibility, looks, playback, resources, sync, texts
 from app.engine.analysis import second_listen, with_words_heard_again
 from app.engine.probe import probe_file, speech_loudness
-from app.engine.reframe import Framing, frame_project, placement_at
+from app.engine.reframe import Framing, centred_note, frame_project, placement_at
 from app.engine.builder import DEFAULT_LOUDNESS_TARGET, Talking, voice_keys
 from app.engine.levels import song_level, talking_in
 from app.engine.delivery import (
@@ -329,6 +329,9 @@ def preview_project(
     )
     if omitted:
         header += f" {omitted} clip(s) were skipped: the project has more clips than tiles."
+    unplaced = centred_note(framing)
+    if unplaced:
+        header += f" {unplaced}."
     return ToolResult(content=[
         "\n".join([header, *listing]),
         Image(data=storyboard_sheet(shots, aspect=project.width / project.height), format="jpeg"),
@@ -566,6 +569,8 @@ def render_project(
         render went ahead in spite of. The parts of the video, where it has
         markers, are carried in the file as chapters. A preview also says how
         many clip `pictures` it `rendered` and how many it `reused`.
+        `framing` names any clip told to fill the frame that had no face to
+        follow, so was cropped from the middle.
 
     Raises:
         ValueError: If the project does not exist, contains no clips, uses an
@@ -768,6 +773,9 @@ def start_render(
         **renamed(project),
         "findings": [{"check": finding.check, "message": finding.message} for finding in findings],
     }
+    unplaced = centred_note(framing)
+    if unplaced:
+        result["framing"] = unplaced
     if is_preview:
         result["pictures"] = {"rendered": len(pieces), "reused": pictures - len(pieces)}
     return result
