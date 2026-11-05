@@ -33,7 +33,7 @@ history = repo.keep_history(os.path.join(WORKSPACE_DIR, "history"))
 # instructions because a client that loads tools on demand has to guess which ones it will
 # need before it has read anything; a test keeps every name here a real tool.
 CORE_TOOLS = (
-    "list_assets", "analyze_asset", "get_job", "build_semantic_timeline", "query_clips", "view_frames",
+    "start_production", "get_production", "list_assets", "analyze_asset", "get_job", "build_semantic_timeline", "query_clips", "view_frames",
     "save_plan", "amend_plan", "create_project", "compile_plan", "preview_project", "render_project",
     "view_render", "inspect_join", "listen_again", "check_render", "apply_edits", "generate_subtitles",
 )

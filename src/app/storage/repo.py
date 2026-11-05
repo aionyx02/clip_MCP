@@ -11,6 +11,7 @@ from app.models.comment import Comment, Preference
 from app.models.job import Job
 from app.models.media import Asset, MediaAnalysis
 from app.models.offer import SongOffer
+from app.models.production import Production
 from app.models.plan import EditPlan
 from app.models.semantic import ClipKind, ClipLevel, SemanticClip, SemanticTimeline
 from app.models.trial import Trial
@@ -136,6 +137,11 @@ _MIGRATIONS: List[List[str]] = [
         # decides it, so a final render after a change to the music alone asks for no new preview.
         "CREATE TABLE IF NOT EXISTS heard_sounds (project_id TEXT NOT NULL, sound TEXT NOT NULL, "
         "PRIMARY KEY (project_id, sound))",
+    ],
+    [
+        # A request to make a video, kept so a new conversation can pick it up. Only what cannot be
+        # worked out again is kept; how far it has got is read off the rest each time.
+        "CREATE TABLE IF NOT EXISTS productions (id TEXT PRIMARY KEY, data TEXT NOT NULL)",
     ],
 ]
 # Footage and music are filed apart, each in folders of its own; projects in theirs.
@@ -727,6 +733,22 @@ class Repository:
         with self._transaction() as conn:
             conn.execute("INSERT OR REPLACE INTO trials (id, project_id, data) VALUES (?, ?, ?)",
                          (trial.id, trial.project_id, trial.model_dump_json()))
+
+    def production(self, production_id: str) -> Optional[Production]:
+        """Read one production."""
+        rows = self._query("SELECT data FROM productions WHERE id = ?", (production_id,))
+        return Production.model_validate_json(rows[0][0]) if rows else None
+
+    def productions(self) -> List[Production]:
+        """Read every production, oldest first."""
+        kept = [Production.model_validate_json(row[0]) for row in self._query("SELECT data FROM productions")]
+        return sorted(kept, key=lambda production: production.created_at)
+
+    def save_production(self, production: Production) -> None:
+        """Keep a production as it now stands."""
+        with self._transaction() as conn:
+            conn.execute("INSERT OR REPLACE INTO productions (id, data) VALUES (?, ?)",
+                         (production.id, production.model_dump_json()))
 
     def preferences(self) -> List[Preference]:
         """Read how the user likes their videos, oldest first."""
