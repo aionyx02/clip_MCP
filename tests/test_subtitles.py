@@ -129,16 +129,93 @@ def test_captions_follow_the_clips_when_the_cut_is_rearranged(spoken: str) -> No
     edit(project, [{"action": "reorder_clip", "track_id": "main", "clip_id": "second", "before_clip_id": "first"}])
     assert [cue["text"] for cue in get_subtitles(project)["cues"]] == ["第三句", "第一句"]
 
-def test_a_caption_whose_clip_is_split_is_shown_on_both_sides(spoken: str) -> None:
-    project = build_project([video_track(), insert("a", spoken, 0, 10)])
+def test_a_caption_whose_clip_is_split_is_shown_on_both_sides(media: Path) -> None:
+    asset = import_asset(str(media / "wide.mp4"))["id"]
+    transcribe(asset, [TranscriptSegment(start=4.0, end=6.0, text="第二句話", words=words(
+        ("第", 4.0, 4.5), ("二", 4.5, 5.0), ("句", 5.0, 5.5), ("話", 5.5, 6.0)))])
+    project = build_project([video_track(), insert("a", asset, 0, 10)])
     edit(project, [{"action": "set_subtitles", "cues": caption(project)["cues"]}])
-    # Split through the middle of the second sentence: those words are on screen on both
-    # sides of the cut, so the one stored caption is placed twice under the one id.
+    # Split through the middle of the sentence: its words are heard on both sides of the
+    # cut, so the one stored caption is placed twice under the one id, each side with its
+    # own half (#256).
     edit(project, [{"action": "split_clip", "track_id": "main", "clip_id": "a",
                     "at_source": 5.0, "new_clip_id": "b"}])
-    placed = [cue for cue in get_subtitles(project)["cues"] if cue["text"] == "第二句"]
-    assert len(placed) == 2
+    placed = get_subtitles(project)["cues"]
+    assert [cue["text"] for cue in placed] == ["第二", "句話"]
     assert len({cue["cue_id"] for cue in placed}) == 1
+
+def said_a_character_at_a_time(said: str, asset_id: str, at: str = "4.0", step: str = "0.2", **fields) -> SubtitleCue:
+    """Build a stored caption timed a character at a time, as the recogniser hands Chinese back.
+
+    Args:
+        said: What was said; one timed word per character.
+        asset_id: The file it was said in.
+        at: When the first character begins.
+        step: How long each character lasts.
+        **fields: Anything else the caption carries, such as its `text` once corrected.
+
+    Returns:
+        The caption.
+    """
+    start, length = Decimal(at), Decimal(step)
+    timed = [CueWord(start=start + length * index, end=start + length * (index + 1), text=character)
+             for index, character in enumerate(said)]
+    return SubtitleCue(**{"id": "c", "asset_id": asset_id, "source_start": start,
+                          "source_end": start + length * len(said), "text": said, "words": timed, **fields})
+
+# 這4.0 個4.2 要4.4 旋4.6 轉4.8 就5.0 可5.2 以5.4 拿5.6 下5.8 来6.0, each 0.2s.
+@pytest.mark.parametrize("start, end, shown", [
+    # #256: the sound stops after 這個要, so the caption does too.
+    (0.0, 4.65, "這個要"),
+    # 旋 is three quarters inside: most of it is heard, so it is shown.
+    (0.0, 4.75, "這個要旋"),
+    # The head cut off: 就 is mostly before the cut, 可 mostly after it.
+    (5.15, 9.0, "可以拿下来"),
+])
+def test_a_caption_cut_by_a_clip_shows_only_the_words_heard_in_it(
+    spoken: str, start: float, end: float, shown: str,
+) -> None:
+    project = build_project([video_track(), insert("a", spoken, start, end)])
+    placed = place_cues(repo.get_project(project), [said_a_character_at_a_time("這個要旋轉就可以拿下来", spoken)])
+    assert [cue.text for cue in placed] == [shown]
+    assert "".join(word.text for word in placed[0].words) == shown
+
+def test_a_caption_with_none_of_its_words_heard_is_not_shown(spoken: str) -> None:
+    # The clip reaches 0.09s into the caption, short of the middle of its first character.
+    project = build_project([video_track(), insert("a", spoken, 0.0, 4.09)])
+    assert place_cues(repo.get_project(project), [said_a_character_at_a_time("這個要旋轉就可以拿下来", spoken)]) == []
+
+def test_a_caption_across_two_clips_of_one_take_is_split_between_them_word_for_word(spoken: str) -> None:
+    project = build_project([video_track(), insert("a", spoken, 0.0, 5.0), insert("b", spoken, 5.0, 9.0)])
+    placed = place_cues(repo.get_project(project), [said_a_character_at_a_time("這個要旋轉就可以拿下来", spoken)])
+    assert [cue.text for cue in placed] == ["這個要旋轉", "就可以拿下来"]
+    # One after the other, with no word on screen twice or missing.
+    assert placed[0].end == placed[1].start == Decimal("5.000")
+
+def test_a_shortened_caption_keeps_its_corrected_text_and_punctuation(spoken: str) -> None:
+    cue = said_a_character_at_a_time("這個要旋轉就可以拿下来", spoken, text="這個要旋轉，就可以拿下來。")
+    project = build_project([video_track(), insert("a", spoken, 5.0, 9.0)])
+    assert [placed.text for placed in place_cues(repo.get_project(project), [cue])] == ["就可以拿下來。"]
+
+@pytest.mark.parametrize("fields", [
+    # Typed by hand: no word timings to cut by.
+    {"words": [], "typed": True},
+    # Corrected to a different length, so its timings no longer say which character is which.
+    {"text": "這個要轉一下就可以拿下來"},
+])
+def test_a_caption_with_nothing_to_cut_it_by_is_shown_whole(spoken: str, fields: dict) -> None:
+    cue = said_a_character_at_a_time("這個要旋轉就可以拿下来", spoken, **fields)
+    project = build_project([video_track(), insert("a", spoken, 0.0, 4.65)])
+    assert [placed.text for placed in place_cues(repo.get_project(project), [cue])] == [cue.text]
+
+def test_exported_subtitles_show_only_the_words_heard(spoken: str) -> None:
+    from app.engine.interchange import write_srt
+
+    project = build_project([video_track(), insert("a", spoken, 0.0, 4.65)])
+    stored = repo.get_project(project)
+    placed = place_cues(stored, [said_a_character_at_a_time("這個要旋轉就可以拿下来", spoken)])
+    assert "這個要\n" in write_srt(placed) and "旋" not in write_srt(placed)
+    assert "旋" not in build_ass(placed, 640, 360)
 
 def test_long_sentences_are_broken_between_words(media: Path) -> None:
     asset = import_asset(str(media / "silent.mp4"))["id"]
