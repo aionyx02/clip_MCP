@@ -44,8 +44,8 @@ CLIPPED_PEAK_DB = -0.5
 CLIPPED_FLATNESS = 5.0
 # The kinds of finding a render can be told to go ahead in spite of.
 CHECKS = (
-    "bad_picture", "clipping", "music", "mid_speech", "repeated", "look_alike", "continuity", "unplanned", "captions",
-    "length",
+    "bad_picture", "covered_card", "clipping", "music", "mid_speech", "repeated", "look_alike", "continuity",
+    "unplanned", "captions", "length",
 )
 # How far under the talking music has to sit while somebody speaks, in dB. Under that it
 # competes with the words: the first edits made with the server had music two decibels
@@ -287,6 +287,8 @@ def check_delivery(
                            "with `after_seconds` set to where in that clip it begins" if talked else "")
                     ), ((start, end),)))
 
+    findings.extend(_covered_cards(project, fps))
+
     # Everything heard: the sequence and the audio tracks, less anything turned all the way down.
     for clip in captioned_clips(project):
         analysis = analyses.get(clip.asset_id)
@@ -345,6 +347,39 @@ def check_delivery(
         )))
     order = {check: index for index, check in enumerate(CHECKS)}
     return sorted(findings, key=lambda finding: order[finding.check])
+
+def _covered_cards(project: Project, fps: float) -> List[Finding]:
+    """Find full-frame picture laid over a title card, where it would hide the card's words.
+
+    A compile never lays B-roll on a card, but a card added by hand moves the
+    sequence along and leaves the tracks above it where they were. Moving the
+    B-roll is a choice about the cut — before the card, after it, or not at
+    all — so it is found, not moved.
+
+    Args:
+        project: The project.
+        fps: Its frame rate; covering less than a frame of a card hides nothing.
+
+    Returns:
+        One finding per picture and card that overlap.
+    """
+    base = project.base_video_track
+    cards = [clip for clip in (base.clips if base else []) if clip.card is not None]
+    found: List[Finding] = []
+    # An inset leaves the rest of the frame, and most of the card, to be seen.
+    for over in sorted((clip for track in project.video_tracks[1:] for clip in track.clips if clip.layout is None),
+                       key=lambda clip: clip.timeline_in):
+        for card in cards:
+            start = max(float(over.timeline_in), float(card.timeline_in))
+            end = min(float(over.timeline_out), float(card.timeline_out))
+            if end - start < 1 / fps:
+                continue
+            found.append(Finding("covered_card", (
+                f"clip {over.id} is laid over the title card 「{card.card.title}」 from {clock(start)} to "
+                f"{clock(end)} ({end - start:.1f}s) and hides its words; move it to end before "
+                f"{clock(float(card.timeline_in))} or start after {clock(float(card.timeline_out))}, or take it off"
+            ), ((start, end),)))
+    return found
 
 def _music_over_talking(project: Project, talking: Optional[Talking]) -> List[Finding]:
     """Find music that plays too close to the level of somebody talking over it.
