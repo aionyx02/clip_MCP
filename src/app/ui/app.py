@@ -114,6 +114,11 @@ async def projects(request: Request) -> Response:
             {"action": "add_track", "track_id": "music", "track_type": "audio", "duck_under_speech": True},
         ]))
         return JSONResponse({"id": made["id"]})
+    # Reads the history, the database and the disk: off the event loop, so the page's polls still answer.
+    return JSONResponse({"projects": await run_in_threadpool(_project_cards)})
+
+def _project_cards() -> List[dict]:
+    """Every project as its card on the projects page shows it."""
     listed, filed = [], runtime.repo.folder_of("projects")
     counts = runtime.history.counts("projects/")
     everything = runtime.repo.list_projects()
@@ -141,7 +146,7 @@ async def projects(request: Request) -> Response:
             "under": project.branched_from.project_id if project.branched_from else None,
             "megabytes": upkeep.disk_of(project.id),
         })
-    return JSONResponse({"projects": listed})
+    return listed
 
 async def project(request: Request) -> Response:
     """One project as the page draws it: its tracks and clips, its markers, and the files they play."""

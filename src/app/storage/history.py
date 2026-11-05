@@ -29,7 +29,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Callable, Dict, Iterator, List, Mapping, Optional, Tuple
 
-from dulwich.errors import NotTreeError
+from dulwich.errors import MissingCommitError, NotTreeError
 from dulwich.object_store import tree_lookup_path
 from dulwich.repo import Repo
 from filelock import FileLock
@@ -430,8 +430,10 @@ class History:
     def counts(self, prefix: str) -> Dict[str, int]:
         """How many versions each file in a folder has, by the ID its name ends with, in one walk.
 
-        Remembered until the next commit, since the projects page asks for every
-        project at once each time it is drawn.
+        Remembered with the commit it was counted at, and after a commit only
+        the commits since then are counted onto it: the projects page asks for
+        every project at once each time it is drawn, and walking the whole
+        history again took seconds once it was a thousand commits long.
 
         Args:
             prefix: The folder, such as `projects/`.
@@ -446,21 +448,51 @@ class History:
         if cached and cached[0] == head:
             return cached[1]
         folder = prefix.encode("utf-8")
-        counted: Dict[str, int] = {}
         with Repo(self.root) as repo:
-            for entry in repo.get_walker(paths=[folder.rstrip(b"/")]):
-                seen = set()
-                for change in entry.changes():
-                    for one in (change if isinstance(change, list) else [change]):
-                        for side in (one.old, one.new):
-                            if side is not None and side.path and side.path.startswith(folder):
-                                stem = side.path.decode("utf-8").rsplit("/", 1)[-1].removesuffix(".json")
-                                found = _ID_AT_END.search(stem)
-                                seen.add(found.group(0) if found else stem)
-                for item in seen:
-                    counted[item] = counted.get(item, 0) + 1
+            counted = self._count_since(repo, folder, head, cached) if cached else None
+            if counted is None:
+                counted = {}
+                walker = repo.get_walker(include=[head.encode("ascii")], paths=[folder.rstrip(b"/")])
+                self._count_into(counted, walker, folder)
         self._counted[prefix] = (head, counted)
         return counted
+
+    def _count_since(self, repo: Repo, folder: bytes, head: str,
+                     cached: Tuple[str, Dict[str, int]]) -> Optional[Dict[str, int]]:
+        """Add the commits after the one last counted at, or None when it is not behind `head`.
+
+        Only a straight line on from the old commit is added to: anything else,
+        such as a history made again from nothing, is counted from the start.
+        """
+        since, before = cached
+        old = since.encode("ascii")
+        try:
+            newer = list(repo.get_walker(include=[head.encode("ascii")], exclude=[old]))
+        except (KeyError, MissingCommitError):
+            return None
+        known = {entry.commit.id for entry in newer} | {old}
+        parents = [entry.commit.parents for entry in newer]
+        if not newer or any(len(each) != 1 or each[0] not in known for each in parents) \
+                or sum(each[0] == old for each in parents) != 1:
+            return None
+        counted = dict(before)
+        self._count_into(counted, newer, folder)
+        return counted
+
+    @staticmethod
+    def _count_into(counted: Dict[str, int], walker, folder: bytes) -> None:
+        """Add one to each ID for every commit the walker gives that changed its file in the folder."""
+        for entry in walker:
+            seen = set()
+            for change in entry.changes():
+                for one in (change if isinstance(change, list) else [change]):
+                    for side in (one.old, one.new):
+                        if side is not None and side.path and side.path.startswith(folder):
+                            stem = side.path.decode("utf-8").rsplit("/", 1)[-1].removesuffix(".json")
+                            found = _ID_AT_END.search(stem)
+                            seen.add(found.group(0) if found else stem)
+            for item in seen:
+                counted[item] = counted.get(item, 0) + 1
 
     def head(self) -> Optional[str]:
         """The newest commit's ID, or None before anything was kept."""
