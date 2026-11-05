@@ -283,7 +283,7 @@ def offer_songs(
     start: Optional[float] = None,
     end: Optional[float] = None,
 ) -> dict:
-    """Put a few songs to the user to hear under the same stretch of the cut, and let them pick.
+    """Put a few songs to the user to hear under one part of the cut, and let them pick.
 
     You cannot hear whether a song suits the pictures; its tags are a guess at
     its mood, about half the time right. Narrow the music down to two or three
@@ -294,7 +294,11 @@ def offer_songs(
     which second. When the stretch is a music cue of the plan the cut was
     compiled from (`beat_id`, or the start of the cut), the pick is already
     written into that cue, and the comment says so — compile the plan to hear
-    it; otherwise set it with `fit_track`. A new offer replaces the last.
+    it; otherwise set it with `fit_track`. Each part keeps its own songs, so
+    offer every part that needs music before telling the user, and they hear
+    them in any order; offering a part again, or seconds another offer covers,
+    replaces those songs alone. `waiting` lists every part's songs, numbered,
+    for the user who answers in the conversation rather than in the editor.
 
     Args:
         project_id: The video.
@@ -307,7 +311,10 @@ def offer_songs(
         end: Where it ends; the end of the cut when not given.
 
     Returns:
-        `offered`, the songs by name, and what to tell the user.
+        `offered`, the songs by name; `part`, what this part is called (its
+        `beat_id`, or its stretch); `replaced`, the parts whose songs this
+        took the place of; `waiting`, every part's songs still to be picked;
+        and what to tell the user.
 
     Raises:
         ValueError: If the project, a song or the part does not exist, a song
@@ -355,10 +362,29 @@ def offer_songs(
                    if float(clip.timeline_in) < end and float(clip.timeline_out) > start]
         if playing:
             offer = offer.model_copy(update={"volume": playing[0].volume})
-    runtime.repo.save_song_offer(offer, project_id)
-    return {"offered": names, "say": (
-        f"tell the user {len(names)} songs are waiting in the editor to hear under {clock(start)}–{clock(end)}; "
-        "their pick comes back as a comment")}
+    before = runtime.repo.song_offers(project_id)
+    replaced = [other.part for other in before if other.part == offer.part or other.overlaps(offer)]
+    runtime.repo.save_song_offer(offer, replaced)
+    waiting = [_waiting(other) for other in runtime.repo.song_offers(project_id)]
+    return {"offered": names, "part": offer.part, "replaced": replaced, "waiting": waiting, "say": (
+        f"once every part that needs music is offered, tell the user {len(waiting)} "
+        f"part{'s' if len(waiting) != 1 else ''} of songs are waiting in the editor, or read `waiting` back "
+        "for them to answer here; a pick in the editor comes back as a comment, "
+        "one in the conversation you set yourself")}
+
+def _waiting(offer: SongOffer) -> dict:
+    """One part's songs as they are read back, numbered as the editor numbers them.
+
+    Each with what a pick given in the conversation is set with: the song and
+    the second it is heard from.
+    """
+    songs = []
+    for number, song in enumerate(offer.songs, start=1):
+        asset = runtime.repo.get_assets([song.asset_id]).get(song.asset_id)
+        songs.append({"number": number, "name": os.path.basename(asset.path) if asset is not None else song.asset_id,
+                      "asset_id": song.asset_id, "start": song.start})
+    return {"part": offer.part, "beat_id": offer.beat_id, "stretch": f"{clock(offer.start)}–{clock(offer.end)}",
+            "songs": songs}
 
 def song_trial(project: Project, offer: SongOffer, number: int) -> Project:
     """The cut with one offered song in place of its music over the stretch, for the editor to play.
@@ -399,10 +425,13 @@ def _offered_cue(project: Project, offer: SongOffer) -> Optional[Tuple[EditPlan,
     if plan is None or plan.music is None or (offer.beat_id is None and offer.start > 0):
         return None
     cue = next((cue for cue in plan.music.cues if cue.beat_id == offer.beat_id), None)
+    if cue is None and offer.start == 0:
+        # The first part is the cue that starts with the video, which may name no part.
+        cue = next((cue for cue in plan.music.cues if cue.beat_id is None), None)
     return (plan, cue) if cue is not None else None
 
-def pick_song(project_id: str, number: int) -> dict:
-    """Take the user's pick of the offered songs to the AI, as a comment on the stretch.
+def pick_song(project_id: str, part: str, number: int) -> dict:
+    """Take the user's pick of one part's offered songs to the AI, as a comment on the stretch.
 
     Where the stretch is a music cue of the plan the cut was compiled from,
     the pick is written into that cue too, so compiling the plan again plays
@@ -412,15 +441,16 @@ def pick_song(project_id: str, number: int) -> dict:
 
     Args:
         project_id: The video.
+        part: Which part's songs, as `SongOffer.part` names it.
         number: Which song, from 1.
 
     Returns:
-        The comment.
+        The comment. The other parts' songs stay offered.
 
     Raises:
-        ValueError: If nothing is offered, or there is no such song.
+        ValueError: If nothing is offered for the part, or there is no such song.
     """
-    offer = runtime.repo.song_offer(project_id)
+    offer = runtime.repo.song_offer(project_id, part)
     if offer is None or not 1 <= number <= len(offer.songs):
         raise ValueError("no such song is offered")
     song = offer.songs[number - 1]
@@ -434,5 +464,5 @@ def pick_song(project_id: str, number: int) -> dict:
                                                                               start=song.start)], note=said)
         said += f"；已寫進計畫 {plan.id} 第 {amended['version']} 版，重新 compile_plan 後生效"
     made = feedback.add_comment(project_id, said, offer.start, offer.end)
-    runtime.repo.save_song_offer(None, project_id)
+    runtime.repo.drop_song_offer(project_id, part)
     return made

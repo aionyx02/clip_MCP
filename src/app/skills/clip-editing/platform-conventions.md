@@ -106,7 +106,11 @@ landscape shot in a vertical project, or the other way round. Each shot can be
 told otherwise with `set_clip_look` `fit`: `{"mode": "whole"}` for
 「整個畫面都要看到」, `{"mode": "fill"}` to crop it anyway, with `center_x` /
 `center_y` (0–1 of the picture) for 「往左一點」 and `zoom` for 「拉近一點」;
-`clear_fit` gives the choice back. Look at `preview_project` with the same
+`clear_fit` gives the choice back. A vertical phone shot in a landscape video
+with no face — hands showing a product — is mostly blur that way; give it
+`{"mode": "fill"}` to fill the frame. It follows a face if there is one;
+otherwise it crops the middle strip and the preview and render say so, so look
+at the tile and set `center_y` onto the hands. Look at `preview_project` with the same
 `frame` first — the tiles are cropped the way the render will be. Check
 captions again for a portrait version: lines that fit across a landscape frame
 can stack too tall in a narrow one.

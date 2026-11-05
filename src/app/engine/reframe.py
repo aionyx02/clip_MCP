@@ -88,6 +88,9 @@ class Framing:
         zoom: How much closer than covering the box the crop is; above 1 the
             other axis is cropped too.
         cross: Where the crop is centred along the other axis, when zoomed.
+        centred: Told to fill, with no face seen to follow: cropped from the
+            middle, which is a guess worth saying out loud rather than a
+            framing anybody chose.
     """
 
     axis: str
@@ -95,6 +98,7 @@ class Framing:
     whole: bool = False
     zoom: float = 1.0
     cross: float = 0.5
+    centred: bool = False
 
 def _span(source: Tuple[int, int], box: Tuple[int, int]) -> Tuple[str, float]:
     """Work out which axis a crop moves along, and how much of it the crop covers.
@@ -269,7 +273,8 @@ def place_clip(
     """Decide how one clip sits in its box: where its crop goes, or whether it is shown whole.
 
     What the clip was told wins: `whole`, or `fill` with a centre and a zoom
-    of somebody's choosing. Otherwise a face is followed; a shot with no face
+    of somebody's choosing; `fill` alone follows a face, or crops from the
+    middle when none was seen. Otherwise a face is followed; a shot with no face
     that would lose most of its width is shown whole; anything else is
     cropped from the middle.
 
@@ -298,8 +303,13 @@ def place_clip(
         return Framing(axis=axis, positions=((0, _clamped(0.5 if along is None else along, narrowed)),),
                        zoom=zoom, cross=_clamped(0.5 if other is None else other, 1 / zoom))
     followed = frame_clip(clip, source, box, faces, fps) if follow_faces else None
-    if followed is not None or fit is not None:
+    if followed is not None:
         return followed
+    if fit is not None:
+        # Told to fill and nothing to follow. No other measure of where the subject is exists,
+        # so the middle it is, marked so that the preview and the render can say so — but only
+        # when faces were looked for: with following turned off, the middle is what was asked.
+        return Framing(axis=axis, positions=((0, 0.5),), centred=follow_faces)
     seen = any(second.faces for second in faces
                if second.end > float(clip.video_source_start) and second.start < float(clip.source_range.end))
     if not seen and span < WHOLE_BELOW_SPAN:
@@ -371,3 +381,19 @@ def crop_filter(width: int, height: int, framing: Optional[Framing]) -> str:
     # backslashes would reach the expression parser and it would refuse them.
     offset = rf"max(0\,min({size}-{out}\,{centre}*{size}-{out}/2))"
     return f"crop={width}:{height}:{framing.axis}={offset}{cross}"
+
+
+def centred_note(framed: Mapping[str, Framing]) -> Optional[str]:
+    """Say which clips were told to fill the frame but had no face to follow.
+
+    Args:
+        framed: The project's framings, keyed by clip ID.
+
+    Returns:
+        One sentence naming them, or None when there are none.
+    """
+    named = [clip_id for clip_id, framing in framed.items() if framing.centred]
+    if not named:
+        return None
+    return (f"clip {', '.join(named)}: told to fill the frame, but no face was seen to follow, so the crop sits "
+            f"in the middle; set fit center_x / center_y to move it onto what matters")

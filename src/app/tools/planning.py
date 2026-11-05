@@ -643,10 +643,12 @@ def compile_plan(project_id: str, expected_version: int, plan_id: Optional[str] 
         raise ValueError(refused)
     pieces, left_out = as_left(plan_pieces(plan, clips, children, assets, cuts), project)
     notes = notes + left_out
-    covers, _, _ = broll_covers(plan, pieces, clips, assets, cuts)
-    # The music as the compile lays it, under the cut with its title cards: without them it runs
-    # short, and a stretch pinned past where the cut would end is taken for one the plan dropped.
-    beds = music_beds(plan, with_cards(plan, pieces, assets, cuts, project), assets, cuts)
+    # The B-roll and the music as the compile lays them, over and under the cut with its title
+    # cards: without them the music runs short, and a stretch pinned past where the cut would end
+    # is taken for one the plan dropped.
+    played = with_cards(plan, pieces, assets, cuts, project)
+    covers, _, _ = broll_covers(plan, played, clips, assets, cuts)
+    beds = music_beds(plan, played, assets, cuts)
     blocked = check_recompile(plan, project, pieces, covers, beds)
     if blocked:
         raise ValueError("compiling would undo work already on this project:\n- " + "\n- ".join(blocked))
@@ -935,5 +937,5 @@ def propose_broll(plan_id: Optional[str] = None) -> dict:
     """
     plan = _require_plan(plan_id)
     _, clips, children, assets, cuts = _plan_context(plan)
-    pieces = plan_pieces(plan, clips, children, assets, cuts)
+    pieces = with_cards(plan, plan_pieces(plan, clips, children, assets, cuts), assets, cuts, None)
     return {"plan_id": plan.id, "slots": broll_slots(plan, pieces, clips, cuts)}

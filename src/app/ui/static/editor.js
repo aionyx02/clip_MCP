@@ -46,7 +46,7 @@
   // What the user said about moments of the cut, open and closed, where each is on the cut now.
   async function loadComments() {
     try {
-      E.songs = (await api(`/api/projects/${encodeURIComponent(E.id)}/songs`)).offer;
+      E.songs = (await api(`/api/projects/${encodeURIComponent(E.id)}/songs`)).offers;
     } catch { /* kept as it was until the next look */ }
     try {
       const listed = await api(`/api/projects/${encodeURIComponent(E.id)}/comments`);
@@ -1112,8 +1112,9 @@
     const context = E.selectedCaption ? ["captions"] : !clip ? [] : track.track_type === "audio" ? ["sound"]
       : (clip.card || E.project.assets[clip.asset_id]?.has_audio === false ? ["picture"] : ["picture", "sound"]);
     const available = [...context, "comments"];
-    if (!available.includes(E.tab)) E.tab = context[0] || (E.songs ? "comments" : null);
-    const waiting = (E.comments || []).filter((comment) => comment.status === "open").length + (E.songs ? 1 : 0);
+    const parts = (E.songs || []).length;
+    if (!available.includes(E.tab)) E.tab = context[0] || (parts ? "comments" : null);
+    const waiting = (E.comments || []).filter((comment) => comment.status === "open").length + parts;
     root.innerHTML = `<div class="tabs">${["picture", "sound", "captions", "comments"].map((tab) =>
       `<button type="button" data-tab="${tab}" class="${tab === E.tab ? "on" : ""}" ${available.includes(tab) ? "" : "disabled"}>${esc(T.editor.tabs[tab])}${tab === "comments" && waiting ? `<span class="count">${waiting}</span>` : ""}</button>`).join("")}</div>
       <div class="props" data-props></div>`;
@@ -1520,9 +1521,9 @@
         <ol class="clist">${closed.map(commentHtml).join("")}</ol></details>` : ""}`;
     $("[data-new-comment]", panel).onclick = () => writeComment(E.time);
     panel.querySelectorAll("[data-song]").forEach((item) => {
-      const number = Number(item.dataset.song);
-      $("[data-hear]", item).onclick = () => (E.trial === number ? stopSong() : hearSong(number));
-      $("[data-pick]", item).onclick = () => pickSong(number);
+      const part = item.closest("[data-part]").dataset.part, number = Number(item.dataset.song);
+      $("[data-hear]", item).onclick = () => (hearing(part, number) ? stopSong() : hearSong(part, number));
+      $("[data-pick]", item).onclick = () => pickSong(part, number);
     });
     const change = async (id, body) => {
       try {
@@ -1559,27 +1560,36 @@
 
   // ------------------------------------------------------------------ songs offered to hear
 
-  // The songs the AI put to the user for a stretch: each heard in place of the music there,
-  // picked by ear, and the pick sent back as a comment on the stretch.
+  // The songs the AI put to the user, a few for each part of the cut: each heard in place of the
+  // music there, picked by ear in whatever order, and each pick sent back as a comment on its part.
   function songsHtml() {
-    const offer = E.songs;
-    if (!offer) return "";
-    return `<div class="group songs"><p class="label">${esc(T.songs.title(fmt(offer.start), fmt(offer.end)))}</p>
-      <p class="hint">${esc(T.songs.how)}</p><ol class="clist">${offer.songs.map((song) => `<li data-song="${song.number}">
+    const offers = E.songs || [];
+    if (!offers.length) return "";
+    return `<div class="group songs"><p class="label">${esc(T.songs.title)}</p><p class="hint">${esc(T.songs.how)}</p>
+      ${offers.map((offer) => `<div data-part="${esc(offer.part)}"><p class="label">${esc(T.songs.part(fmt(offer.start), fmt(offer.end)))}</p>
+      <ol class="clist">${offer.songs.map((song) => `<li data-song="${song.number}">
         <p class="ctext"><strong>${esc(song.name)}</strong>${song.start ? ` · ${esc(T.songs.from(fmt(song.start)))}` : ""}</p>
         ${song.why ? `<p class="hint">${esc(song.why)}</p>` : ""}
-        <div class="cactions"><button class="btn small" data-hear>${esc(E.trial === song.number ? T.songs.stop : T.songs.hear)}</button>
-          <button class="btn small primary" data-pick>${esc(T.songs.pick)}</button></div></li>`).join("")}</ol></div>`;
+        <div class="cactions"><button class="btn small" data-hear>${esc(hearing(offer.part, song.number) ? T.songs.stop : T.songs.hear)}</button>
+          <button class="btn small primary" data-pick>${esc(T.songs.pick)}</button></div></li>`).join("")}</ol></div>`).join("")}</div>`;
   }
 
-  async function hearSong(number) {
-    const offer = E.songs;
+  function hearing(part, number) {
+    return !!E.trial && E.trial.part === part && E.trial.number === number;
+  }
+
+  function songPath(part, number) {
+    return `/api/projects/${encodeURIComponent(E.id)}/songs/${encodeURIComponent(part)}/${number}`;
+  }
+
+  async function hearSong(part, number) {
+    const offer = (E.songs || []).find((entry) => entry.part === part);
     if (!offer) return;
     try {
-      const described = await api(`/api/projects/${encodeURIComponent(E.id)}/songs/${number}`);
+      const described = await api(songPath(part, number));
       if (!E) return;
       if (E.mode === "exact") showLive();
-      E.trial = number;
+      E.trial = { part, number };
       E.player.load(described);
       seek(offer.start);
       E.player.play();
@@ -1600,9 +1610,9 @@
     drawInspector();
   }
 
-  async function pickSong(number) {
+  async function pickSong(part, number) {
     try {
-      await api(`/api/projects/${encodeURIComponent(E.id)}/songs/${number}`, {});
+      await api(songPath(part, number), {});
       stopSong();
       await loadComments();
       drawCommentMarks();
