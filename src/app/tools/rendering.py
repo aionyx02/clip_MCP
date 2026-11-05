@@ -20,7 +20,7 @@ from app.models.media import Asset, MediaAnalysis
 from app.models.plan import EditPlan
 from app.models.timeline.parts import Clip, Project, TrackType
 from app.models.job import Job, JobKind, JobStatus
-from app.engine import cards, looks, playback, resources, sync, texts
+from app.engine import cards, legibility, looks, playback, resources, sync, texts
 from app.engine.analysis import second_listen, with_words_heard_again
 from app.engine.probe import probe_file, speech_loudness
 from app.engine.reframe import Framing, frame_project, placement_at
@@ -29,7 +29,7 @@ from app.engine.levels import song_level, talking_in
 from app.engine.delivery import (
     CHECKS, chapter_metadata, chapters, check_delivery, light_steps, look_candidates, run_on_cuts,
 )
-from app.engine.frames import format_timestamp, storyboard_sheet
+from app.engine.frames import format_timestamp, still, storyboard_sheet
 from app.engine.subtitles import build_ass, place_cues
 from app.storage import housekeeping
 from app.workspace import output_dir
@@ -908,6 +908,76 @@ def _looks(clips: Sequence[Clip], assets: Mapping[str, Asset]) -> Dict[str, Tupl
             runtime.repo.save_looks(asset_id, new)
     return found
 
+def contrast_notes(project: Project) -> List[str]:
+    """Measure the white words of a cut against the picture behind them, and say where they are hard to read.
+
+    A title card is measured on its background as the render treats it — the
+    frame at its `at`, blurred, darkened or replaced by its colour — and words
+    over the footage on the frame in the middle of the stretch they show for,
+    through the name bar's box where they have one. Words on a picture laid
+    over the sequence are left out: what is behind them moves about the frame.
+
+    Args:
+        project: The cut, at the size and shape it will be rendered at.
+
+    Returns:
+        One line for each card or text below `legibility.LOW_CONTRAST`.
+    """
+    base = project.base_video_track
+    clips = sorted(base.clips, key=lambda clip: clip.timeline_in) if base else []
+    if not any(clip.card is not None or clip.shown_texts for clip in clips):
+        return []
+    assets = shared.referenced_assets(project)
+    framing = framing_of(project, assets)
+    fps = Fraction(project.fps_num, project.fps_den)
+    width, height = project.width, project.height
+
+    def frame_at(clip: Clip, seconds: float):
+        asset = assets.get(clip.asset_id)
+        if asset is None or not asset.has_video or not os.path.exists(asset.path):
+            return None
+        try:
+            return still(asset.path, seconds, width, height, placement_at(framing.get(clip.id), clip, seconds, fps))
+        except RuntimeError:
+            return None
+
+    notes = []
+    floor = f"{legibility.LOW_CONTRAST:g}:1"
+    for clip in clips:
+        when = format_timestamp(float(clip.timeline_in))
+        if clip.card is not None:
+            picture = frame_at(clip, float(clip.card.at))
+            if picture is None:
+                continue
+            ratio = legibility.words_contrast(cards.backdrop_image(picture, clip.card),
+                                              cards.placed(clip, width, height)["rows"])
+            if ratio < legibility.LOW_CONTRAST:
+                notes.append(
+                    f"title card {clip.id} 「{clip.card.title}」 at {when}: its white words stand {ratio:.1f}:1 against "
+                    f"the {clip.card.background} background behind them (from {float(clip.card.at):g}s of its file), "
+                    f"under the {floor} that large words need to read. Show another moment with `at` in "
+                    "set_title_card, or put them on a dark `colour`"
+                )
+            continue
+        for text in clip.shown_texts:
+            shown = texts.shown(clip, text)
+            if shown is None:
+                continue
+            middle = (max(text.start, clip.source_range.start) + min(text.end, clip.source_range.end)) / 2
+            picture = frame_at(clip, float(middle))
+            if picture is None:
+                continue
+            rows = texts.placed(text, width, height, project.caption_style)
+            ratio = legibility.words_contrast(picture, rows, texts.BOX_OPACITY)
+            if ratio < legibility.LOW_CONTRAST:
+                notes.append(
+                    f"words {text.id} 「{text.text}」 on clip {clip.id} at {format_timestamp(shown[0])}: white, they "
+                    f"stand {ratio:.1f}:1 against the picture behind them at {float(middle):g}s of its file, under the "
+                    f"{floor} that large words need to read. Move them with `x` and `y` in set_text to a darker "
+                    "part of the frame, or make them a `name`, which has a dark box behind it"
+                )
+    return notes
+
 @mcp.tool()
 def check_render(
     project_id: str,
@@ -957,7 +1027,10 @@ def check_render(
         that the next follows with no pause: nothing is cut off as the
         transcript has it, but only listening to the render tells whether the
         next sentence's first sound carries across. It never stops a render
-        either.
+        either. And `contrast`, the title cards and words over the footage
+        whose white letters stand out too little from the picture behind
+        them, measured on that picture as the render shows it, with what to
+        change. It never stops a render: the words still have their shadow.
 
     Raises:
         ValueError: If the project does not exist.
@@ -981,6 +1054,9 @@ def check_render(
     run_on = run_on_cuts(base.clips, analyses_of(project, listened=True))
     if run_on:
         checked["run_on"] = run_on
+    contrast = contrast_notes(reshaped(project, frame))
+    if contrast:
+        checked["contrast"] = contrast
     return checked
 
 # Whether edits start making what the browser needs to play them. Off where nobody will
