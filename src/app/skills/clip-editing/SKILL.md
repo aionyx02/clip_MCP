@@ -228,8 +228,8 @@ was not there to agree to them.
 9. Call `render_project` — it renders a preview unless told otherwise —
    with `burn_subtitles: true` if captions were stored. Even when the user
    asked for the final file, the preview comes first: a final render is
-   refused until a preview of the cut as it is now, in the same shape, has
-   finished.
+   refused until a preview of the picture as it is now, in the same shape,
+   has finished; after a change to the sound alone, `preview_sound` will do.
    Do not even out clip volumes by hand: the render normalizes the mix. Call
    `get_job` with `wait_seconds: 50` until the status is `completed`, `failed`,
    or `cancelled`. Look at what came out with `view_render` — captions and

@@ -73,6 +73,14 @@ class Job(BaseModel):
     project_version: Optional[int] = Field(
         default=None, description="The project's version when it was rendered, to tell whether it has changed since",
     )
+    picture: Optional[str] = Field(
+        default=None,
+        description="A fingerprint of everything that decides the picture of the cut rendered, to tell whether "
+                    "a later version shows the same thing (render jobs)",
+    )
+    sound: Optional[str] = Field(
+        default=None, description="A fingerprint of everything that decides its sound, likewise (render jobs)",
+    )
     captioned: bool = Field(default=False, description="Whether the render burns the captions in (render jobs)")
     frame: Optional[str] = Field(
         default=None, description="The shape it was rendered in, when not the project's own (render jobs)",
