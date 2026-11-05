@@ -15,7 +15,7 @@ from app.models.plan import (
 from app.models.semantic import SemanticClip
 from app.models.timeline.operations import EditOperation
 from app.models.timeline.parts import Project
-from app.engine import loudness
+from app.engine import loudness, playback
 from app.engine.plan.beats import plan_pieces
 from app.engine.plan.broll import broll_covers, broll_slots
 from app.engine.plan.checks import COMPILED_TRACKS, as_left, check_plan, check_recompile, with_cards
@@ -788,6 +788,8 @@ def preview_sound(
     heard, played = levels(voice), levels(music)
     for leftover in (voice, music, graph):
         os.remove(leftover)
+    # A final render after a change to the sound alone asks for this rather than a new preview.
+    runtime.repo.hear_sound(project_id, playback.mix_key(project))
     lines = [f"The mix is at {mix}.", *describe(parts_of(project, heard, played))]
     return ToolResult(content=["\n".join(lines), Image(data=chart(project, heard, played), format="png")])
 
