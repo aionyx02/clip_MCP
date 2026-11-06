@@ -19,7 +19,7 @@ from app.storage import housekeeping
 from app.storage.history import Version
 from app import runtime
 from app.runtime import mcp
-from app.tools import rendering, shared
+from app.tools import production, rendering, shared
 
 # What the user can mark a version as. `exported` is a third mark, never set by hand: a
 # version that was rendered out, not as a preview, wears it by itself.
@@ -335,6 +335,30 @@ def branch_project(project_id: str, name: str, commit: Optional[str] = None, not
 
     Returns:
         The new `project_id`, its `name`, and `branched_from`.
+
+    Refused while the project is being finished on your own (an unfinished
+    `auto` production): a branch is a new project, out of reach of what
+    that production still has to ask. Branch once the user has said so.
+
+    Raises:
+        ValueError: If the project or version does not exist, or an `auto`
+            production is finishing it.
+    """
+    owner = production.of_project(project_id)
+    if owner is not None and owner.mode == "auto":
+        raise ValueError(f"project {project_id} is being finished on your own (production {owner.id}, auto); "
+                         "it is not branched until the user says so, or the production is switched to "
+                         "interactive in their words with set_production_mode")
+    return start_branch(project_id, name, commit)
+
+def start_branch(project_id: str, name: str, commit: Optional[str] = None) -> dict:
+    """Start a branch; what `branch_project` does, and what the editor calls when the user starts one.
+
+    Args:
+        project_id: As for `branch_project`, and the rest likewise.
+
+    Returns:
+        As `branch_project`.
 
     Raises:
         ValueError: If the project or version does not exist.

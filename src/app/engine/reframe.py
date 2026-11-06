@@ -27,6 +27,32 @@ from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 from app.models.media import Asset, FaceMeasurement
 from app.models.timeline.parts import Clip, Project
 
+# The shapes a cut is delivered in, as width to height.
+FRAME_SHAPES = {"landscape": (16, 9), "portrait": (9, 16), "square": (1, 1)}
+
+def framed_size(width: int, height: int, frame: Optional[str]) -> Tuple[int, int]:
+    """Say how big a video of one size comes out in another shape.
+
+    The short side is kept, because that is the side a platform's resolution
+    is quoted by: 1080p is 1080 across the short side whichever way up it is.
+
+    Args:
+        width: The video's own width.
+        height: Its own height.
+        frame: `landscape`, `portrait`, `square`, or None for as it is.
+
+    Returns:
+        `(width, height)` in that shape.
+    """
+    if frame is None:
+        return width, height
+    across, down = FRAME_SHAPES[frame]
+    short = min(width, height)
+    even = lambda value: max(2, int(round(value / 2)) * 2)
+    if across >= down:
+        return even(short * across / down), short
+    return short, even(short * down / across)
+
 # How near the edge of the crop a face may sit before it counts as leaving: the outer
 # quarter of the window either side of centre. Provisional until there is a corpus.
 REFRAME_MARGIN = 0.25

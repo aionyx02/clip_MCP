@@ -17,7 +17,7 @@ from app.engine.frames import format_timestamp
 from app.engine.subtitles import place_cues
 from app import runtime
 from app.runtime import mcp
-from app.tools import rendering, shared
+from app.tools import production, rendering, shared
 
 @mcp.tool()
 def create_project(
@@ -26,6 +26,7 @@ def create_project(
     height: Annotated[int, Field(gt=0, multiple_of=2)] = 1080,
     fps_num: Annotated[int, Field(gt=0)] = 30,
     fps_den: Annotated[int, Field(gt=0)] = 1,
+    production_id: Optional[str] = None,
 ) -> dict:
     """Create an empty project.
 
@@ -43,6 +44,9 @@ def create_project(
         height: Output height in pixels; must be even.
         fps_num: Frame rate numerator, e.g. 30000 for 29.97 fps.
         fps_den: Frame rate denominator, e.g. 1001 for 29.97 fps.
+        production_id: The unfinished production this project is for, from
+            `start_production`; it is bound to the project. Refused when it
+            has a project already.
 
     Returns:
         The new project serialized as a dictionary, including its generated
@@ -51,11 +55,15 @@ def create_project(
     """
     if not name.strip():
         raise ValueError("a project needs a name: what the video is about, such as 'EP1 台北'")
+    if production_id is not None:
+        production.check_project_free(production_id)
     project = Project(
         id=str(uuid.uuid4()), name=name.strip(),
         width=width, height=height, fps_num=fps_num, fps_den=fps_den,
     )
     runtime.repo.add_project(project)
+    if production_id is not None:
+        production.bind_project(production_id, project.id)
     return with_preferences(shared.plain(project.model_dump()))
 
 def with_preferences(result: dict) -> dict:
