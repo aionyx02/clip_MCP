@@ -59,6 +59,7 @@ class NewClipSpec(BaseModel):
     layout: SkipJsonSchema[Optional[ClipLayout]] = None
     fit: SkipJsonSchema[Optional[ClipFit]] = None
     motion: SkipJsonSchema[Optional[Motion]] = None
+    stabilize: SkipJsonSchema[bool] = False
     # A title card the compiler puts in, or one made by hand that it puts back.
     card: SkipJsonSchema[Optional[TitleCard]] = None
 
@@ -492,6 +493,11 @@ class SetClipLookOp(BaseModel):
         default=None,
         description="For a photo: how it moves while on screen — `push`, `pull`, `pan_left`, `pan_right` or `none`. "
                     "Refused on a video clip; for a closer view of video use `fit` with `zoom`",
+    )
+    stabilize: Optional[bool] = Field(
+        default=None,
+        description="True steadies a handheld shot, enlarging it a little to hide the moving edges; false leaves "
+                    "it as shot",
     )
 
     @model_validator(mode="after")

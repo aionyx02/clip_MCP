@@ -50,6 +50,7 @@ def _as_made(pinned: Clip) -> dict:
         "layout": pinned.layout.model_dump() if pinned.layout else None,
         "fit": pinned.fit.model_dump() if pinned.fit else None,
         "motion": pinned.motion,
+        "stabilize": pinned.stabilize,
     }
 
 def _card_operation(clip_id: str, piece: Piece) -> dict:
@@ -234,6 +235,8 @@ def compile_operations(
             placed["speed"] = piece.speed
         if piece.keep_level:
             placed["keep_level"] = True
+        if piece.stabilize:
+            placed["stabilize"] = True
         if piece.transition is not None:
             kind, seconds, through, direction = piece.transition
             placed["transition_in"] = {"kind": kind, "seconds": seconds}

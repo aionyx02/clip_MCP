@@ -42,6 +42,7 @@ feedback are mapped in their own files.
 | 「轉場拿掉，改回硬切」 / back to a straight cut | `set_clip_look` with `clear_transition: true` |
 | 「開頭淡入、結尾淡出」 / fade in and out | `set_clip_look` `video_fade_in` on the first clip, `video_fade_out` on the last |
 | 「這段快轉」「放慢一點」 / speed it up or slow it down | In a compiled cut, `amend_plan` with `set_playback`, so what is laid over it moves too. Otherwise `set_clip_speed` with `speed`; 2.0 is twice as fast. Voices keep their pitch unless `preserve_pitch: false` |
+| 「這段太晃」「穩定一下」 / steady a shaky shot | In a compiled cut, `amend_plan` with `set_stabilize`; otherwise `set_clip_look` with `stabilize: true`. It enlarges the picture a little to hide the moving edges, and the render measures the shot first. Not on a photo or a title card. `check_render` lists under `shaky` the clips left shaking: ask before steadying them, since a vlog's shake may be the point |
 | 「這段亮一點／色彩濃一點」 / brighter or more colourful | `set_clip_look` with `color` `brightness` or `saturation`; ones you leave out keep their value |
 | 「改成黑白」 / black and white | `set_clip_look` with `color` `{"saturation": 0}` |
 | 「色溫暖一點／冷一點」 / warmer or cooler | `set_clip_look` with `color` `temperature`, below 6500 for warmer |

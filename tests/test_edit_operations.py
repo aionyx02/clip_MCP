@@ -164,6 +164,14 @@ def test_split_keeps_the_look_on_both_halves(source: str) -> None:
     assert float(halves["a"]["video_fade_in"]) == 1 and float(halves["a"]["video_fade_out"]) == 0
     assert float(halves["a2"]["video_fade_in"]) == 0 and float(halves["a2"]["video_fade_out"]) == 2
 
+def test_split_keeps_a_steadied_shot_steadied_on_both_halves(source: str) -> None:
+    """One shot cut in two must not jump from steadied, and enlarged, to shaky at the cut."""
+    project = build_project([video_track(), insert("a", source, 0, 6, stabilize=True, keep_level=True)])
+    edit(project, [{"action": "split_clip", "track_id": "main", "clip_id": "a", "new_clip_id": "a2", "at": 3}])
+    halves = {clip["id"]: clip for clip in clips_of(project)}
+    assert halves["a"]["stabilize"] is halves["a2"]["stabilize"] is True
+    assert halves["a"]["keep_level"] is halves["a2"]["keep_level"] is True
+
 def test_split_shortens_a_video_fade_that_no_longer_fits_its_half(source: str) -> None:
     project = build_project([video_track(), insert("a", source, 0, 8, video_fade_in=3, video_fade_out=3)])
     edit(project, [{"action": "split_clip", "track_id": "main", "clip_id": "a", "new_clip_id": "a2", "at": 1}])

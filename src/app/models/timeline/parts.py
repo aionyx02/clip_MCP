@@ -625,6 +625,11 @@ class Clip(BaseModel):
         description="For a photo: `push` closer, `pull` back, `pan_left`, `pan_right`, or `none` to hold it "
                     "still; null is a slow push. Ignored for video",
     )
+    stabilize: bool = Field(
+        default=False,
+        description="Steady a handheld shot: the camera's shake is measured on the clip's own frames and taken "
+                    "out, at the cost of enlarging the picture a little to hide the moving edges. Video only",
+    )
     card: Optional[TitleCard] = Field(
         default=None,
         description="Set on a title card: what it says and how its background looks. A card is silent, and its "

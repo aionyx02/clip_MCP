@@ -139,14 +139,19 @@ def render(project_id: str, path: Path, **options) -> None:
     Args:
         project_id: Project to render.
         path: File to write.
-        **options: Extra arguments for `build_command`.
+        **options: Extra arguments for `build_render`. The camera movement of
+            a clip to be steadied is measured first and kept beside `path`.
 
     Raises:
         AssertionError: If FFmpeg rejects the filter graph or fails.
     """
     project = repo.get_project(project_id)
     renderer, assets = FFmpegRenderer(), referenced_assets(project)
-    command = renderer.build_command(project, assets, str(path), **options)
+    command, passes = renderer.build_render(project, assets, str(path), transforms_dir=str(path.parent), **options)
+    for measuring in passes:
+        measured = subprocess.run(measuring["command"], capture_output=True)
+        assert measured.returncode == 0, measured.stderr.decode("utf-8", errors="replace")[-800:]
+        Path(measuring["part"]).replace(measuring["path"])
     target = options.get("loudness_target", DEFAULT_LOUDNESS_TARGET)
     if target is not None:
         # What the render worker does: measure the mix on its own, then write in its gain.

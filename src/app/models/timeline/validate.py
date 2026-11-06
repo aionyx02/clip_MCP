@@ -53,6 +53,12 @@ def validate_project(project: Project, assets: Mapping[str, Asset]) -> None:
                     f"clip {clip.id}: a layout box only means something on a video track above the base one; "
                     f"track {track.id} is not drawn on top of anything, so its clips fill the frame"
                 )
+            if clip.stabilize and (asset.still or clip.card is not None or not asset.has_video):
+                held = "a title card" if clip.card is not None else "a photo" if asset.still else "sound alone"
+                raise ValueError(
+                    f"clip {clip.id}: asks to be steadied, but it is {held}: there is no camera movement in it "
+                    "to measure or take out. Leave stabilize off for it"
+                )
             if clip.card is not None:
                 if track is not base:
                     raise ValueError(f"clip {clip.id}: a title card goes on the main video track, not {track.id}")
