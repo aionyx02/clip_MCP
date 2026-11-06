@@ -1047,10 +1047,13 @@ def check_render(
     """Check a cut for what would be noticed in the finished file, without rendering it.
 
     The same check `render_project` runs first and refuses a render over. It
-    looks for ten things: `bad_picture`, black or frozen source picture that
+    looks for eleven things: `bad_picture`, black or frozen source picture that
     reaches the screen, as far as the analysis measures it: black of half a
     second or more, frozen of two seconds or more, while anything shorter
-    shows only in a render's `frames` from `get_job`; `clipping`, a recording squared off at the ceiling,
+    shows only in a render's `frames` from `get_job`; `covered_card`,
+    full-frame picture on a track above the sequence, such as B-roll, laid
+    over a title card so its words are hidden, most likely after a card was
+    added by hand, which moves the sequence but not the tracks above; `clipping`, a recording squared off at the ceiling,
     which no amount of turning down undoes; `music`, music heard too close
     under somebody talking; `mid_speech`, a cut that lands
     inside a word or between two words of one phrase, or takes the start or
