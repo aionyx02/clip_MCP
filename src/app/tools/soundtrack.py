@@ -4,12 +4,12 @@ import hashlib
 import json
 import os
 from decimal import Decimal
-from typing import Annotated, Dict, List, Optional, Tuple
+from typing import Annotated, Dict, List, Optional
 
 from pydantic import Field
 
 from app.models.media import Source
-from app.models.plan import EditPlan, MusicCue, SetMusicCueOp
+from app.models.plan import SetMusicCueOp
 from app.models.timeline.parts import Clip, Project, TimeRange, Track, TrackType
 from app.models.offer import OfferedSong, SongOffer
 from app.engine import clap, fetch
@@ -352,7 +352,7 @@ def offer_songs(
         names.append(os.path.basename(asset.path))
     offer = SongOffer(project_id=project_id, start=round(start, 3), end=round(end, 3), songs=songs, beat_id=beat_id)
     # Heard as the plan's cue there would play it; else as loud as the music the cut has there.
-    found = _offered_cue(project, offer)
+    found = planning.offered_cue(project, offer)
     if found is not None:
         cue = found[1]
         offer = offer.model_copy(update={"volume": cue.volume, "fade_in": cue.fade_in, "fade_out": cue.fade_out})
@@ -419,17 +419,6 @@ def song_trial(project: Project, offer: SongOffer, number: int) -> Project:
     music[0].clips.sort(key=lambda clip: clip.timeline_in)
     return trial
 
-def _offered_cue(project: Project, offer: SongOffer) -> Optional[Tuple[EditPlan, MusicCue]]:
-    """The music cue of the plan the cut was compiled from that the offered stretch is, if it is one."""
-    plan = rendering.compiled_plan(project)
-    if plan is None or plan.music is None or (offer.beat_id is None and offer.start > 0):
-        return None
-    cue = next((cue for cue in plan.music.cues if cue.beat_id == offer.beat_id), None)
-    if cue is None and offer.start == 0:
-        # The first part is the cue that starts with the video, which may name no part.
-        cue = next((cue for cue in plan.music.cues if cue.beat_id is None), None)
-    return (plan, cue) if cue is not None else None
-
 def pick_song(project_id: str, part: str, number: int) -> dict:
     """Take the user's pick of one part's offered songs to the AI, as a comment on the stretch.
 
@@ -457,7 +446,7 @@ def pick_song(project_id: str, part: str, number: int) -> dict:
     asset = runtime.repo.get_assets([song.asset_id]).get(song.asset_id)
     name = os.path.basename(asset.path) if asset is not None else song.asset_id
     said = f"配樂選「{name}」，從歌的 {song.start:g} 秒開始（{song.asset_id}）"
-    found = _offered_cue(runtime.repo.get_project(project_id), offer)
+    found = planning.offered_cue(runtime.repo.get_project(project_id), offer)
     if found is not None:
         plan, cue = found
         amended = planning.amend_plan(plan.id, plan.version, [SetMusicCueOp(beat_id=cue.beat_id, asset_id=song.asset_id,

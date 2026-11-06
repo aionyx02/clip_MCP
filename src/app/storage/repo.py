@@ -757,6 +757,10 @@ class Repository:
         rows = self._query("SELECT data FROM song_offers_by_part WHERE project_id = ?", (project_id,))
         return sorted((SongOffer.model_validate_json(row[0]) for row in rows), key=lambda offer: offer.start)
 
+    def offered_project_ids(self) -> List[str]:
+        """The projects that have songs waiting for the user, in any part."""
+        return [row[0] for row in self._query("SELECT DISTINCT project_id FROM song_offers_by_part")]
+
     def song_offer(self, project_id: str, part: str) -> Optional[SongOffer]:
         """Read the songs put to the user for one part of a project, if any are."""
         rows = self._query("SELECT data FROM song_offers_by_part WHERE project_id = ? AND part = ?", (project_id, part))
