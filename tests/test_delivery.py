@@ -20,8 +20,10 @@ from app.engine.delivery import (
     chapter_metadata,
     chapters,
     check_delivery,
+    clock,
     cover_candidates,
     frames_around,
+    half_sentences,
     light_steps,
     look_candidates,
     run_on_cuts,
@@ -800,6 +802,150 @@ def test_a_cut_in_talking_with_no_word_timings_does_not_say_what_the_words_mark(
     found = checks(project_of(clip("a", "x", 0, at, 0)), {"x": analysis})
     assert [check for check, _ in found] == ["mid_speech"]
     assert "marks no sentence end" not in found[0][1]
+
+def spoken(*parts) -> MediaAnalysis:
+    """Analyze talking with pauses in it, split into sentences the way a transcription is.
+
+    A character a word, 0.2s each, as Whisper gives spoken Chinese; a number
+    between two lines is a pause of that many seconds. The sentences are cut
+    by `split_sentences`, the transcriber's own rule: at 。！？ or a pause of
+    `SENTENCE_PAUSE_SECONDS` or more, so a shorter pause stays inside one.
+
+    Args:
+        *parts: Lines and pauses, in order.
+
+    Returns:
+        The analysis.
+    """
+    from app.engine.analysis import split_sentences
+    from app.models.media import Transcript, TranscriptWord
+
+    words, at = [], 1.0
+    for part in parts:
+        if not isinstance(part, str):
+            at += part
+            continue
+        for character in part:
+            if character in "。，！？":
+                words[-1].text += character
+                continue
+            words.append(TranscriptWord(text=character, start=round(at, 2), end=round(at + 0.2, 2)))
+            at += 0.2
+    return MediaAnalysis(asset_id="x", duration=round(at + 1.0, 2), transcript=Transcript(
+        language="zh", model="t", segments=split_sentences(words)))
+
+def said_until(analysis: MediaAnalysis, said: str) -> float:
+    """Where the first time something is said ends, in seconds of the file."""
+    words = [word for segment in analysis.transcript.segments for word in segment.words]
+    text = "".join(word.text.rstrip("。，！？") for word in words)
+    return words[text.index(said) + len(said) - 1].end
+
+def test_a_clip_that_stops_on_a_word_leading_into_more_is_a_half_sentence() -> None:
+    # #238, as transcribed: the speaker trailed off on a drawn-out 「大概」 and paused, so the
+    # transcript ends the sentence there and the cut is clean, but the line says half a thing.
+    analysis = spoken("各位這是現在的樣子然後就是堪用，但還可以更好可以看一下它的機構這樣抽下來大概", 1.9,
+                      "就這樣那好，另外一個稍等一下")
+    end = said_until(analysis, "抽下來大概")
+    opened = said_until(analysis, "可以看一下")
+    project = project_of(clip("a", "x", 1.0, end, 0), clip("b", "y", 0, 3, end - 1.0))
+    assert checks(project, {"x": analysis}) == []
+    caption = PlacedCue(cue_id="c4", start=Decimal(str(round(opened - 1.0, 2))), end=Decimal(str(round(end - 1.0, 2))),
+                        text="它的機構這樣抽下來大概")
+    [note] = half_sentences(project.base_video_track.clips, {"x": analysis}, [caption])
+    assert note.startswith(f"clip a ends at {clock(end - 1.0)} ({end:.2f}s of the file)")
+    assert "caption 「它的機構這樣抽下來大概」" in note and "stops on 「大概」" in note
+    # Nothing earlier in the clip ends a sentence — no 。！？, no closing particle, no pause the
+    # transcriber ended one at — and that is said rather than left out.
+    assert "No sentence ends earlier in this clip" in note
+    # The end of the video is the same as a cut away from the speaker.
+    alone = project_of(clip("a", "x", 1.0, end, 0))
+    assert len(half_sentences(alone.base_video_track.clips, {"x": analysis})) == 1
+
+def test_a_clip_that_starts_partway_through_the_word_it_stops_on_names_that_word() -> None:
+    # The clip keeps only 「概」 of 「大概」: the sentence still stops on 大概, and saying so
+    # must not depend on how much of it the clip kept.
+    analysis = spoken("可以看一下它的機構這樣抽下來大概", 1.9, "就這樣")
+    end = said_until(analysis, "大概")
+    project = project_of(clip("a", "x", end - 0.2, end, 0))
+    [note] = half_sentences(project.base_video_track.clips, {"x": analysis})
+    assert "stops on 「大概」" in note
+
+def test_a_clip_that_stops_where_the_transcribed_sentence_goes_on_is_a_half_sentence() -> None:
+    # A breath inside one sentence is a clean place to cut the sound, but the sentence goes on.
+    analysis = spoken("早安今天天氣很好。", 0.8, "我們今天要去", 0.3, "台南吃牛肉湯", 1.0, "出發")
+    end = said_until(analysis, "要去")
+    project = project_of(clip("a", "x", 1.0, end + 0.15, 0), clip("b", "y", 0, 3, end - 0.85))
+    assert checks(project, {"x": analysis}) == []
+    [note] = half_sentences(project.base_video_track.clips, {"x": analysis})
+    assert "the words heard last, 「我們今天要去」" in note and "「台南吃牛肉湯」" in note
+    # Where it could end instead: the sentence before, in the file's own seconds, or where this one ends.
+    assert f"after 「早安今天天氣很好」 at {said_until(analysis, '天氣很好'):.2f}s of the file" in note
+    assert f"runs on to {said_until(analysis, '牛肉湯'):.2f}s" in note
+
+@pytest.mark.parametrize("parts, cut_after", [
+    # Marked by its punctuation, with only a breath before the next.
+    (("我們今天就先拍到這裡。", 0.3, "下禮拜再來"), "這裡"),
+    # Marked by a particle that closes it.
+    (("差不多結案了吧", 0.3, "那我們明天再來"), "結案了吧"),
+    # Ended by the transcriber at a pause, on a word that says all it needs to.
+    (("今天天氣很好", 1.0, "我們出門吧"), "很好"),
+])
+def test_a_clip_that_stops_at_a_sentence_end_is_not_a_half_sentence(parts, cut_after: str) -> None:
+    analysis = spoken(*parts)
+    end = said_until(analysis, cut_after)
+    project = project_of(clip("a", "x", 1.0, end + 0.1, 0), clip("b", "y", 0, 3, end - 0.9))
+    assert half_sentences(project.base_video_track.clips, {"x": analysis}) == []
+
+def test_a_cut_the_same_talking_picks_up_after_is_not_a_half_sentence() -> None:
+    analysis = spoken("可以看一下它的機構這樣抽下來大概", 1.9, "就是這樣一抽就出來了", 0.3, "很順")
+    end, resumes = said_until(analysis, "大概"), said_until(analysis, "大概") + 1.9
+    # The pause taken out of the middle: what comes next is what was said next.
+    tightened = project_of(clip("a", "x", 1.0, end, 0), clip("b", "x", resumes, resumes + 4.0, end - 1.0))
+    assert half_sentences(tightened.base_video_track.clips, {"x": analysis}) == []
+    # A clip split at a breath, both halves kept.
+    breath = said_until(analysis, "一抽就出來了")
+    halves = breath + 0.15 - resumes
+    split = project_of(clip("a", "x", resumes, breath + 0.15, 0), clip("b", "x", breath + 0.15, breath + 1.5, halves))
+    assert half_sentences(split.base_video_track.clips, {"x": analysis}) == []
+
+def test_a_cut_inside_a_word_is_left_to_mid_speech() -> None:
+    analysis = spoken("我們今天要去台南吃牛肉湯", 1.0, "出發")
+    end = said_until(analysis, "台南") - 0.1
+    project = project_of(clip("a", "x", 1.0, end, 0))
+    assert [check for check, _ in checks(project, {"x": analysis})] == ["mid_speech"]
+    assert half_sentences(project.base_video_track.clips, {"x": analysis}) == []
+
+# What a vlogger says, sentence by sentence, as a transcription of continuous Chinese hands it
+# back: no punctuation, a breath inside a sentence now and then, a pause between them.
+VLOG = (
+    "早安各位", 0.8, "今天要帶大家去台南", 0.3, "吃一間很有名的牛肉湯", 0.9, "我四點就起床了", 0.7,
+    "外面還是暗的", 1.1, "好我們到了", 0.8, "排隊的人真的很多", 0.3, "大概排了半小時", 0.9,
+    "這碗是招牌", 0.7, "湯頭很清", 0.3, "肉也很嫩", 1.2, "老闆說每天現切", 0.8, "所以要早點來", 0.9,
+    "接下來去市場", 0.7, "買一些水果回家", 1.0, "芒果現在正好吃", 0.8, "一斤一百", 0.9, "我買了兩斤",
+    0.7, "今天收穫滿滿", 1.0, "我們下次見",
+)
+
+def test_on_continuous_talking_only_a_cut_inside_a_sentence_is_a_half_sentence() -> None:
+    """The rate this fires at on every cut a vlog's sound lets through, as each clip's end.
+
+    None of the sentences ends on anything that marks an end, so a rule that
+    asked for 。！？ or a particle would call all 16 cuts between them half a
+    sentence. This one goes by where the transcriber ended the sentence: it is
+    quiet on all 16, and fires on the 3 breaths inside one, of which
+    「排隊的人真的很多 / 大概排了半小時」 and 「湯頭很清 / 肉也很嫩」 could be
+    heard as two sentences. That is the price: 2 wrong notes in 19 cuts here.
+    """
+    analysis = spoken(*VLOG)
+    segments = analysis.transcript.segments
+    breaths = [(before.end + after.start) / 2 for segment in segments
+               for before, after in zip(segment.words, segment.words[1:]) if after.start - before.end >= 0.2]
+    ends = [segment.end + 0.1 for segment in segments[:-1]]
+    unmarked = [segment for segment in segments if not segment.text.endswith(tuple("。！？吧啊"))]
+    assert len(segments) == 17 and len(unmarked) == 17 and len(breaths) == 3
+    fired = {at for at in [*breaths, *ends]
+             if half_sentences(project_of(clip("a", "x", 0.5, at, 0)).base_video_track.clips, {"x": analysis})}
+    # Every breath inside a sentence, which leaves the rest of it out; no sentence end at all.
+    assert fired == set(breaths)
 
 def test_a_cut_that_takes_off_a_start_the_transcript_missed_is_found() -> None:
     # The second sentence really starts at 5.6, where the silence ends; the transcript says
