@@ -114,6 +114,8 @@ window.T = {
     gone: "找不到原始檔",
     goneHint: "原始檔案被移動或刪除了。不需要的話可以從素材庫移除。",
     fastTranscript: "快速聽打",
+    generated: "AI 生成",
+    generatedHint: (tool, model) => `用 ${model ? `${tool} 的 ${model}` : tool} 生成的檔案，發布前的注意事項會列出它在成片裡的位置。`,
     fastTranscriptHint: "這個檔案是用快速模式聽打的，錯字和字的時間點可能比較不準。檢查字幕時請多留意；需要時可以請 AI 改用精準模式重新聽打。",
     remove: "移除",
     removeTitle: (what) => `從素材庫移除${what}？`,

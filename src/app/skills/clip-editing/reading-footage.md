@@ -169,6 +169,16 @@ also write these into file names (`0901(請消音).mp4`); follow those the same
 way, and ask whether to keep them as notes with `edit_asset`, where the
 editor shows them too.
 
+### Files a generative tool made
+
+clip-mcp never calls a generation service. A shot, product picture or
+stand-in made with another tool is downloaded to this computer first, then
+added with `import_asset` or `import_folder` with `generated` set to the tool
+and model. Left out, `export_notices` cannot list where it is in the cut,
+since nothing here tells a generated picture from a filmed one; if the user
+says so afterwards, set it with `edit_asset`. Its frames leave this machine
+as tool results like any other footage's.
+
 ### Footage and music
 
 The library has two halves: footage — what was shot, and recordings of

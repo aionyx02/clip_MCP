@@ -199,11 +199,12 @@ def export_notices(
     Call it after the final render, twice. The first time, without `text`, it
     says what is in the cut that may need permission or has to be disclosed —
     the music under it, where each song came from and what each file says
-    about itself, other voices, more than one face on screen — and nothing is
-    written. Write the notices from that, in the user's language, and call
+    about itself, the files a generative AI tool made and where they are,
+    other voices, more than one face on screen — and nothing is written. Write the notices from that, in the user's language, and call
     again with `text`: for each thing, what the concern is and how to resolve
     it (the credit line a CC BY song needs, a source to confirm for music
-    whose licence nobody gave, the consent of somebody heard or seen). Add
+    whose licence nobody gave, the AI label a platform asks for on generated
+    pictures, the consent of somebody heard or seen). Add
     what you see in the frames and hear in the footage that no measurement
     finds: a brand or a logo, music playing in the room, a screen, somebody's
     work shown. Say plainly where a question is the user's to answer rather
