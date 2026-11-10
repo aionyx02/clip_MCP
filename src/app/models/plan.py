@@ -626,6 +626,11 @@ class EditPlan(BaseModel):
     )
     music: Optional[MusicPlan] = None
     pacing: Pacing = Field(default_factory=Pacing, description="How tight the whole cut is")
+    brand_kit: Optional[str] = Field(
+        default=None,
+        description="The brand kit this video wears, by name: its logo over the cut, its closing card at the end "
+                    "(counted in the length), its colour and its font. Only one the user chose; null for none",
+    )
     created_at: datetime = Field(default_factory=_utc_now)
     updated_at: datetime = Field(default_factory=_utc_now)
 

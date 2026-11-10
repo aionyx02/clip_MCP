@@ -67,10 +67,13 @@ def create_project(
     return with_preferences(shared.plain(project.model_dump()))
 
 def with_preferences(result: dict) -> dict:
-    """Add how the user likes their videos to what a tool says, when anything is kept."""
+    """Add how the user likes their videos to what a tool says, when anything is kept: preferences and brand kits."""
     kept = runtime.repo.preferences()
     if kept:
         result["preferences"] = [{"id": preference.id, "text": preference.text} for preference in kept]
+    kits = runtime.repo.brand_kits()
+    if kits:
+        result["brand_kits"] = [kit.model_dump(mode="json", exclude={"saved_at"}) for kit in kits]
     return result
 
 @mcp.tool()
@@ -339,8 +342,10 @@ def apply(
                 if span is not None:
                     op.loops[asset_id] = (Decimal(str(span[0])), Decimal(str(span[1])))
     # A photo a title card is to stand on is not in the cut until the card puts it there.
-    known = runtime.repo.get_assets({clip.asset_id for track in project.tracks for clip in track.clips}
-                                    | {op.photo_asset_id for op in operations if getattr(op, "photo_asset_id", None)})
+    # Nor is a logo, until it is set.
+    known = runtime.repo.get_assets(project.asset_ids
+                                    | {op.photo_asset_id for op in operations if getattr(op, "photo_asset_id", None)}
+                                    | {op.logo.asset_id for op in operations if getattr(op, "logo", None)})
     for op in operations:
         apply_operation(project, op, known)
     if stamp is not None:

@@ -7,13 +7,14 @@ from app.models.media import Asset
 from app.models.timeline.operations import (
     AddClipOp, AddSubtitleOp, AddTextOp, AddTitleCardOp, AddTrackOp, DeleteOp, EditOperation, EditSubtitleOp,
     FitTrackOp, InsertClipOp, MoveClipOp, NewClipSpec, RemoveTextOp, RenameProjectOp, ReorderClipOp, SetCaptionStyleOp,
-    SetClipAudioOp, SetClipLookOp, SetClipPinnedOp, SetClipSpeedOp, SetMarkersOp, SetSubtitlesOp, SetTextOp,
-    SetTitleCardOp, SetTrackAudioOp, SplitClipOp, TextTimes, TrimClipOp,
+    SetClipAudioOp, SetClipLookOp, SetClipPinnedOp, SetClipSpeedOp, SetLogoOp, SetMarkersOp, SetSubtitlesOp,
+    SetTextOp, SetTitleCardOp, SetTrackAudioOp, SplitClipOp, TextTimes, TrimClipOp,
 )
 from app.models.timeline.parts import (
     CAPTION_PRESETS, Clip, CueWord, Project, SubtitleCue, TextLayer, TimeRange, TitleCard, Track, TrackType,
     card_background,
 )
+from app.models.timeline.validate import logo_picture
 
 
 def _in_the_file(
@@ -562,6 +563,12 @@ def apply_operation(project: Project, op: EditOperation, assets: Mapping[str, As
 
     if isinstance(op, RenameProjectOp):
         project.name = op.name
+        return
+
+    if isinstance(op, SetLogoOp):
+        if op.logo is not None:
+            logo_picture(op.logo.asset_id, assets)
+        project.logo = op.logo
         return
 
     if isinstance(op, SetSubtitlesOp):

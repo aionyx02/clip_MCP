@@ -8,7 +8,8 @@ from pydantic.json_schema import SkipJsonSchema
 
 from app.models.timeline.parts import (
     CAPTION_PRESETS, COLOUR, KEEP_LEVEL, MAX_SPEED, MIN_SPEED, TITLE_CARD_LONGEST, TITLE_CARD_SECONDS,
-    TITLE_CARD_SHORTEST, CaptionStyle, CardBackground, ClipFit, ClipLayout, ColorAdjust, Marker, Motion, SubtitleCue,
+    TITLE_CARD_SHORTEST, CaptionStyle, CardBackground, ClipFit, ClipLayout, ColorAdjust, LogoLayer, Marker, Motion,
+    SubtitleCue,
     TextStyle, TimeRange, TitleCard, TrackType, Transition, VoiceCleanup,
 )
 
@@ -520,6 +521,15 @@ class SetClipLookOp(BaseModel):
                 raise ValueError(f"give either {name} or {cleared}, not both")
         return self
 
+class SetLogoOp(BaseModel):
+    """Edit operation that holds a picture in a corner over the whole cut, or takes it off.
+
+    A plan naming a brand kit puts the kit's logo here when it is compiled.
+    """
+
+    action: Literal["set_logo"] = "set_logo"
+    logo: Optional[LogoLayer] = Field(..., description="The logo; null takes it off")
+
 class RenameProjectOp(BaseModel):
     """Edit operation that gives the project a new name. Every project has one."""
 
@@ -648,6 +658,7 @@ EditOperation = Annotated[
         SplitClipOp, ReorderClipOp, RenameProjectOp, SetTrackAudioOp, SetClipAudioOp,
         SetClipLookOp, SetClipPinnedOp, SetClipSpeedOp, SetMarkersOp, SetSubtitlesOp, EditSubtitleOp, AddSubtitleOp,
         SetCaptionStyleOp, FitTrackOp, AddTitleCardOp, SetTitleCardOp, AddTextOp, SetTextOp, RemoveTextOp,
+        SetLogoOp,
     ],
     Field(discriminator="action"),
 ]

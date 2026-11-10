@@ -114,7 +114,10 @@ that doubt settled without the user. After a preview, `ask_user` the two or
 three things you weighed and could not settle, and wait for the replies in
 `get_comments`. An answer about their videos in general — 「開場都要短」 — goes
 into `remember_preference`, or the next project asks it again;
-`forget_preference` when it no longer holds.
+`forget_preference` when it no longer holds. Their logo, brand colour, font
+or closing card goes into `save_brand_kit` instead, since a preference is
+only words and nothing puts it on a cut; a plan wears the kit by naming it in
+`brand_kit`, and `forget_brand_kit` drops it.
 
 ## What the complaint means
 

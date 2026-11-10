@@ -31,6 +31,10 @@ BLUR_SHARE = 1 / 25
 BLUR_DIM = -0.25
 # The same for a photo shown as it is, less, since it is meant to be seen. Provisional (roadmap §13).
 PICTURE_DIM = -0.15
+# Provisional: the box a logo on a card is fitted into, as shares of the frame's width and
+# height. Big enough to be the thing a closing card is about, small enough to leave the words room.
+CARD_LOGO_WIDTH = 0.4
+CARD_LOGO_HEIGHT = 0.25
 
 
 def backdrop_filter(card: TitleCard, width: int, height: int) -> str:
@@ -82,7 +86,9 @@ def placed(clip: Clip, width: int, height: int) -> dict:
     """Place a card's words in the frame.
 
     The title is centred, the line under it smaller; the two together sit
-    in the middle of the frame, however many lines the title wraps to.
+    in the middle of the frame, however many lines the title wraps to. A
+    card with a logo has it above the words, fitted into a box of its own,
+    and the box and the words are centred together.
 
     Args:
         clip: The card's clip.
@@ -91,7 +97,9 @@ def placed(clip: Clip, width: int, height: int) -> dict:
 
     Returns:
         `start` and `end` on the timeline, `fade` in seconds, and `rows`:
-        each `{text, size, y}`, `y` the centre of the line in frame pixels.
+        each `{text, size, y}`, `y` the centre of the line in frame pixels;
+        and for a card with a logo, `logo`: `{x, y, width, height}`, the box
+        it is fitted into, in frame pixels.
     """
     card = clip.card
     size = round(min(width, height) * TITLE_SHARE)
@@ -103,6 +111,14 @@ def placed(clip: Clip, width: int, height: int) -> dict:
     gap = round(small * 0.5) if card.subtitle else 0
     total = sum(row_size * CAPTION_LINE_HEIGHT for _, row_size in rows) + gap
     y = height / 2 - total / 2
+    logo = None
+    if card.logo_asset_id:
+        box_width, box_height = 2 * round(width * CARD_LOGO_WIDTH / 2), 2 * round(height * CARD_LOGO_HEIGHT / 2)
+        # As much air between the logo and the title as half the title is tall.
+        under = round(size * 0.5)
+        y = height / 2 - (box_height + under + total) / 2
+        logo = {"x": (width - box_width) // 2, "y": round(y), "width": box_width, "height": box_height}
+        y += box_height + under
     placed_rows = []
     for index, (text, row_size) in enumerate(rows):
         if index and row_size != rows[index - 1][1]:
@@ -112,7 +128,7 @@ def placed(clip: Clip, width: int, height: int) -> dict:
         y += step
     return {
         "start": float(clip.timeline_in), "end": float(clip.timeline_out), "fade": TEXT_FADE_SECONDS,
-        "rows": placed_rows,
+        "rows": placed_rows, **({"logo": logo} if logo else {}),
     }
 
 

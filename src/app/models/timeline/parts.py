@@ -505,6 +505,35 @@ class TitleCard(BaseModel):
     beat_id: Optional[str] = Field(
         default=None, description="The part of the plan it opens, when the plan put it there",
     )
+    logo_asset_id: Optional[str] = Field(
+        default=None, description="A picture from the library drawn whole above the title, such as a logo",
+    )
+    end: bool = Field(
+        default=False, description="The closing card a brand kit puts at the end of the cut",
+    )
+
+# Where a logo sits over the picture.
+LogoCorner = Literal["top_left", "top_right", "bottom_left", "bottom_right"]
+# Provisional: how far a logo stands in from the frame's edges, as a share of its short side.
+# Clear of the edge a TV or a rounded phone screen crops, not measured against anything.
+LOGO_MARGIN = 0.04
+
+class LogoLayer(BaseModel):
+    """A picture held in a corner over the whole cut, such as a brand's logo.
+
+    Not a clip: it has no length of its own, and follows whatever the cut
+    becomes, so a trim never leaves it running short or past the end. It is
+    drawn over everything but the words, and not over a title card that
+    carries a logo of its own.
+    """
+
+    asset_id: str = Field(..., description="The picture, from the library")
+    corner: LogoCorner = Field(default="top_right")
+    opacity: float = Field(default=0.85, gt=0, le=1, description="1 is solid")
+    width: float = Field(default=0.12, ge=0.03, le=0.4, description="How wide it is, as a share of the frame's width")
+    brand_kit: Optional[str] = Field(
+        default=None, description="The brand kit it came from, when a plan put it there; null when set by hand",
+    )
 
 TextStyle = Literal["name", "place", "headline", "free"]
 
@@ -843,6 +872,9 @@ class Project(BaseModel):
         description="How those captions are drawn: where they sit, how big they are, whether they light up "
                     "word by word, and whether they say who is talking",
     )
+    logo: Optional[LogoLayer] = Field(
+        default=None, description="A picture held in a corner over the whole cut, such as a logo",
+    )
 
     @field_validator("subtitles", mode="before")
     @classmethod
@@ -884,6 +916,16 @@ class Project(BaseModel):
             The first video track, or None when the project has none.
         """
         return next(iter(self.video_tracks), None)
+
+    @property
+    def asset_ids(self) -> set:
+        """Every file the cut plays or shows: its clips', and the logos over it and on its cards."""
+        used = {clip.asset_id for track in self.tracks for clip in track.clips}
+        used |= {clip.card.logo_asset_id for track in self.tracks for clip in track.clips
+                 if clip.card is not None and clip.card.logo_asset_id}
+        if self.logo is not None:
+            used.add(self.logo.asset_id)
+        return used
 
     @computed_field(description="Length of the edited video (seconds): the end of the last clip on the bottom video track")
     @property

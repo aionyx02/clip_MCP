@@ -46,7 +46,7 @@ def asset_id_for(name: str) -> str:
     return named[0].id if named else name
 
 def referenced_assets(project: Project) -> dict[str, Asset]:
-    """Fetch the assets referenced by a project's clips.
+    """Fetch the assets referenced by a project's clips and the logos drawn over it.
 
     Args:
         project: Project whose clips are inspected.
@@ -55,7 +55,7 @@ def referenced_assets(project: Project) -> dict[str, Asset]:
         The registered assets used by the project, keyed by asset ID. IDs that
         are not registered are omitted.
     """
-    return runtime.repo.get_assets(clip.asset_id for track in project.tracks for clip in track.clips)
+    return runtime.repo.get_assets(project.asset_ids)
 
 def get_asset(asset_id: str) -> Asset:
     """Fetch a registered asset.

@@ -13,6 +13,7 @@ from app.models.plan import (
     EditPlan, MusicCue, PlanAmendment, SetMusicCueOp, Trim, TrimKind, apply_amendment, describe_amendment,
     with_whole_clip_ids,
 )
+from app.models.brand import BrandKit
 from app.models.offer import SongOffer
 from app.models.semantic import SemanticClip
 from app.models.timeline.operations import EditOperation
@@ -76,6 +77,10 @@ def _plan_context(plan: EditPlan) -> tuple:
         if analysis is not None:
             cuts[asset_id] = clean_cuts(rendering.listened_to(analysis, budget) if asset_id in footage else analysis)
     return timeline, {clip.id: clip for clip in clips}, children, shared.dated(runtime.repo.get_assets(footage | songs)), cuts
+
+def _brand(plan: EditPlan) -> Optional[BrandKit]:
+    """The brand kit a plan names, as kept; None when it names none or one that is not kept."""
+    return runtime.repo.brand_kit(plan.brand_kit) if plan.brand_kit else None
 
 def _require_plan(plan_id: Optional[str]) -> EditPlan:
     """Fetch a plan, or the one saved most recently.
@@ -154,7 +159,7 @@ def save_plan(plan: EditPlan, note: str = "", production_id: Optional[str] = Non
     stored = runtime.repo.save_plan(stamped, note)
     if production_id is not None:
         production.bind_plan(production_id, stored.id)
-    problems, notes = check_plan(stored, *_plan_context(stored))
+    problems, notes = check_plan(stored, *_plan_context(stored), kit=_brand(stored))
     newest = runtime.repo.get_semantic_timeline(None)
     if newest is not None and newest.id != timeline.id:
         notes.append(Note(f"a newer timeline ({newest.id}) has been built since; this plan is about {timeline.id}",
@@ -420,7 +425,7 @@ def amend_plan(plan_id: str, expected_version: int, amendments: list[PlanAmendme
     for amendment in amendments:
         if isinstance(amendment, SetMusicCueOp) and amendment.asset_id is not None:
             _drop_picked_offers(stored, amendment)
-    problems, notes = check_plan(stored, *_plan_context(stored))
+    problems, notes = check_plan(stored, *_plan_context(stored), kit=_brand(stored))
     return {
         "plan_id": stored.id,
         "version": stored.version,
@@ -540,7 +545,7 @@ def revert_plan(plan_id: str, to_version: int, expected_version: int, note: str 
         earlier.model_copy(update={"version": plan.version}),
         f"back to version {to_version}" + (f" — {note}" if note else ""),
     )
-    problems, notes = check_plan(stored, *_plan_context(stored))
+    problems, notes = check_plan(stored, *_plan_context(stored), kit=_brand(stored))
     return {
         "plan_id": stored.id,
         "version": stored.version,
@@ -603,10 +608,12 @@ def validate_plan(plan_id: Optional[str] = None) -> dict:
     """
     plan = _require_plan(plan_id)
     timeline, clips, children, assets, cuts = _plan_context(plan)
-    problems, notes = check_plan(plan, timeline, clips, children, assets, cuts)
-    # Title cards in, as the compile lays them: only the plan's own, with no project to say
-    # what else is on the cut.
-    pieces = [] if problems else with_cards(plan, plan_pieces(plan, clips, children, assets, cuts), assets, cuts, None)
+    kit = _brand(plan)
+    problems, notes = check_plan(plan, timeline, clips, children, assets, cuts, kit=kit)
+    # Title cards in, as the compile lays them: only the plan's own and its brand kit's closing
+    # card, with no project to say what else is on the cut.
+    pieces = [] if problems else with_cards(plan, plan_pieces(plan, clips, children, assets, cuts), assets, cuts,
+                                            None, kit)
     return {
         "ok": not problems,
         "problems": problems,
@@ -665,7 +672,8 @@ def compile_plan(project_id: str, expected_version: int, plan_id: Optional[str] 
     """
     plan = _require_plan(plan_id)
     timeline, clips, children, assets, cuts = _plan_context(plan)
-    problems, notes = check_plan(plan, timeline, clips, children, assets, cuts)
+    kit = _brand(plan)
+    problems, notes = check_plan(plan, timeline, clips, children, assets, cuts, kit=kit)
     if problems:
         raise ValueError("this plan cannot be compiled yet:\n- " + "\n- ".join(problems))
 
@@ -680,14 +688,14 @@ def compile_plan(project_id: str, expected_version: int, plan_id: Optional[str] 
     # The B-roll and the music as the compile lays them, over and under the cut with its title
     # cards: without them the music runs short, and a stretch pinned past where the cut would end
     # is taken for one the plan dropped.
-    played = with_cards(plan, pieces, assets, cuts, project)
+    played = with_cards(plan, pieces, assets, cuts, project, kit)
     covers, _, _ = broll_covers(plan, played, clips, assets, cuts)
     beds = music_beds(plan, played, assets, cuts)
     blocked = check_recompile(plan, project, pieces, covers, beds)
     if blocked:
         raise ValueError("compiling would undo work already on this project:\n- " + "\n- ".join(blocked))
 
-    built, provenance = compile_operations(plan, clips, children, assets, project, cuts)
+    built, provenance = compile_operations(plan, clips, children, assets, project, cuts, kit)
     operations = OPERATIONS.validate_python(built)
 
     def record(edited: Project) -> None:
@@ -888,7 +896,7 @@ def preview_plan_diff(
     for plan_id, version in ((before_plan_id, before_version), (after_plan_id, after_version)):
         plan = _plan_at(plan_id, version)
         timeline, clips, children, assets, known = _plan_context(plan)
-        problems, _ = check_plan(plan, timeline, clips, children, assets, known)
+        problems, _ = check_plan(plan, timeline, clips, children, assets, known, kit=_brand(plan))
         if problems:
             raise ValueError(f"plan {plan_id} does not lay out yet:\n- " + "\n- ".join(problems))
         cuts.append((plan, plan_pieces(plan, clips, children, assets, known), assets))
@@ -971,5 +979,5 @@ def propose_broll(plan_id: Optional[str] = None) -> dict:
     """
     plan = _require_plan(plan_id)
     _, clips, children, assets, cuts = _plan_context(plan)
-    pieces = with_cards(plan, plan_pieces(plan, clips, children, assets, cuts), assets, cuts, None)
+    pieces = with_cards(plan, plan_pieces(plan, clips, children, assets, cuts), assets, cuts, None, _brand(plan))
     return {"plan_id": plan.id, "slots": broll_slots(plan, pieces, clips, cuts)}

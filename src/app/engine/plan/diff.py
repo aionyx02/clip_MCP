@@ -95,6 +95,8 @@ def diff_plans(before: EditPlan, after: EditPlan) -> Dict[str, List[str]]:
         top.append(f"length: {before.target.seconds} → {after.target.seconds}")
     if before.target.platform != after.target.platform:
         top.append(f"platform: {before.target.platform} → {after.target.platform}")
+    if before.brand_kit != after.brand_kit:
+        top.append(f"brand kit: {before.brand_kit} → {after.brand_kit}")
     if before.timeline_id != after.timeline_id:
         top.append(f"footage: {before.timeline_id} → {after.timeline_id}")
     if pace_of(before) != pace_of(after):

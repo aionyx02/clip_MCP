@@ -7,6 +7,7 @@ from contextlib import contextmanager
 from datetime import datetime, timezone
 from typing import Callable, Dict, Iterable, Iterator, List, Mapping, Optional, Set, Tuple
 
+from app.models.brand import BrandKit
 from app.models.comment import Comment, Preference
 from app.models.job import Job
 from app.models.media import Asset, MediaAnalysis
@@ -150,6 +151,10 @@ _MIGRATIONS: List[List[str]] = [
         # A request to make a video, kept so a new conversation can pick it up. Only what cannot be
         # worked out again is kept; how far it has got is read off the rest each time.
         "CREATE TABLE IF NOT EXISTS productions (id TEXT PRIMARY KEY, data TEXT NOT NULL)",
+    ],
+    [
+        # A brand's logo, colour, font and closing card, kept by name for every project after.
+        "CREATE TABLE IF NOT EXISTS brand_kits (name TEXT PRIMARY KEY, data TEXT NOT NULL)",
     ],
 ]
 # Footage and music are filed apart, each in folders of its own; projects in theirs.
@@ -773,6 +778,27 @@ class Repository:
         """Forget one; False when there was none by that ID."""
         with self._transaction() as conn:
             return conn.execute("DELETE FROM preferences WHERE id = ?", (preference_id,)).rowcount > 0
+
+    def brand_kits(self) -> List[BrandKit]:
+        """Read every brand kit, by name."""
+        kept = [BrandKit.model_validate_json(row[0]) for row in self._query("SELECT data FROM brand_kits")]
+        return sorted(kept, key=lambda kit: kit.name)
+
+    def brand_kit(self, name: str) -> Optional[BrandKit]:
+        """Read one brand kit by its name, or None."""
+        rows = self._query("SELECT data FROM brand_kits WHERE name = ?", (name,))
+        return BrandKit.model_validate_json(rows[0][0]) if rows else None
+
+    def save_brand_kit(self, kit: BrandKit) -> None:
+        """Keep a brand kit, replacing one of the same name."""
+        with self._transaction() as conn:
+            conn.execute("INSERT OR REPLACE INTO brand_kits (name, data) VALUES (?, ?)",
+                         (kit.name, kit.model_dump_json()))
+
+    def delete_brand_kit(self, name: str) -> bool:
+        """Forget a brand kit; False when there was none by that name."""
+        with self._transaction() as conn:
+            return conn.execute("DELETE FROM brand_kits WHERE name = ?", (name,)).rowcount > 0
 
     def song_offers(self, project_id: str) -> List[SongOffer]:
         """Read the songs put to the user for a project, a set per part, in the order the parts play."""
@@ -1572,7 +1598,7 @@ class Repository:
     def delete_unused_assets(self, asset_ids: Iterable[str]) -> Dict[str, Dict[str, List[str]]]:
         """Take files out of the library, unless anything still uses one of them.
 
-        A file is in use while a project has a clip of it, the AI's current
+        A file is in use while a project has a clip of it or shows it as a logo, the AI's current
         plan for a cut uses it (a selection, a cutaway or music), or an
         analysis of it is running. Looking and deleting happen in one write
         transaction, so nothing can start using a file between the two.
@@ -1601,7 +1627,7 @@ class Repository:
 
             for (data,) in conn.execute("SELECT data FROM projects").fetchall():
                 project = Project.model_validate_json(data)
-                for asset_id in wanted & {clip.asset_id for track in project.tracks for clip in track.clips}:
+                for asset_id in wanted & project.asset_ids:
                     note(asset_id, "projects", project.name or project.id)
             for (data,) in conn.execute("SELECT data FROM plans").fetchall():
                 plan = json.loads(data)
