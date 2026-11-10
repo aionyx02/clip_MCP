@@ -1,8 +1,10 @@
+import functools
 import hashlib
 import json
 import math
 import os
 import re
+import subprocess
 import uuid
 from dataclasses import dataclass, field
 from decimal import Decimal
@@ -10,7 +12,7 @@ from fractions import Fraction
 from statistics import median
 from typing import Callable, Dict, FrozenSet, List, Mapping, Optional, Sequence, Tuple
 from app.engine import cards, loudness, resources, stills
-from app.engine.ffmpeg import escape_filter_path
+from app.engine.ffmpeg import escape_filter_path, hidden_window_flags
 from app.engine.reframe import Framing, crop_filter
 from app.models.media import Asset, MediaAnalysis
 from app.models.timeline.parts import TOUCHING_SECONDS, Clip, Dip, Project, TrackType, Transition, VoiceCleanup, Wipe
@@ -84,6 +86,19 @@ SIBILANCE_INTENSITY = 0.4
 # Raised whenever the picture chain changes in a way its text does not show, so a
 # cached picture made by the old chain is never mistaken for one made by the new.
 PICTURE_CACHE_VERSION = 1
+# Steadying a clip (#235): vidstabdetect measures the camera's movement on the clip's own frames
+# and vidstabtransform takes it out. Provisional, all three, set on one synthetic shaky clip
+# rather than against anyone watching: how much shake to expect on vidstab's 1 to 10 (8, a hand
+# walking, over its default 5 for a camera held fairly still); how hard it searches for each move
+# (15, its most careful); and how many frames either side the camera's path is smoothed over —
+# half a second at 30 fps, so a deliberate pan stays and the tremble in it goes. `optzoom=1`
+# enlarges the picture once, by as little as hides the moving edges anywhere in the clip: that
+# crop is the price of steadying.
+STABILIZE_SHAKINESS = 8
+STABILIZE_ACCURACY = 15
+STABILIZE_SMOOTHING = 15
+# Raised whenever what the transforms are measured on changes in a way its text does not show.
+TRANSFORMS_VERSION = 1
 # The rate the stems of a sound preview are written at: they are measured, not listened to.
 STEM_SAMPLE_RATE = 8000
 
@@ -375,6 +390,26 @@ def _layout(clips: List[Clip], fps: Fraction) -> List[Segment]:
         ended = Fraction(clip.timeline_out)
     return segments
 
+@functools.lru_cache(maxsize=None)
+def can_stabilize(ffmpeg_bin: str = "ffmpeg") -> bool:
+    """Say whether this FFmpeg can steady a clip: both vidstab filters are only there with libvidstab.
+
+    Args:
+        ffmpeg_bin: Path to, or name of, the FFmpeg executable.
+
+    Returns:
+        True when `vidstabdetect` and `vidstabtransform` are both built in.
+    """
+    try:
+        listed = subprocess.run(
+            [ffmpeg_bin, "-hide_banner", "-loglevel", "quiet", "-filters"], stdin=subprocess.DEVNULL,
+            capture_output=True, encoding="utf-8", errors="replace", creationflags=hidden_window_flags(),
+        ).stdout
+    except OSError:
+        return False
+    names = {line.split()[1] for line in listed.splitlines() if len(line.split()) > 2}
+    return {"vidstabdetect", "vidstabtransform"} <= names
+
 def _input_args(clip: Clip, asset: Asset, frames: int, fps: Fraction) -> List[str]:
     """Build the FFmpeg input options that read a clip's source segment.
 
@@ -624,6 +659,46 @@ def _placed(clip: Clip, width: int, height: int, framing: Optional[Framing]) -> 
     return (f"scale={wide}:{high}:force_original_aspect_ratio=increase,"
             f"{crop_filter(width, height, framing)}")
 
+def _source_frames(clip: Clip, fps: Fraction) -> str:
+    """Build the filters that turn a clip's read into its frames at the output rate, before it is placed.
+
+    Shared by the picture and by the pass that measures the camera's movement
+    to steady it, so the transforms are numbered frame for frame the way
+    `vidstabtransform` meets them. They are applied by frame number, and a
+    clip read from 2 s in starts at frame 1 of its read, not frame 61 of the
+    file: transforms measured over the whole file and applied to a trimmed
+    read made a synthetic shaky clip shakier than it went in (17.4 px of
+    movement between frames against 10.3 px).
+
+    Args:
+        clip: A clip of a video file.
+        fps: Output frame rate.
+
+    Returns:
+        The filters, without input or output labels.
+    """
+    rate = f"{fps.numerator}/{fps.denominator}"
+    # A read that began at the start of the file rather than at the clip's in point is cut here,
+    # by timestamp, before anything rebases it (see `_seek_or_cut`).
+    _seek, cut = _seek_or_cut(clip.video_source_start)
+    head = f"trim=start={cut}," if cut else ""
+    return f"{head}setpts=PTS-STARTPTS{_speed_video_filter(clip)},fps={rate}"
+
+def _steadied(transforms: Optional[str]) -> str:
+    """Build the filter that takes the measured shake out of a clip's frames, or nothing.
+
+    Args:
+        transforms: The transforms measured on exactly these frames, or None
+            to leave the picture as shot.
+
+    Returns:
+        The filter with a leading comma, or an empty string.
+    """
+    if transforms is None:
+        return ""
+    return (f",vidstabtransform=input='{escape_filter_path(transforms)}':smoothing={STABILIZE_SMOOTHING}"
+            ":optzoom=1:interpol=bicubic")
+
 def _picture_chain(
     clip: Clip,
     frames: int,
@@ -632,6 +707,7 @@ def _picture_chain(
     fps: Fraction,
     framing: Optional[Framing],
     still: bool = False,
+    transforms: Optional[str] = None,
 ) -> str:
     """Build everything that turns a clip's decoded source into its picture.
 
@@ -651,6 +727,10 @@ def _picture_chain(
         still: The source is a photo: one picture, placed at twice the box
             so the move over it stays sharp, then moved for as many frames
             as the clip has. Its speed means nothing.
+        transforms: The transforms that steady it, measured on the frames
+            `_source_frames` makes; None leaves it as shot. Applied before it
+            is placed, so steadying crops the whole frame and the framing
+            then crops from that.
 
     Returns:
         The filters, without input or output labels.
@@ -672,12 +752,8 @@ def _picture_chain(
             f"trim=end_frame={frames},setpts=PTS-STARTPTS"
             f"{_clip_video_filter(clip, frames, fps)}"
         )
-    # A read that began at the start of the file rather than at the clip's in point is cut here,
-    # by timestamp, before anything rebases it (see `_seek_or_cut`).
-    _seek, cut = _seek_or_cut(clip.video_source_start)
-    head = f"trim=start={cut}," if cut else ""
     return (
-        f"{head}setpts=PTS-STARTPTS{_speed_video_filter(clip)},fps={rate},"
+        f"{_source_frames(clip, fps)}{_steadied(transforms)},"
         f"{_placed(clip, width, height, framing)},setsar=1,format=yuv420p,"
         f"tpad=stop_mode=clone:stop_duration=1,trim=end_frame={frames},setpts=PTS-STARTPTS"
         f"{_clip_video_filter(clip, frames, fps)}"
@@ -837,6 +913,11 @@ class FFmpegRenderer:
                     raise ValueError(f"clip {clip.id}: asset {asset.id} has no audio stream, so it cannot be used on audio track {track.id}")
                 if asset.duration is None:
                     raise ValueError(f"clip {clip.id}: asset {asset.id} has no known duration")
+                if clip.stabilize and not can_stabilize(self.ffmpeg_bin):
+                    raise ValueError(
+                        f"clip {clip.id} is to be steadied, but this FFmpeg was built without libvidstab, which "
+                        "does it; install a build with it, or turn stabilize off for the clip"
+                    )
             _layout(track.clips, fps)
 
     def _picture(
@@ -850,6 +931,7 @@ class FFmpegRenderer:
         box: Tuple[int, int],
         framing: Optional[Framing],
         cache_dir: Optional[str],
+        transforms_dir: Optional[str] = None,
     ) -> Tuple[str, int, bool]:
         """Add a clip's picture to a render, from its source or from the cache.
 
@@ -873,6 +955,8 @@ class FFmpegRenderer:
             box: `(width, height)` it fills.
             framing: Where its crop sits.
             cache_dir: Where cached pictures live, or None to read the source.
+            transforms_dir: Where the transforms that steady a clip are kept;
+                needed when the clip is to be steadied.
 
         Returns:
             `(filters, input_index, cached)` — the chain reading its input,
@@ -881,7 +965,9 @@ class FFmpegRenderer:
             sound in it.
         """
         args = _input_args(clip, asset, frames, fps)
-        chain = _picture_chain(clip, frames, box[0], box[1], fps, framing, still=asset.still)
+        steady = clip.stabilize and not asset.still and clip.card is None
+        transforms = self._transforms(pieces, clip, asset, args, fps, frames, transforms_dir) if steady else None
+        chain = _picture_chain(clip, frames, box[0], box[1], fps, framing, still=asset.still, transforms=transforms)
         index = len(inputs)
         if cache_dir is None:
             inputs.append(args)
@@ -912,6 +998,70 @@ class FFmpegRenderer:
             index,
             True,
         )
+
+    def _transforms(
+        self,
+        pieces: List[Dict[str, object]],
+        clip: Clip,
+        asset: Asset,
+        args: List[str],
+        fps: Fraction,
+        frames: int,
+        transforms_dir: Optional[str],
+    ) -> str:
+        """Find the transforms that steady a clip, queueing the pass that measures them when they are not there.
+
+        The camera's movement is measured on the clip's own read, through the
+        filters its picture goes through up to that point, so frame N of the
+        measurement is frame N of the picture. The analysis measures shake
+        too, but at a few frames a second and a small size over the whole
+        file: right for saying how shaky a shot is, unusable for taking the
+        shake out. Named by everything the measurement depends on, so a clip
+        retrimmed is measured again and one rendered twice is measured once.
+
+        Args:
+            pieces: Passes still to run; the measuring pass is added when the
+                transforms are not there yet.
+            clip: The clip.
+            asset: Its file.
+            args: The input options its picture is read with.
+            fps: Output frame rate.
+            frames: Frames of picture, run-up included.
+            transforms_dir: Where transforms are kept.
+
+        Returns:
+            The transforms file, which is there once the passes have run.
+
+        Raises:
+            ValueError: If there is nowhere to keep them.
+        """
+        if transforms_dir is None:
+            raise ValueError(f"clip {clip.id} is to be steadied, and this render has nowhere to keep the "
+                             "camera movement measured for it")
+        source = _source_frames(clip, fps)
+        stat = os.stat(asset.path)
+        recipe = json.dumps([TRANSFORMS_VERSION, args, source, STABILIZE_SHAKINESS, STABILIZE_ACCURACY,
+                             stat.st_size, stat.st_mtime_ns])
+        path = os.path.join(transforms_dir, hashlib.sha256(recipe.encode("utf-8")).hexdigest()[:32] + ".trf")
+        if os.path.exists(path):
+            # Used again, so the cache keeps it.
+            os.utime(path)
+        elif not any(piece["path"] == path for piece in pieces):
+            # Written under a name of its own and moved into place once whole, like a cached picture.
+            part = f"{path[:-4]}.{uuid.uuid4().hex[:8]}.part.trf"
+            pieces.append({
+                "kind": "transforms",
+                "command": [
+                    self.ffmpeg_bin, "-y", "-loglevel", "error", "-nostats", *args, "-filter_complex",
+                    f"[0:v]{source},vidstabdetect=shakiness={STABILIZE_SHAKINESS}:accuracy={STABILIZE_ACCURACY}"
+                    f":result='{escape_filter_path(part)}'[v]",
+                    "-map", "[v]", "-f", "null", "-",
+                ],
+                "part": part,
+                "path": path,
+                "duration_seconds": float(Fraction(frames) / fps),
+            })
+        return path
 
     def plan_segments(self, project: Project) -> List[Segment]:
         """Lay out the video track as consecutive clip and gap segments.
@@ -971,11 +1121,13 @@ class FFmpegRenderer:
             `(command, pieces)` — the render, and the pictures to render into
             the cache first, each a dictionary with its `command`, the `part`
             file it writes, the `path` to move that to once it is finished,
-            and its `duration_seconds`. Empty when everything was cached.
+            and its `duration_seconds`; among them, marked `kind`
+            `transforms`, the passes that measure a steadied clip's camera
+            movement, kept in the cache too. Empty when everything was cached.
         """
         return self._build(
             project, assets, output_path, True, loudness_target, subtitle_path, framing, chapters_path, cache_dir,
-            voices=voices, talking=talking,
+            voices=voices, talking=talking, transforms_dir=cache_dir,
         )
 
     def build_sound(
@@ -1051,6 +1203,7 @@ class FFmpegRenderer:
         chapters_path: Optional[str] = None,
         voices: Optional[Mapping[str, float]] = None,
         talking: Optional[Talking] = None,
+        transforms_dir: Optional[str] = None,
     ) -> List[str]:
         """Build the FFmpeg arguments that render a project to a file.
 
@@ -1100,6 +1253,10 @@ class FFmpegRenderer:
                 wherever somebody is talking, however loud they are; without
                 it, music ducks under the level of the footage's own sound.
 
+            transforms_dir: Where the camera movement measured to steady a
+                clip is kept. Needed when a clip is to be steadied, and then
+                the passes `build_render` returns have to have run first.
+
         Returns:
             The command as an argument list.
 
@@ -1107,10 +1264,40 @@ class FFmpegRenderer:
             ValueError: If the project uses an unsupported feature, has no
                 video clips, or has overlapping or sub-frame clips.
         """
+        return self.build_render(
+            project, assets, output_path, is_preview, loudness_target, subtitle_path, framing, chapters_path,
+            voices, talking, transforms_dir,
+        )[0]
+
+    def build_render(
+        self,
+        project: Project,
+        assets: Mapping[str, Asset],
+        output_path: str,
+        is_preview: bool = False,
+        loudness_target: Optional[float] = DEFAULT_LOUDNESS_TARGET,
+        subtitle_path: Optional[str] = None,
+        framing: Optional[Mapping[str, Framing]] = None,
+        chapters_path: Optional[str] = None,
+        voices: Optional[Mapping[str, float]] = None,
+        talking: Optional[Talking] = None,
+        transforms_dir: Optional[str] = None,
+    ) -> Tuple[List[str], List[Dict[str, object]]]:
+        """Build a render, with the passes that have to run before it.
+
+        Args:
+            As for `build_command`.
+
+        Returns:
+            `(command, passes)` — the render, and the passes that measure the
+            camera's movement in each clip to be steadied whose movement is
+            not in `transforms_dir` yet, shaped like `build_incremental`'s
+            pieces. Empty when no clip is steadied or all were measured.
+        """
         return self._build(
             project, assets, output_path, is_preview, loudness_target, subtitle_path, framing, chapters_path, None,
-            voices=voices, talking=talking,
-        )[0]
+            voices=voices, talking=talking, transforms_dir=transforms_dir,
+        )
 
     def _build(
         self,
@@ -1126,6 +1313,7 @@ class FFmpegRenderer:
         stems: Optional[Tuple[str, str]] = None,
         voices: Optional[Mapping[str, float]] = None,
         talking: Optional[Talking] = None,
+        transforms_dir: Optional[str] = None,
     ) -> Tuple[List[str], List[Dict[str, object]]]:
         """Build a render, reading pictures from their sources or from a cache.
 
@@ -1148,9 +1336,12 @@ class FFmpegRenderer:
                 the picture, from `voice_keys`: the footage's sound and the
                 music duck under them.
             talking: As for `build_command`.
+            transforms_dir: As for `build_command`; with a cache, the cache.
 
         Returns:
-            `(command, pieces)`; `pieces` is always empty without a cache.
+            `(command, pieces)`: the passes measuring camera movement to steady
+            a clip, each just before the cached picture that needs it, and the
+            pictures to cache. Without a cache, only the measuring passes.
         """
         sound_only = stems is not None
         speech = talking.spans if talking is not None and talking.spans else None
@@ -1209,7 +1400,7 @@ class FFmpegRenderer:
                 else:
                     picture, input_index, cached = self._picture(
                         inputs, pieces, segment.clip, asset, picture_frames, fps,
-                        (project.width, project.height), framed.get(segment.clip.id), cache_dir,
+                        (project.width, project.height), framed.get(segment.clip.id), cache_dir, transforms_dir,
                     )
                     filters.append(f"{picture}[v{index}]")
                 if asset.has_audio and segment.clip.card is None:
@@ -1345,7 +1536,7 @@ class FFmpegRenderer:
                     over = f"[ov{track_index}_{segment_index}]"
                     picture, input_index, cached = self._picture(
                         inputs, pieces, clip, asset, frames, fps, (box_width, box_height), framed.get(clip.id),
-                        cache_dir,
+                        cache_dir, transforms_dir,
                     )
                     # Hold the overlay back to its place on the timeline, then stop drawing when it runs out.
                     filters.append(f"{picture},setpts=PTS+{segment.start_frame}/({rate})/TB{over}")

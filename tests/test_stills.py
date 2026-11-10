@@ -93,3 +93,12 @@ def test_the_editor_plays_a_photo_from_the_file_itself(photo: Path) -> None:
     assert clip["still"] and clip["proxy"] == f"/media/{asset}" and clip["motion"] == stills.DEFAULT_MOTION
     # Nothing to wait for and nothing to copy: a photo is drawn as it is.
     assert shown["waiting"] == [] and playback.missing(stored, assets, []) == []
+
+
+def test_motion_on_a_video_clip_is_refused_with_what_to_use_instead(media: Path) -> None:
+    # Taken and ignored, a push-in asked of video would never show up in the render.
+    asset = catalog.import_asset(str(media / "wide.mp4"))["id"]
+    project = build_project([video_track(), insert("a", asset, 0, 2)], width=320, height=180, name="影片推近")
+    with pytest.raises(ValueError, match="motion only moves a photo.*zoom"):
+        edit(project, [{"action": "set_clip_look", "track_id": "main", "clip_id": "a", "motion": "push"}])
+    assert clips_of(project, "main")[0]["motion"] is None

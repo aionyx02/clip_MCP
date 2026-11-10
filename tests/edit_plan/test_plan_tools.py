@@ -622,6 +622,24 @@ def test_a_song_picked_by_ear_under_the_plan_s_music_is_written_into_its_cue(pla
     cue = get_plan(planned["plan_id"])["plan"]["music"]["cues"][0]
     assert (cue["asset_id"], cue["start"], cue["volume"]) == (song, 2, 0.3)
 
+def test_a_piece_the_plan_steadies_is_steadied_on_the_timeline_and_kept_through_a_hand_edit(planned: dict) -> None:
+    second = planned["clips"][2]["clip_id"]
+    result = amend_plan(planned["plan_id"], 1, amendments({"action": "set_stabilize", "clip_id": second}))
+    assert result["problems"] == []
+    assert [selection.get("stabilize", False) for selection in get_plan(planned["plan_id"])["plan"]["selections"]] \
+        == [False, True]
+    project = compiled_project(planned)
+    assert [clip["stabilize"] for clip in main_clips(project)] == [False, True]
+    # Pinned by a hand edit, then compiled again: the steadying stays with the clip.
+    made = main_clips(project)[1]
+    apply_edits(project, get_project(project)["version"], ops(
+        {"action": "set_clip_audio", "track_id": "main", "clip_id": made["id"], "volume": 0.5},
+    ))
+    compile_plan(project_id=project, expected_version=get_project(project)["version"], plan_id=planned["plan_id"])
+    assert [clip["stabilize"] for clip in main_clips(project)] == [False, True]
+    amend_plan(planned["plan_id"], 2, amendments({"action": "set_stabilize", "clip_id": second, "stabilize": False}))
+    assert get_plan(planned["plan_id"])["plan"]["selections"][1].get("stabilize", False) is False
+
 def test_songs_offered_for_every_part_at_once_are_each_written_into_their_own_cue(planned: dict, media: Path) -> None:
     from app.models.offer import OfferedSong
     from app.tools.catalog import set_asset_library
@@ -659,3 +677,35 @@ def test_songs_offered_for_every_part_at_once_are_each_written_into_their_own_cu
     cues = get_plan(planned["plan_id"])["plan"]["music"]["cues"]
     assert [(cue["beat_id"], cue["asset_id"], cue["start"]) for cue in cues] == [(None, song, 1), ("b2", song, 3)]
     assert plan["version"] < get_plan(planned["plan_id"])["plan"]["version"]
+
+def test_a_song_set_in_the_conversation_takes_that_part_s_offer_away(planned: dict, media: Path) -> None:
+    from app.models.offer import OfferedSong
+    from app.tools.catalog import set_asset_library
+    from app.tools.soundtrack import offer_songs
+
+    song = import_asset(str(media / "song.mp3"))["id"]
+    jingle = import_asset(str(media / "jingle.wav"))["id"]
+    set_asset_library([song, jingle], "music")
+    stored = EditPlan.model_validate(get_plan(planned["plan_id"])["plan"])
+    clips = planned["clips"]
+    saved = save_plan(with_a_fact(stored.model_copy(update={
+        "beats": [Beat(id="b1", name="開場", role=BeatRole.TURN), Beat(id="b2", name="結尾", role=BeatRole.PAYOFF)],
+        "selections": [Selection(clip_id=clips[0]["clip_id"], beat_id="b1"),
+                       Selection(clip_id=clips[2]["clip_id"], beat_id="b2")],
+        "music": MusicPlan(cues=[MusicCue(asset_id=jingle), MusicCue(beat_id="b2", asset_id=jingle)]),
+    }), 1.5, 2.5))
+    project = create_project(name="對話選歌", width=640, height=360)["id"]
+    compile_plan(project_id=project, expected_version=1, plan_id=saved["plan_id"])
+    offer_songs(project, [OfferedSong(asset_id=song, start=1)], beat_id="b1")
+    offer_songs(project, [OfferedSong(asset_id=song, start=3)], beat_id="b2")
+    version = get_plan(planned["plan_id"])["plan"]["version"]
+    # A song that was not offered for the part leaves its offer standing.
+    amend_plan(planned["plan_id"], version, amendments({"action": "set_music_cue", "beat_id": "b2", "asset_id": jingle}))
+    assert [offer.part for offer in runtime_repo.song_offers(project)] == ["b1", "b2"]
+    # One of the part's offered songs takes that part's offer away, and only that part's.
+    amend_plan(planned["plan_id"], version + 1,
+               amendments({"action": "set_music_cue", "beat_id": "b2", "asset_id": song, "start": 3}))
+    assert [offer.part for offer in runtime_repo.song_offers(project)] == ["b1"]
+    # The cue that starts the video names no part, and is the first part's.
+    amend_plan(planned["plan_id"], version + 2, amendments({"action": "set_music_cue", "asset_id": song, "start": 1}))
+    assert runtime_repo.song_offers(project) == []

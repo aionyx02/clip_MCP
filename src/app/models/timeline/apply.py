@@ -280,6 +280,7 @@ def _new_clip(track: Track, spec: NewClipSpec, timeline_in: Decimal) -> Clip:
         layout=spec.layout,
         fit=spec.fit,
         motion=spec.motion,
+        stabilize=spec.stabilize,
         card=spec.card,
     )
 
@@ -779,6 +780,8 @@ def apply_operation(project: Project, op: EditOperation, assets: Mapping[str, As
             color=clip.color,
             layout=clip.layout,
             fit=clip.fit,
+            keep_level=clip.keep_level,
+            stabilize=clip.stabilize,
             motion=clip.motion,
             card=clip.card,
             texts=[text.model_copy() for text in clip.texts],
@@ -836,7 +839,16 @@ def apply_operation(project: Project, op: EditOperation, assets: Mapping[str, As
         elif op.fit is not None:
             clip.fit = op.fit
         if op.motion is not None:
+            source = assets.get(clip.asset_id)
+            if source is not None and not source.still:
+                # Taken and ignored, it reads as a push-in that never shows up in the render.
+                raise ValueError(
+                    f"clip {clip.id} is video, and motion only moves a photo; for a closer view of video set "
+                    f"`fit` with `zoom` above 1, which holds the crop rather than moving it"
+                )
             clip.motion = op.motion
+        if op.stabilize is not None:
+            clip.stabilize = op.stabilize
     elif isinstance(op, SetClipAudioOp):
         clip = _find_clip(track, op.clip_id)
         for field in ("volume", "audio_fade_in", "audio_fade_out", "audio_lead", "audio_lag", "keep_level"):

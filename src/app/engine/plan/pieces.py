@@ -170,6 +170,7 @@ class Piece:
         gain: How loud its own sound plays, from its selection's volume.
         keep_level: Whether its talking stays at the level it was recorded,
             from its selection.
+        stabilize: Whether its picture is steadied, from its selection.
         transition: How it comes in over the window before, as `(kind,
             seconds, through, direction)`, already shortened to the picture
             the file has; None is a straight cut. Only the first window of a
@@ -197,6 +198,7 @@ class Piece:
     own_speed: bool = False
     gain: float = 1.0
     keep_level: bool = False
+    stabilize: bool = False
     transition: Optional[Tuple[str, float, str, str]] = None
     sound_lead: float = 0.0
     card: Optional[TitleCard] = None
@@ -395,8 +397,8 @@ def merge_pieces(pieces: Sequence[Piece]) -> List[Piece]:
             # is a flashback, and joining it on kept one of the two and lost the other (#91).
             and piece.start >= last.start
             # A window sped up or turned down on purpose is its own clip, however close it sits.
-            and (last.speed, last.own_speed, last.gain, last.keep_level)
-            == (piece.speed, piece.own_speed, piece.gain, piece.keep_level)
+            and (last.speed, last.own_speed, last.gain, last.keep_level, last.stabilize)
+            == (piece.speed, piece.own_speed, piece.gain, piece.keep_level, piece.stabilize)
         ):
             # The first piece's beat wins. Two pieces this close are one shot, and a
             # marker inside a shot would say a new part starts partway through it.
@@ -465,6 +467,7 @@ def selected_pieces(
                 own_speed=selection.speed is not None,
                 gain=1.0 if selection.volume is None else selection.volume,
                 keep_level=selection.keep_level,
+                stabilize=selection.stabilize,
                 excused=(bool(selection.edge_reason),),
             )
             for piece in _selection_pieces(

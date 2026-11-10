@@ -186,6 +186,29 @@ be covered at all. Set
 pointing at something, holding something up. Nothing measures that, so if you
 do not say it, it is not known.
 
+### One camera, nothing to cover it with
+
+A long stretch of one shot — someone talking to a single camera — comes back
+from `propose_broll`, and `query_clips` may find nothing that belongs over it.
+Do not cover it with another moment of the same take; that is the same picture
+again. Change the picture inside the shot instead, roughly in this order:
+
+1. Shorten it: dead air first (`set_pacing`), then whole sentences
+   (`drop_selection`, or a tighter `trim`).
+2. Punch in. A compiled stretch is already several clips wherever a pause was
+   cut out; give every other one `set_clip_look` with `fit: {"mode": "fill",
+   "zoom": 1.2}` and a `center_x`/`center_y` on the face, so each jump cut
+   reads as a cut to a closer shot. `split_clip` a long clip with no pause to
+   make one. Keep it near 1.2–1.3 on footage shot at the output size, or it
+   goes soft, and check with `view_frames`. That is a hand edit, so it is pinned
+   and survives a recompile, but `propose_broll` does not see it and still
+   lists the stretch.
+3. Words over it, where the user asked for them: a headline over the line that
+   matters (`set_selection_texts`).
+
+`motion` only moves photos; on a video clip it is refused. Video has no slow
+push-in yet, only the held `zoom` above.
+
 ## Music in a plan
 
 Every video gets music unless the user declines, so a `save_plan` with no

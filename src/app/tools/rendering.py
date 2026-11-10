@@ -24,11 +24,12 @@ from app.models.job import Job, JobKind, JobStatus
 from app.engine import cards, legibility, looks, playback, resources, sync, texts
 from app.engine.analysis import second_listen, with_words_heard_again
 from app.engine.probe import probe_file, speech_loudness
-from app.engine.reframe import Framing, centred_note, frame_project, placement_at
+from app.engine.reframe import Framing, centred_note, frame_project, framed_size, placement_at
 from app.engine.builder import DEFAULT_LOUDNESS_TARGET, Talking, voice_keys
 from app.engine.levels import song_level, talking_in
 from app.engine.delivery import (
     CHECKS, chapter_metadata, chapters, check_delivery, half_sentences, light_steps, look_candidates, run_on_cuts,
+    shaky_clips,
 )
 from app.engine.frames import format_timestamp, still, storyboard_sheet
 from app.engine.subtitles import build_ass, place_cues
@@ -36,7 +37,7 @@ from app.storage import housekeeping
 from app.workspace import output_dir
 from app import runtime
 from app.runtime import mcp
-from app.tools import shared
+from app.tools import production, shared
 
 # Characters a Windows or POSIX filesystem will not take in a name, plus the control
 # range. A project is named by whoever is editing, so a render cannot assume anything
@@ -442,31 +443,20 @@ def _picture_cache() -> str:
             pass
     return folder
 
-# The shapes a cut is delivered in, as width to height.
-FRAME_SHAPES = {"landscape": (16, 9), "portrait": (9, 16), "square": (1, 1)}
-
 def reshaped(project: Project, frame: Optional[str]) -> Project:
     """Give a project another shape for one render, leaving the stored one alone.
-
-    The short side is kept, because that is the side a platform's resolution
-    is quoted by: 1080p is 1080 across the short side whichever way up it is.
 
     Args:
         project: The project.
         frame: `landscape`, `portrait`, `square`, or None for as it is.
 
     Returns:
-        A copy at the new size, or the project itself when no shape was asked for.
+        A copy at the size `framed_size` gives, or the project itself when no
+        shape was asked for.
     """
     if frame is None:
         return project
-    across, down = FRAME_SHAPES[frame]
-    short = min(project.width, project.height)
-    even = lambda value: max(2, int(round(value / 2)) * 2)
-    if across >= down:
-        width, height = even(short * across / down), short
-    else:
-        width, height = short, even(short * down / across)
+    width, height = framed_size(project.width, project.height, frame)
     return project.model_copy(update={"width": width, "height": height})
 
 def framing_of(project: Project, assets: Mapping[str, Asset], follow_faces: bool = True) -> Dict[str, Framing]:
@@ -582,8 +572,11 @@ def render_project(
     unseen = None if is_preview else _unseen(project_id, frame)
     if unseen:
         raise ValueError(unseen)
+    # Named only here: the editor's renders are the user's own, and belong to no production.
+    owner = production.of_project(project_id)
     return start_render(
         project_id, is_preview, loudness_target, burn_subtitles, frame, follow_faces, allow, PREVIEW_SHORT_SIDE,
+        production_id=owner.id if owner is not None else None,
     )
 
 def _unseen(project_id: str, frame: Optional[str]) -> Optional[str]:
@@ -630,6 +623,7 @@ def start_render(
     follow_faces: bool,
     allow: Optional[List[str]],
     preview_side: int,
+    production_id: Optional[str] = None,
 ) -> dict:
     """Start a render; what `render_project` does, with the preview's size open.
 
@@ -640,6 +634,8 @@ def start_render(
     Args:
         project_id: As for `render_project`, and the rest likewise.
         preview_side: The short side of a preview, in pixels.
+        production_id: The unfinished production `render_project` renders
+            it for; None from the editor.
 
     Returns:
         As `render_project`.
@@ -670,7 +666,7 @@ def start_render(
         _make_room()
     housekeeping.sweep_renders(runtime.WORKSPACE_DIR, _delivered)
     job = Job(kind=JobKind.RENDER, project_id=project_id, project_version=project.version, picture=picture,
-              sound=sound, captioned=burn_subtitles, preview=is_preview, frame=frame)
+              sound=sound, captioned=burn_subtitles, preview=is_preview, frame=frame, production_id=production_id)
     delivered: Optional[str] = None
     if is_preview:
         job.work_dir = os.path.join(housekeeping.preview_dir(runtime.WORKSPACE_DIR, project_id), job.job_id)
@@ -731,9 +727,12 @@ def start_render(
             if argument.startswith(cache) and os.path.exists(argument):
                 os.utime(argument)
     else:
-        command = runtime.renderer.build_command(
+        # The camera movement measured to steady a clip is kept with the preview pictures, so a
+        # preview's measuring is not done again for the finished video.
+        command, pieces = runtime.renderer.build_render(
             project, assets, render_path, loudness_target=loudness_target, subtitle_path=subtitle_path,
             framing=framing, chapters_path=chapters_path, voices=voices, talking=talking,
+            transforms_dir=_picture_cache(),
         )
     # One input per clip, all opened at once, is what a render's memory use is made of.
     job.memory_estimate = resources.render_memory_bytes(command.count("-i"))
@@ -777,7 +776,8 @@ def start_render(
     if unplaced:
         result["framing"] = unplaced
     if is_preview:
-        result["pictures"] = {"rendered": len(pieces), "reused": pictures - len(pieces)}
+        rendered = sum(1 for piece in pieces if piece.get("kind") != "transforms")
+        result["pictures"] = {"rendered": rendered, "reused": pictures - rendered}
     return result
 
 def talking_of(project: Project, voices: Mapping[str, float]) -> Optional[Talking]:
@@ -1047,10 +1047,13 @@ def check_render(
     """Check a cut for what would be noticed in the finished file, without rendering it.
 
     The same check `render_project` runs first and refuses a render over. It
-    looks for ten things: `bad_picture`, black or frozen source picture that
+    looks for eleven things: `bad_picture`, black or frozen source picture that
     reaches the screen, as far as the analysis measures it: black of half a
     second or more, frozen of two seconds or more, while anything shorter
-    shows only in a render's `frames` from `get_job`; `clipping`, a recording squared off at the ceiling,
+    shows only in a render's `frames` from `get_job`; `covered_card`,
+    full-frame picture on a track above the sequence, such as B-roll, laid
+    over a title card so its words are hidden, most likely after a card was
+    added by hand, which moves the sequence but not the tracks above; `clipping`, a recording squared off at the ceiling,
     which no amount of turning down undoes; `music`, music heard too close
     under somebody talking; `mid_speech`, a cut that lands
     inside a word or between two words of one phrase, or takes the start or
@@ -1087,7 +1090,10 @@ def check_render(
         that the next follows with no pause: nothing is cut off as the
         transcript has it, but only listening to the render tells whether the
         next sentence's first sound carries across. It never stops a render
-        either. And `half_sentence`, the clips whose sound stops in a pause,
+        either. And `shaky`, the clips the camera shook in that are left as
+        shot, with how to steady them; a shake may be wanted, so it never
+        stops a render — ask before steadying, since it enlarges the picture.
+        And `half_sentence`, the clips whose sound stops in a pause,
         so nothing is cut off, before what is being said is finished: the
         transcribed sentence goes on after the cut with nothing marking an end,
         or stops on a word that leads into more, such as 大概 or 因為. Each
@@ -1118,6 +1124,9 @@ def check_render(
     light = light_steps(project, analyses_of(project))
     if light:
         checked["light"] = light
+    shaky = shaky_clips(project, analyses_of(project))
+    if shaky:
+        checked["shaky"] = shaky
     base = project.base_video_track
     listened = analyses_of(project, listened=True)
     run_on = run_on_cuts(base.clips, listened)

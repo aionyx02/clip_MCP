@@ -482,7 +482,7 @@ async def branch(request: Request) -> Response:
     """Start a branch of the video from one of its versions."""
     body = await request.json()
     try:
-        result = await run_in_threadpool(versioning.branch_project, request.path_params["project_id"],
+        result = await run_in_threadpool(versioning.start_branch, request.path_params["project_id"],
                                           str(body["name"]), body.get("commit"))
     except (ValueError, KeyError, TypeError) as error:
         return _error(str(error), 400)

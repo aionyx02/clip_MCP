@@ -968,6 +968,61 @@ def test_a_clip_from_the_afternoon_between_two_from_the_morning_is_found() -> No
                         markers=[(4, "下午")])
     assert not [f for f in check_delivery(marked, {}, recorded=recorded) if f.check == "continuity"]
 
+# --- B-roll over somebody talking (#234) --------------------------------------------------
+
+def test_b_roll_ending_mid_sentence_is_not_a_cut_in_the_talking() -> None:
+    """The sound stays on the sequence underneath: only the picture changes at the B-roll's edges."""
+    # The sequence runs both sentences whole; the B-roll goes on at 1.5s, inside 今天, and off at
+    # 2.02s, between 天氣's neighbours with no pause — both mid-sentence on the sequence. Its own
+    # file is talking too, cut inside words, but it is turned all the way down.
+    broll = clip("b", "y", 1.5, 2.02, 1.5, volume=0.0)
+    found = checks(project_of(clip("a", "x", 0, 9.5, 0), over=[broll]), {"x": talking(), "y": talking("y")})
+    assert [check for check, _ in found if check == "mid_speech"] == []
+
+def test_b_roll_from_another_day_is_not_a_continuity_jump() -> None:
+    from datetime import datetime, timezone
+
+    # The talking was all shot in the morning; a shot from two days later is laid over it.
+    broll = clip("b", "p", 0, 2, 1, volume=0.0)
+    project = project_of(clip("a", "m", 0, 4, 0), clip("c", "m", 10, 14, 4), over=[broll])
+    recorded = {"m": datetime(2026, 8, 31, 2, 0, tzinfo=timezone.utc),
+                "p": datetime(2026, 9, 2, 6, 0, tzinfo=timezone.utc)}
+    assert [f for f in check_delivery(project, {}, recorded=recorded) if f.check == "continuity"] == []
+
+def carded(*over: Clip) -> Project:
+    """A cut opening on a three-second title card, then one shot, with picture laid over it."""
+    from app.models.timeline.parts import TitleCard
+
+    card = clip("t", "x", 0, 3, 0, volume=0.0, card=TitleCard(title="開場"))
+    return project_of(card, clip("a", "x", 0, 6, 3), over=list(over))
+
+def test_b_roll_over_a_title_card_is_found() -> None:
+    found = [f for f in check_delivery(carded(clip("b", "y", 0, 2, 2, volume=0.0)), {}) if f.check == "covered_card"]
+    assert len(found) == 1
+    assert "clip b" in found[0].message and "「開場」" in found[0].message and "0:02" in found[0].message
+    assert found[0].spans == ((2.0, 3.0),)
+
+def test_b_roll_starting_where_the_card_ends_covers_nothing() -> None:
+    assert [f for f in check_delivery(carded(clip("b", "y", 0, 2, 3, volume=0.0)), {})
+            if f.check == "covered_card"] == []
+
+def test_a_card_added_by_hand_under_b_roll_holds_the_render_back(media: Path) -> None:
+    """A card put in by hand moves the sequence along, but not the B-roll above it."""
+    asset = import_asset(str(media / "wide.mp4"))["id"]
+    project = build_project([
+        video_track(), insert("a", asset, 0, 4), insert("c", asset, 4, 8),
+        video_track("broll"), {"action": "add_clip", "track_id": "broll", "clip_id": "b", "asset_id": asset,
+                               "source_range": {"start": 8, "end": 10}, "timeline_in": 4.5},
+    ], width=640, height=360)
+    assert not [f for f in check_render(project)["findings"] if f["check"] == "covered_card"]
+    edit(project, [{"action": "add_title_card", "track_id": "main", "clip_id": "t", "before_clip_id": "c",
+                    "title": "第二段", "seconds": 2.0}])
+    found = [f for f in check_render(project)["findings"] if f["check"] == "covered_card"]
+    assert len(found) == 1 and "「第二段」" in found[0]["message"]
+    finished(render_project(project))
+    with pytest.raises(ValueError, match="covered_card"):
+        render_project(project, is_preview=False, allow=[check for check in ANYTHING if check != "covered_card"])
+
 # --- captions long enough to read --------------------------------------------------------
 
 def cue(cue_id: str, start: float, end: float, text: str = "晚安"):

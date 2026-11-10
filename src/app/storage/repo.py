@@ -11,6 +11,7 @@ from app.models.comment import Comment, Preference
 from app.models.job import Job
 from app.models.media import Asset, MediaAnalysis
 from app.models.offer import SongOffer
+from app.models.production import Production
 from app.models.plan import EditPlan
 from app.models.semantic import ClipKind, ClipLevel, SemanticClip, SemanticTimeline
 from app.models.trial import Trial
@@ -144,6 +145,11 @@ _MIGRATIONS: List[List[str]] = [
         "CREATE TABLE IF NOT EXISTS song_offers_by_part (project_id TEXT NOT NULL, part TEXT NOT NULL, "
         "data TEXT NOT NULL, PRIMARY KEY (project_id, part))",
         "DROP TABLE IF EXISTS song_offers",
+    ],
+    [
+        # A request to make a video, kept so a new conversation can pick it up. Only what cannot be
+        # worked out again is kept; how far it has got is read off the rest each time.
+        "CREATE TABLE IF NOT EXISTS productions (id TEXT PRIMARY KEY, data TEXT NOT NULL)",
     ],
 ]
 # Footage and music are filed apart, each in folders of its own; projects in theirs.
@@ -736,6 +742,22 @@ class Repository:
             conn.execute("INSERT OR REPLACE INTO trials (id, project_id, data) VALUES (?, ?, ?)",
                          (trial.id, trial.project_id, trial.model_dump_json()))
 
+    def production(self, production_id: str) -> Optional[Production]:
+        """Read one production."""
+        rows = self._query("SELECT data FROM productions WHERE id = ?", (production_id,))
+        return Production.model_validate_json(rows[0][0]) if rows else None
+
+    def productions(self) -> List[Production]:
+        """Read every production, oldest first."""
+        kept = [Production.model_validate_json(row[0]) for row in self._query("SELECT data FROM productions")]
+        return sorted(kept, key=lambda production: production.created_at)
+
+    def save_production(self, production: Production) -> None:
+        """Keep a production as it now stands."""
+        with self._transaction() as conn:
+            conn.execute("INSERT OR REPLACE INTO productions (id, data) VALUES (?, ?)",
+                         (production.id, production.model_dump_json()))
+
     def preferences(self) -> List[Preference]:
         """Read how the user likes their videos, oldest first."""
         kept = [Preference.model_validate_json(row[0]) for row in self._query("SELECT data FROM preferences")]
@@ -756,6 +778,10 @@ class Repository:
         """Read the songs put to the user for a project, a set per part, in the order the parts play."""
         rows = self._query("SELECT data FROM song_offers_by_part WHERE project_id = ?", (project_id,))
         return sorted((SongOffer.model_validate_json(row[0]) for row in rows), key=lambda offer: offer.start)
+
+    def offered_project_ids(self) -> List[str]:
+        """The projects that have songs waiting for the user, in any part."""
+        return [row[0] for row in self._query("SELECT DISTINCT project_id FROM song_offers_by_part")]
 
     def song_offer(self, project_id: str, part: str) -> Optional[SongOffer]:
         """Read the songs put to the user for one part of a project, if any are."""

@@ -3,20 +3,23 @@
 import os
 import subprocess
 import uuid
-from typing import Annotated, List, Literal, Optional
+from typing import Annotated, List, Literal, Optional, Tuple
 
 from fastmcp.tools import ToolResult
 from fastmcp.utilities.types import Image
 from pydantic import Field, TypeAdapter
 
 from app.models.plan import (
-    EditPlan, PlanAmendment, Trim, TrimKind, apply_amendment, describe_amendment, with_whole_clip_ids,
+    EditPlan, MusicCue, PlanAmendment, SetMusicCueOp, Trim, TrimKind, apply_amendment, describe_amendment,
+    with_whole_clip_ids,
 )
+from app.models.offer import SongOffer
 from app.models.semantic import SemanticClip
 from app.models.timeline.operations import EditOperation
 from app.models.timeline.parts import Project
 from app.engine import loudness, playback
 from app.engine.plan.beats import plan_pieces
+from app.engine.reframe import FRAME_SHAPES
 from app.engine.plan.broll import broll_covers, broll_slots
 from app.engine.plan.checks import COMPILED_TRACKS, as_left, check_plan, check_recompile, with_cards
 from app.engine.plan.compile import compile_operations
@@ -31,7 +34,7 @@ from app.engine.listen import chart, describe, levels, parts_of
 from app.storage import housekeeping
 from app import runtime
 from app.runtime import mcp
-from app.tools import editing, examining, rendering, shared
+from app.tools import editing, examining, production, rendering, shared
 
 # Compiled operations are validated the same way a client's are, so a plan cannot reach
 # the timeline through a door the tool surface does not have.
@@ -92,7 +95,7 @@ def _require_plan(plan_id: Optional[str]) -> EditPlan:
     return plan
 
 @mcp.tool()
-def save_plan(plan: EditPlan, note: str = "") -> dict:
+def save_plan(plan: EditPlan, note: str = "", production_id: Optional[str] = None) -> dict:
     """Store a plan for a cut: what it is for, its parts, and which footage fills them.
 
     Before choosing a length, an opening or how fast to cut, read
@@ -125,6 +128,8 @@ def save_plan(plan: EditPlan, note: str = "") -> dict:
             `timeline_input_hash` is filled in for you.
         note: What this version is, kept in its history — the user's own
             words for what they wanted changed are the best thing to put here.
+        production_id: The unfinished production this plan is for, from
+            `start_production`; it is bound to the plan.
 
     Returns:
         A dictionary with the `plan_id`, its new `version`, the `timeline_id`,
@@ -135,15 +140,20 @@ def save_plan(plan: EditPlan, note: str = "") -> dict:
         `beat_id`, `clip_ids` and `seconds` it is about where it has them.
 
     Raises:
-        ValueError: If the timeline does not exist, or the plan was saved at a
-            version other than the stored one.
+        ValueError: If the timeline does not exist, the plan was saved at a
+            version other than the stored one, or the production does not
+            exist or has ended.
     """
     timeline = runtime.repo.get_semantic_timeline(plan.timeline_id)
     if timeline is None:
         raise ValueError(f"semantic timeline {plan.timeline_id} not found; build one before planning against it")
+    if production_id is not None:
+        production.going(production_id)
 
     stamped = plan.model_copy(update={"timeline_input_hash": timeline.input_hash})
     stored = runtime.repo.save_plan(stamped, note)
+    if production_id is not None:
+        production.bind_plan(production_id, stored.id)
     problems, notes = check_plan(stored, *_plan_context(stored))
     newest = runtime.repo.get_semantic_timeline(None)
     if newest is not None and newest.id != timeline.id:
@@ -361,8 +371,9 @@ def amend_plan(plan_id: str, expected_version: int, amendments: list[PlanAmendme
     own amendments rather than a trim to every selection: `set_pacing` for
     「整體節奏太慢」 (shorter pauses, less air around every cut),
     `set_music_level` for 「音樂太大聲」 (everywhere, or from one beat),
-    `set_music_cue` to change one cue's start, volume, fades or cutting on
-    its beat without sending the plan again,
+    `set_music_cue` to change one cue's song, start, volume, fades or cutting
+    on its beat without sending the plan again (setting one of the songs
+    offered for that part takes the part's offer out of the editor),
     `set_target` for a new length or platform, and `drop_beat` for
     「這整段不要」, which files every selection in it under the rejections.
     What the viewer has to know is `set_facts` for the plan and
@@ -406,6 +417,9 @@ def amend_plan(plan_id: str, expected_version: int, amendments: list[PlanAmendme
         amended.model_copy(update={"timeline_input_hash": timeline.input_hash}),
         f"{note} — {done}" if note and done else note or done,
     )
+    for amendment in amendments:
+        if isinstance(amendment, SetMusicCueOp) and amendment.asset_id is not None:
+            _drop_picked_offers(stored, amendment)
     problems, notes = check_plan(stored, *_plan_context(stored))
     return {
         "plan_id": stored.id,
@@ -414,6 +428,34 @@ def amend_plan(plan_id: str, expected_version: int, amendments: list[PlanAmendme
         "problems": problems,
         "notes": [note_record(note) for note in notes],
     }
+
+def offered_cue(project: Project, offer: SongOffer) -> Optional[Tuple[EditPlan, MusicCue]]:
+    """The music cue of the plan the cut was compiled from that the offered stretch is, if it is one."""
+    plan = rendering.compiled_plan(project)
+    if plan is None or plan.music is None or (offer.beat_id is None and offer.start > 0):
+        return None
+    cue = next((cue for cue in plan.music.cues if cue.beat_id == offer.beat_id), None)
+    if cue is None and offer.start == 0:
+        # The first part is the cue that starts with the video, which may name no part.
+        cue = next((cue for cue in plan.music.cues if cue.beat_id is None), None)
+    return (plan, cue) if cue is not None else None
+
+def _drop_picked_offers(plan: EditPlan, amendment: SetMusicCueOp) -> None:
+    """Take away the songs offered for the cue a song was just set on, when it is one of them.
+
+    A pick given in the conversation settles the part as one made in the
+    editor does. Only membership is checked: a song that was not offered for
+    the part leaves the offer standing.
+    """
+    for project_id in runtime.repo.offered_project_ids():
+        project = runtime.repo.get_project(project_id)
+        if project is None:
+            continue
+        for offer in runtime.repo.song_offers(project_id):
+            found = offered_cue(project, offer)
+            if (found is not None and found[0].id == plan.id and found[1].beat_id == amendment.beat_id
+                    and any(song.asset_id == amendment.asset_id for song in offer.songs)):
+                runtime.repo.drop_song_offer(project_id, offer.part)
 
 def _plan_at(plan_id: str, version: Optional[int]) -> EditPlan:
     """Fetch a plan as it is now, or as it was at one version.
@@ -606,6 +648,10 @@ def compile_plan(project_id: str, expected_version: int, plan_id: Optional[str] 
         note: The user's own words for what this round changes, kept as what
             this version is in the project's history.
 
+    A plan or project that belongs to an unfinished production binds the
+    other once compiled. A plan of an `auto` production already bound to
+    another project is refused.
+
     Returns:
         A dictionary with the `plan_id`, the `project_id`, its `new_version`,
         how many `clips` were placed, how many of those were `kept` from a
@@ -626,6 +672,9 @@ def compile_plan(project_id: str, expected_version: int, plan_id: Optional[str] 
     project = runtime.repo.get_project(project_id)
     if not project:
         raise ValueError(f"project {project_id} not found")
+    refused = production.compile_refusal(plan.id, project_id)
+    if refused:
+        raise ValueError(refused)
     pieces, left_out = as_left(plan_pieces(plan, clips, children, assets, cuts), project)
     notes = notes + left_out
     # The B-roll and the music as the compile lays them, over and under the cut with its title
@@ -652,6 +701,7 @@ def compile_plan(project_id: str, expected_version: int, plan_id: Optional[str] 
                     clip.pinned = origin["pinned"]
 
     saved = editing.apply(project_id, expected_version, operations, stamp=record)
+    production.bind_compiled(plan.id, project_id)
     rendering.prepare_playback(saved)
     return {
         "plan_id": plan.id,
@@ -875,7 +925,7 @@ def preview_plan_diff(
             lines.append(f"#{number}: {change.status} | {where} | {length} | {', '.join(piece.from_clip_ids)}")
     if len(shots) > shared.MAX_STORYBOARD_TILES:
         lines.append(f"the sheet shows the first {shared.MAX_STORYBOARD_TILES} of {len(shots)} shots")
-    shape = rendering.FRAME_SHAPES.get(aspect) if aspect else None
+    shape = FRAME_SHAPES.get(aspect) if aspect else None
     image = storyboard_sheet(
         shots[:shared.MAX_STORYBOARD_TILES], aspect=shape[0] / shape[1] if shape else None,
         borders=borders[:shared.MAX_STORYBOARD_TILES],

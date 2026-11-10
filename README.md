@@ -25,9 +25,9 @@ editor (ui/) ──HTTP───────────────────
 |---|---|
 | `server.py` | MCP server 的啟動與 middleware；工具都在 `tools/` |
 | `runtime.py` | 伺服器執行期間共用的物件：工作區、資料庫、版本歷史、工作佇列、MCP server |
-| `tools/` | 依領域分開的 MCP 工具：`catalog.py`（素材庫）、`examining.py`（素材分析、重聽、分析結果與歌曲聽感）、`timelines.py`（語意時間軸、片段搜尋與段落）、`looking.py`（看畫面與接點）、`editing.py`（專案與時間軸編輯）、`planning.py`（剪輯計畫）、`rendering.py`（預覽、輸出、輸出前檢查與播放用副本）、`subtitles.py`（字幕）、`delivery.py`（交付：剪輯文字稿、章節、封面、給其他剪輯軟體的時間軸）、`soundtrack.py`（配樂）、`feedback.py`（留言、試做、提問與偏好）、`versioning.py`（版本歷史、還原、分支、比較與合併）、`upkeep.py`（磁碟空間與清理）、`job_queue.py`（背景工作）；`shared.py` 放多個領域共用的輔助函式 |
+| `tools/` | 依領域分開的 MCP 工具：`catalog.py`（素材庫）、`examining.py`（素材分析、重聽、分析結果與歌曲聽感）、`timelines.py`（語意時間軸、片段搜尋與段落）、`looking.py`（看畫面與接點）、`editing.py`（專案與時間軸編輯）、`planning.py`（剪輯計畫）、`rendering.py`（預覽、輸出、輸出前檢查與播放用副本）、`subtitles.py`（字幕）、`delivery.py`（交付：剪輯文字稿、章節、封面、給其他剪輯軟體的時間軸）、`soundtrack.py`（配樂）、`feedback.py`（留言、試做、提問與偏好）、`production.py`（製作紀錄：需求原文與綁定，進度每次重算）、`versioning.py`（版本歷史、還原、分支、比較與合併）、`upkeep.py`（磁碟空間與清理）、`job_queue.py`（背景工作）；`shared.py` 放多個領域共用的輔助函式 |
 | `engine/` | 分析、語意時間軸、計畫編譯、filtergraph 建構、render、字幕、交換格式 |
-| `models/` | Pydantic 領域模型（素材、語意片段、計畫、時間軸、工作） |
+| `models/` | Pydantic 領域模型（素材、語意片段、計畫、時間軸、工作、製作紀錄） |
 | `storage/` | SQLite 持久化、版本歷史、儲存空間管理 |
 | `ui/` | 編輯器：與 AI 共用同一組工具與驗證規則 |
 
@@ -56,7 +56,9 @@ editor (ui/) ──HTTP───────────────────
 | 影音原檔、預覽、成品 | 檔名、路徑、規格 |
 | 逐字稿、量測、向量索引、模型權重 | 查詢命中的片段文字與量測值 |
 | 專案、計畫、版本歷史 | 模型要求時的縮圖拼貼、音量圖與頻譜圖 |
+| 製作紀錄（需求原文、使用者在對話裡的原話） | `get_production` 回傳的需求原文、原話與進度 |
 
+- 製作紀錄存的是使用者在對話裡說的話（需求、改口、取消），本來就來自客戶端；`get_production` 會把它們連同進度再交回客戶端，新對話靠這個接續。
 - 沒有工具回傳影音本體。模型仍可主動讀取完整逐字稿（`get_analysis`、`query_clips` 的 `brief`、`get_subtitles`）。
 - 回傳內容的去向由客戶端決定；搭配本機模型（如 LM Studio）則完全離線。
 - 對外連線僅限：模型權重下載（固定版本、驗證 SHA-256）、安裝程式下載 FFmpeg、安裝版的更新檢查。
@@ -94,6 +96,7 @@ LM Studio、Cherry Studio（一鍵安裝連結）。修改前備份為 `<檔名>
 | 素材庫 | `inspect_media` `import_asset` `import_folder` `list_assets` `edit_asset` `organize_library` `move_files` |
 | 分析 | `analyze_asset` `listen_again` `get_analysis` `view_frames` `inspect_sound` |
 | 語意時間軸 | `build_semantic_timeline` `query_clips` `get_semantic_clip` `propose_sections` `set_sections` `frames_for_clips` `set_clip_tags` `list_timelines` `delete_timelines` |
+| 製作 | `start_production` `get_production` `set_production_mode` `close_production` |
 | 計畫 | `save_plan` `amend_plan` `copy_plan` `get_plan` `validate_plan` `compile_plan` `diff_plan` `preview_plan_diff` `list_plan_versions` `revert_plan` `propose_broll` |
 | 專案 | `create_project` `list_projects` `get_project` `apply_edits` `preview_project` `preview_sound` `offer_songs` `ask_user` `remember_preference` `forget_preference` |
 | 字幕 | `generate_subtitles` `get_subtitles` |

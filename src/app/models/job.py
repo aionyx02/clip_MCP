@@ -86,6 +86,11 @@ class Job(BaseModel):
         default=None, description="The shape it was rendered in, when not the project's own (render jobs)",
     )
     preview: bool = Field(default=False, description="Whether the render is a preview rather than the finished video")
+    production_id: Optional[str] = Field(
+        default=None,
+        description="The unfinished production the AI rendered it for, through `render_project`; null for a "
+                    "render the editor started, or one of a project with no production (render jobs)",
+    )
     work_dir: Optional[str] = Field(default=None, description="Directory holding the job's specification and logs")
     spots: Optional[List[Dict[str, Any]]] = Field(
         default=None,

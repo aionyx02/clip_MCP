@@ -669,7 +669,8 @@ def _run_render(job: Job, spec: Dict[str, Any], context: JobContext, repo: Optio
     began = time.monotonic()
     for number, piece in enumerate(pieces, start=1):
         start, share = done / total, weights[number - 1] / total
-        context.report(start, f"rendering picture {number} of {len(pieces)}")
+        context.report(start, "measuring camera shake" if piece.get("kind") == "transforms"
+                       else f"rendering picture {number} of {len(pieces)}")
         try:
             run_ffmpeg(
                 piece["command"], log, float(piece["duration_seconds"]),
