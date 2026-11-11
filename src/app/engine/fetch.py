@@ -1,10 +1,11 @@
-"""Music from the web: only from sites whose terms are known, and only a song.
+"""Music and sound effects from the web: only from sites whose terms are known.
 
 The sites are written here and nowhere else. Each says what its music may be
 used for and whether a credit is owed: one licence for the whole site, or one
 per track that the AI reads off the page and the user hears before anything is
-downloaded. A link to anywhere else is refused, and so is a redirect that
-leads anywhere else.
+downloaded. A site that also offers sound effects under a licence of its own
+says which, and only those sites are asked for effects. A link to anywhere
+else is refused, and so is a redirect that leads anywhere else.
 """
 
 import os
@@ -31,6 +32,9 @@ class Site:
         licence: The licence of all its music, or None when each track has its own.
         credit: Whether its licence asks for a credit.
         terms: What its licence allows, in a sentence for the user.
+        effects_licence: The licence of its sound effects, or None when sound
+            effects are not taken from it.
+        effects_terms: What that licence allows, in a sentence for the user.
     """
 
     name: str
@@ -38,6 +42,8 @@ class Site:
     licence: Optional[str]
     credit: bool
     terms: str
+    effects_licence: Optional[str] = None
+    effects_terms: str = ""
 
 
 SITES = {
@@ -45,11 +51,16 @@ SITES = {
         "Pixabay Music", ("pixabay.com", "cdn.pixabay.com"), "Pixabay Content License", False,
         "free for videos, commercial ones included, with no credit; the file may not be resold on its own. Some "
         "tracks are registered with Content ID: a claim is cleared with the licence certificate on the track's page",
+        "Pixabay Content License",
+        "free in videos, commercial ones included, with no credit; the file may not be resold or shared on its own",
     ),
     "mixkit": Site(
         "Mixkit", ("mixkit.co", "assets.mixkit.co"), "Mixkit Stock Music Free License", False,
         "free for videos online, social media and ads included, with no credit; not for TV or radio broadcast, "
         "CDs, DVDs or games",
+        "Mixkit Sound Effects Free License",
+        "free in videos, commercial ones included, with no credit; the file may not be redistributed or sold on its "
+        "own. Read the licence on Mixkit's page once before relying on it for a broadcast",
     ),
     "incompetech": Site(
         "Incompetech (Kevin MacLeod)", ("incompetech.com",), "CC BY 4.0", True,
@@ -88,6 +99,11 @@ def site_of(url: str) -> Optional[str]:
         if any(host == allowed or host.endswith("." + allowed) for allowed in site.hosts):
             return key
     return None
+
+
+def effect_sites() -> Tuple[str, ...]:
+    """The keys of the sites sound effects may be taken from."""
+    return tuple(key for key, site in SITES.items() if site.effects_licence is not None)
 
 
 def licence_problem(site: str, licence: Optional[str], personal: bool) -> Optional[str]:

@@ -32,7 +32,7 @@ from typing import Callable, Dict, List, Mapping, Optional, Tuple
 from app.engine.builder import Talking
 from app.engine.delivery import _on_timeline
 from app.engine.ffmpeg import exact_stretch_args, hidden_window_flags
-from app.engine.library import MUSIC, library_of
+from app.engine.library import MUSIC, SFX, library_of
 from app.models.media import Asset, MediaAnalysis
 from app.models.timeline.parts import Clip, Project, TrackType
 
@@ -228,6 +228,11 @@ def talking_in(
         if track.track_type == TrackType.AUDIO and track.id not in voices and not track.duck_under_speech
         for clip in track.clips
         if clip.asset_id in filmed and (asset := assets.get(clip.asset_id)) is not None and library_of(asset) != MUSIC
+    ) | frozenset(
+        # A sound effect is brought to the talking like a song, but it is a moment, not a bed:
+        # it is meant to be heard, and is not held to how far under the words music sits.
+        clip.id for track in project.tracks if track.track_type == TrackType.AUDIO
+        for clip in track.clips if (asset := assets.get(clip.asset_id)) is not None and library_of(asset) == SFX
     )
     return Talking(spans=tuple(sorted(spans)), music_gains=gains, clip_gains=clip_gains,
                    footage_spans=tuple(sorted(footage_spans)), not_music=not_music)

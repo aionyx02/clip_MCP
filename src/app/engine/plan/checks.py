@@ -13,8 +13,8 @@ from app.engine.plan.broll import Cover, broll_covers
 from app.engine.plan.music import Bed, music_fit_notes
 from app.engine.plan.pieces import (
     BROLL_TRACK_ID, MERGE_GAP_SECONDS, MIN_TRANSITION_SECONDS, MOVED_FAR_SECONDS, MUSIC_B_TRACK_ID, MUSIC_TRACK_ID,
-    SNAP_SECONDS, VIDEO_TRACK_ID, Note, Piece, compiled_duration, edge_of, first_clips, ordered_selections, pace_of,
-    piece_starts, selected_pieces,
+    SFX_B_TRACK_ID, SFX_TRACK_ID, SNAP_SECONDS, VIDEO_TRACK_ID, Note, Piece, compiled_duration, edge_of, first_clips,
+    ordered_selections, pace_of, piece_starts, selected_pieces,
 )
 from app.engine.semantic import CLEAN_SILENCE_SECONDS, EDGE_TOLERANCE_SECONDS, CleanCuts
 from app.models.brand import BrandKit
@@ -29,7 +29,7 @@ from app.models.timeline.parts import MAX_SPEED, MIN_SPEED, Clip, Project, Title
 EVIDENCE_SLACK_SECONDS = 0.01
 
 # Every track a compile owns and rebuilds; any other track belongs to whoever made it.
-COMPILED_TRACKS = (VIDEO_TRACK_ID, MUSIC_TRACK_ID, MUSIC_B_TRACK_ID, BROLL_TRACK_ID)
+COMPILED_TRACKS = (VIDEO_TRACK_ID, MUSIC_TRACK_ID, MUSIC_B_TRACK_ID, BROLL_TRACK_ID, SFX_TRACK_ID, SFX_B_TRACK_ID)
 
 # How far the compiled length may sit from what the plan asked for before it is worth saying.
 LENGTH_TOLERANCE = 0.1
@@ -1373,6 +1373,7 @@ def check_recompile(
     pieces: Sequence[Piece],
     covers: Sequence[Cover] = (),
     beds: Sequence["Bed"] = (),
+    effects: Sequence[Tuple[str, ...]] = (),
 ) -> List[str]:
     """Check that compiling over a project would not destroy work done by hand.
 
@@ -1391,6 +1392,8 @@ def check_recompile(
             own pair of clips rather than by a window.
         beds: The music the plan lays under them, each stretch identified by
             its cue and its pass through the song.
+        effects: The sound effects the plan lays, each identified by its
+            moment and its file.
 
     Returns:
         One message per problem, empty when the project is safe to compile
@@ -1400,6 +1403,7 @@ def check_recompile(
     available = {piece.from_clip_ids for piece in pieces}
     available |= {(cover.clip_id, cover.over_clip_id) for cover in covers}
     available |= {bed.key for bed in beds}
+    available |= {tuple(effect) for effect in effects}
     if beds:
         # A music clip compiled before stretches had names of their own carries none; it
         # was the first stretch, and is taken as the first stretch now.

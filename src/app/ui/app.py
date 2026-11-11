@@ -45,7 +45,7 @@ from app.engine.frames import extract_frame
 from app.engine.subtitles import captioned_clips, place_cues
 from app.models.timeline.parts import Clip, Project
 from app.storage import housekeeping
-from app.engine.library import FOLDER_KINDS as LIBRARY_FOLDERS, FOOTAGE, LIBRARIES, MUSIC, library_of
+from app.engine.library import FOLDER_KINDS as LIBRARY_FOLDERS, FOOTAGE, LIBRARIES, MUSIC, SFX, library_of
 from app.storage.repo import FOLDER_KINDS, FolderNotFoundError
 from app.ui import dialogs, updates
 from app.workspace import output_dir
@@ -423,12 +423,14 @@ async def assets(request: Request) -> Response:
     """
     everything = request.query_params.get("all") == "1"
     library = request.query_params.get("library")
-    filed = {**runtime.repo.folder_of("assets"), **runtime.repo.folder_of("music")}
+    filed = {item: folder for kind in LIBRARY_FOLDERS.values() for item, folder in runtime.repo.folder_of(kind).items()}
+    # The editor has no page of its own for sound effects yet: they are shown with the music, as sound.
+    wanted = {MUSIC, SFX} if library == MUSIC else {library}
     listed = []
     heard = examining.song_tags() if library == MUSIC else {}
     analyzing = examining.analyzing_assets()
     for asset in runtime.repo.list_assets():
-        if library in LIBRARIES and library_of(asset) != library:
+        if library in LIBRARIES and library_of(asset) not in wanted:
             continue
         present = os.path.exists(asset.path)
         if present or everything:

@@ -14,8 +14,9 @@ from app.models.timeline.parts import Clip, Project, TimeRange, Track, TrackType
 from app.models.offer import OfferedSong, SongOffer
 from app.engine import clap, fetch
 from app.engine.probe import probe_file, rights_tags
-from app.engine.library import MUSIC, library_of
+from app.engine.library import MUSIC, SFX, library_of
 from app.engine.delivery import clock, marked_parts, rights_facts
+from app.engine.plan.effects import SFX_UNDER_TALK_DB, effect_moments, moments_hash
 from app.storage import housekeeping
 from app.workspace import output_dir
 from app import runtime
@@ -74,9 +75,25 @@ def _music_folder() -> str:
     """Where songs taken from the web are kept: beside the user's finished videos, where they can find them."""
     return os.path.join(str(output_dir()), "音樂")
 
-def _web_song_plan(url: str, page: str, title: str, artist: str, licence: Optional[str], personal_use: bool) -> dict:
-    """What taking a song would do, or why it cannot be taken."""
+def _effects_folder() -> str:
+    """Where sound effects taken from the web are kept, beside the songs."""
+    return os.path.join(str(output_dir()), "音效")
+
+def _web_song_plan(url: str, page: str, title: str, artist: str, licence: Optional[str], personal_use: bool,
+                   sound_effect: bool = False) -> dict:
+    """What taking a song or a sound effect would do, or why it cannot be taken."""
     site = fetch.site_of(url)
+    if sound_effect:
+        allowed = fetch.effect_sites()
+        if site not in allowed or fetch.site_of(page) != site:
+            raise ValueError("sound effects are only taken from " + ", ".join(fetch.SITES[key].name for key in allowed)
+                             + ", with the file's link and its page both on the same one")
+        terms = fetch.SITES[site]
+        return {
+            "site": terms.name, "title": title, "artist": artist, "licence": terms.effects_licence,
+            "terms": terms.effects_terms, "credit": None, "personal_only": personal_use, "sound_effect": True,
+            "saved_in": _effects_folder(), "url": url, "page": page,
+        }
     if site is None or fetch.site_of(page) != site:
         raise ValueError("music is only taken from " + ", ".join(item.name for item in fetch.SITES.values())
                          + ", with the file's link and its page both on the same one")
@@ -93,8 +110,9 @@ def _web_song_plan(url: str, page: str, title: str, artist: str, licence: Option
 
 @mcp.tool()
 def add_music_from_url(url: str, page: str, title: str, artist: str = "", licence: Optional[str] = None,
-                       personal_use: bool = False, confirm_plan: Optional[str] = None) -> dict:
-    """Take a song from one of the allowed music sites into the music library.
+                       personal_use: bool = False, confirm_plan: Optional[str] = None,
+                       sound_effect: bool = False, sound_kinds: Optional[List[str]] = None) -> dict:
+    """Take a song from one of the allowed music sites into the music library, or a sound effect.
 
     Allowed: Pixabay Music, Mixkit, Incompetech (Kevin MacLeod), Free Music
     Archive and Wikimedia Commons; anything else is refused. Call without
@@ -110,6 +128,12 @@ def add_music_from_url(url: str, page: str, title: str, artist: str = "", licenc
     analyzed in the background like any other. `music_credits` gives the
     credit lines a video owes.
 
+    With `sound_effect`, a sound effect from Pixabay or Mixkit, which have
+    sound effects under a licence of their own; every other site is refused
+    for effects. It goes in the sound-effects library, saved in 音效, with
+    the kinds you give in `sound_kinds`, such as `whoosh` — read off its
+    page or its title, since nothing listens for it.
+
     Args:
         url: The audio file's own link, not its page.
         page: The track's page, where its licence is shown.
@@ -119,6 +143,9 @@ def add_music_from_url(url: str, page: str, title: str, artist: str = "", licenc
             domain, CC BY, CC BY-SA, CC BY-NC, CC BY-ND, CC BY-NC-SA, CC BY-NC-ND.
         personal_use: The user said the video is only for themselves.
         confirm_plan: The `plan` the user agreed to; downloads it.
+        sound_effect: Take a sound effect rather than a song.
+        sound_kinds: For a sound effect, what kind it is, such as `whoosh`,
+            `pop`, `click`, `impact` or `riser`.
 
     Returns:
         Without `confirm_plan`: `plan` and what would be taken. With it: the
@@ -128,13 +155,15 @@ def add_music_from_url(url: str, page: str, title: str, artist: str = "", licenc
         ValueError: If the site is not allowed, the licence does not allow
             the use, the plan is not the one shown, or the file is not a song.
     """
-    planned = _web_song_plan(url, page, title, artist, licence, personal_use)
+    if sound_kinds is not None and not sound_effect:
+        raise ValueError("sound_kinds says what kind of sound effect a file is; give it only with sound_effect")
+    planned = _web_song_plan(url, page, title, artist, licence, personal_use, sound_effect)
     key = hashlib.sha256(json.dumps(planned, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()[:12]
     if confirm_plan is None:
         return {"plan": key, **planned}
     if confirm_plan.strip() != key:
         raise ValueError("this is not the plan the user was shown: show them the new one and ask again")
-    path = fetch.download(url, _music_folder(), title)
+    path = fetch.download(url, planned["saved_in"], title)
     try:
         streams = probe_file(path).get("streams", [])
     except RuntimeError:
@@ -145,8 +174,9 @@ def add_music_from_url(url: str, page: str, title: str, artist: str = "", licenc
         # Ours, just downloaded, and not what was agreed to: it does not stay.
         os.remove(path)
         raise ValueError("what was downloaded is not a song: it has no sound, or it has a picture")
-    shared.say_in_history(f"從 {planned['site']} 加入「{title}」")
-    asset = catalog.register_asset(path, MUSIC).model_copy(update={"source": Source(
+    shared.say_in_history(f"從 {planned['site']} 加入{'音效' if sound_effect else ''}「{title}」")
+    asset = catalog.register_asset(path, SFX if sound_effect else MUSIC,
+                                   sound_kinds=sound_kinds if sound_effect else None).model_copy(update={"source": Source(
         site=planned["site"], page=page, url=url, title=title, artist=artist, licence=planned["licence"],
         credit=planned["credit"], personal_only=personal_use,
     )})
@@ -155,16 +185,17 @@ def add_music_from_url(url: str, page: str, title: str, artist: str = "", licenc
 
 @mcp.tool()
 def music_credits(project_id: str) -> dict:
-    """The credit lines a video owes for the songs in it, ready for its description.
+    """The credit lines a video owes for the songs and sound effects in it, ready for its description.
 
     Args:
         project_id: The video.
 
     Returns:
-        `credits`, one line per song that asks for one; `personal_only`, the
-        songs taken for a video only the user watches, which must not go in
-        one that is published; and `unknown`, songs with no record of where
-        they came from — ask the user how they are licensed.
+        `credits`, one line per song or sound effect that asks for one;
+        `personal_only`, those taken for a video only the user watches,
+        which must not go in one that is published; and `unknown`, those
+        with no record of where they came from — ask the user how they are
+        licensed.
 
     Raises:
         ValueError: If there is no such project.
@@ -175,7 +206,7 @@ def music_credits(project_id: str) -> dict:
     used = runtime.repo.get_assets({clip.asset_id for track in project.tracks if track.track_type == TrackType.AUDIO
                                     for clip in track.clips})
     # A voice-over is on an audio track too, but owes nobody a credit.
-    used = {asset_id: asset for asset_id, asset in used.items() if library_of(asset) == MUSIC}
+    used = {asset_id: asset for asset_id, asset in used.items() if library_of(asset) in (MUSIC, SFX)}
     credits, personal, unknown = [], [], []
     for asset in used.values():
         if asset.source is None:
@@ -272,6 +303,71 @@ def export_notices(
     with open(path, "w", encoding="utf-8-sig", newline="\r\n") as out:
         out.write(text.rstrip() + "\n\n---\n" + "\n".join(listed or ["(nothing found)"]) + "\n")
     return {"facts": listed, "written": True, "output_path": path}
+
+@mcp.tool()
+def propose_sound_effects(project_id: str) -> dict:
+    """List the moments of a compiled cut a sound effect could go at, and the effects in the library.
+
+    The moments are found by rule and on purpose too many: every cut on the
+    sequence (`marks` says which come in on a `transition`, change `speed`,
+    follow a `gap` or touch a `card`), every title card, words coming up over
+    the footage, covering picture cutting in, and the closing call to action
+    (`cta`). None is ranked. Which ones get an effect is yours and the
+    user's to choose, sparingly: an effect on every cut is noise. Pick from
+    `effects` by their `sound_kinds`; a moment you want that is not listed
+    cannot be had, so say so rather than picking the nearest.
+
+    Write the picks into the plan with `amend_plan` and a `set_sound_effects`
+    step — each `{candidate, asset_id, volume, lead}` with this
+    `candidate_hash` — and compile it. The compile refuses, with reasons, a
+    pick that names a moment not listed here, a file that is not a sound
+    effect, or a hash from moments that have changed since: propose again
+    then. An effect plays over everything, never ducks under speech, and at
+    `volume` 1 sits a fixed distance under the talking; `check_render`
+    says which land on spoken words.
+
+    Args:
+        project_id: The compiled cut.
+
+    Returns:
+        `moments`, each with its `id`, `kind`, `at` in seconds of the cut,
+        `marks` and `what` it is; `candidate_hash`; `effects`, the sound
+        effects in the library with their `id`, `name`, `duration` and
+        `sound_kinds` (empty when nobody said); `under_talk_db`, how far
+        under the talking volume 1 is; and `chosen`, the picks of the plan
+        the cut was compiled from and whether they are `current`.
+
+    Raises:
+        ValueError: If there is no such project, or nothing is on its sequence.
+    """
+    project = runtime.repo.get_project(project_id)
+    if project is None:
+        raise ValueError(f"project {project_id} not found")
+    base = project.base_video_track
+    if base is None or not base.clips:
+        raise ValueError(f"project {project_id} has nothing on its sequence yet; compile a plan first")
+    moments = effect_moments(project)
+    current = moments_hash(moments)
+    effects = sorted((asset for asset in runtime.repo.list_assets() if library_of(asset) == SFX),
+                     key=lambda asset: catalog.natural_key(os.path.basename(asset.path)))
+    result = {
+        "moments": [moment.record() for moment in moments],
+        "candidate_hash": current,
+        "effects": [{"id": asset.id, "name": os.path.basename(asset.path),
+                     "duration": float(asset.duration) if asset.duration is not None else None,
+                     "sound_kinds": asset.sound_kinds,
+                     **({"source": asset.source.site} if asset.source is not None else {})} for asset in effects],
+        "under_talk_db": SFX_UNDER_TALK_DB,
+    }
+    plan_id = next((clip.from_plan_id for clip in base.clips if clip.from_plan_id), None)
+    plan = runtime.repo.get_plan(plan_id) if plan_id else None
+    if plan is not None and plan.sound_effects is not None:
+        result["chosen"] = {"plan_id": plan.id, **plan.sound_effects.model_dump(mode="json"),
+                            "current": plan.sound_effects.candidate_hash == current}
+    if not effects:
+        result["next"] = ("the library has no sound effects: import short sounds the user has, or take some from "
+                          "Pixabay or Mixkit with add_music_from_url and sound_effect")
+    return result
 
 # More songs than this to hear under the same stretch is a library, not a choice. Provisional.
 MOST_OFFERED_SONGS = 4

@@ -158,7 +158,7 @@ _MIGRATIONS: List[List[str]] = [
     ],
 ]
 # Footage and music are filed apart, each in folders of its own; projects in theirs.
-FOLDER_KINDS = ("assets", "music", "projects")
+FOLDER_KINDS = ("assets", "music", "sfx", "projects")
 SCHEMA_VERSION = len(_MIGRATIONS)
 
 class VersionConflictError(ValueError):
@@ -306,11 +306,11 @@ class Repository:
             self.history.write("library.json", canonical(self._library()), said)
 
     def move_to_library(self, asset_ids: Iterable[str], library: str) -> List[Asset]:
-        """Put files in the footage or the music library, at the top of its folders.
+        """Put files in the footage, the music or the sound-effects library, at the top of its folders.
 
         Args:
             asset_ids: The files.
-            library: `footage` or `music`.
+            library: `footage`, `music` or `sfx`.
 
         Returns:
             The files that moved; one already there is left as it is.
@@ -333,7 +333,8 @@ class Repository:
                 conn.execute("DELETE FROM folder_items WHERE item_id = ? AND kind != ?", (asset_id, kind))
                 moved.append(asset)
         if moved:
-            self._kept_library(f"{len(moved)} 個檔案移到{'音樂' if library == 'music' else '素材'}")
+            named = {"music": "音樂", "sfx": "音效"}.get(library, "素材")
+            self._kept_library(f"{len(moved)} 個檔案移到{named}")
         return moved
 
     def save_asset(self, asset: Asset) -> None:

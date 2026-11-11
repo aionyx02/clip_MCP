@@ -23,7 +23,7 @@ from app.engine.builder import DUCK_DEPTH_DB, Talking
 from app.engine.continuity import Shot, stray_runs
 from app.engine.looks import alike
 from app.engine.plan.checks import LENGTH_TOLERANCE, NOT_PARTICLES, SENTENCE_END_PUNCTUATION, SHAKY
-from app.engine.library import MUSIC, library_of
+from app.engine.library import FOOTAGE, MUSIC, SFX, library_of
 from app.engine.semantic import (
     CLEAN_GAP_SECONDS, CLEAN_SILENCE_SECONDS, EDGE_TOLERANCE_SECONDS, bare_words, clean_cuts, combined_over, join_voices,
     share_covered, voice_likeness, was_audible, was_made_up,
@@ -1284,9 +1284,10 @@ class RightsFact:
     """Something in a cut its publisher may need permission for, or has to say.
 
     Attributes:
-        kind: `music` for a song laid under the cut, `recording` for any
-            other sound laid on a sound track — a song filed with the footage,
-            a voice-over, a sound effect — `generated` for a file a
+        kind: `music` for a song laid under the cut, `sound_effect` for a
+            file of the sound-effects library, `recording` for any other
+            sound laid on a sound track — a song filed with the footage, a
+            voice-over — `generated` for a file a
             generative AI tool made, wherever it is seen or heard, `other_voice` for
             somebody heard who is not the main speaker, `unchecked_voices` for
             talking nobody told the voices apart in, and `faces` for more than
@@ -1334,7 +1335,7 @@ def rights_facts(
     pictured = {clip.asset_id for track in project.video_tracks for clip in track.clips}
     for asset_id in dict.fromkeys(clip.asset_id for track in audio for clip in track.clips if clip.volume != 0):
         asset = assets.get(asset_id)
-        if asset is None or (asset_id in pictured and library_of(asset) != MUSIC):
+        if asset is None or (asset_id in pictured and library_of(asset) == FOOTAGE):
             continue
         spans = _joined_spans((float(clip.timeline_in), float(clip.timeline_out)) for track in audio
                               for clip in track.clips if clip.asset_id == asset_id and clip.volume != 0)
@@ -1349,7 +1350,7 @@ def rights_facts(
             known.append("licence: nobody has said")
         known += [f"{key}: {value}" for key, value in tags.get(asset_id, {}).items() if value]
         # Every recording laid on the sound tracks: a song filed with the footage is still a song.
-        kind = "music" if library_of(asset) == MUSIC else "recording"
+        kind = {MUSIC: "music", SFX: "sound_effect"}.get(library_of(asset), "recording")
         facts.append(RightsFact(kind, os.path.basename(asset.path), spans, tuple(known)))
 
     # Every place a generated file is seen or heard, a title card's background and an inset
@@ -1371,7 +1372,7 @@ def rights_facts(
     tracks = ([project.base_video_track] if project.base_video_track else []) + audio
     heard = [clip for track in tracks for clip in track.clips
              if clip.volume != 0 and clip.card is None and clip.asset_id in assets
-             and library_of(assets[clip.asset_id]) != MUSIC]
+             and library_of(assets[clip.asset_id]) == FOOTAGE]
     joined = join_voices(analyses)
     talk: dict = {}
     for clip in heard:

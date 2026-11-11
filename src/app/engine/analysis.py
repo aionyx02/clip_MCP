@@ -33,7 +33,7 @@ from app.engine import relisten
 from app.engine.relisten import Listener
 from app.engine.rhythm import measure_rhythm, rhythm_model_name
 from app.engine import clap
-from app.engine.library import MUSIC, library_of
+from app.engine.library import FOOTAGE, MUSIC, library_of
 from app.engine.listen import cut_sound
 from app.engine.music import energy_curve
 from app.engine.subtitles import chinese_words
@@ -1755,7 +1755,8 @@ def analyze_media(
     # Music is listened to for its beat and never transcribed; everything else the other way
     # round: a beat tracker run over somebody talking finds one in their syllables.
     music = asset.has_audio and library_of(asset) == MUSIC
-    with_speech = transcribe and asset.has_audio and not music
+    # A sound effect is neither: nothing is said in a whoosh, and it has no beat.
+    with_speech = transcribe and asset.has_audio and library_of(asset) == FOOTAGE
     with_speakers = with_speech and diarize
     with_faces = asset.has_video
     with_rhythm = music

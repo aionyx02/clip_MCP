@@ -6,7 +6,7 @@ from pydantic import BaseModel, Field
 
 
 class Source(BaseModel):
-    """Where a song taken from the web came from, and on what terms."""
+    """Where a song or a sound effect taken from the web came from, and on what terms."""
 
     site: str = Field(..., description="The site, as the user knows it")
     page: str = Field(..., description="The page it was taken from")
@@ -50,11 +50,16 @@ class Asset(BaseModel):
         description="How this file may be used, in the user's words: 「請消音」, 「0:12 以後手入鏡，不要用」. Shown "
                     "wherever the file is read about, so an instruction does not have to live in its name",
     )
-    source: Optional[Source] = Field(default=None, description="For a song taken from the web: where, and on what terms")
+    source: Optional[Source] = Field(default=None, description="For a song or a sound effect taken from the web: where, and on what terms")
     library: Optional[str] = Field(
         default=None,
-        description="`footage` or `music`: which of the library's two halves the file is in. Null for a file "
-                    "added before there were two, which is placed by whether it has a picture",
+        description="`footage`, `music` or `sfx`: which part of the library the file is in. Null for a file "
+                    "added before there were libraries, which is placed by whether it has a picture",
+    )
+    sound_kinds: List[str] = Field(
+        default_factory=list,
+        description="For a sound effect, what kind it is — whoosh, pop, click, impact, riser — as whoever added it "
+                    "said. Empty when nobody has: the server never guesses it from the sound",
     )
     still: bool = Field(
         default=False,
