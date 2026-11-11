@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from decimal import Decimal
 from fractions import Fraction
@@ -32,7 +33,7 @@ from app.engine.delivery import (
     shaky_clips,
 )
 from app.engine.frames import format_timestamp, still, storyboard_sheet
-from app.engine.subtitles import build_ass, place_cues
+from app.engine.subtitles import CAPTION_LINE_HEIGHT, build_ass, drawn_captions, place_cues
 from app.storage import housekeeping
 from app.workspace import output_dir
 from app import runtime
@@ -980,7 +981,34 @@ def _looks(clips: Sequence[Clip], assets: Mapping[str, Asset]) -> Dict[str, Tupl
             runtime.repo.save_looks(asset_id, new)
     return found
 
-def contrast_notes(project: Project) -> List[str]:
+# Provisional: how many captions the check measures at most, spread evenly over the cut. Each
+# is a frame read from its file; a long cut's every caption would make the check slow.
+MOST_CAPTIONS_MEASURED = 40
+# Provisional: how many of the hard-to-read captions are named, by time, in the note.
+CAPTIONS_NAMED = 5
+# Provisional: how many frames are read for captions at once. Each is an FFmpeg process that
+# spends about half a second seeking in a phone's file, measured on one laptop; one after
+# another, forty of them held the check up for twenty seconds.
+CAPTION_FRAME_READERS = 8
+
+
+def _caption_rows(event: dict, drawn: dict, height: int) -> List[dict]:
+    """The rows of one drawn caption, placed as the render places them: up from the bottom margin."""
+    size, second_size = drawn["font_size"], drawn["secondary_size"]
+    colour = event["colour"] or drawn["colour"]
+    pitch, second_pitch = size * CAPTION_LINE_HEIGHT, second_size * CAPTION_LINE_HEIGHT
+    lines = ["".join(word[0] for word in line) for line in event["lines"]]
+    lines[0] = event["prefix"] + lines[0]
+    bottom = height - drawn["margin_v"] - len(event["secondary"]) * second_pitch
+    rows = [{"text": line, "size": size, "x": drawn["centre"], "colour": colour,
+             "y": bottom - (len(lines) - index - 0.5) * pitch} for index, line in enumerate(lines)]
+    rows += [{"text": line, "size": second_size, "x": drawn["centre"], "colour": colour,
+              "y": height - drawn["margin_v"] - (len(event["secondary"]) - index - 0.5) * second_pitch}
+             for index, line in enumerate(event["secondary"])]
+    return rows
+
+
+def contrast_notes(project: Project, captions: bool = True) -> List[str]:
     """Measure the words of a cut, in their colours, against the picture behind them, and say where they are hard to read.
 
     A title card is measured on its background as the render treats it — the
@@ -988,16 +1016,26 @@ def contrast_notes(project: Project) -> List[str]:
     over the footage on the frame in the middle of the stretch they show for,
     through the name bar's box where they have one. Words on a picture laid
     over the sequence are left out: what is behind them moves about the frame.
+    Captions drawn with no outline are measured too, each on the frame in the
+    middle of its time, on whatever full-frame picture is on top then; at
+    most `MOST_CAPTIONS_MEASURED` of them, spread over the cut. A caption with
+    an outline is not: the outline is what keeps it readable.
 
     Args:
         project: The cut, at the size and shape it will be rendered at.
+        captions: Whether its captions will be burned in.
 
     Returns:
-        One line for each card or text below `legibility.LOW_CONTRAST`.
+        One line for each card or text below `legibility.LOW_CONTRAST`, and
+        one for the captions, naming the first few below it.
     """
     base = project.base_video_track
     clips = sorted(base.clips, key=lambda clip: clip.timeline_in) if base else []
-    if not any(clip.card is not None or clip.shown_texts for clip in clips):
+    drawn = (drawn_captions(place_cues(project, project.subtitles), project.width, project.height,
+                            project.caption_style) if captions and project.subtitles else None)
+    if drawn is not None and (drawn["outline"] or not drawn["events"]):
+        drawn = None
+    if drawn is None and not any(clip.card is not None or clip.shown_texts for clip in clips):
         return []
     assets = shared.referenced_assets(project)
     framing = framing_of(project, assets)
@@ -1048,7 +1086,44 @@ def contrast_notes(project: Project) -> List[str]:
                     f"{floor} that large words need to read. Move them with `x` and `y` in set_text to a darker "
                     "part of the frame, or make them a `name`, which has a dark box behind it"
                 )
+    if drawn is not None:
+        notes += _caption_contrast(project, drawn, frame_at, floor)
     return notes
+
+
+def _caption_contrast(project: Project, drawn: dict, frame_at, floor: str) -> List[str]:
+    """Measure outline-free captions on the picture on top at the middle of each, and say which are hard to read."""
+    events = drawn["events"]
+    step = max(1, -(-len(events) // MOST_CAPTIONS_MEASURED))
+    measured = events[::step]
+    # Drawn in order, so the last track covering a moment is the picture on top of it.
+    covering = [clip for track in project.video_tracks for clip in track.clips if clip.layout is None]
+    wanted = []
+    for event in measured:
+        moment = Decimal(str((event["start"] + event["end"]) / 2))
+        on_top = [clip for clip in covering if clip.timeline_in <= moment < clip.timeline_out]
+        if not on_top or on_top[-1].card is not None:
+            continue
+        clip = on_top[-1]
+        wanted.append((event, clip, float(clip.source_range.start + (moment - clip.timeline_in) * Decimal(str(clip.speed)))))
+    with ThreadPoolExecutor(max_workers=CAPTION_FRAME_READERS) as readers:
+        pictures = list(readers.map(lambda each: frame_at(each[1], each[2]), wanted))
+    low = []
+    for (event, _clip, _seconds), picture in zip(wanted, pictures):
+        if picture is None:
+            continue
+        ratio = legibility.words_contrast(picture, _caption_rows(event, drawn, project.height))
+        if ratio < legibility.LOW_CONTRAST:
+            low.append((event, ratio))
+    if not low:
+        return []
+    named = "; ".join(f"{format_timestamp(event['start'])} 「{''.join(word[0] for word in event['lines'][0])}」 "
+                      f"{ratio:.1f}:1" for event, ratio in low[:CAPTIONS_NAMED])
+    sampled = f" (one in every {step})" if step > 1 else ""
+    return [f"captions: {len(low)} of {len(measured)} measured{sampled} stand under the {floor} words need against "
+            f"the picture behind them, drawn plain with no outline: {named}. Tell the user; with their go-ahead, an "
+            "outline (`outline_fraction` in set_caption_style, such as 0.08) or captions placed over a darker part "
+            "of the frame (`bottom_fraction`) reads"]
 
 @mcp.tool()
 def check_render(
@@ -1116,7 +1191,10 @@ def check_render(
         And `contrast`, the title cards and words over the footage
         whose white letters stand out too little from the picture behind
         them, measured on that picture as the render shows it, with what to
-        change. It never stops a render: the words still have their shadow.
+        change. Captions drawn plain, with no outline, are measured the same
+        way, a sample of them across the cut, in one line naming the first
+        few. It never stops a render: tell the user, since plain captions are
+        their default and an outline is theirs to add.
 
     Raises:
         ValueError: If the project does not exist.
@@ -1147,7 +1225,7 @@ def check_render(
     half = half_sentences(base.clips, listened, place_cues(project, project.subtitles) if project.subtitles else None)
     if half:
         checked["half_sentence"] = half
-    contrast = contrast_notes(reshaped(project, frame))
+    contrast = contrast_notes(reshaped(project, frame), burn_subtitles)
     if contrast:
         checked["contrast"] = contrast
     return checked

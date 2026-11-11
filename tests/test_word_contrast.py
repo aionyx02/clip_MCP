@@ -97,3 +97,33 @@ def test_a_headline_over_a_bright_shot_is_flagged_and_a_name_on_its_box_is_not(t
 
     edit(project, [{"action": "set_text", "track_id": "main", "clip_id": "a", "text_id": "h", "style": "name"}])
     assert "contrast" not in check_render(project)
+
+
+def _plain(folder: Path, colour: str) -> Path:
+    path = folder / f"{colour}.mp4"
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", f"color=c={colour}:size=640x360:rate=30:duration=4",
+                    "-f", "lavfi", "-i", "sine=f=300:d=4", "-shortest", "-c:v", "libx264", "-preset", "ultrafast",
+                    "-pix_fmt", "yuv420p", str(path)], check=True)
+    return path
+
+
+def captioned(asset: str, name: str) -> str:
+    return build_project([video_track(), insert("a", asset, 0, 3),
+                          {"action": "set_subtitles", "cues": [
+                              {"id": "q1", "asset_id": asset, "source_start": 0.5, "source_end": 2.0, "text": "我們出發吧"}]}],
+                         width=640, height=360, name=name)
+
+
+def test_plain_captions_over_a_bright_shot_are_flagged_and_outlined_ones_are_not(tmp_path: Path) -> None:
+    project = captioned(catalog.import_asset(str(_plain(tmp_path, "white")))["id"], "白底字幕")
+    [note] = check_render(project)["contrast"]
+    assert note.startswith("captions: 1 of 1 measured") and "「我們出發吧」 1.0:1" in note
+    # Left out of a render that does not burn them in, they are not measured.
+    assert "contrast" not in check_render(project, burn_subtitles=False)
+    edit(project, [{"action": "set_caption_style", "style": {"outline_fraction": 0.08}}])
+    assert "contrast" not in check_render(project)
+
+
+def test_plain_captions_over_a_dark_shot_are_not_flagged(tmp_path: Path) -> None:
+    project = captioned(catalog.import_asset(str(_plain(tmp_path, "black")))["id"], "黑底字幕")
+    assert "contrast" not in check_render(project)
