@@ -156,6 +156,11 @@ _MIGRATIONS: List[List[str]] = [
         # A brand's logo, colour, font and closing card, kept by name for every project after.
         "CREATE TABLE IF NOT EXISTS brand_kits (name TEXT PRIMARY KEY, data TEXT NOT NULL)",
     ],
+    [
+        # The B-roll candidates offered for a plan's stretches, by the hash a pick names, so a
+        # compile can tell a pick that was offered from one that was not without asking again.
+        "CREATE TABLE IF NOT EXISTS broll_offers (hash TEXT PRIMARY KEY, plan_id TEXT NOT NULL, data TEXT NOT NULL)",
+    ],
 ]
 # Footage and music are filed apart, each in folders of its own; projects in theirs.
 FOLDER_KINDS = ("assets", "music", "sfx", "projects")
@@ -800,6 +805,21 @@ class Repository:
         """Forget a brand kit; False when there was none by that name."""
         with self._transaction() as conn:
             return conn.execute("DELETE FROM brand_kits WHERE name = ?", (name,)).rowcount > 0
+
+    def save_broll_offer(self, candidate_hash: str, plan_id: str, offer: dict) -> None:
+        """Keep the B-roll candidates offered for a plan under the hash a pick will name."""
+        with self._transaction() as conn:
+            conn.execute("INSERT OR REPLACE INTO broll_offers (hash, plan_id, data) VALUES (?, ?, ?)",
+                         (candidate_hash, plan_id, json.dumps(offer, ensure_ascii=False)))
+
+    def broll_offers(self, hashes: Iterable[str]) -> Dict[str, dict]:
+        """Read the B-roll offers kept under these hashes, keyed by hash; unknown ones are left out."""
+        wanted = [item for item in dict.fromkeys(hashes) if item]
+        if not wanted:
+            return {}
+        rows = self._query(f"SELECT hash, data FROM broll_offers WHERE hash IN ({','.join('?' * len(wanted))})",
+                           wanted)
+        return {row[0]: json.loads(row[1]) for row in rows}
 
     def song_offers(self, project_id: str) -> List[SongOffer]:
         """Read the songs put to the user for a project, a set per part, in the order the parts play."""
