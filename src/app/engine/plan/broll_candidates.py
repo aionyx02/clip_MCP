@@ -355,6 +355,10 @@ def offer_candidates(
                       if words else "shares no word with what is said; ")
             record["why"] = (f"{shared}{position} of {len(ranked)} read ({meaning[clip.id]:.3f} by meaning), "
                              f"from its {', '.join(source for source, _ in parts)}")
+        elif parts and not stretch.said:
+            # Described, but nothing is said under the stretch to read it against.
+            record["why"] = (f"nothing is said under this stretch to match its {', '.join(s for s, _ in parts)} "
+                             "against, so it was not placed by meaning; look at it before picking")
         else:
             record["why"] = ("nothing says what is in it — no description, tags or telling file name — so it was "
                              "not placed by meaning; look at it before picking")

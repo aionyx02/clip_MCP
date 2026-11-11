@@ -288,3 +288,13 @@ def test_an_offer_is_pinned_to_what_it_was_made_from() -> None:
     first = offering.candidate_hash({"tl_x:u0000": {"inputs": one, "candidates": ["a", "b"]}})
     assert first == offering.candidate_hash({"tl_x:u0000": {"inputs": one, "candidates": ["a", "b"]}})
     assert first != offering.candidate_hash({"tl_x:u0000": {"inputs": one, "candidates": ["a"]}})
+
+
+def test_a_described_shot_under_a_silent_stretch_is_not_called_undescribed() -> None:
+    assets = {TALK: filed(TALK, "1-講解.mp4"), "a": filed("a", "IMG_0001.MOV")}
+    described = shot("u0001", "a").model_copy(update={"tags": [Tag(value="機構特寫", source=TagSource.MODEL)]})
+    pool = offering.eligible([described], assets)
+    # Nothing said under it, so nothing is read by meaning, as `propose_broll` leaves it.
+    candidates, _, _ = offering.offer_candidates(stretch(""), plan_for([]), [], pool, assets, {}, NOON)
+    assert "nothing is said under this stretch" in candidates[0]["why"]
+    assert "nothing says what is in it" not in candidates[0]["why"]
