@@ -15,7 +15,9 @@ from app.engine import cards, loudness, resources, stills
 from app.engine.ffmpeg import escape_filter_path, hidden_window_flags
 from app.engine.reframe import Framing, crop_filter
 from app.models.media import Asset, MediaAnalysis
-from app.models.timeline.parts import TOUCHING_SECONDS, Clip, Dip, Project, TrackType, Transition, VoiceCleanup, Wipe
+from app.models.timeline.parts import (
+    LOGO_MARGIN, TOUCHING_SECONDS, Clip, Dip, Project, TrackType, Transition, VoiceCleanup, Wipe,
+)
 
 AUDIO_SAMPLE_RATE = 48000
 # Clips starting closer than this to the beginning of their file are read from the beginning and cut by timestamp:
@@ -496,6 +498,52 @@ def overlay_box(clip: Clip, width: int, height: int) -> Tuple[int, int, int, int
         box_width,
         box_height,
     )
+
+def _drawn_logos(
+    project: Project, assets: Mapping[str, Asset], inputs: List[List[str]], filters: List[str], joined: str,
+) -> str:
+    """Draw the logo held over the cut, and the logo of each title card that carries one.
+
+    Over everything else in the picture and under the words, which are burned
+    after. Each logo is one picture read once; the overlay holds it for as
+    long as it is drawn. The corner logo stays off a card with a logo of its
+    own, so a closing card shows its logo once, large, rather than twice.
+
+    Args:
+        project: The cut, at the size it is rendered at.
+        assets: Registered assets, keyed by asset ID, the logos among them.
+        inputs: The render's inputs, added to.
+        filters: The render's filters, added to.
+        joined: The label of the picture so far.
+
+    Returns:
+        The label of the picture with the logos on it.
+    """
+    width, height = project.width, project.height
+    carded = [(clip, cards.placed(clip, width, height)) for clip in cards.cards_of(project)
+              if clip.card.logo_asset_id and clip.card.logo_asset_id in assets]
+    logo = project.logo
+    if logo is not None and logo.asset_id in assets:
+        inputs.append(["-i", assets[logo.asset_id].path])
+        wide = max(2, 2 * round(width * logo.width / 2))
+        margin = round(min(width, height) * LOGO_MARGIN)
+        x = f"{margin}" if logo.corner.endswith("left") else f"W-w-{margin}"
+        y = f"{margin}" if logo.corner.startswith("top") else f"H-h-{margin}"
+        off = "+".join(f"between(t,{placed['start']:.3f},{placed['end']:.3f})" for _, placed in carded)
+        filters.append(f"[{len(inputs) - 1}:v]format=rgba,scale={wide}:-2,colorchannelmixer=aa={logo.opacity:g}[logo]")
+        filters.append(f"{joined}[logo]overlay=x={x}:y={y}" + (f":enable='not({off})'" if off else "") + "[logov]")
+        joined = "[logov]"
+    for number, (clip, placed) in enumerate(carded):
+        box = placed["logo"]
+        inputs.append(["-i", assets[clip.card.logo_asset_id].path])
+        filters.append(f"[{len(inputs) - 1}:v]format=rgba,"
+                       f"scale={box['width']}:{box['height']}:force_original_aspect_ratio=decrease[cardlogo{number}]")
+        filters.append(
+            f"{joined}[cardlogo{number}]overlay=x={box['x']}+({box['width']}-w)/2:y={box['y']}+({box['height']}-h)/2"
+            f":enable='between(t,{placed['start']:.3f},{placed['end']:.3f})'[cardlogov{number}]"
+        )
+        joined = f"[cardlogov{number}]"
+    return joined
 
 def _speed_video_filter(clip: Clip) -> str:
     """Stretch or compress a clip's picture to its playback speed.
@@ -1567,6 +1615,8 @@ class FFmpegRenderer:
                 )
                 overlay_audio.append(track_label)
 
+        if not sound_only:
+            joined = _drawn_logos(project, assets, inputs, filters, joined)
         if sound_only:
             pass
         elif subtitle_path is not None:

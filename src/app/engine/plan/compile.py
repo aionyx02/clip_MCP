@@ -9,6 +9,7 @@ from app.engine.plan.checks import as_left, compiled_clips, with_cards
 from app.engine.plan.music import music_beds, plan_markers
 from app.engine.plan.pieces import BROLL_TRACK_ID, MUSIC_TRACK_ID, VIDEO_TRACK_ID, Piece
 from app.engine.semantic import CleanCuts
+from app.models.brand import BrandKit
 from app.models.media import Asset
 from app.models.plan import EditPlan, short_clip_ids
 from app.models.semantic import SemanticClip
@@ -156,6 +157,29 @@ def _text_operations(
                     put(track_id, clip_id, text_id, low, high, fields)
     return texts
 
+def _brand_operations(kit: Optional[BrandKit], project: Optional[Project]) -> List[dict]:
+    """Write the brand kit's logo and font onto the cut, or take a kit's logo off when there is no kit.
+
+    Args:
+        kit: The brand kit the plan names, or None.
+        project: What is on the timeline now, if anything.
+
+    Returns:
+        `set_logo` and `set_caption_style` operations, as needed.
+    """
+    operations: List[dict] = []
+    had = project.logo if project is not None else None
+    if kit is not None and kit.logo_asset_id:
+        operations.append({"action": "set_logo", "logo": {
+            "asset_id": kit.logo_asset_id, "corner": kit.logo_corner, "opacity": kit.logo_opacity,
+            "width": kit.logo_width, "brand_kit": kit.name,
+        }})
+    elif had is not None and had.brand_kit is not None:
+        operations.append({"action": "set_logo", "logo": None})
+    if kit is not None and kit.font and (project is None or project.caption_style.font != kit.font):
+        operations.append({"action": "set_caption_style", "style": {"font": kit.font}})
+    return operations
+
 def compile_operations(
     plan: EditPlan,
     clips: Mapping[str, SemanticClip],
@@ -163,6 +187,7 @@ def compile_operations(
     assets: Mapping[str, Asset],
     project: Optional[Project] = None,
     cuts: Optional[Mapping[str, CleanCuts]] = None,
+    kit: Optional[BrandKit] = None,
 ) -> Tuple[List[dict], Dict[str, dict]]:
     """Turn a plan into the edit operations that build its cut.
 
@@ -179,6 +204,10 @@ def compile_operations(
         project: What is already on the timeline, if anything.
         cuts: Where each file may be cut without splitting a word, keyed by
             asset ID.
+        kit: The brand kit the plan names, if any: its closing card goes in
+            as the last card, its logo over the cut, its font on the words.
+            A logo a kit put there goes when the plan stops naming one; one
+            set by hand stays.
 
     Returns:
         `(operations, provenance)` — operations for `apply_edits`, and, keyed
@@ -197,7 +226,7 @@ def compile_operations(
         (track_id, tuple(clip.from_clip_ids)): clip
         for track_id, clip in compiled_clips(project) if clip.pinned and clip.card is None
     }
-    pieces = with_cards(plan, pieces, assets, cuts, project)
+    pieces = with_cards(plan, pieces, assets, cuts, project, kit)
 
     operations: List[dict] = [
         # Everything the compiler owns comes down first, so the cut is rebuilt rather than
@@ -291,6 +320,7 @@ def compile_operations(
             }
 
     operations += _text_operations(plan, operations, provenance, project, children)
+    operations += _brand_operations(kit, project)
 
     # The compiler owns the markers it made and nothing else: one somebody added by hand
     # has no beat behind it, so it is carried across rather than rebuilt.

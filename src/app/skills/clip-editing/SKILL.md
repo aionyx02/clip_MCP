@@ -117,7 +117,7 @@ the very start of a video, use `video_fade_in` instead.
   appear in the file with `burn_subtitles`; `set_caption_style` decides how they are drawn, from
   a platform `preset` (the platform file). `get_subtitles` reports `total`, how many land in the
   cut, and `stored`; `stored` above `total` means some belong to footage the
-  edit dropped.
+  edit dropped. A brand kit's logo is taken off by hand with `set_logo` and a null `logo`.
 - **Version**: `apply_edits` needs the project's current `version` as
   `expected_version`. `get_project` leaves out clip fields still at their
   default, so a clip with no `volume` is at 1.0 and one with no `color` is as

@@ -7,6 +7,26 @@ from app.models.media import Asset
 from app.models.timeline.parts import TOUCHING_SECONDS, Clip, Project, TrackType
 
 
+def logo_picture(asset_id: str, assets: Mapping[str, Asset]) -> Asset:
+    """Find the picture a logo is drawn from, refusing anything that is not a still in the library.
+
+    Args:
+        asset_id: The logo's file.
+        assets: Registered assets keyed by ID.
+
+    Returns:
+        The asset.
+
+    Raises:
+        ValueError: If it is not in the library, or is not a still picture.
+    """
+    asset = assets.get(asset_id)
+    if asset is None:
+        raise ValueError(f"logo {asset_id} is not in the library; import the picture first")
+    if not asset.still:
+        raise ValueError(f"logo {asset_id} is not a still picture; a logo is one image, such as a PNG")
+    return asset
+
 def validate_project(project: Project, assets: Mapping[str, Asset]) -> None:
     """Check that a project's timeline is semantically consistent.
 
@@ -30,6 +50,8 @@ def validate_project(project: Project, assets: Mapping[str, Asset]) -> None:
             clip and explains how to fix it.
     """
     base = project.base_video_track
+    if project.logo is not None:
+        logo_picture(project.logo.asset_id, assets)
     for track in project.tracks:
         if track.duck_under_speech and track.track_type != TrackType.AUDIO:
             raise ValueError(f"track {track.id}: only audio tracks can duck under speech")
@@ -64,6 +86,8 @@ def validate_project(project: Project, assets: Mapping[str, Asset]) -> None:
                     raise ValueError(f"clip {clip.id}: a title card goes on the main video track, not {track.id}")
                 if clip.volume != 0:
                     raise ValueError(f"clip {clip.id}: a title card is silent; its sound cannot be turned up")
+                if clip.card.logo_asset_id is not None:
+                    logo_picture(clip.card.logo_asset_id, assets)
                 if asset.duration is not None and clip.card.at > Decimal(str(asset.duration)) + TOUCHING_SECONDS:
                     raise ValueError(
                         f"clip {clip.id}: the card shows {clip.card.at}s of asset {asset.id}, "

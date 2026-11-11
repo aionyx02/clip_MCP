@@ -262,8 +262,11 @@ def preview_project(
             shots.append((asset.path, float(clip.card.at), f"#{number}  {format_timestamp(at)}  title card",
                           placement_at(framing.get(clip.id), clip, float(clip.card.at), fps), clip.card))
             words = clip.card.title + (f" / {clip.card.subtitle}" if clip.card.subtitle else "")
-            listing.append(f"#{number}: clip {clip.id} | edit {format_timestamp(at)} | title card 「{words}」 "
-                           f"for {end - start:g}s on {clip.card.background} (words not drawn on the tile)")
+            listing.append(f"#{number}: clip {clip.id} | edit {format_timestamp(at)} | "
+                           f"{'closing card' if clip.card.end else 'title card'} 「{words}」 "
+                           f"for {end - start:g}s on {clip.card.background}"
+                           + (f", logo {clip.card.logo_asset_id} above the words" if clip.card.logo_asset_id else "")
+                           + " (words not drawn on the tile)")
             continue
         for offset in range(frames):
             # Sample the middle of each interval, and stay clear of the very last frame, which may not decode.
@@ -310,6 +313,15 @@ def preview_project(
                 f"-- track {track.id}: clip {clip.id}, "
                 f"{format_timestamp(float(clip.timeline_in))} to {format_timestamp(float(clip.timeline_out))}, {what}"
             )
+
+    if project.logo is not None:
+        logo = project.logo
+        listing.append(
+            f"-- logo {logo.asset_id} in the {logo.corner.replace('_', '-')} corner, "
+            f"{logo.width:.0%} of the frame wide at {logo.opacity:.0%} opacity, "
+            "over the whole cut but a card with a logo of its own"
+            + (f", from brand kit 「{logo.brand_kit}」" if logo.brand_kit else "") + " (not drawn on the tiles)"
+        )
 
     for track in project.tracks:
         if track.track_type != TrackType.AUDIO or not track.clips:

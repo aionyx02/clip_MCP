@@ -11,6 +11,7 @@ from fastmcp.utilities.types import Image
 from pydantic import Field
 
 from app.models.timeline.parts import Project
+from app.models.brand import BrandKit
 from app.models.comment import Comment, Preference, Question, Reply
 from app.models.trial import Trial, Verdict
 from app.engine.probe import probe_file
@@ -353,7 +354,9 @@ def remember_preference(text: Annotated[str, Field(min_length=1, max_length=300)
     轉場」 — and only when it is about their videos in general rather than
     this cut. What is kept comes back with `list_projects`, `create_project`
     and `get_project`, so the next video starts from it. Read it back to them
-    when you keep it.
+    when you keep it. A logo, a brand colour or font, or a closing card goes
+    in a brand kit with `save_brand_kit` instead: kept as words here, nothing
+    would ever put it on a cut.
 
     Args:
         text: The preference, as they said it.
@@ -382,6 +385,53 @@ def forget_preference(preference_id: str) -> dict:
     if not runtime.repo.delete_preference(preference_id):
         raise ValueError(f"there is no preference {preference_id}")
     return editing.with_preferences({"forgotten": preference_id})
+
+@mcp.tool()
+def save_brand_kit(kit: BrandKit) -> dict:
+    """Keep a brand's logo, colour, font and closing card, for every video of that brand after this one.
+
+    Only what the user gave: their logo, their colour, their words for the
+    closing card. Saving under a name already kept replaces it. A plan wears
+    a kit by naming it in `brand_kit`; compiling then puts the logo over the
+    cut and the closing card at the end, where the length counts it, and
+    sets the font of the captions, cards and words over the footage.
+
+    Args:
+        kit: The kit. `logo_asset_id` is a picture already in the library;
+            its file name works too.
+
+    Returns:
+        `kept`, the kit; and `brand_kits` and `preferences`, all of them.
+
+    Raises:
+        ValueError: If the logo is not a picture in the library.
+    """
+    if kit.logo_asset_id is not None:
+        kit = kit.model_copy(update={"logo_asset_id": shared.asset_id_for(kit.logo_asset_id)})
+        asset = runtime.repo.get_assets([kit.logo_asset_id]).get(kit.logo_asset_id)
+        if asset is None:
+            raise ValueError(f"logo {kit.logo_asset_id} is not in the library; import the picture first")
+        if not asset.still:
+            raise ValueError(f"logo {kit.logo_asset_id} is not a still picture; a logo is one image, such as a PNG")
+    runtime.repo.save_brand_kit(kit)
+    return editing.with_preferences({"kept": kit.model_dump(mode="json", exclude={"saved_at"})})
+
+@mcp.tool()
+def forget_brand_kit(name: str) -> dict:
+    """Stop keeping a brand kit, when the user says so. Plans naming it no longer compile until they name another.
+
+    Args:
+        name: Its name, from `brand_kits` in `list_projects`.
+
+    Returns:
+        `forgotten`, its name; and `brand_kits` and `preferences`, what is still kept.
+
+    Raises:
+        ValueError: If no kit has that name.
+    """
+    if not runtime.repo.delete_brand_kit(name):
+        raise ValueError(f"there is no brand kit called {name}")
+    return editing.with_preferences({"forgotten": name})
 
 def add_comment(project_id: str, text: str, start: float, end: Optional[float] = None) -> dict:
     """Write down what the user said about a moment of the cut, pinned to the footage under it.

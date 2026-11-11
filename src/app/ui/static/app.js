@@ -704,7 +704,8 @@ function removeAssets(ids, assets) {
 function showInUse(data) {
   const used = data.in_use.length ? `<p>${esc(T.media.inUseBody)}</p><ul class="used-list">${data.in_use.map((item) =>
     `<li>${esc(item.name)}${item.projects.length ? `<br><small>${esc(item.projects.join("、"))}</small>` : ""}
-      ${item.plans?.length ? `<br><small>${esc(T.media.inPlans(item.plans.join("、")))}</small>` : ""}</li>`).join("")}</ul>` : "";
+      ${item.plans?.length ? `<br><small>${esc(T.media.inPlans(item.plans.join("、")))}</small>` : ""}
+      ${item.brand_kits?.length ? `<br><small>${esc(T.media.inKits(item.brand_kits.join("、")))}</small>` : ""}</li>`).join("")}</ul>` : "";
   const busy = data.busy.length ? `<p>${esc(T.media.busyBody(data.busy.join("、")))}</p>` : "";
   modal(`<h2>${esc(T.media.inUseTitle)}</h2>${used}${busy}
     <div class="foot"><button class="btn primary" data-ok>${esc(T.common.close)}</button></div>`, (box, close) => {

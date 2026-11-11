@@ -16,6 +16,7 @@ from app.engine.plan.pieces import (
     piece_starts, selected_pieces,
 )
 from app.engine.semantic import CLEAN_SILENCE_SECONDS, EDGE_TOLERANCE_SECONDS, CleanCuts
+from app.models.brand import BrandKit
 from app.models.media import Asset
 from app.models.plan import STRUCTURES, Beat, BeatRole, EditPlan, Structure, TrimKind
 from app.models.semantic import ClipKind, SemanticClip, SemanticTimeline
@@ -745,6 +746,7 @@ def check_plan(
     children: Mapping[str, List[SemanticClip]],
     assets: Mapping[str, Asset],
     cuts: Optional[Mapping[str, CleanCuts]] = None,
+    kit: Optional[BrandKit] = None,
 ) -> Tuple[List[str], List[str]]:
     """Check a plan against the footage it claims to be made of.
 
@@ -756,6 +758,8 @@ def check_plan(
         assets: The assets they play from, keyed by asset ID.
         cuts: Where each file may be cut without splitting a word, keyed by
             asset ID.
+        kit: The brand kit the plan names, as kept; None when it names none
+            or one that is not kept, which is a problem.
 
     Returns:
         `(problems, notes)`. A problem stops the plan compiling; a note is
@@ -774,6 +778,10 @@ def check_plan(
         )
     if not plan.selections:
         problems.append("the plan chooses no footage")
+    if plan.brand_kit is not None and (kit is None or kit.name != plan.brand_kit):
+        problems.append(f"the plan wears brand kit 「{plan.brand_kit}」, which is not kept; "
+                        "name one listed under `brand_kits`, or save it first")
+        kit = None
 
     beats = {beat.id for beat in plan.beats}
     if len(beats) != len(plan.beats):
@@ -929,7 +937,7 @@ def check_plan(
         pieces, cleaned = compile_pieces(plan, clips, children, assets, cuts)
         # The cut as it will play, title cards in: its length and the song under it are the
         # compile's, cards and all (#228, #246). A plan checked on its own has only its own cards.
-        played = with_cards(plan, pieces, assets, cuts, None)
+        played = with_cards(plan, pieces, assets, cuts, None, kit)
         duration = compiled_duration(played)
         edges, ending_notes, stopped = _edge_problems(plan, pieces, cuts)
         notes.extend(_cut_notes(
@@ -1066,6 +1074,7 @@ def with_cards(
     assets: Mapping[str, Asset],
     cuts: Optional[Mapping[str, CleanCuts]],
     project: Optional[Project],
+    kit: Optional[BrandKit] = None,
 ) -> List[Piece]:
     """Put the title cards into a compile's windows, where they will play.
 
@@ -1087,6 +1096,11 @@ def with_cards(
         cuts: What is known about each file, keyed by asset ID.
         project: What is on the timeline now, or None for a plan checked on
             its own, which has only its own cards.
+        kit: The brand kit the plan names, if any. Its closing card goes
+            last, after every other card, and belongs to no part: it counts
+            in the cut's length and not in any part's. Its colour stands
+            behind a card asked for on a `colour` background without one.
+            A closing card changed by hand comes back as it was, still last.
 
     Returns:
         The windows with the cards among them, the cuts after each card put
@@ -1095,6 +1109,9 @@ def with_cards(
     beats = {beat.id: beat for beat in plan.beats}
     old = sorted((clip for track_id, clip in compiled_clips(project)
                   if track_id == VIDEO_TRACK_ID and clip.card is not None), key=lambda clip: clip.timeline_in)
+    # The closing card is the kit's, not a part's: rebuilt from the kit unless it was changed by hand.
+    closing = next((clip for clip in old if clip.card.end and clip.from_plan_id == plan.id and clip.pinned), None)
+    old = [clip for clip in old if not clip.card.end]
     held = {clip.card.beat_id: clip for clip in old
             if clip.from_plan_id == plan.id and clip.pinned and clip.card.beat_id in beats}
     # Made by hand, or a plan's card somebody changed: kept. Another plan's untouched cards are
@@ -1126,7 +1143,7 @@ def with_cards(
                         background=card_background(wanted.background, photo),
                         at=wanted.at if wanted.at is not None else 0 if photo else piece.start,
                         beat_id=piece.beat_id,
-                        **({"colour": wanted.colour} if wanted.colour else {}),
+                        **({"colour": colour} if (colour := wanted.colour or (kit.colour if kit else None)) else {}),
                     ),
                 )
             if card is not None:
@@ -1153,6 +1170,22 @@ def with_cards(
         if found and abs(at - out[shows].end) < abs(at - out[shows].start):
             shows += 1
         out.insert(shows, from_clip(clip, beat_id))
+    shots = [piece for piece in out if piece.card is None]
+    if closing is not None:
+        out.append(from_clip(closing, ""))
+    elif kit is not None and kit.end_card is not None and shots:
+        wanted = kit.end_card
+        # Its frame is the last shot's, which a plain colour covers; without a brand colour it is that shot blurred.
+        last = shots[-1]
+        out.append(Piece(
+            asset_id=last.asset_id, start=0.0, end=wanted.seconds, from_clip_ids=(), beat_id="",
+            card=TitleCard(
+                title=wanted.title, subtitle=wanted.subtitle, background="colour" if kit.colour else "blur",
+                at=last.start, end=True,
+                logo_asset_id=kit.logo_asset_id if wanted.logo else None,
+                **({"colour": kit.colour} if kit.colour else {}),
+            ),
+        ))
     if any(piece.card is not None for piece in out):
         # The beat was found for the cut without its cards; with them in, everything after a
         # card is that much later against the music, so the cuts are put on the beat again.

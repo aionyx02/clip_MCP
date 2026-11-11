@@ -663,8 +663,9 @@ def _remove_assets(asset_ids: List[str], recycle: bool) -> dict:
     if using:
         return {
             "removed": [],
-            "in_use": [{"name": name(asset_id), "projects": uses["projects"], "plans": uses["plans"]}
-                       for asset_id, uses in using.items() if uses["projects"] or uses["plans"]],
+            "in_use": [{"name": name(asset_id), "projects": uses["projects"], "plans": uses["plans"],
+                        "brand_kits": uses["brand_kits"]}
+                       for asset_id, uses in using.items() if uses["projects"] or uses["plans"] or uses["brand_kits"]],
             "busy": sorted(name(asset_id) for asset_id, uses in using.items() if uses["busy"]),
         }
     recycled = [asset.path for asset in found.values() if recycle and os.path.exists(asset.path)]
