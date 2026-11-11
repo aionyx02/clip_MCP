@@ -39,6 +39,17 @@ def test_white_on_black_reads_and_white_on_white_does_not() -> None:
     assert legibility.words_contrast(half, rows) == 21.0
 
 
+def test_words_in_a_brand_colour_are_measured_in_that_colour() -> None:
+    white = Image.new("RGB", (640, 360), "white")
+    # Black words on white read as well as white ones on black; a pale yellow on white does not.
+    assert legibility.words_contrast(white, [{"text": "追蹤", "size": 36, "y": 180, "colour": "#000000"}]) == 21.0
+    assert legibility.words_contrast(white, [{"text": "追蹤", "size": 36, "y": 180, "colour": "#ffee88"}]) < 1.3
+    # Each colour on its own: a line that reads does not carry one that does not.
+    rows = [{"text": "追蹤", "size": 36, "y": 150, "colour": "#000000"},
+            {"text": "每週", "size": 18, "y": 200, "colour": "#ffffff"}]
+    assert legibility.words_contrast(white, rows) == 1.0
+
+
 def test_a_card_read_off_a_dark_frame_is_not_flagged(media: Path) -> None:
     """The issue's own case: white words on a near-black frame stand out as far as they can."""
     asset = catalog.import_asset(str(media / "black.mp4"))["id"]

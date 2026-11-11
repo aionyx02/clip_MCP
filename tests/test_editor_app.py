@@ -607,9 +607,12 @@ def test_a_brand_kits_logo_cannot_be_taken_out(tmp_path: Path) -> None:
 
     store = Repository(str(tmp_path / "kit.db"))
     store.save_asset(Asset(id="logo", path=str(tmp_path / "logo.png"), has_video=True, has_audio=False))
-    store.save_brand_kit(BrandKit(name="咖啡店", logo_asset_id="logo"))
-    assert store.delete_unused_assets(["logo"]) == {
-        "logo": {"projects": [], "plans": [], "brand_kits": ["咖啡店"], "busy": []}}
-    assert set(store.get_assets(["logo"])) == {"logo"}
+    store.save_asset(Asset(id="dark", path=str(tmp_path / "dark.png"), has_video=True, has_audio=False))
+    store.save_brand_kit(BrandKit(name="咖啡店", logo_asset_id="logo", logo_dark_asset_id="dark"))
+    # Both versions of the logo: the dark one goes on a light closing card.
+    assert store.delete_unused_assets(["logo", "dark"]) == {
+        "logo": {"projects": [], "plans": [], "brand_kits": ["咖啡店"], "busy": []},
+        "dark": {"projects": [], "plans": [], "brand_kits": ["咖啡店"], "busy": []}}
+    assert set(store.get_assets(["logo", "dark"])) == {"logo", "dark"}
     store.delete_brand_kit("咖啡店")
     assert store.delete_unused_assets(["logo"]) == {}

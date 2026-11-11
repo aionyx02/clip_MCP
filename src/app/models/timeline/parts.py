@@ -173,6 +173,11 @@ class VoiceCleanup(BaseModel):
         """
         return not (self.rumble or self.hiss or self.sibilance)
 
+# A colour of a dip, a card or words: six hex digits, or the two names worth having by name.
+# Anything else has to be given as hex on purpose — FFmpeg knows a long list of colour
+# names, and a typo in one of them would only ever surface as a render that failed.
+COLOUR = r"^(#[0-9a-fA-F]{6}|black|white)$"
+
 class SpeakerMark(str, Enum):
     """How a caption says who is talking."""
 
@@ -194,6 +199,10 @@ class CaptionStyle(BaseModel):
 
     font: Optional[str] = Field(
         default=None, description="Font family to ask for; null uses the server's configured default",
+    )
+    colour: str = Field(
+        default="white", pattern=COLOUR,
+        description="The words' colour; a speaker's own colour, when they are marked by colour, wins",
     )
     size_fraction: float = Field(
         default=1 / 16, gt=0, le=0.5, description="Text size as a fraction of the frame's shorter side",
@@ -375,11 +384,6 @@ class WipeDirection(str, Enum):
     UP = "up"
     DOWN = "down"
 
-# A colour a dip can pass through: six hex digits, or the two names worth having by name.
-# Anything else has to be given as hex on purpose — FFmpeg knows a long list of colour
-# names, and a typo in one of them would only ever surface as a render that failed.
-COLOUR = r"^(#[0-9a-fA-F]{6}|black|white)$"
-
 class _Transition(BaseModel):
     """What every transition has: how long it runs.
 
@@ -511,6 +515,10 @@ class TitleCard(BaseModel):
     end: bool = Field(
         default=False, description="The closing card a brand kit puts at the end of the cut",
     )
+    text_colour: str = Field(default="white", pattern=COLOUR, description="The colour of the words")
+    accent: Optional[str] = Field(
+        default=None, pattern=COLOUR, description="The colour of the title line, when not the words' colour",
+    )
 
 # Where a logo sits over the picture.
 LogoCorner = Literal["top_left", "top_right", "bottom_left", "bottom_right"]
@@ -535,7 +543,7 @@ class LogoLayer(BaseModel):
         default=None, description="The brand kit it came from, when a plan put it there; null when set by hand",
     )
 
-TextStyle = Literal["name", "place", "headline", "free"]
+TextStyle = Literal["name", "place", "headline", "free", "cta"]
 
 class TextLayer(BaseModel):
     """Words over a stretch of footage, pinned to what is on screen rather than to a time in the cut.
@@ -554,7 +562,12 @@ class TextLayer(BaseModel):
     style: TextStyle = Field(
         default="name",
         description="`name`: a name bar low on the left; `place`: a place, high on the left; `headline`: large in "
-                    "the middle; `free`: wherever `x` and `y` put it",
+                    "the middle; `free`: wherever `x` and `y` put it; `cta`: a call to action, centred low, above "
+                    "the captions",
+    )
+    colour: Optional[str] = Field(default=None, pattern=COLOUR, description="The first line's colour; null is white")
+    second_colour: Optional[str] = Field(
+        default=None, pattern=COLOUR, description="The second line's colour; null is white",
     )
     start: Decimal = Field(..., ge=0, description="First second of the clip's file it is shown over")
     end: Decimal = Field(..., gt=0, description="Second of the clip's file it stops at")

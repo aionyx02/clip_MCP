@@ -13,7 +13,10 @@ from app.models.brand import BrandKit
 from app.models.media import Asset
 from app.models.plan import EditPlan, short_clip_ids
 from app.models.semantic import SemanticClip
-from app.models.timeline.parts import Clip, Project
+from app.models.timeline.parts import CaptionStyle, Clip, Project
+
+# The words a brand kit closes on over the last shot, by the one name a recompile knows them by.
+CLOSING_TEXT_ID = "brand-end"
 
 
 def _as_made(pinned: Clip) -> dict:
@@ -76,8 +79,9 @@ def _text_operations(
     provenance: Mapping[str, dict],
     project: Optional[Project],
     children: Mapping[str, List[SemanticClip]],
+    kit: Optional[BrandKit] = None,
 ) -> List[dict]:
-    """Write the words over a compiled cut: the plan's, and every other set kept from before.
+    """Write the words over a compiled cut: the plan's, its brand kit's, and every other set kept from before.
 
     Words are pinned to footage, so they find their clips by it: the plan's
     over the windows its selections became, and words put on by hand — or the
@@ -92,9 +96,17 @@ def _text_operations(
         project: What is on the timeline now.
         children: Each section's own clips, so a selection of a section
             finds the windows made from its parts.
+        kit: The brand kit the plan wears, if any: words it closes on go
+            over the last seconds of the last shot, unless a copy of them
+            changed or taken off by hand is kept.
 
     Returns:
         `add_text` operations.
+
+    Raises:
+        ValueError: If the last shot plays for less time than the kit's
+            closing words stay up; `check_plan` says so first, but a shot
+            adjusted by hand can come out shorter than the plan's.
     """
     made = [
         (op["track_id"], op["clip_id"], op["asset_id"], float(op["source_range"]["start"]),
@@ -128,7 +140,7 @@ def _text_operations(
             # Named with the whole clip ID before they were named as the AI is shown them.
             kept.add(short_clip_ids(text.id))
             fields = {"text": text.text, "second": text.second, "style": text.style, "x": text.x, "y": text.y,
-                      "hidden": text.hidden}
+                      "hidden": text.hidden, "colour": text.colour, "second_colour": text.second_colour}
             for track_id, clip_id, asset_id, start, end, _ in made:
                 low, high = max(start, float(text.start)), min(end, float(text.end))
                 if asset_id == clip.asset_id and high > low:
@@ -155,29 +167,56 @@ def _text_operations(
                 high = min(end, text.end if text.end is not None else end)
                 if high > low:
                     put(track_id, clip_id, text_id, low, high, fields)
+
+    closing = kit.end_card if kit is not None else None
+    shots = [op for op in operations if op["action"] == "insert_clip" and op["track_id"] == VIDEO_TRACK_ID
+             and "card" not in op]
+    if closing is not None and closing.mode == "overlay" and CLOSING_TEXT_ID not in kept and shots:
+        last = shots[-1]
+        start, end = float(last["source_range"]["start"]), float(last["source_range"]["end"])
+        # Seconds of the file, so as many more as the shot is sped up.
+        reach = closing.held * float(last.get("speed", 1.0))
+        if end - reach < start - 1e-6:
+            raise ValueError(
+                f"brand kit 「{kit.name}」 closes on words over the last {closing.held:g}s of the last shot, which "
+                f"plays only {(end - start) / float(last.get('speed', 1.0)):.2f}s"
+            )
+        put(VIDEO_TRACK_ID, last["clip_id"], CLOSING_TEXT_ID, max(start, end - reach), end, {
+            "text": closing.title, "second": closing.subtitle, "style": "cta", "by_plan": True,
+            "colour": kit.accent or kit.text_colour, "second_colour": kit.text_colour,
+        })
     return texts
 
 def _brand_operations(kit: Optional[BrandKit], project: Optional[Project]) -> List[dict]:
-    """Write the brand kit's logo and font onto the cut, or take a kit's logo off when there is no kit.
+    """Write the brand kit's corner logo, font and words' colour onto the cut, or take a kit's logo off.
 
     Args:
         kit: The brand kit the plan names, or None.
         project: What is on the timeline now, if anything.
 
     Returns:
-        `set_logo` and `set_caption_style` operations, as needed.
+        `set_logo` and `set_caption_style` operations, as needed. The corner
+        logo only when the kit asks for one; a kit's logo already there goes
+        when it no longer does, or when there is no kit.
     """
     operations: List[dict] = []
     had = project.logo if project is not None else None
-    if kit is not None and kit.logo_asset_id:
+    corner = kit.corner_logo_asset_id if kit is not None and kit.corner_logo else None
+    if corner is not None:
         operations.append({"action": "set_logo", "logo": {
-            "asset_id": kit.logo_asset_id, "corner": kit.logo_corner, "opacity": kit.logo_opacity,
+            "asset_id": corner, "corner": kit.logo_corner, "opacity": kit.logo_opacity,
             "width": kit.logo_width, "brand_kit": kit.name,
         }})
     elif had is not None and had.brand_kit is not None:
         operations.append({"action": "set_logo", "logo": None})
-    if kit is not None and kit.font and (project is None or project.caption_style.font != kit.font):
-        operations.append({"action": "set_caption_style", "style": {"font": kit.font}})
+    style = project.caption_style if project is not None else CaptionStyle()
+    changed = {}
+    if kit is not None and kit.font and style.font != kit.font:
+        changed["font"] = kit.font
+    if kit is not None and style.colour != kit.text_colour:
+        changed["colour"] = kit.text_colour
+    if changed:
+        operations.append({"action": "set_caption_style", "style": changed})
     return operations
 
 def compile_operations(
@@ -204,10 +243,11 @@ def compile_operations(
         project: What is already on the timeline, if anything.
         cuts: Where each file may be cut without splitting a word, keyed by
             asset ID.
-        kit: The brand kit the plan names, if any: its closing card goes in
-            as the last card, its logo over the cut, its font on the words.
-            A logo a kit put there goes when the plan stops naming one; one
-            set by hand stays.
+        kit: The brand kit the plan names, if any: its closing words over
+            the end of the last shot or its closing card after it, its logo
+            in a corner when it asks for one, its font and colours on the
+            words. A logo a kit put there goes when the plan stops naming
+            one; one set by hand stays.
 
     Returns:
         `(operations, provenance)` — operations for `apply_edits`, and, keyed
@@ -319,7 +359,7 @@ def compile_operations(
                 "pinned": pinned is not None,
             }
 
-    operations += _text_operations(plan, operations, provenance, project, children)
+    operations += _text_operations(plan, operations, provenance, project, children, kit)
     operations += _brand_operations(kit, project)
 
     # The compiler owns the markers it made and nothing else: one somebody added by hand

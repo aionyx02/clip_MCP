@@ -980,7 +980,7 @@ def _looks(clips: Sequence[Clip], assets: Mapping[str, Asset]) -> Dict[str, Tupl
     return found
 
 def contrast_notes(project: Project) -> List[str]:
-    """Measure the white words of a cut against the picture behind them, and say where they are hard to read.
+    """Measure the words of a cut, in their colours, against the picture behind them, and say where they are hard to read.
 
     A title card is measured on its background as the render treats it — the
     frame at its `at`, blurred, darkened or replaced by its colour — and words
@@ -1024,7 +1024,7 @@ def contrast_notes(project: Project) -> List[str]:
                                               cards.placed(clip, width, height)["rows"])
             if ratio < legibility.LOW_CONTRAST:
                 notes.append(
-                    f"title card {clip.id} 「{clip.card.title}」 at {when}: its white words stand {ratio:.1f}:1 against "
+                    f"title card {clip.id} 「{clip.card.title}」 at {when}: its words stand {ratio:.1f}:1 against "
                     f"the {clip.card.background} background behind them (from {float(clip.card.at):g}s of its file), "
                     f"under the {floor} that large words need to read. Show another moment with `at` in "
                     "set_title_card, or put them on a dark `colour`"
@@ -1042,7 +1042,7 @@ def contrast_notes(project: Project) -> List[str]:
             ratio = legibility.words_contrast(picture, rows, texts.BOX_OPACITY)
             if ratio < legibility.LOW_CONTRAST:
                 notes.append(
-                    f"words {text.id} 「{text.text}」 on clip {clip.id} at {format_timestamp(shown[0])}: white, they "
+                    f"words {text.id} 「{text.text}」 on clip {clip.id} at {format_timestamp(shown[0])}: they "
                     f"stand {ratio:.1f}:1 against the picture behind them at {float(middle):g}s of its file, under the "
                     f"{floor} that large words need to read. Move them with `x` and `y` in set_text to a darker "
                     "part of the frame, or make them a `name`, which has a dark box behind it"

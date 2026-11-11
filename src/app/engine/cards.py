@@ -12,7 +12,9 @@ from typing import List, Optional
 
 from PIL import Image, ImageEnhance, ImageFilter
 
-from app.engine.subtitles import CAPTION_LINE_HEIGHT, DEFAULT_FONT, escape_ass_text, format_ass_time, wrap_caption
+from app.engine.subtitles import (
+    CAPTION_LINE_HEIGHT, DEFAULT_FONT, ass_colour, escape_ass_text, format_ass_time, hex_colour, wrap_caption,
+)
 from app.engine.texts import LINE_WIDTH
 from app.models.timeline.parts import CaptionStyle, Clip, Project, TitleCard
 
@@ -97,19 +99,21 @@ def placed(clip: Clip, width: int, height: int) -> dict:
 
     Returns:
         `start` and `end` on the timeline, `fade` in seconds, and `rows`:
-        each `{text, size, y}`, `y` the centre of the line in frame pixels;
-        and for a card with a logo, `logo`: `{x, y, width, height}`, the box
-        it is fitted into, in frame pixels.
+        each `{text, size, y, colour}`, `y` the centre of the line in frame
+        pixels and `colour` as `#rrggbb`; `shadow`, whether the words carry
+        one; and for a card with a logo, `logo`: `{x, y, width, height,
+        asset_id}`, the box it is fitted into, in frame pixels.
     """
     card = clip.card
     size = round(min(width, height) * TITLE_SHARE)
     small = max(8, round(size * SUBTITLE_SCALE))
-    rows = [(line, size) for line in _lines(card.title, size, width)]
+    title, words = hex_colour(card.accent or card.text_colour), hex_colour(card.text_colour)
+    rows = [(line, size, title) for line in _lines(card.title, size, width)]
     if card.subtitle:
-        rows += [(line, small) for line in _lines(card.subtitle, small, width)]
+        rows += [(line, small, words) for line in _lines(card.subtitle, small, width)]
     # A little air between the title and the line under it, on top of the line spacing.
     gap = round(small * 0.5) if card.subtitle else 0
-    total = sum(row_size * CAPTION_LINE_HEIGHT for _, row_size in rows) + gap
+    total = sum(row_size * CAPTION_LINE_HEIGHT for _, row_size, _ in rows) + gap
     y = height / 2 - total / 2
     logo = None
     if card.logo_asset_id:
@@ -120,16 +124,26 @@ def placed(clip: Clip, width: int, height: int) -> dict:
         logo = {"x": (width - box_width) // 2, "y": round(y), "width": box_width, "height": box_height}
         y += box_height + under
     placed_rows = []
-    for index, (text, row_size) in enumerate(rows):
+    for index, (text, row_size, colour) in enumerate(rows):
         if index and row_size != rows[index - 1][1]:
             y += gap
         step = row_size * CAPTION_LINE_HEIGHT
-        placed_rows.append({"text": text, "size": row_size, "y": round(y + step / 2)})
+        placed_rows.append({"text": text, "size": row_size, "y": round(y + step / 2), "colour": colour})
         y += step
     return {
         "start": float(clip.timeline_in), "end": float(clip.timeline_out), "fade": TEXT_FADE_SECONDS,
-        "rows": placed_rows, **({"logo": logo} if logo else {}),
+        "rows": placed_rows, "shadow": shadowed(card),
+        **({"logo": {**logo, "asset_id": card.logo_asset_id}} if logo else {}),
     }
+
+
+def shadowed(card: TitleCard) -> bool:
+    """Whether a card's words carry a drop shadow: only over a picture, where they need it to read.
+
+    On a plain colour nothing behind the words competes with them, and a
+    shadow only smudges every letter.
+    """
+    return card.background != "colour"
 
 
 def cards_of(project: Project) -> List[Clip]:
@@ -158,11 +172,11 @@ def ass_events(project: Project, style: Optional[CaptionStyle] = None) -> List[s
     for clip in cards_of(project):
         words = placed(clip, project.width, project.height)
         for row in words["rows"]:
-            shadow = max(1, row["size"] // 24)
+            shadow = max(1, row["size"] // 24) if words["shadow"] else 0
             events.append(
                 f"Dialogue: 1,{format_ass_time(words['start'])},{format_ass_time(words['end'])},Default,,0,0,0,,"
                 f"{{\\an5\\pos({project.width // 2},{row['y']})\\fn{font}\\fs{row['size']}\\b1"
-                f"\\c&H00FFFFFF&\\bord0\\shad{shadow}\\4c&H80000000&\\fad({fade},{fade})}}"
+                f"\\c{ass_colour(row['colour'])}&\\bord0\\shad{shadow}\\4c&H80000000&\\fad({fade},{fade})}}"
                 f"{escape_ass_text(row['text'])}"
             )
     return events

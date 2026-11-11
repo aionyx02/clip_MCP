@@ -715,7 +715,8 @@ def apply_operation(project: Project, op: EditOperation, assets: Mapping[str, As
             raise ValueError(f"clip {clip.id} already has a text {op.text_id}")
         start, end = _text_times(clip, op, clip.source_range.start, clip.source_range.end)
         clip.texts.append(TextLayer(id=op.text_id, text=op.text, second=op.second or None, style=op.style,
-                                    start=start, end=end, x=op.x, y=op.y, by_plan=op.by_plan, hidden=op.hidden))
+                                    start=start, end=end, x=op.x, y=op.y, by_plan=op.by_plan, hidden=op.hidden,
+                                    colour=op.colour, second_colour=op.second_colour))
     elif isinstance(op, SetTextOp):
         clip = _find_clip(track, op.clip_id)
         layer = _find_text(clip, op.text_id)
