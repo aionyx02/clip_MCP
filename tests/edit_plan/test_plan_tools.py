@@ -640,6 +640,18 @@ def test_a_piece_the_plan_steadies_is_steadied_on_the_timeline_and_kept_through_
     amend_plan(planned["plan_id"], 2, amendments({"action": "set_stabilize", "clip_id": second, "stabilize": False}))
     assert get_plan(planned["plan_id"])["plan"]["selections"][1].get("stabilize", False) is False
 
+def test_a_piece_the_plan_pushes_in_on_is_pushed_on_the_timeline_and_its_neighbour_is_not(planned: dict) -> None:
+    second = planned["clips"][2]["clip_id"]
+    result = amend_plan(planned["plan_id"], 1, amendments({"action": "set_motion", "clip_id": second}))
+    assert result["problems"] == []
+    motions = [selection.get("motion") for selection in get_plan(planned["plan_id"])["plan"]["selections"]]
+    assert motions == [None, "push"]
+    project = compiled_project(planned)
+    # Held still unless asked, which a video is: only the pushed piece moves.
+    assert [clip["motion"] for clip in main_clips(project)] == [None, "push"]
+    amend_plan(planned["plan_id"], 2, amendments({"action": "set_motion", "clip_id": second, "motion": None}))
+    assert get_plan(planned["plan_id"])["plan"]["selections"][1].get("motion") is None
+
 def test_songs_offered_for_every_part_at_once_are_each_written_into_their_own_cue(planned: dict, media: Path) -> None:
     from app.models.offer import OfferedSong
     from app.tools.catalog import set_asset_library

@@ -11,8 +11,8 @@ from app.models.timeline.operations import (
     SetTextOp, SetTitleCardOp, SetTrackAudioOp, SplitClipOp, TextTimes, TrimClipOp,
 )
 from app.models.timeline.parts import (
-    CAPTION_PRESETS, Clip, CueWord, Project, SubtitleCue, TextLayer, TimeRange, TitleCard, Track, TrackType,
-    card_background,
+    CAPTION_PRESETS, MIN_MOVE_SECONDS, Clip, CueWord, Project, SubtitleCue, TextLayer, TimeRange, TitleCard, Track,
+    TrackType, card_background,
 )
 from app.models.timeline.validate import logo_picture
 
@@ -848,11 +848,16 @@ def apply_operation(project: Project, op: EditOperation, assets: Mapping[str, As
             clip.fit = op.fit
         if op.motion is not None:
             source = assets.get(clip.asset_id)
-            if source is not None and not source.still:
-                # Taken and ignored, it reads as a push-in that never shows up in the render.
+            if clip.card is not None:
+                # Taken and ignored, it reads as a move that never shows up in the render.
+                raise ValueError(f"clip {clip.id} is a title card, which holds one frame still behind its words; "
+                                 "a move goes on the shots either side of it")
+            seconds = float(clip.timeline_duration)
+            if source is not None and not source.still and op.motion != "none" and seconds < MIN_MOVE_SECONDS:
                 raise ValueError(
-                    f"clip {clip.id} is video, and motion only moves a photo; for a closer view of video set "
-                    f"`fit` with `zoom` above 1, which holds the crop rather than moving it"
+                    f"clip {clip.id} is on screen for {seconds:.2f}s, and a whole {op.motion} crossed in under "
+                    f"{MIN_MOVE_SECONDS:g}s reads as a jolt rather than a move; put it on a longer clip, or for a "
+                    "cut to a closer view set `fit` with `zoom` above 1"
                 )
             clip.motion = op.motion
         if op.stabilize is not None:

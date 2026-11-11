@@ -306,6 +306,8 @@ def compile_operations(
             placed["keep_level"] = True
         if piece.stabilize:
             placed["stabilize"] = True
+        if piece.motion is not None:
+            placed["motion"] = piece.motion
         if piece.transition is not None:
             kind, seconds, through, direction = piece.transition
             placed["transition_in"] = {"kind": kind, "seconds": seconds}

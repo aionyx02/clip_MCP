@@ -25,7 +25,7 @@ from app.models.job import Job, JobKind, JobStatus
 from app.engine import cards, legibility, looks, playback, resources, sync, texts
 from app.engine.analysis import second_listen, with_words_heard_again
 from app.engine.probe import probe_file, speech_loudness
-from app.engine.reframe import Framing, centred_note, frame_project, framed_size, placement_at
+from app.engine.reframe import Framing, centred_note, frame_project, framed_size, move_notes, placement_at
 from app.engine.builder import DEFAULT_LOUDNESS_TARGET, Talking, voice_keys
 from app.engine.levels import song_level, talking_in
 from app.engine.library import SFX, library_of
@@ -590,7 +590,8 @@ def render_project(
         markers, are carried in the file as chapters. A preview also says how
         many clip `pictures` it `rendered` and how many it `reused`.
         `framing` names any clip told to fill the frame that had no face to
-        follow, so was cropped from the middle.
+        follow, so was cropped from the middle. `moves` says what a slow move
+        over video costs, as `check_render` says it.
 
     Raises:
         ValueError: If the project does not exist, contains no clips, uses an
@@ -805,6 +806,10 @@ def start_render(
     unplaced = centred_note(framing)
     if unplaced:
         result["framing"] = unplaced
+    # At the size it is delivered at, not a preview's: a preview has pixels to spare that the video does not.
+    moved = move_notes(drawn_at, shared.sized(assets), framing)
+    if moved:
+        result["moves"] = moved
     if is_preview:
         rendered = sum(1 for piece in pieces if piece.get("kind") != "transforms")
         result["pictures"] = {"rendered": rendered, "reused": pictures - rendered}
@@ -1221,6 +1226,12 @@ def check_render(
         product slot, the corner logo, nor words — a card, words over the
         footage or a caption — naming the product or the brand. It never stops
         a render: holding the product back can be the point, so ask.
+        And `moves`, what a slow push, pull or pan over video costs: a clip
+        that moves over less than 1.5 s, which reads as a jolt; and the clips
+        whose closest point shows fewer of the source's pixels than the frame
+        has, enlarged to fill it and so slightly softer, with how much. It
+        never stops a render: tell the user, since a little softness for the
+        move may be a trade they take.
 
     Raises:
         ValueError: If the project does not exist.
@@ -1257,6 +1268,11 @@ def check_render(
     on_words = effects_on_words(project, listened, shared.referenced_assets(project))
     if on_words:
         checked["sound_effects_on_words"] = on_words
+    shaped = reshaped(project, frame)
+    shaped_assets = shared.referenced_assets(shaped)
+    moved = move_notes(shaped, shared.sized(shaped_assets), framing_of(shaped, shaped_assets))
+    if moved:
+        checked["moves"] = moved
     plan_id = next((clip.from_plan_id for clip in base.clips if clip.from_plan_id), None)
     plan = runtime.repo.get_plan(plan_id) if plan_id else None
     if plan is not None:

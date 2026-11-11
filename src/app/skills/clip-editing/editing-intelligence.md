@@ -211,8 +211,14 @@ again. Change the picture inside the shot instead, roughly in this order:
 3. Words over it, where the user asked for them: a headline over the line that
    matters (`set_selection_texts`).
 
-`motion` only moves photos; on a video clip it is refused. Video has no slow
-push-in yet, only the held `zoom` above.
+A slow push is the other way to change the picture inside one shot: `motion:
+"push"` closes in 8% over the clip, keeping the face where it is. In a
+compiled cut set it with `amend_plan` `set_motion`, so a recompile keeps it;
+every clip compiled from the piece pushes over its own length, which with the
+punch-in above gives the usual alternation of a push and a held closer shot.
+It is refused on a clip under 1.5 s, where it reads as a jolt. `check_render`
+lists under `moves` the clips it softens, footage shot at the output size
+enlarged at the end of the push: tell the user rather than dropping it.
 
 ## Music in a plan
 

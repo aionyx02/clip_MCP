@@ -1166,7 +1166,7 @@
     wireTexts(panel, clip);
     panel.querySelectorAll("[data-motion]").forEach((button) => {
       button.onclick = () => {
-        if (button.dataset.motion === (clip.motion || "push")) return;
+        if (button.dataset.motion === motionOf(clip, asset)) return;
         edit([{ action: "set_clip_look", track_id: E.selected.track, clip_id: clip.id, motion: button.dataset.motion }]);
       };
     });
@@ -1302,14 +1302,19 @@
     return true;
   }
 
-  // A photo moves while it is on screen; null is the slow push the render gives it.
+  // How a clip's picture moves while it is on screen. Null is the slow push the render gives a
+  // photo, and a held shot for video; a title card holds its one frame, so it has no choice.
   function motionGroup(clip, asset) {
-    if (!asset?.still) return "";
-    const motion = clip.motion || "push";
+    if (!asset || clip.card || !(asset.still || asset.has_video)) return "";
+    const motion = motionOf(clip, asset);
     const choice = (value) => `<button class="${motion === value ? "on" : ""}" data-motion="${value}">${esc(T.motion.modes[value])}</button>`;
-    return `<div class="group edit-action"><div class="label">${esc(T.motion.title)}</div>
+    return `<div class="group edit-action"><div class="label">${esc(asset.still ? T.motion.title : T.motion.videoTitle)}</div>
       <div class="seg fit-seg">${Object.keys(T.motion.modes).map(choice).join("")}</div>
-      <p class="hint">${esc(T.motion.hint)}</p></div>`;
+      <p class="hint">${esc(asset.still ? T.motion.hint : T.motion.videoHint)}</p></div>`;
+  }
+
+  function motionOf(clip, asset) {
+    return clip.motion || (asset?.still ? "push" : "none");
   }
 
   function fitEdit(clip, fit) {

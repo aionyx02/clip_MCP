@@ -30,17 +30,27 @@
   const firstNeeded = (clip) => Math.min(pictureStart(clip), soundStart(clip));
   const lastNeeded = (clip) => Math.max(clip.timeline_out, soundEnd(clip));
   // Where in its file a clip is at a time on the timeline; negative before the file starts.
-  // How close in a photo is and where across it the view sits, part of the way through its clip:
-  // the render's `stills.motion_at`.
-  const motionAt = (clip, progress) => {
+  // Which part of a moving clip's placed picture is on screen, part of the way through its clip:
+  // how much closer, and the left and top of the part shown as fractions of the picture. The
+  // render's `moves.window_at`, closing in on the clip's anchor, which a push keeps still.
+  const windowAt = (clip, progress) => {
     const moved = clamp(progress, 0, 1), amount = clip.motion_amount || 0;
+    let [across, down] = clip.anchor || [0.5, 0.5], zoom;
     switch (clip.motion) {
-      case "push": return [1 + amount * moved, 0.5];
-      case "pull": return [1 + amount * (1 - moved), 0.5];
-      case "pan_left": return [1 + amount, moved];
-      case "pan_right": return [1 + amount, 1 - moved];
-      default: return [1, 0.5];
+      case "push": zoom = 1 + amount * moved; break;
+      case "pull": zoom = 1 + amount * (1 - moved); break;
+      case "pan_left": zoom = 1 + amount; across = moved; break;
+      case "pan_right": zoom = 1 + amount; across = 1 - moved; break;
+      default: return [1, 0, 0];
     }
+    const room = 1 - 1 / zoom;
+    return [zoom, across * room, down * room];
+  };
+  // How far through its move a clip is: counted in frames, first to last, the way the render's
+  // `moves.progress_of` counts them, so the two show the same frame of the move at the same time.
+  const moveProgress = (clip, time, fps) => {
+    const frames = Math.max(1, Math.round((clip.timeline_out - pictureStart(clip)) * fps));
+    return ((time - pictureStart(clip)) * fps) / Math.max(1, frames - 1);
   };
   const sourceAt = (clip, time) => clip.source_start + (time - clip.timeline_in) * clip.speed;
   // Where its repaired sound starts in the file: the render cuts it from the same place.
@@ -540,15 +550,16 @@
       const sy = clamp((axis === "y" ? centre : cross) * vh - sh / 2, 0, vh - sh);
       ctx.save();
       ctx.globalAlpha = alpha;
-      if (clip.still) {
-        // A photo moves over the placed picture, the way the render's zoompan does: closer by the
-        // zoom, the view's left edge `across` of the way along the room the zoom leaves.
-        const [z, across] = motionAt(clip, (time - pictureStart(clip)) / Math.max(1e-3, clip.timeline_out - pictureStart(clip)));
+      const moving = clip.motion && clip.motion !== "none";
+      if (moving) {
+        // A photo, or video told to move, moves over its placed picture the way the render's
+        // perspective does: the part of it from `left` and `top`, `1 / z` of each way, fills the box.
+        const [z, left, top] = windowAt(clip, moveProgress(clip, time, this.described.fps));
         ctx.save();
         ctx.beginPath();
         ctx.rect(x, y, w, h);
         ctx.clip();
-        ctx.translate(x - (w * z - w) * across, y - (h * z - h) / 2);
+        ctx.translate(x - w * z * left, y - h * z * top);
         ctx.scale(z, z);
         ctx.translate(-x, -y);
       }
@@ -578,7 +589,7 @@
         ctx.drawImage(element, sx, sy, sw, sh, x, y, w, h);
       }
       ctx.filter = "none";
-      if (clip.still) ctx.restore();
+      if (moving) ctx.restore();
       if (color?.temperature) {
         // Warmer below daylight, cooler above it: a tint, where a render shifts the white point.
         const warm = color.temperature < 6500;
