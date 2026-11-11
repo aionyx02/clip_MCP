@@ -27,22 +27,23 @@ of pacing: `skill://clip-editing/pacing-and-structure.md`.
 platform the video is going to — `youtube`, `reels`, `tiktok`, `vertical`
 (a vertical video minutes long), or `plain` —
 because each sets the safe area that platform's own buttons and captions take
-up, along with the text size and outline. Anything given alongside the preset
-wins, so `{"preset": "tiktok", "style": {"karaoke": false}}` is that safe area
-without the word-by-word lighting.
+up, along with the text size. Every preset draws plain white words with no
+outline and no word-by-word lighting, which is what the user wants unless they
+say otherwise. Anything given alongside the preset wins, so
+`{"preset": "tiktok", "style": {"karaoke": true}}` is that safe area with the
+words lighting up.
 
 - **One line at a time** (`single_line`, on by default): a caption too long
   for one line is shown as several lines one after another, never stacked up
   into the picture. Set the style before `generate_subtitles`, which then
   keeps each caption to one line of that style. Turn it off only when the user
   asks for stacked captions.
-- **Word-by-word lighting** (`karaoke`): each word brightens as it is said. On
-  for `reels` and `tiktok`, which is where it is expected. It needs the word
+- **Word-by-word lighting** (`karaoke`): each word brightens as it is said. Off
+  in every preset; turn it on only when the user asks for it. It needs the word
   timings `generate_subtitles` puts on a caption; one written by hand has none
   and simply lights up whole. A correction that swaps characters one for one
   keeps them; one that changes how many there are drops them. For a vertical
-  video minutes long, use the `vertical` preset: the same safe area without
-  the lighting.
+  video minutes long, use the `vertical` preset: the Reels safe area.
 - **Long enough to read** (`min_seconds`, 0.7 by default): a caption on screen
   for less is held on while its shot has room. One that cannot be — the last
   words of a video, with the cut ending right after them — is found by the
@@ -164,7 +165,8 @@ the file.
 | Request | Operations |
 |---|---|
 | 「同一支也出直式」「Reels 跟 YouTube 各一版」 / one cut for several platforms | `render_project` with `frame: "portrait"` (and again with `landscape` or `square`); `preview_project` with the same `frame` first |
-| 「字幕要 TikTok 那種」「一個字一個字跳」 / platform captions, word-by-word | `set_caption_style` with `preset: "tiktok"` (or `reels`, `youtube`, `plain`) |
+| 「字幕要 TikTok 那種」 / platform captions | `set_caption_style` with `preset: "tiktok"` (or `reels`, `youtube`, `plain`) |
+| 「一個字一個字跳」「字要有黑框」 / word-by-word, outlined | the preset plus `style: {"karaoke": true}` or `style: {"outline_fraction": 0.1}` |
 | 「字幕加英文」「中英對照」 / bilingual captions | Put the other language in each caption's `secondary`, with `set_subtitles` or `edit_subtitle` |
 | 「誰在講話要標出來」「兩個人不同顏色」 / show who is speaking | `set_caption_style` with `speaker_mark` and `speaker_names` |
 | 「幫我寫 YouTube 章節」 / YouTube chapters | `get_chapters`, paste its `description`; say what `problems` lists |
