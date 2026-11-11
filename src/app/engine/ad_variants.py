@@ -99,10 +99,17 @@ class Cut:
     keeps: Tuple[str, ...]
     seconds: float
 
-def admissible(kept: Sequence[Unit], rules: Format) -> bool:
-    """Say whether a set of selections makes a commercial of these rules: a hook and the product, nothing else."""
+def admissible(kept: Sequence[Unit], rules: Format, asks: bool = False) -> bool:
+    """Say whether a set of selections makes a commercial of these rules: a hook, the product and the ask.
+
+    The ask is required only of a plan that says it in its own words, `asks`:
+    one with no CTA line leaves it to the brand kit's closing words or card,
+    which every cut-down keeps over its last shot.
+    """
     slots = [unit.slot for unit in kept]
     if AdSlot.HOOK not in slots or AdSlot.PRODUCT not in slots:
+        return False
+    if asks and AdSlot.CTA not in slots:
         return False
     if any(slot not in rules.roles for slot in slots):
         return False
@@ -131,9 +138,10 @@ def cut_downs(
     rules = format_for(seconds)
     low, high = window(seconds)
     admitted: List[Tuple[Tuple[Unit, ...], float]] = []
+    asks = any(unit.slot == AdSlot.CTA for unit in units)
     for size in range(len(units), 0, -1):
         for kept in combinations(units, size):
-            if admissible(kept, rules):
+            if admissible(kept, rules, asks):
                 admitted.append((kept, sum(unit.seconds for unit in kept) + overhead))
     fits: List[Cut] = []
     for kept, estimate in admitted:

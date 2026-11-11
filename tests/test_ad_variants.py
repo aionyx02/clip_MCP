@@ -45,8 +45,21 @@ def offered(seconds: float) -> Dict[Tuple[str, ...], float]:
 
 def test_a_bumper_is_one_hook_one_product_line_and_the_ask_never_the_problem_or_proof() -> None:
     assert format_for(6).label == "bumper"
-    # 2.5 + 3.0 = 5.5 and with the ask 7.5; only the first is under the 6.5 s ceiling.
-    assert offered(6) == {("hook", "product1"): 5.5}
+    # Hook, the shorter product line and the ask run 7.5 s, over the 6.5 s ceiling: nothing
+    # is offered rather than a bumper that drops the ask.
+    assert offered(6) == {}
+    short = [LINES[0], LINES[2], Unit("cta", AdSlot.CTA, 0.8, "點連結"), LINES[4]]
+    fits, _, _ = cut_downs(short, 6, 0.0, lambda keeps: round(sum(u.seconds for u in short if u.clip_id in keeps), 3))
+    assert {cut.keeps: cut.seconds for cut in fits} == {("hook", "product1", "cta"): 6.3}
+
+
+def test_a_plan_that_says_its_ask_keeps_it_in_every_cut_down() -> None:
+    for seconds in (6, 15, 30):
+        assert all("cta" in keeps for keeps in offered(seconds))
+    # One with no ask line of its own leaves it to the brand kit's closing words.
+    silent = [unit for unit in LINES if unit.slot != AdSlot.CTA]
+    fits, _, _ = cut_downs(silent, 15, 0.0, lambda keeps: round(sum(u.seconds for u in silent if u.clip_id in keeps), 3))
+    assert fits and all("cta" not in cut.keeps for cut in fits)
 
 def test_a_fifteen_second_spot_drops_the_problem_and_the_proof_and_keeps_whole_lines() -> None:
     cuts = offered(15)
