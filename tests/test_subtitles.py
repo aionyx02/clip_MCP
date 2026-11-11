@@ -491,8 +491,9 @@ def test_a_line_does_not_break_a_word_from_the_one_it_leans_on(said: list, room:
 @pytest.mark.parametrize("before", range(6, 14))
 def test_a_line_never_breaks_inside_a_chinese_word(before: int) -> None:
     # The recogniser hands back one character at a time; wherever the even break falls,
-    # it must not split the café in two.
-    text = "字" * before + "咖啡廳" + "字" * (20 - before)
+    # it must not split the café in two. Short enough that two lines of a vertical frame, clear of
+    # the buttons up its right, always have a break outside the word.
+    text = "字" * before + "咖啡廳" + "字" * (18 - before)
     lines = [line.split(",,0,0,0,,")[1] for line in dialogue_of(build_ass([said_with_a_pause(text, 0, "0")], 1080, 1920))]
     assert len(lines) > 1 and any("咖啡廳" in line for line in lines)
 

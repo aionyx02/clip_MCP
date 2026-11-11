@@ -1,10 +1,11 @@
-"""How well the white words drawn over a cut stand out from what is behind them.
+"""How well the words drawn over a cut stand out from what is behind them.
 
-A title card's words and the words over the footage are all drawn white, so
-a card read off a bright frame, or a headline over a bright sky, can be lost
-where a dark frame would carry them. This measures the picture behind the
-words, the way the render will show it, against white; whether the frame is
-the wrong one is for whoever chose it.
+A title card's words and the words over the footage are drawn white unless a
+brand kit gives them its colours, so a card read off a bright frame, or a
+headline over a bright sky, can be lost where a dark frame would carry them.
+This measures the picture behind the words, the way the render will show it,
+against the words' own colour; whether the frame is the wrong one is for
+whoever chose it.
 """
 
 from typing import Sequence, Tuple
@@ -14,15 +15,14 @@ from PIL import Image
 
 from app.engine.subtitles import CAPTION_LINE_HEIGHT, text_width
 
-# Provisional: below this, white words are taken to be hard to read on what is behind them.
+# Provisional: below this, words are taken to be hard to read on what is behind them.
 # WCAG 2's contrast ratio for large text (3:1), measured between white and the bright end of
 # the background under the words, without the soft shadow or outline drawn round them.
 LOW_CONTRAST = 3.0
 # Provisional: the bright end of the background is where this share of its pixels stay under,
-# so a bright patch behind a few letters counts and a stray highlight does not.
+# so a bright patch behind a few letters counts and a stray highlight does not. Dark words are
+# measured against the dark end the same way.
 BRIGHT_PERCENTILE = 90
-# The words' own colour, as WCAG's relative luminance: white.
-WORDS_LUMINANCE = 1.0
 
 
 def relative_luminance(pixels: np.ndarray) -> np.ndarray:
@@ -49,7 +49,7 @@ def row_box(row: dict, width: int) -> Tuple[int, int, int, int]:
 
     Args:
         row: A row as `cards.placed` or `texts.placed` gives it: `text`,
-            `size` and `y`, the centre of the line; and, from `texts.placed`,
+            `size`, `y`, the centre of the line, and `colour`; and, from `texts.placed`,
             `x` with its `align` and the `box` padding round it. A row
             without `x` is centred, as a card's are.
         width: Frame width in pixels.
@@ -63,30 +63,39 @@ def row_box(row: dict, width: int) -> Tuple[int, int, int, int]:
 
 
 def words_contrast(picture: Image.Image, rows: Sequence[dict], box_opacity: float = 0.0) -> float:
-    """Measure white words against the picture behind them.
+    """Measure words against the picture behind them, in their own colour.
 
     Args:
         picture: The frame behind the words, at the size and framing they are
             placed in, already treated as the render treats it.
-        rows: The rows of words, as `row_box` reads them.
+        rows: The rows of words, as `row_box` reads them; a row without a
+            `colour` is white.
         box_opacity: How opaque the black box drawn behind a row with a `box`
             is; rows without one stand on the picture itself.
 
     Returns:
-        The contrast ratio between white and the bright end of the picture
-        under the words, rounded to one decimal; 21 when no row is inside the
+        The lowest contrast ratio, among the words of each colour, between
+        that colour and the end of the picture under them nearer to it in
+        lightness — the bright end under light words, the dark end under
+        dark ones — rounded to one decimal; 21 when no row is inside the
         frame.
     """
     pixels = np.asarray(picture.convert("RGB"))
     height, width = pixels.shape[:2]
-    behind = []
+    behind: dict = {}
     for row in rows:
         left, top, right, bottom = row_box(row, width)
         part = pixels[max(0, top):min(height, bottom), max(0, left):min(width, right)].reshape(-1, 3)
         if row.get("box"):
             part = part * (1 - box_opacity)
-        behind.append(part)
-    if not behind or not sum(len(part) for part in behind):
-        return 21.0
-    bright = float(np.percentile(relative_luminance(np.concatenate(behind)), BRIGHT_PERCENTILE))
-    return round(contrast_ratio(WORDS_LUMINANCE, bright), 1)
+        behind.setdefault(row.get("colour") or "#ffffff", []).append(part)
+    worst = 21.0
+    for colour, parts in behind.items():
+        if not sum(len(part) for part in parts):
+            continue
+        under = relative_luminance(np.concatenate(parts))
+        hexed = {"black": "#000000", "white": "#ffffff"}.get(colour, colour)
+        words = float(relative_luminance(np.array([int(hexed[index:index + 2], 16) for index in (1, 3, 5)])))
+        end = BRIGHT_PERCENTILE if words >= float(np.median(under)) else 100 - BRIGHT_PERCENTILE
+        worst = min(worst, contrast_ratio(words, float(np.percentile(under, end))))
+    return round(worst, 1)

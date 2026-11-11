@@ -433,6 +433,9 @@ class AddTextOp(TextTimes):
                                description="Put its middle here down the frame instead, 0 to 1; kept off the captions")
     by_plan: SkipJsonSchema[bool] = False
     hidden: SkipJsonSchema[bool] = False
+    # A brand kit's colours, which only its closing words carry.
+    colour: SkipJsonSchema[Optional[str]] = Field(default=None, pattern=COLOUR)
+    second_colour: SkipJsonSchema[Optional[str]] = Field(default=None, pattern=COLOUR)
 
 class SetTextOp(TextTimes):
     """Edit operation that changes a text layer: its words, its style, where or when it shows."""

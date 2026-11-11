@@ -58,7 +58,7 @@ mcp = FastMCP(
         "second picture goes on the track above, which is how B-roll covers "
         "somebody talking while their sound carries on, and how picture in "
         "picture is made — and no graphics beyond words and a still logo: captions, title cards, "
-        "text over the footage, and a brand kit's logo in a corner and on its closing card. "
+        "text over the footage, and a brand kit's logo on its closing card and, when asked for, in a corner. "
         "Photos go in like videos and are shown for as long "
         "as their clip runs. "
         "Transitions end on the cut rather than straddling it, so adding one "

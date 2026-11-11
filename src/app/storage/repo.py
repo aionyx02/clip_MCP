@@ -1651,8 +1651,8 @@ class Repository:
                     note(asset_id, "plans", plan.get("goal") or plan.get("id", ""))
             for (data,) in conn.execute("SELECT data FROM brand_kits").fetchall():
                 kit = BrandKit.model_validate_json(data)
-                if kit.logo_asset_id in wanted:
-                    note(kit.logo_asset_id, "brand_kits", kit.name)
+                for asset_id in wanted & kit.logos:
+                    note(asset_id, "brand_kits", kit.name)
             for (data,) in conn.execute("SELECT data FROM jobs").fetchall():
                 job = Job.model_validate_json(data)
                 if job.asset_id in wanted and job.status.is_active:

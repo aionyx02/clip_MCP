@@ -366,9 +366,42 @@
           && time >= clip.timeline_in - clip.transition.seconds);
         if (incoming) this.drawTransition(track, incoming, time);
       }
+      this.drawLogos(time);
       this.drawCards(time);
       this.drawTexts(time);
       this.drawCaptions(time);
+    }
+
+    // The logo held in a corner, and a title card's own logo above its words, where the render
+    // puts them: over the picture and under the words, the corner one off while a card shows its own.
+    drawLogos(time) {
+      const { ctx } = this;
+      const { width, height } = this.described;
+      const corner = this.described.logo;
+      if (corner && !corner.off.some(([start, end]) => time >= start && time <= end)) {
+        const image = this.photo(`/media/${corner.asset_id}`);
+        if (image.complete && image.naturalWidth) {
+          const w = corner.width;
+          // The render scales to this width and rounds the height to an even number, as -2 does.
+          const h = 2 * Math.round(w * image.naturalHeight / image.naturalWidth / 2);
+          const x = corner.corner.endsWith("left") ? corner.margin : width - w - corner.margin;
+          const y = corner.corner.startsWith("top") ? corner.margin : height - h - corner.margin;
+          ctx.save();
+          ctx.globalAlpha = corner.opacity;
+          ctx.drawImage(image, x, y, w, h);
+          ctx.restore();
+        }
+      }
+      for (const event of this.described.cards?.events || []) {
+        if (!event.logo || time < event.start || time > event.end) continue;
+        const image = this.photo(`/media/${event.logo.asset_id}`);
+        if (!image.complete || !image.naturalWidth) continue;
+        // Fitted inside its box, whole, and centred in it.
+        const box = event.logo;
+        const fit = Math.min(box.width / image.naturalWidth, box.height / image.naturalHeight);
+        const w = image.naturalWidth * fit, h = image.naturalHeight * fit;
+        ctx.drawImage(image, box.x + (box.width - w) / 2, box.y + (box.height - h) / 2, w, h);
+      }
     }
 
     // Words over the footage, row by row where the render puts them; a name bar on its box.
@@ -413,7 +446,7 @@
               x += run.width;
             }
           }
-          ctx.fillStyle = "#fff";
+          ctx.fillStyle = row.colour || "#fff";
           let x = left;
           for (const run of runs) {
             ctx.font = run.font;
@@ -439,10 +472,13 @@
       ctx.textBaseline = "middle";
       for (const row of event.rows) {
         ctx.font = `bold ${row.size}px "${font}", ${FONTS}`;
-        const shadow = Math.max(1, Math.floor(row.size / 24));
-        ctx.fillStyle = "rgba(0,0,0,.5)";
-        ctx.fillText(row.text, this.described.width / 2 + shadow, row.y + shadow);
-        ctx.fillStyle = "#ffffff";
+        // Only over a picture: on a plain colour the render draws the words without one.
+        if (event.shadow) {
+          const shadow = Math.max(1, Math.floor(row.size / 24));
+          ctx.fillStyle = "rgba(0,0,0,.5)";
+          ctx.fillText(row.text, this.described.width / 2 + shadow, row.y + shadow);
+        }
+        ctx.fillStyle = row.colour || "#ffffff";
         ctx.fillText(row.text, this.described.width / 2, row.y);
       }
       ctx.restore();
@@ -573,7 +609,7 @@
       const { ctx } = this;
       const { width, height } = this.described;
       const font = (size) => `bold ${size}px "${captions.font}", ${FONTS}`;
-      const lit = event.colour || "#ffffff";
+      const lit = event.colour || captions.colour || "#ffffff";
       // Bottom up: the second language under the first, the block's foot on the margin.
       let foot = height - captions.margin_v;
       const rows = [];
@@ -592,7 +628,8 @@
       for (const row of rows) {
         ctx.font = font(row.size);
         const widths = row.words.map(([text]) => ctx.measureText(text).width);
-        let left = width / 2 - widths.reduce((a, b) => a + b, 0) / 2;
+        // Centred between the margins, which on a vertical video keep clear of the buttons up the right.
+        let left = (captions.centre ?? width / 2) - widths.reduce((a, b) => a + b, 0) / 2;
         const baseline = row.foot - row.size * 0.22;
         row.words.forEach(([text, start], index) => {
           const spoken = start === null || time >= start;

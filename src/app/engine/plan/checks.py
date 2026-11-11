@@ -951,6 +951,7 @@ def check_plan(
         # compile's, cards and all (#228, #246). A plan checked on its own has only its own cards.
         played = with_cards(plan, pieces, assets, cuts, None, kit)
         duration = compiled_duration(played)
+        problems.extend(closing_words_problems(kit, played))
         edges, ending_notes, stopped = _edge_problems(plan, pieces, cuts)
         notes.extend(_cut_notes(
             pieces,
@@ -1080,6 +1081,26 @@ def as_left(pieces: Sequence[Piece], project: Optional[Project]) -> Tuple[List[P
         ))
     return out, notes
 
+def closing_words_problems(kit: Optional[BrandKit], played: Sequence[Piece]) -> List[str]:
+    """Refuse closing words that would not fit over the last shot, rather than stretch the shot for them.
+
+    Args:
+        kit: The brand kit the plan wears, if any.
+        played: The cut's windows, cards in, as `with_cards` lays them.
+
+    Returns:
+        A problem when the kit closes on words over the last shot and that
+        shot plays for less time than the words stay up.
+    """
+    if kit is None or kit.end_card is None or kit.end_card.mode != "overlay":
+        return []
+    shots = [piece for piece in played if piece.card is None]
+    if not shots or shots[-1].played + 1e-6 >= kit.end_card.held:
+        return []
+    return [f"brand kit 「{kit.name}」 closes on 「{kit.end_card.title}」 over the last {kit.end_card.held:g}s of the "
+            f"last shot, which plays only {shots[-1].played:.2f}s; end on a longer shot, or save the kit with a "
+            "shorter `end_card.seconds` or `end_card.mode` `card`"]
+
 def with_cards(
     plan: EditPlan,
     pieces: Sequence[Piece],
@@ -1108,11 +1129,14 @@ def with_cards(
         cuts: What is known about each file, keyed by asset ID.
         project: What is on the timeline now, or None for a plan checked on
             its own, which has only its own cards.
-        kit: The brand kit the plan names, if any. Its closing card goes
-            last, after every other card, and belongs to no part: it counts
-            in the cut's length and not in any part's. Its colour stands
-            behind a card asked for on a `colour` background without one.
-            A closing card changed by hand comes back as it was, still last.
+        kit: The brand kit the plan names, if any. A closing card (its
+            `end_card` in `card` mode) goes last, after every other card, and
+            belongs to no part: it counts in the cut's length and not in any
+            part's; closing words over the last shot add no window. Its
+            colour stands behind a card asked for on a `colour` background
+            without one, and its words' and accent colours go on every card.
+            A closing card changed by hand comes back as it was, still last,
+            unless the kit now closes over the last shot instead.
 
     Returns:
         The windows with the cards among them, the cuts after each card put
@@ -1123,6 +1147,10 @@ def with_cards(
                   if track_id == VIDEO_TRACK_ID and clip.card is not None), key=lambda clip: clip.timeline_in)
     # The closing card is the kit's, not a part's: rebuilt from the kit unless it was changed by hand.
     closing = next((clip for clip in old if clip.card.end and clip.from_plan_id == plan.id and clip.pinned), None)
+    if kit is not None and kit.end_card is not None and kit.end_card.mode == "overlay":
+        closing = None
+    # The brand's colours for the words of the cards it makes.
+    worded = {"text_colour": kit.text_colour, **({"accent": kit.accent} if kit.accent else {})} if kit else {}
     old = [clip for clip in old if not clip.card.end]
     held = {clip.card.beat_id: clip for clip in old
             if clip.from_plan_id == plan.id and clip.pinned and clip.card.beat_id in beats}
@@ -1156,6 +1184,7 @@ def with_cards(
                         at=wanted.at if wanted.at is not None else 0 if photo else piece.start,
                         beat_id=piece.beat_id,
                         **({"colour": colour} if (colour := wanted.colour or (kit.colour if kit else None)) else {}),
+                        **worded,
                     ),
                 )
             if card is not None:
@@ -1185,17 +1214,18 @@ def with_cards(
     shots = [piece for piece in out if piece.card is None]
     if closing is not None:
         out.append(from_clip(closing, ""))
-    elif kit is not None and kit.end_card is not None and shots:
+    elif kit is not None and kit.end_card is not None and kit.end_card.mode == "card" and shots:
         wanted = kit.end_card
         # Its frame is the last shot's, which a plain colour covers; without a brand colour it is that shot blurred.
         last = shots[-1]
         out.append(Piece(
-            asset_id=last.asset_id, start=0.0, end=wanted.seconds, from_clip_ids=(), beat_id="",
+            asset_id=last.asset_id, start=0.0, end=wanted.held, from_clip_ids=(), beat_id="",
             card=TitleCard(
                 title=wanted.title, subtitle=wanted.subtitle, background="colour" if kit.colour else "blur",
                 at=last.start, end=True,
-                logo_asset_id=kit.logo_asset_id if wanted.logo else None,
-                **({"colour": kit.colour} if kit.colour else {}),
+                # Of the two logos, the one that stands out from what is behind it.
+                logo_asset_id=kit.logo_on(kit.colour) if wanted.logo else None,
+                **({"colour": kit.colour} if kit.colour else {}), **worded,
             ),
         ))
     if any(piece.card is not None for piece in out):

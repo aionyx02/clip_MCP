@@ -499,6 +499,30 @@ def overlay_box(clip: Clip, width: int, height: int) -> Tuple[int, int, int, int
         box_height,
     )
 
+def corner_logo(project: Project, assets: Mapping[str, Asset]) -> Optional[dict]:
+    """Where the logo held over the cut is drawn, in frame pixels, for the render and the editor alike.
+
+    Args:
+        project: The cut, at the size it is rendered at.
+        assets: Registered assets, keyed by asset ID.
+
+    Returns:
+        None without a logo, or one whose file is not in the library;
+        otherwise `asset_id`, `corner`, `width` (even, its height following
+        the picture's shape), `margin` from the two edges of its corner,
+        `opacity`, and `off`: each `[start, end]` of a title card with a logo
+        of its own, when it is not drawn.
+    """
+    logo = project.logo
+    if logo is None or logo.asset_id not in assets:
+        return None
+    width, height = project.width, project.height
+    off = [[placed["start"], placed["end"]] for placed in (cards.placed(clip, width, height)
+                                                         for clip in cards.cards_of(project)
+                                                         if clip.card.logo_asset_id in assets)]
+    return {"asset_id": logo.asset_id, "corner": logo.corner, "width": max(2, 2 * round(width * logo.width / 2)),
+            "margin": round(min(width, height) * LOGO_MARGIN), "opacity": logo.opacity, "off": off}
+
 def _drawn_logos(
     project: Project, assets: Mapping[str, Asset], inputs: List[List[str]], filters: List[str], joined: str,
 ) -> str:
@@ -522,15 +546,15 @@ def _drawn_logos(
     width, height = project.width, project.height
     carded = [(clip, cards.placed(clip, width, height)) for clip in cards.cards_of(project)
               if clip.card.logo_asset_id and clip.card.logo_asset_id in assets]
-    logo = project.logo
-    if logo is not None and logo.asset_id in assets:
-        inputs.append(["-i", assets[logo.asset_id].path])
-        wide = max(2, 2 * round(width * logo.width / 2))
-        margin = round(min(width, height) * LOGO_MARGIN)
-        x = f"{margin}" if logo.corner.endswith("left") else f"W-w-{margin}"
-        y = f"{margin}" if logo.corner.startswith("top") else f"H-h-{margin}"
-        off = "+".join(f"between(t,{placed['start']:.3f},{placed['end']:.3f})" for _, placed in carded)
-        filters.append(f"[{len(inputs) - 1}:v]format=rgba,scale={wide}:-2,colorchannelmixer=aa={logo.opacity:g}[logo]")
+    logo = corner_logo(project, assets)
+    if logo is not None:
+        inputs.append(["-i", assets[logo["asset_id"]].path])
+        margin = logo["margin"]
+        x = f"{margin}" if logo["corner"].endswith("left") else f"W-w-{margin}"
+        y = f"{margin}" if logo["corner"].startswith("top") else f"H-h-{margin}"
+        off = "+".join(f"between(t,{start:.3f},{end:.3f})" for start, end in logo["off"])
+        filters.append(f"[{len(inputs) - 1}:v]format=rgba,scale={logo['width']}:-2,"
+                       f"colorchannelmixer=aa={logo['opacity']:g}[logo]")
         filters.append(f"{joined}[logo]overlay=x={x}:y={y}" + (f":enable='not({off})'" if off else "") + "[logov]")
         joined = "[logov]"
     for number, (clip, placed) in enumerate(carded):

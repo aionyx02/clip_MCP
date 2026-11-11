@@ -388,17 +388,18 @@ def forget_preference(preference_id: str) -> dict:
 
 @mcp.tool()
 def save_brand_kit(kit: BrandKit) -> dict:
-    """Keep a brand's logo, colour, font and closing card, for every video of that brand after this one.
+    """Keep a brand's logos, colours, font and closing words, for every video of that brand after this one.
 
-    Only what the user gave: their logo, their colour, their words for the
-    closing card. Saving under a name already kept replaces it. A plan wears
-    a kit by naming it in `brand_kit`; compiling then puts the logo over the
-    cut and the closing card at the end, where the length counts it, and
-    sets the font of the captions, cards and words over the footage.
+    Only what the user gave: their logo, their colours, their words to close
+    on. Saving under a name already kept replaces it. A plan wears a kit by
+    naming it in `brand_kit`; compiling then puts the closing words over the
+    end of the last shot (or, in `card` mode, a closing card after it, where
+    the length counts it), its colours and font on the cards, captions and
+    closing words, and its logo in a corner only when `corner_logo` is on.
 
     Args:
-        kit: The kit. `logo_asset_id` is a picture already in the library;
-            its file name works too.
+        kit: The kit. `logo_asset_id` and `logo_dark_asset_id` are pictures
+            already in the library; their file names work too.
 
     Returns:
         `kept`, the kit; and `brand_kits` and `preferences`, all of them.
@@ -406,13 +407,17 @@ def save_brand_kit(kit: BrandKit) -> dict:
     Raises:
         ValueError: If the logo is not a picture in the library.
     """
-    if kit.logo_asset_id is not None:
-        kit = kit.model_copy(update={"logo_asset_id": shared.asset_id_for(kit.logo_asset_id)})
-        asset = runtime.repo.get_assets([kit.logo_asset_id]).get(kit.logo_asset_id)
+    for field in ("logo_asset_id", "logo_dark_asset_id"):
+        named = getattr(kit, field)
+        if named is None:
+            continue
+        kit = kit.model_copy(update={field: shared.asset_id_for(named)})
+        asset_id = getattr(kit, field)
+        asset = runtime.repo.get_assets([asset_id]).get(asset_id)
         if asset is None:
-            raise ValueError(f"logo {kit.logo_asset_id} is not in the library; import the picture first")
+            raise ValueError(f"logo {asset_id} is not in the library; import the picture first")
         if not asset.still:
-            raise ValueError(f"logo {kit.logo_asset_id} is not a still picture; a logo is one image, such as a PNG")
+            raise ValueError(f"logo {asset_id} is not a still picture; a logo is one image, such as a PNG")
     runtime.repo.save_brand_kit(kit)
     return editing.with_preferences({"kept": kit.model_dump(mode="json", exclude={"saved_at"})})
 

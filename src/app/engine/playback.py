@@ -21,7 +21,7 @@ from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 
 from app.engine.builder import (
     DUCK_ATTACK_SECONDS, DUCK_DEPTH_DB, DUCK_HOLD_SECONDS, DUCK_RELEASE_SECONDS, Talking, _cleanup_filters,
-    overlay_box,
+    corner_logo, overlay_box,
 )
 from app.engine import cards, stills, texts
 from app.engine.ffmpeg import exact_stretch_args
@@ -229,8 +229,9 @@ def describe(
 
     Returns:
         The description: the frame, the tracks and their clips, the music's
-        ducking, the captions, the gain to the target loudness, and what is
-        still being prepared.
+        ducking, the captions, the title cards, the words over the footage,
+        the corner logo, the gain to the target loudness, and what is still
+        being prepared.
     """
     fps = Fraction(project.fps_num, project.fps_den)
     music_gains = talking.music_gains if talking is not None else {}
@@ -302,6 +303,8 @@ def describe(
         "cards": {"events": cards.drawn(project), "blur_share": cards.BLUR_SHARE, "blur_dim": cards.BLUR_DIM,
                   "picture_dim": cards.PICTURE_DIM},
         "texts": texts.drawn(project, project.caption_style),
+        # The logo held in a corner, placed as the render places it; a card's own logo is on its event.
+        "logo": corner_logo(project, assets),
         "gain_db": prepared.gain_db,
         "loudness_target": LOUDNESS_TARGET,
         "approximate": {

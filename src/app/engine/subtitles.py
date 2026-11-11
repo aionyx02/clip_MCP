@@ -28,6 +28,10 @@ from app.models.timeline.parts import (
 # `CaptionStyle`, because a platform changes those and does not change this.
 PORTRAIT_BOTTOM_FRACTION = 0.13
 LANDSCAPE_BOTTOM_FRACTION = 0.06
+# Provisional: how much of a vertical video's right-hand side the like, comment and share
+# buttons of TikTok, Reels and Shorts cover, as a share of the width; estimated, not measured.
+# Captions and words over the footage keep at least this far in from the right of one.
+PORTRAIT_RIGHT_FRACTION = 0.14
 # libass falls back to a font that has the glyphs, but the starting point can be set for unusual systems.
 DEFAULT_FONT = os.environ.get("CLIP_MCP_SUBTITLE_FONT", "Arial")
 # A caption much longer than this is hard to read at a glance, and one much shorter flickers past.
@@ -45,6 +49,19 @@ MILLISECOND = Decimal('0.001')
 SPEAKER_COLOURS = ("&H00FFFFFF", "&H0000FFFF", "&H00FFFF00", "&H00FF00FF")
 # What a word looks like before it is said, when the caption lights up word by word.
 UNSPOKEN_COLOUR = "&H00909090"
+
+
+def hex_colour(colour: str) -> str:
+    """Write a colour as `#rrggbb`, the two names spelled out, for the browser."""
+    return {"black": "#000000", "white": "#ffffff"}.get(colour, colour.lower())
+
+
+def ass_colour(colour: str) -> str:
+    """Write a colour the way ASS does, `&H00BBGGRR`, backwards from everywhere else."""
+    hexed = hex_colour(colour)
+    return f"&H00{hexed[5:7]}{hexed[3:5]}{hexed[1:3]}".upper()
+
+
 # How tall a line of captions stands, as a multiple of the font size: the glyphs plus
 # the gap libass leaves between lines. An estimate of the renderer's own spacing rather
 # than a taste, used only to tell whether a block of lines fits in the frame.
@@ -418,10 +435,14 @@ class CaptionGeometry:
 
     Attributes:
         font_size: Font size in pixels.
-        margin_h: Space kept clear at each side, in pixels.
+        margin_h: Space kept clear at the left, and at the right of a
+            landscape frame, in pixels.
+        margin_r: Space kept clear at the right, in pixels: more on a
+            vertical frame, where the platform's buttons run up that side.
         margin_v: Space kept clear below the text, in pixels.
         outline: Outline width in pixels.
         max_units: How wide a line may run, as a multiple of the font size.
+        width: The frame's width, in pixels.
     """
 
     font_size: int
@@ -429,6 +450,13 @@ class CaptionGeometry:
     margin_v: int
     outline: int
     max_units: float
+    margin_r: int
+    width: int
+
+    @property
+    def centre(self) -> float:
+        """Where a centred line of captions is centred across the frame, in pixels: between the margins."""
+        return (self.margin_h + self.width - self.margin_r) / 2
 
 def caption_geometry(width: int, height: int, style: CaptionStyle) -> CaptionGeometry:
     """Work out the size and margins captions get in a frame.
@@ -449,14 +477,17 @@ def caption_geometry(width: int, height: int, style: CaptionStyle) -> CaptionGeo
     if bottom is None:
         bottom = PORTRAIT_BOTTOM_FRACTION if height > width else LANDSCAPE_BOTTOM_FRACTION
     margin_h = round(width * style.side_fraction)
+    margin_r = max(margin_h, round(width * PORTRAIT_RIGHT_FRACTION)) if height > width else margin_h
     return CaptionGeometry(
         font_size=font_size,
         margin_h=margin_h,
+        margin_r=margin_r,
+        width=width,
         margin_v=round(height * bottom),
         # At least a pixel when one is asked for at all; none when none is.
         outline=max(1, round(font_size * style.outline_fraction)) if style.outline_fraction else 0,
         # libass measures in the ASS resolution, so the usable width is the frame minus both margins.
-        max_units=max(4.0, (width - 2 * margin_h) / font_size),
+        max_units=max(4.0, (width - margin_h - margin_r) / font_size),
     )
 
 def _speaker_prefix(cue: PlacedCue, style: CaptionStyle) -> str:
@@ -924,7 +955,8 @@ def build_ass(
     # With karaoke the secondary colour is what a word looks like before it is said, so it
     # has to differ from the primary or nothing appears to happen. Without it the two are
     # the same, which is what a caption that simply sits there wants.
-    waiting = UNSPOKEN_COLOUR if style.karaoke else "&H00FFFFFF"
+    words = ass_colour(style.colour)
+    waiting = UNSPOKEN_COLOUR if style.karaoke else words
     colours = _speaker_colours(cues) if style.speaker_mark in (SpeakerMark.COLOUR, SpeakerMark.BOTH) else {}
 
     lines: List[str] = [
@@ -939,9 +971,9 @@ def build_ass(
         "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, "
         "Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, "
         "Shadow, Alignment, MarginL, MarginR, MarginV, Encoding",
-        f"Style: Default,{font},{font_size},&H00FFFFFF,{waiting},&H00000000,&H80000000,"
+        f"Style: Default,{font},{font_size},{words},{waiting},&H00000000,&H80000000,"
         # The shadow goes with the outline: a caption asked for with no outline is plain white text.
-        f"-1,0,0,0,100,100,0,0,1,{outline},{max(1, outline // 2) if outline else 0},2,{margin_h},{margin_h},{margin_v},1",
+        f"-1,0,0,0,100,100,0,0,1,{outline},{max(1, outline // 2) if outline else 0},2,{margin_h},{geometry.margin_r},{margin_v},1",
         *extra_styles,
         "",
         "[Events]",
@@ -1002,6 +1034,7 @@ def drawn_captions(cues: Sequence[PlacedCue], width: int, height: int, style: Ca
         })
     return {
         "font": style.font or DEFAULT_FONT, "font_size": geometry.font_size, "margin_h": geometry.margin_h,
+        "margin_r": geometry.margin_r, "centre": geometry.centre, "colour": hex_colour(style.colour),
         "margin_v": geometry.margin_v, "outline": geometry.outline,
         "shadow": max(1, geometry.outline // 2) if geometry.outline else 0,
         "secondary_size": max(8, round(geometry.font_size * style.secondary_scale)),
