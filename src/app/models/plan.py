@@ -565,6 +565,30 @@ class MusicPlan(BaseModel):
                     "a matter of taste, so it is only ever what the plan says",
     )
 
+class SoundEffectPick(BaseModel):
+    """One sound effect at one of the moments `propose_sound_effects` offered."""
+
+    candidate: str = Field(..., min_length=1, description="The moment's `id`, as `propose_sound_effects` lists it")
+    asset_id: str = Field(..., min_length=1, description="The effect, from the sound-effects library")
+    volume: float = Field(
+        default=1.0, gt=0, le=4,
+        description="How loud against the talking: 1 is the server's usual distance under it, 2 twice as loud",
+    )
+    lead: float = Field(
+        default=0.0, ge=0, le=3,
+        description="Seconds the effect starts before the moment, for one that builds into it such as a riser; "
+                    "0 starts it on the moment",
+    )
+
+class SoundEffects(BaseModel):
+    """The sound effects of a cut: which effect plays at which of the moments offered."""
+
+    candidate_hash: str = Field(
+        ..., min_length=1,
+        description="The `candidate_hash` `propose_sound_effects` gave with the moments these were picked from",
+    )
+    picks: List[SoundEffectPick] = Field(default_factory=list, description="The effects, in any order")
+
 class Pacing(BaseModel):
     """How tight the whole cut is.
 
@@ -644,6 +668,11 @@ class EditPlan(BaseModel):
                     "not something to write at the same time as the selections",
     )
     music: Optional[MusicPlan] = None
+    sound_effects: Optional[SoundEffects] = Field(
+        default=None,
+        description="Sound effects at moments of the compiled cut, picked from `propose_sound_effects`; a pass "
+                    "after the cut is compiled, not something to write with the selections",
+    )
     pacing: Pacing = Field(default_factory=Pacing, description="How tight the whole cut is")
     brand_kit: Optional[str] = Field(
         default=None,
@@ -745,6 +774,14 @@ class SetMusicCueOp(BaseModel):
     fade_out: Optional[float] = Field(default=None, ge=0, description="As on a cue")
     cut_on_beat: Optional[bool] = Field(default=None, description="As on a cue")
 
+class SetSoundEffectsOp(BaseModel):
+    """Plan amendment that sets the cut's sound effects, all of them at once."""
+
+    action: Literal["set_sound_effects"] = "set_sound_effects"
+    sound_effects: Optional[SoundEffects] = Field(
+        default=None, description="The picks and the hash of the moments they came from; null takes them all away",
+    )
+
 class SetTargetOp(BaseModel):
     """Amendment that changes what the finished video has to be."""
 
@@ -816,7 +853,7 @@ PlanAmendment = Annotated[
     Union[
         SetTrimOp, SetRationaleOp, AddSelectionOp, DropSelectionOp, AddBrollOp, DropBrollOp,
         SetPacingOp, SetMusicLevelOp, SetMusicCueOp, SetTargetOp, DropBeatOp, SetPlaybackOp, SetBeatJoinOp,
-        SetStabilizeOp, SetBeatTitleOp, SetSelectionTextsOp, SetFactsOp, SetKnowledgeOp,
+        SetStabilizeOp, SetBeatTitleOp, SetSelectionTextsOp, SetFactsOp, SetKnowledgeOp, SetSoundEffectsOp,
     ],
     Field(discriminator="action"),
 ]
@@ -871,6 +908,9 @@ def describe_amendment(op: "PlanAmendment") -> str:
         return "facts: " + (", ".join(fact.id for fact in op.facts) or "none")
     if isinstance(op, SetKnowledgeOp):
         return f"said what {op.clip_id} establishes and relies on"
+    if isinstance(op, SetSoundEffectsOp):
+        picked = len(op.sound_effects.picks) if op.sound_effects else 0
+        return f"{picked} sound effect(s)" if picked else "no sound effects"
     return f"dropped the part {op.beat_id}" + (f" ({op.reason})" if op.reason else "")
 
 def _selection_index(plan: EditPlan, clip_id: str) -> int:
@@ -1006,6 +1046,10 @@ def apply_amendment(plan: EditPlan, op: PlanAmendment) -> None:
 
     if isinstance(op, SetFactsOp):
         plan.facts = list(op.facts)
+        return
+
+    if isinstance(op, SetSoundEffectsOp):
+        plan.sound_effects = op.sound_effects
         return
 
     if isinstance(op, SetKnowledgeOp):

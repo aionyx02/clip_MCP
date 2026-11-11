@@ -22,7 +22,9 @@ from app.engine import loudness, playback
 from app.engine.plan.beats import plan_pieces
 from app.engine.reframe import FRAME_SHAPES
 from app.engine.plan.broll import broll_covers, broll_slots
-from app.engine.plan.checks import COMPILED_TRACKS, as_left, check_plan, check_recompile, with_cards
+from app.engine.plan.checks import COMPILED_TRACKS, as_left, check_plan, check_recompile, compiled_clips, with_cards
+from app.engine.plan.effects import SFX_TRACKS, effect_moments, effect_operations
+from app.models.timeline.apply import apply_operation
 from app.engine.plan.compile import compile_operations
 from app.engine.plan.diff import diff_plans, piece_changes
 from app.engine.plan.music import music_beds
@@ -383,6 +385,8 @@ def amend_plan(plan_id: str, expected_version: int, amendments: list[PlanAmendme
     「這整段不要」, which files every selection in it under the rejections.
     What the viewer has to know is `set_facts` for the plan and
     `set_knowledge` for what one piece establishes and relies on.
+    `set_sound_effects` sets every sound effect at once, picked from
+    `propose_sound_effects` with its `candidate_hash`.
 
     Every version is kept: `revert_plan` goes back to any of them.
 
@@ -644,9 +648,12 @@ def compile_plan(project_id: str, expected_version: int, plan_id: Optional[str] 
     made from, nothing is compiled and you are told which clips are in the
     way, because losing somebody's work to a recompile is worse than stopping.
 
-    The sequence, the music bed and the covering picture belong to the plan,
-    each on its own track, and all three are rebuilt. Other tracks — an
-    inset, a second music bed — are left exactly as they are.
+    The sequence, the music bed, the covering picture and the sound effects
+    belong to the plan, each on its own track, and all are rebuilt. Other
+    tracks — an inset, a second music bed — are left exactly as they are.
+    The sound effects are laid at the moments of the cut as it is rebuilt;
+    a pick whose moment is gone, or whose `candidate_hash` no longer matches
+    those moments, stops the compile with the reason.
 
     Args:
         project_id: Project to build the cut on.
@@ -691,11 +698,14 @@ def compile_plan(project_id: str, expected_version: int, plan_id: Optional[str] 
     played = with_cards(plan, pieces, assets, cuts, project, kit)
     covers, _, _ = broll_covers(plan, played, clips, assets, cuts)
     beds = music_beds(plan, played, assets, cuts)
-    blocked = check_recompile(plan, project, pieces, covers, beds)
+    effects = [(pick.candidate, pick.asset_id) for pick in plan.sound_effects.picks] if plan.sound_effects else []
+    blocked = check_recompile(plan, project, pieces, covers, beds, effects)
     if blocked:
         raise ValueError("compiling would undo work already on this project:\n- " + "\n- ".join(blocked))
 
     built, provenance = compile_operations(plan, clips, children, assets, project, cuts, kit)
+    laid, made = _effect_operations(plan, project, built, provenance)
+    built, provenance = built + laid, {**provenance, **made}
     operations = OPERATIONS.validate_python(built)
 
     def record(edited: Project) -> None:
@@ -721,6 +731,47 @@ def compile_plan(project_id: str, expected_version: int, plan_id: Optional[str] 
         "notes": [note_record(note) for note in notes],
         **({"songs": songs} if (songs := _songs_in(plan)) else {}),
     }
+
+def _effect_operations(plan: EditPlan, project: Project, built: List[dict],
+                       provenance: dict) -> Tuple[List[dict], dict]:
+    """Lay the plan's sound effects at the moments of the cut its other operations build.
+
+    The moments are found on the cut as it will be, so the cut is built on a
+    copy first; nothing is saved here.
+
+    Args:
+        plan: The plan being compiled.
+        project: The project as it is now.
+        built: The operations that build the rest of the cut.
+        provenance: Where each clip they make came from.
+
+    Returns:
+        `(operations, provenance)` for the effects.
+
+    Raises:
+        ValueError: If a pick does not hold up, with every reason.
+    """
+    if plan.sound_effects is None or not plan.sound_effects.picks:
+        return [], {}
+    scratch = project.model_copy(deep=True)
+    operations = OPERATIONS.validate_python(built)
+    named = {op.asset_id for op in operations if getattr(op, "asset_id", None)}
+    known = runtime.repo.get_assets(scratch.asset_ids | named)
+    for op in operations:
+        apply_operation(scratch, op, known)
+    for track in scratch.tracks:
+        for clip in track.clips:
+            origin = provenance.get(clip.id)
+            if origin is not None and track.id in COMPILED_TRACKS:
+                clip.from_clip_ids = origin["from_clip_ids"]
+    kept = {tuple(clip.from_clip_ids): clip for track_id, clip in compiled_clips(project)
+            if track_id in SFX_TRACKS and clip.pinned}
+    picked = runtime.repo.get_assets({pick.asset_id for pick in plan.sound_effects.picks})
+    laid, made, problems = effect_operations(plan.sound_effects, effect_moments(scratch), picked,
+                                             {track.id for track in scratch.tracks}, plan.id, kept)
+    if problems:
+        raise ValueError("this plan's sound effects do not hold up:\n- " + "\n- ".join(problems))
+    return laid, made
 
 def _songs_in(plan: EditPlan) -> List[dict]:
     """The songs a plan plays, each with how it sounds, to say when the plan is read back."""

@@ -28,7 +28,7 @@ from app.engine.faces import framing_note
 from app.engine.delivery import SpeechEdge, speech_edges
 from app.engine.semantic import EDGE_TOLERANCE_SECONDS, bare_words, was_made_up
 from app.engine.ffmpeg import hidden_window_flags
-from app.engine.library import MUSIC, SPEECH_SHARE, classify, library_of, speech_share
+from app.engine.library import FOOTAGE, MUSIC, SPEECH_SHARE, classify, library_of, speech_share
 from app.engine import music as music_energy
 from app.engine.frames import format_timestamp
 from app.engine.listen import cut_sound, levels_every
@@ -113,8 +113,8 @@ def transcription_kind(analysis: Optional[MediaAnalysis]) -> Optional[str]:
     return transcription_of(None if analysis is None or analysis.transcript is None else analysis.transcript.model)
 
 def _transcribed(asset: Asset, transcribe: bool) -> bool:
-    """Whether an analysis of this file transcribes it: never a song, whatever was asked."""
-    return transcribe and asset.has_audio and library_of(asset) != MUSIC
+    """Whether an analysis of this file transcribes it: never a song or a sound effect, whatever was asked."""
+    return transcribe and asset.has_audio and library_of(asset) == FOOTAGE
 
 def start_analysis(asset: Asset, transcribe: bool, transcription: str, language: Optional[str] = None,
                    prompt: Optional[str] = None, chinese_variant: Optional[str] = None, diarize: bool = True,

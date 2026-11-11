@@ -44,6 +44,10 @@ MUSIC_TRACK_ID = "music"
 # the songs alternate between the two.
 MUSIC_B_TRACK_ID = "music_b"
 BROLL_TRACK_ID = "broll"
+# Sound effects, laid by the plan at moments of the compiled cut. Two, for the same reason as
+# the music: a track holds one clip at a time, and an effect may still ring when the next starts.
+SFX_TRACK_ID = "sfx"
+SFX_B_TRACK_ID = "sfx_b"
 
 # A transition shortened below this is a few frames of flicker rather than a transition,
 # so it is left out instead. Three frames at 30fps, two at 24.

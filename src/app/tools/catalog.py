@@ -16,7 +16,7 @@ from app.models.media import Asset, Generated
 from app.models.job import JobKind
 from app.engine import stills
 from app.engine.probe import picture_size, probe_file, recorded_at
-from app.engine.library import FOLDER_KINDS, FOOTAGE, LIBRARIES, MUSIC, classify, library_of
+from app.engine.library import FOLDER_KINDS, FOOTAGE, LIBRARIES, MUSIC, SFX, classify, library_of
 from app.workspace import output_dir
 from app import runtime
 from app.runtime import mcp
@@ -61,11 +61,13 @@ def natural_key(name: str) -> List[object]:
     """
     return [int(part) if part.isdigit() else part.lower() for part in re.split(r"(\d+)", name)]
 
-def register_asset(filepath: str, library: Optional[str] = None, generated: Optional[Generated] = None) -> Asset:
-    """Probe a media file and save it as an asset, in the footage or the music library.
+def register_asset(filepath: str, library: Optional[str] = None, generated: Optional[Generated] = None,
+                   sound_kinds: Optional[List[str]] = None) -> Asset:
+    """Probe a media file and save it as an asset, in the footage, music or sound-effects library.
 
-    A new file without a picture is listened to: mostly somebody talking, it
-    is footage; otherwise music, and a song is analyzed in the background
+    A new file without a picture shorter than `SFX_LONGEST_SECONDS` is a
+    sound effect. A longer one is listened to: mostly somebody talking, it is
+    footage; otherwise music, and a song is analyzed in the background
     straight away.
 
     Args:
@@ -74,6 +76,8 @@ def register_asset(filepath: str, library: Optional[str] = None, generated: Opti
         library: Put it in this library rather than the one it sounds like,
             as when it is added on the editor's music page.
         generated: The generative tool that made it, as the caller said.
+        sound_kinds: What kind of sound effect it is, as the caller said;
+            left out, what was said before is kept.
 
     Returns:
         The saved asset. A path that was imported before keeps its asset ID
@@ -114,6 +118,9 @@ def register_asset(filepath: str, library: Optional[str] = None, generated: Opti
         asset.library = existing.library
         asset.source = existing.source
         asset.generated = existing.generated
+        asset.sound_kinds = existing.sound_kinds
+    if sound_kinds is not None:
+        asset.sound_kinds = sound_names(sound_kinds)
     if generated is not None:
         asset.generated = generated
     if library in LIBRARIES:
@@ -123,6 +130,10 @@ def register_asset(filepath: str, library: Optional[str] = None, generated: Opti
     runtime.repo.save_asset(asset)
     _queue_music([asset])
     return asset
+
+def sound_names(kinds: Iterable[str]) -> List[str]:
+    """What kinds of sound effect a file is, as said, written one way: lower case, each once, in order."""
+    return list(dict.fromkeys(kind.strip().lower() for kind in kinds if kind.strip()))
 
 # Whether a song added to the music library starts being analyzed. Off where nothing should
 # run in the background unasked, such as a test run.
@@ -177,7 +188,7 @@ def tend_library() -> None:
         return
 
 @mcp.tool()
-def import_asset(filepath: str, generated: Optional[Generated] = None) -> dict:
+def import_asset(filepath: str, generated: Optional[Generated] = None, sound_kinds: Optional[List[str]] = None) -> dict:
     """Register a local media file as an asset that clips can reference.
 
     This is what puts a file in the library, the only files a project can use;
@@ -195,23 +206,31 @@ def import_asset(filepath: str, generated: Optional[Generated] = None) -> dict:
     platforms ask for AI-made pictures to be disclosed. Nothing here can tell
     a generated file from a filmed one, so only what you pass is known.
 
+    A file with no picture shorter than ten seconds goes in the sound-effects
+    library. Say what kind of effect it is in `sound_kinds`, from its name or
+    what the user said: nothing listens for it, and `propose_sound_effects`
+    lists effects by these kinds.
+
     Args:
         filepath: Path to the media file, absolute or relative to the server's
             working directory.
         generated: The tool and model that made the file, when one did. Left
             out on a file imported before, what was said then is kept.
+        sound_kinds: For a sound effect, what kind it is, such as `whoosh`,
+            `pop`, `click`, `impact` or `riser`. Left out on a file imported
+            before, what was said then is kept.
 
     Returns:
         The asset serialized as a dictionary: its `id`, absolute `path`,
         `duration` in seconds (or null if unknown, and for a photo, which
         lasts as long as its clip; `still` is true for one), and
-        `has_video` / `has_audio` flags.
+        `has_video` / `has_audio` flags, its `library` and `sound_kinds`.
 
     Raises:
         FileNotFoundError: If the file does not exist.
         RuntimeError: If ffprobe cannot read the file.
     """
-    return shared.plain(_asset_record(register_asset(filepath, generated=generated)))
+    return shared.plain(_asset_record(register_asset(filepath, generated=generated, sound_kinds=sound_kinds)))
 
 def _asset_record(asset: Asset) -> dict:
     """An asset as a tool hands it back: a photo with no length, since it has none of its own."""
@@ -222,7 +241,7 @@ def _asset_record(asset: Asset) -> dict:
 
 @mcp.tool()
 def list_assets(
-    kind: Optional[Literal["footage", "music"]] = None,
+    kind: Optional[Literal["footage", "music", "sfx"]] = None,
     folder_id: Optional[str] = None,
     text: Optional[str] = None,
     limit: Annotated[int, Field(ge=1, le=200)] = 50,
@@ -240,7 +259,8 @@ def list_assets(
             this library, how it `ends` and where it is `fullest`, once
             analyzed; `analyzing` while it is. The mood is how it sounds to a
             model, right about half the time: say it as 「聽起來偏…」, never as
-            a verdict.
+            a verdict. Or `sfx`, the sound effects, each with its
+            `sound_kinds` as whoever added it said.
         folder_id: Only the files filed in this folder, from `folders`. Its
             sub-folders are their own; ask for them by their own IDs.
         text: Only files whose name contains this.
@@ -263,7 +283,7 @@ def list_assets(
         comparing them with each other. `inspect_media` has a file's full path,
         size and frame rate.
     """
-    filed = {**runtime.repo.folder_of("assets"), **runtime.repo.folder_of("music")}
+    filed = {item: folder for kind_of in FOLDER_KINDS.values() for item, folder in runtime.repo.folder_of(kind_of).items()}
     matching = [
         asset for asset in runtime.repo.list_assets()
         if (kind is None or library_of(asset) == kind)
@@ -291,6 +311,7 @@ def list_assets(
             "folder_id": filed.get(asset.id),
             **({"notes": asset.notes} if asset.notes else {}),
             **({"generated": asset.generated.model_dump()} if asset.generated else {}),
+            **({"sound_kinds": asset.sound_kinds} if library_of(asset) == SFX else {}),
             **(examining.song_details(asset, analysis, heard, analyzing) if library_of(asset) == MUSIC
                else {"analyzing": True} if asset.id in analyzing else {}),
         })
@@ -302,20 +323,26 @@ def _folder_kind(library: str) -> str:
     return FOLDER_KINDS[library]
 
 @mcp.tool()
-def set_asset_library(asset_ids: List[str], library: Literal["footage", "music"], note: str = "") -> dict:
-    """Move files between the footage and the music library.
+def set_asset_library(asset_ids: List[str], library: Literal["footage", "music", "sfx"], note: str = "",
+                      sound_kinds: Optional[List[str]] = None) -> dict:
+    """Move files between the footage, the music and the sound-effects library.
 
-    A file without a picture is put in one when it is added, by whether it is
-    mostly somebody talking; that can be wrong — a song that is mostly a
-    spoken intro, a recording of somebody singing. Move it when the user says
-    so or when what you hear says otherwise, and say in your reply that you
-    did. A song moved to music is analyzed for its beat in the background;
-    footage is transcribed when analyzed, music never is.
+    A file without a picture is put in one when it is added: a sound effect
+    when it is shorter than ten seconds, otherwise by whether it is mostly
+    somebody talking; that can be wrong — a song that is mostly a spoken
+    intro, a recording of somebody singing, a short jingle. Move it when the
+    user says so or when what you hear says otherwise, and say in your reply
+    that you did. A song moved to music is analyzed for its beat in the
+    background; footage is transcribed when analyzed, music and sound effects
+    never are.
 
     Args:
         asset_ids: The files.
-        library: `footage` or `music`.
+        library: `footage`, `music` or `sfx`.
         note: The user's words for why, kept in the library's history.
+        sound_kinds: With `sfx`, what kind of effect the files are, such as
+            `whoosh` or `pop`, as the user said or the file's name does;
+            replaces what was said before. Nothing listens for it.
 
     Returns:
         `moved`, the names of the files moved; a file already there is not
@@ -323,13 +350,19 @@ def set_asset_library(asset_ids: List[str], library: Literal["footage", "music"]
         recording moved to footage is transcribed in the background.
 
     Raises:
-        ValueError: If a file is not in the library, or a file with a
-            picture is moved to music.
+        ValueError: If a file is not in the library, a file with a picture
+            is moved to music or sound effects, or `sound_kinds` is given for
+            another library.
     """
+    if sound_kinds is not None and library != SFX:
+        raise ValueError("sound_kinds says what kind of sound effect a file is; give it only with library sfx")
     assets = [shared.get_asset(asset_id) for asset_id in asset_ids]
     pictured = [os.path.basename(asset.path) for asset in assets if asset.has_video]
-    if library == MUSIC and pictured:
-        raise ValueError(f"{', '.join(pictured)} has a picture, so it is footage: music is sound alone")
+    if library in (MUSIC, SFX) and pictured:
+        raise ValueError(f"{', '.join(pictured)} has a picture, so it is footage: {library} is sound alone")
+    if sound_kinds is not None:
+        for asset in assets:
+            runtime.repo.save_asset(asset.model_copy(update={"sound_kinds": sound_names(sound_kinds)}))
     moved = runtime.repo.move_to_library([asset.id for asset in assets], library)
     _queue_music(moved)
     if library == FOOTAGE and ANALYZE_MUSIC_ON_ADD:
@@ -346,6 +379,7 @@ def edit_asset(
     notes: Optional[str] = None,
     generated: Optional[Generated] = None,
     filmed: bool = False,
+    sound_kinds: Optional[List[str]] = None,
     note: str = "",
 ) -> dict:
     """Write down how a file may be used, or what made it, so it is read wherever the file is.
@@ -365,10 +399,13 @@ def edit_asset(
             out, they stay as they are.
         generated: The tool and model that made the file.
         filmed: The file was filmed or recorded after all, not generated.
+        sound_kinds: For a sound effect, what kind it is — `whoosh`, `pop`,
+            `click`, `impact`, `riser` — replacing what was said; empty
+            clears it. Only what you or the user say: nothing listens for it.
         note: Why, in the user's words, kept in the library's history.
 
     Returns:
-        The file's `id`, `name`, `notes` and `generated`.
+        The file's `id`, `name`, `notes`, `generated` and `sound_kinds`.
 
     Raises:
         ValueError: If the file is not in the library, nothing is to change,
@@ -376,9 +413,14 @@ def edit_asset(
     """
     if generated is not None and filmed:
         raise ValueError("a file is either generated or filmed: give `generated` or `filmed`, not both")
-    if notes is None and generated is None and not filmed:
-        raise ValueError("nothing to change: give `notes`, `generated` or `filmed`")
+    if notes is None and generated is None and not filmed and sound_kinds is None:
+        raise ValueError("nothing to change: give `notes`, `generated`, `filmed` or `sound_kinds`")
     update: Dict[str, object] = {}
+    if sound_kinds is not None:
+        if sound_kinds and library_of(shared.get_asset(asset_id)) != SFX:
+            raise ValueError("sound_kinds is for a sound effect; move the file to the sfx library first with "
+                             "set_asset_library")
+        update["sound_kinds"] = sound_names(sound_kinds)
     if notes is not None:
         update["notes"] = notes.strip()
     if generated is not None or filmed:
@@ -386,14 +428,14 @@ def edit_asset(
     asset = shared.get_asset(asset_id).model_copy(update=update)
     runtime.repo.save_asset(asset)
     return {"id": asset.id, "name": os.path.basename(asset.path), "notes": asset.notes,
-            "generated": asset.generated.model_dump() if asset.generated else None}
+            "generated": asset.generated.model_dump() if asset.generated else None, "sound_kinds": asset.sound_kinds}
 
 class CreateFolder(BaseModel):
     """Make a folder in the library, and put files in it."""
 
     action: Literal["create_folder"]
     name: str = Field(..., description="What to call it, in the user's words")
-    library: Literal["footage", "music"] = Field(default="footage", description="Which library it is a folder of")
+    library: Literal["footage", "music", "sfx"] = Field(default="footage", description="Which library it is a folder of")
     parent_id: Optional[str] = Field(default=None, description="The folder it goes in; omit for the top")
     asset_ids: List[str] = Field(default_factory=list, description="Files to put in it straight away")
 
@@ -437,13 +479,13 @@ def organize_library(steps: List[LibraryStep], note: str = "") -> dict:
         note: The user's words for why, kept in the library's history.
 
     Returns:
-        `done`, each step in words, and `folders` and `music_folders`, every
-        folder of each library now.
+        `done`, each step in words, and `folders`, `music_folders` and
+        `sfx_folders`, every folder of each library now.
 
     Raises:
         ValueError: If a folder or file is unknown, or a name is taken.
     """
-    names = {folder["id"]: folder["name"] for kind in ("assets", "music") for folder in runtime.repo.list_folders(kind)}
+    names = {folder["id"]: folder["name"] for kind in FOLDER_KINDS.values() for folder in runtime.repo.list_folders(kind)}
     done = []
     for step in steps:
         try:
@@ -469,7 +511,8 @@ def organize_library(steps: List[LibraryStep], note: str = "") -> dict:
         except LookupError as exc:
             raise ValueError(str(exc).strip("'\"")) from exc
     shared.say_in_history("；".join(done))
-    return {"done": done, "folders": runtime.repo.list_folders("assets"), "music_folders": runtime.repo.list_folders("music")}
+    return {"done": done, "folders": runtime.repo.list_folders("assets"), "music_folders": runtime.repo.list_folders("music"),
+            "sfx_folders": runtime.repo.list_folders("sfx")}
 
 def _file_in(asset_ids: List[str], folder_id: Optional[str], library: Optional[str] = None) -> None:
     """File footage or songs in a folder of their own library, or at its top.
@@ -486,7 +529,7 @@ def _file_in(asset_ids: List[str], folder_id: Optional[str], library: Optional[s
     assets = [shared.get_asset(asset_id) for asset_id in asset_ids]
     kinds = {library_of(asset) for asset in assets} | ({library} if library else set())
     if len(kinds) > 1:
-        raise ValueError("footage and music are filed in folders of their own: file them in separate steps, or "
+        raise ValueError("footage, music and sound effects are filed in folders of their own: file them in separate steps, or "
                          "move a file to the other library first with set_asset_library")
     runtime.repo.file_items(_folder_kind(kinds.pop() if kinds else FOOTAGE), [asset.id for asset in assets], folder_id)
 
