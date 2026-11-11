@@ -7,6 +7,7 @@ from datetime import timedelta
 from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 
 from app.engine.ad_slots import plan_slot_problems
+from app.engine.ad_variants import window
 from app.engine.continuity import Shot, backward_steps, strays
 from app.engine.plan.beats import beginnings, compile_pieces, on_the_beat, picture_needed, plan_pieces, song_entry
 from app.engine.plan.broll import Cover, broll_covers
@@ -992,7 +993,15 @@ def check_plan(
             from app.engine.plan.broll_candidates import broll_pick_problems
 
             problems.extend(broll_pick_problems(plan, played, clips, assets, timeline, broll_offers, cuts))
-        if plan.target.seconds:
+        cut_to = plan.variant.target_seconds if plan.variant is not None else None
+        if cut_to:
+            low, high = window(cut_to)
+            if not low <= duration <= high:
+                notes.append(Note(
+                    f"the cut comes out {duration:.1f}s, outside the {low:g}–{high:g}s a {cut_to:g}s spot may run",
+                    "length_off_target", seconds=duration, look=True,
+                ))
+        elif plan.target.seconds:
             drift = abs(duration - plan.target.seconds) / plan.target.seconds
             if drift > LENGTH_TOLERANCE:
                 notes.append(Note(

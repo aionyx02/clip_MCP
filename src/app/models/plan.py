@@ -20,6 +20,7 @@ from typing import Annotated, Any, Dict, List, Literal, Optional, Tuple, Union
 
 from pydantic import BaseModel, Field, model_validator
 
+from app.models.semantic import SlotChoice
 from app.models.timeline.parts import (
     COLOUR, TITLE_CARD_LONGEST, TITLE_CARD_SECONDS, TITLE_CARD_SHORTEST, CardBackground, Motion, TextStyle,
 )
@@ -643,6 +644,32 @@ class PlanTarget(BaseModel):
     platform: Optional[str] = Field(default=None, description="Where it is going, such as YouTube or Reels")
     note: str = Field(default="", description="Anything else the cut has to satisfy")
 
+class AdVariant(BaseModel):
+    """What a commercial's variant is, against the plan it was made from.
+
+    A variant is the same commercial with another hook, cut down to a
+    platform length, or both. It plays a part of what the slots were assigned
+    rather than all of it, and its hook may be another of the hook slot's
+    candidates, so it carries the slots it plays: the plan is checked against
+    these, and these against what was assigned, instead of against the
+    timeline's assignment whole.
+    """
+
+    name: str = Field(..., min_length=1, description="What the variant is called, such as `hook-B · 15s`")
+    of_plan_id: str = Field(..., description="The plan it was made from")
+    of_version: int = Field(..., ge=1, description="That plan's version when it was made")
+    hook: Optional[str] = Field(
+        default=None, description="The hook slot candidate it opens on instead of the original's; null for the same",
+    )
+    target_seconds: Optional[float] = Field(
+        default=None, gt=0, description="The length it was cut down to; null for the original's length",
+    )
+    dropped: List[str] = Field(default_factory=list, description="The original's selections it leaves out")
+    slots: List[SlotChoice] = Field(
+        default_factory=list, description="The clips it plays in each slot, in the order they play",
+    )
+    variant_hash: str = Field(..., min_length=1, description="The `variant_hash` it was picked with")
+
 class EditPlan(BaseModel):
     """A cut, stated as intent rather than as operations."""
 
@@ -692,6 +719,10 @@ class EditPlan(BaseModel):
         description="The brand kit this video wears, by name: its closing words over the end of the last shot "
                     "(or a closing card, counted in the length), its colours and font, and its logo in a corner if "
                     "the kit asks for one. Only one the user chose; null for none",
+    )
+    variant: Optional[AdVariant] = Field(
+        default=None,
+        description="Set by `make_ad_variants` on a commercial's variant; never written by hand",
     )
     created_at: datetime = Field(default_factory=_utc_now)
     updated_at: datetime = Field(default_factory=_utc_now)

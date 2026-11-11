@@ -34,6 +34,7 @@ from app.engine.delivery import (
     CHECKS, chapter_metadata, chapters, check_delivery, half_sentences, light_steps, look_candidates, run_on_cuts,
     shaky_clips,
 )
+from app.engine import ad_variants
 from app.engine.brand_opening import brand_opening
 from app.engine.frames import format_timestamp, still, storyboard_sheet
 from app.engine.subtitles import CAPTION_LINE_HEIGHT, build_ass, drawn_captions, place_cues
@@ -966,10 +967,13 @@ def check_findings(project: Project, burn_subtitles: bool) -> list:
     assets = shared.referenced_assets(project)
     dated = shared.dated(assets)
     analyses = analyses_of(project, listened=True)
+    plan = compiled_plan(project)
+    cut_to = plan.variant.target_seconds if plan is not None and plan.variant is not None else None
     return check_delivery(
         project, analyses, _plan_target(project), placed, project.caption_style,
         talking_of(project, voices_of(project)), {asset_id: asset.recorded_at for asset_id, asset in dated.items()},
         _looks(look_candidates(project, analyses), assets),
+        length_window=ad_variants.window(cut_to) if cut_to else None,
     )
 
 def _looks(clips: Sequence[Clip], assets: Mapping[str, Asset]) -> Dict[str, Tuple[int, ...]]:

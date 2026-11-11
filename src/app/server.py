@@ -13,7 +13,7 @@ from app.runtime import mcp
 # Importing a tool module is what registers its tools, so every one is imported here.
 from app.tools import (  # noqa: F401
     catalog, delivery, editing, examining, feedback, job_queue, looking, planning, production, rendering, shared,
-    soundtrack, subtitles, timelines, upkeep, versioning,
+    soundtrack, subtitles, timelines, upkeep, variants, versioning,
 )
 
 def _shortened(value: object) -> object:

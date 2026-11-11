@@ -230,6 +230,7 @@ def check_delivery(
     talking: Optional[Talking] = None,
     recorded: Optional[Mapping[str, datetime]] = None,
     looks: Optional[Mapping[str, Sequence[int]]] = None,
+    length_window: Optional[Tuple[float, float]] = None,
 ) -> List[Finding]:
     """Find what would be noticed in the finished file, before it is rendered.
 
@@ -251,6 +252,10 @@ def check_delivery(
         looks: The fingerprints of the clips `look_candidates` names, keyed
             by clip ID, for finding two from different files a viewer could
             not tell apart. Without them that is not checked.
+        length_window: How short and how long the cut may run, for a
+            commercial's variant cut down to a platform length, which is a
+            ceiling rather than a length to land on either side of. Without
+            it, the cut is held to `target_seconds` either way.
 
     Returns:
         The findings, grouped by check in the order of `CHECKS`.
@@ -347,7 +352,13 @@ def check_delivery(
                 "`delete`, or lower `min_seconds` in the caption style if the user reads that fast"
             )))
 
-    if target_seconds and abs(duration - target_seconds) / target_seconds > LENGTH_TOLERANCE:
+    if length_window is not None:
+        if not length_window[0] <= duration <= length_window[1]:
+            findings.append(Finding("length", (
+                f"the cut runs {duration:.1f}s, outside the {length_window[0]:g}–{length_window[1]:g}s a "
+                f"{target_seconds:g}s spot may run"
+            )))
+    elif target_seconds and abs(duration - target_seconds) / target_seconds > LENGTH_TOLERANCE:
         findings.append(Finding("length", (
             f"the cut runs {duration:.1f}s against the {target_seconds:g}s its plan asked for"
         )))
