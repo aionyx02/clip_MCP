@@ -521,6 +521,12 @@ class BrollShot(BaseModel):
                     "long take — the thing working, not the hands setting it up. 0 plays it from its start",
     )
     rationale: str = Field(default="", description="What this picture is doing here")
+    candidate_hash: str = Field(
+        default="",
+        description="The `candidate_hash` `propose_broll` gave with the candidates this was picked from. `clip_id` "
+                    "has to be one of those offered over `over_clip_id`; a shot without one, or from an offer whose "
+                    "stretch or footage has changed since, is refused at compile",
+    )
 
 class MusicCue(BaseModel):
     """One piece of music, from where one part of the video begins until the next cue takes over.

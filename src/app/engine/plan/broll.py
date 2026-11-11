@@ -353,6 +353,109 @@ def broll_covers(
             ))
     return covers, problems, notes
 
+def _runs(placed: Sequence[Tuple[Piece, float]]) -> List[List[Tuple[Piece, float]]]:
+    """Group the windows of a cut into stretches of unchanged picture.
+
+    A run is one file with the source moving forward through it. Going
+    backwards in the same file is somebody putting a later moment first, which
+    is a real cut whatever the framing was, and a card is a change of picture.
+
+    Args:
+        placed: The windows with their timeline positions.
+
+    Returns:
+        The runs in the order they play, each a list of its windows; a card
+        leaves an empty one where it falls.
+    """
+    runs: List[List[Tuple[Piece, float]]] = []
+    for piece, at in placed:
+        if piece.card is not None:
+            runs.append([])
+            continue
+        last = runs[-1][-1][0] if runs and runs[-1] else None
+        if last is not None and last.asset_id == piece.asset_id and piece.start >= last.end:
+            runs[-1].append((piece, at))
+        else:
+            runs.append([(piece, at)])
+    return runs
+
+@dataclass(frozen=True)
+class Stretch:
+    """One place in a cut covering picture could start, with what plays under it.
+
+    Attributes:
+        over_clip_id: The clip in the cut it starts over.
+        opened: Where it starts, in timeline seconds.
+        seconds: How long a shot may run from there: to where the picture
+            changes anyway, and never past `BROLL_MAX_SECONDS`.
+        said: The words spoken under it, in order.
+        under: The files on screen under it.
+        exposure: How bright the picture it covers is, 0 to 1, where measured.
+    """
+
+    over_clip_id: str
+    opened: float
+    seconds: float
+    said: str
+    under: Tuple[str, ...]
+    exposure: Optional[float]
+
+def stretch_over(
+    plan: EditPlan,
+    pieces: Sequence[Piece],
+    clips: Mapping[str, SemanticClip],
+    over_clip_id: str,
+    cuts: Optional[Mapping[str, CleanCuts]] = None,
+) -> Tuple[Optional[Stretch], str]:
+    """Work out the stretch covering picture would have over one clip of the cut.
+
+    Args:
+        plan: Plan to read, for which shots are held for what they show.
+        pieces: The compiled windows, in order, title cards among them.
+        clips: The timeline's clips, keyed by ID.
+        over_clip_id: The clip to start over.
+        cuts: What is known about each file, keyed by asset ID, for refusing a
+            start partway through a sentence.
+
+    Returns:
+        `(stretch, "")`, or `(None, why)` when nothing can start there.
+    """
+    placed = _placed(pieces)
+    clip = clips.get(over_clip_id)
+    span = None if clip is None else _in_cut(clip, placed)
+    if span is None:
+        return None, "the cut does not use it"
+    if any(selection.clip_id == over_clip_id and selection.hold_picture for selection in plan.selections):
+        return None, "the plan holds it for what it shows"
+    under = _under(placed, span[0])
+    if under is not None and _splits_a_sentence(under, span[0], cuts):
+        return None, "it starts partway through a sentence, so a shot cutting in there loses the line"
+    closed = span[1]
+    # The run that starts last at or before it: positions are rounded, so the run before can
+    # reach a thousandth past where this one begins.
+    for run in _runs(placed):
+        if run and run[0][1] <= span[0] < round(run[-1][1] + run[-1][0].played, 3):
+            closed = round(run[-1][1] + run[-1][0].played, 3)
+    seconds = min(BROLL_MAX_SECONDS, round(closed - span[0], 3))
+    if seconds < BROLL_MIN_SECONDS:
+        return None, f"the picture changes {seconds:.1f}s after it starts, too soon for a shot"
+    ends = round(span[0] + seconds, 3)
+    said: List[str] = []
+    files: List[str] = []
+    for piece, at in placed:
+        if piece.card is not None or at >= ends or round(at + piece.played, 3) <= span[0]:
+            continue
+        files.append(piece.asset_id)
+        for clip_id in piece.from_clip_ids:
+            spoken = clips.get(clip_id)
+            reach = None if spoken is None else _in_cut(spoken, placed)
+            if spoken is not None and spoken.text and reach is not None and reach[0] < ends and span[0] < reach[1]                     and spoken.text not in said:
+                said.append(spoken.text)
+    return Stretch(
+        over_clip_id=over_clip_id, opened=span[0], seconds=seconds, said=" ".join(said),
+        under=tuple(dict.fromkeys(files)), exposure=clip.scores.get("exposure"),
+    ), ""
+
 def broll_slots(
     plan: EditPlan,
     pieces: Sequence[Piece],
@@ -393,23 +496,8 @@ def broll_slots(
     holding = {
         selection.clip_id for selection in plan.selections if selection.hold_picture
     }
-    # A run is a stretch of unchanged picture: one file, and the source moving forward
-    # through it. Going backwards in the same file is somebody putting a later moment
-    # first, which is a real cut whatever the framing was.
-    runs: List[List[Tuple[Piece, float]]] = []
-    for piece, at in placed:
-        if piece.card is not None:
-            # A card is a change of picture, and nothing to cover: the run before it ends there.
-            runs.append([])
-            continue
-        last = runs[-1][-1][0] if runs and runs[-1] else None
-        if last is not None and last.asset_id == piece.asset_id and piece.start >= last.end:
-            runs[-1].append((piece, at))
-        else:
-            runs.append([(piece, at)])
-
     slots: List[dict] = []
-    for run in filter(None, runs):
+    for run in filter(None, _runs(placed)):
         opened = run[0][1]
         closed = round(run[-1][1] + run[-1][0].played, 3)
         seconds = round(closed - opened, 3)

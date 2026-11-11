@@ -140,7 +140,7 @@ let the user steer from there.
 | 「音樂太小聲」 / the music is too quiet | `set_music_level` with `scale: 1.5` |
 | 「歌從副歌開始」「結尾淡出長一點」, or a note saying where to start a song | `set_music_cue` on that cue (`beat_id`, left out for the one that starts with the video) with only what changes |
 | 「聽不太清楚」 / hard to hear | `preview_sound` first. Noise under the voice: `set_clip_audio` with `cleanup`. Music over it: `set_music_level`. A voice left apart from the others: its file was not transcribed |
-| 「畫面太悶」「一直同一個畫面」 / the picture is dull | `propose_broll`, then `add_broll`; with nothing else to cover it, punch in instead (editing-intelligence.md, One camera) |
+| 「畫面太悶」「一直同一個畫面」 / the picture is dull | `propose_broll`, then `add_broll` with one of its candidates; with nothing else to cover it, punch in instead (editing-intelligence.md, One camera) |
 | 「字太小」「字被擋住」 / captions too small or covered | `set_caption_style` with the platform's `preset`, or a larger `size_fraction` |
 | 「剛剛那樣比較好」「回到上一版」 / the last one was better | `project_history`, then `restore_version` to that version |
 | 「改了哪裡？」 / what changed | `preview_plan_diff` with the plan and the two versions |
