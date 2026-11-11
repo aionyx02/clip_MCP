@@ -5,11 +5,11 @@ from pathlib import Path
 
 from app.engine.delivery import rights_facts
 from app.models.media import (
-    Asset, FaceMeasurement, MediaAnalysis, Source, SpeakerTurn, Transcript, TranscriptSegment, Voice,
+    Asset, FaceMeasurement, Generated, MediaAnalysis, Source, SpeakerTurn, Transcript, TranscriptSegment, Voice,
 )
 from app.models.timeline.parts import Clip, Project, TimeRange, Track, TrackType
 from app.runtime import repo
-from app.tools.catalog import import_asset, set_asset_library
+from app.tools.catalog import edit_asset, import_asset, set_asset_library
 from app.tools.soundtrack import export_notices
 from helpers import build_project, insert, video_track
 
@@ -93,3 +93,40 @@ def test_another_voice_says_how_much_it_talks_and_how_near_the_main_one_it_sits(
         "the main speaker is V1", "talks 2.0 s in the whole of the files the cut uses",
         "sits 0.43 from V1, whose own recordings sit up to 0.01 from them",
     )
+
+
+def test_every_place_a_generated_file_is_seen_or_heard_is_listed_with_what_made_it() -> None:
+    project = Project(id="p", width=1080, height=1920, tracks=[
+        Track(id="main", track_type=TrackType.VIDEO, clips=[
+            clip("a", "shot", 0, 4, 0), clip("b", "filmed", 0, 6, 4), clip("c", "shot", 4, 8, 10)]),
+        Track(id="music", track_type=TrackType.AUDIO, clips=[clip("m", "hum", 0, 3, 0), clip("q", "hum", 0, 3, 5)]),
+    ])
+    project.tracks[1].clips[1].volume = 0
+    assets = {
+        "shot": Asset(id="shot", path="/footage/empty.mp4", has_video=True, has_audio=False,
+                      generated=Generated(tool="Higgsfield", model="Soul")),
+        "filmed": Asset(id="filmed", path="/footage/talk.mp4", has_video=True, has_audio=True),
+        "hum": Asset(id="hum", path="/music/hum.mp3", has_video=False, has_audio=True, library="music",
+                     generated=Generated(tool="Suno")),
+    }
+    made = {fact.subject: fact for fact in rights_facts(project, {}, assets, {}) if fact.kind == "generated"}
+    assert set(made) == {"empty.mp4", "hum.mp3"}
+    assert made["empty.mp4"].spans == ((0.0, 4.0), (10.0, 14.0))
+    assert made["empty.mp4"].detail == ("made with: Higgsfield, Soul",)
+    # A generated sound turned all the way down is not heard, so there is nothing to disclose there.
+    assert made["hum.mp3"].spans == ((0.0, 3.0),) and made["hum.mp3"].detail == ("made with: Suno",)
+
+
+def test_a_file_said_to_be_generated_at_import_is_in_the_notices(media: Path) -> None:
+    video = import_asset(str(media / "wide.mp4"), generated=Generated(tool="Higgsfield", model="Soul"))["id"]
+    try:
+        project = build_project([video_track(), insert("v", video, 0, 3)])
+        assert any(fact.startswith("generated | wide.mp4 | 0:00") and "Higgsfield, Soul" in fact
+                   for fact in export_notices(project)["facts"])
+        # Imported again without saying, it is still what it was said to be.
+        import_asset(str(media / "wide.mp4"))
+        assert repo.get_assets([video])[video].generated == Generated(tool="Higgsfield", model="Soul")
+        edit_asset(video, filmed=True)
+        assert not any(fact.startswith("generated") for fact in export_notices(project)["facts"])
+    finally:
+        edit_asset(video, filmed=True)

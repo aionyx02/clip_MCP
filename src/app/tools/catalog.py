@@ -12,7 +12,7 @@ from typing import Annotated, Dict, Iterable, List, Literal, Optional, Union
 
 from pydantic import BaseModel, Field
 
-from app.models.media import Asset
+from app.models.media import Asset, Generated
 from app.models.job import JobKind
 from app.engine import stills
 from app.engine.probe import picture_size, probe_file, recorded_at
@@ -61,7 +61,7 @@ def natural_key(name: str) -> List[object]:
     """
     return [int(part) if part.isdigit() else part.lower() for part in re.split(r"(\d+)", name)]
 
-def register_asset(filepath: str, library: Optional[str] = None) -> Asset:
+def register_asset(filepath: str, library: Optional[str] = None, generated: Optional[Generated] = None) -> Asset:
     """Probe a media file and save it as an asset, in the footage or the music library.
 
     A new file without a picture is listened to: mostly somebody talking, it
@@ -73,10 +73,11 @@ def register_asset(filepath: str, library: Optional[str] = None) -> Asset:
             working directory.
         library: Put it in this library rather than the one it sounds like,
             as when it is added on the editor's music page.
+        generated: The generative tool that made it, as the caller said.
 
     Returns:
         The saved asset. A path that was imported before keeps its asset ID
-        and its library.
+        and its library, and what made it unless `generated` says again.
 
     Raises:
         FileNotFoundError: If the file does not exist.
@@ -112,6 +113,9 @@ def register_asset(filepath: str, library: Optional[str] = None) -> Asset:
         asset.licence = existing.licence
         asset.library = existing.library
         asset.source = existing.source
+        asset.generated = existing.generated
+    if generated is not None:
+        asset.generated = generated
     if library in LIBRARIES:
         asset.library = library
     elif asset.library is None:
@@ -173,7 +177,7 @@ def tend_library() -> None:
         return
 
 @mcp.tool()
-def import_asset(filepath: str) -> dict:
+def import_asset(filepath: str, generated: Optional[Generated] = None) -> dict:
     """Register a local media file as an asset that clips can reference.
 
     This is what puts a file in the library, the only files a project can use;
@@ -184,9 +188,18 @@ def import_asset(filepath: str) -> dict:
     background music, need `has_audio`. Cover art embedded in audio files is
     not counted as video. Video assets without audio contribute silence.
 
+    A file a generative AI tool made — an empty shot, a product picture, a
+    shot standing in for one never filmed — is imported like any other once
+    it is on this computer, with `generated` naming the tool and model:
+    `export_notices` lists where such files are in the cut, since most
+    platforms ask for AI-made pictures to be disclosed. Nothing here can tell
+    a generated file from a filmed one, so only what you pass is known.
+
     Args:
         filepath: Path to the media file, absolute or relative to the server's
             working directory.
+        generated: The tool and model that made the file, when one did. Left
+            out on a file imported before, what was said then is kept.
 
     Returns:
         The asset serialized as a dictionary: its `id`, absolute `path`,
@@ -198,7 +211,7 @@ def import_asset(filepath: str) -> dict:
         FileNotFoundError: If the file does not exist.
         RuntimeError: If ffprobe cannot read the file.
     """
-    return shared.plain(_asset_record(register_asset(filepath)))
+    return shared.plain(_asset_record(register_asset(filepath, generated=generated)))
 
 def _asset_record(asset: Asset) -> dict:
     """An asset as a tool hands it back: a photo with no length, since it has none of its own."""
@@ -243,7 +256,8 @@ def list_assets(
         them, its `notes` — how it may be used — in name order; `total`, how
         many match; `offset`; and `folders`, every folder of that library (the
         footage's when `kind` is omitted) with its `id`, `name` and
-        `parent_id`. `stale` is true for an asset analyzed
+        `parent_id`. A file a generative AI tool made has `generated`, the
+        tool and model. `stale` is true for an asset analyzed
         with detection settings or a speech model the server no longer uses:
         its analysis still works, but analyze those assets again before
         comparing them with each other. `inspect_media` has a file's full path,
@@ -276,6 +290,7 @@ def list_assets(
             "library": library_of(asset),
             "folder_id": filed.get(asset.id),
             **({"notes": asset.notes} if asset.notes else {}),
+            **({"generated": asset.generated.model_dump()} if asset.generated else {}),
             **(examining.song_details(asset, analysis, heard, analyzing) if library_of(asset) == MUSIC
                else {"analyzing": True} if asset.id in analyzing else {}),
         })
@@ -326,28 +341,52 @@ def set_asset_library(asset_ids: List[str], library: Literal["footage", "music"]
     return {"moved": [os.path.basename(asset.path) for asset in moved]}
 
 @mcp.tool()
-def edit_asset(asset_id: str, notes: str, note: str = "") -> dict:
-    """Write down how a file may be used, so it is read wherever the file is.
+def edit_asset(
+    asset_id: str,
+    notes: Optional[str] = None,
+    generated: Optional[Generated] = None,
+    filmed: bool = False,
+    note: str = "",
+) -> dict:
+    """Write down how a file may be used, or what made it, so it is read wherever the file is.
 
-    For an instruction about the footage itself — 「請消音」, 「可不放」,
-    「0:12 以後手入鏡」. Users often put these in the file's name; when you see
-    one there, follow it, and ask whether to keep it here too. The editor
-    shows the same notes and the user can change them there.
+    `notes` is for an instruction about the footage itself — 「請消音」,
+    「可不放」, 「0:12 以後手入鏡」. Users often put these in the file's name;
+    when you see one there, follow it, and ask whether to keep it here too.
+    The editor shows the same notes and the user can change them there.
+
+    `generated` marks a file already in the library as made by a generative
+    AI tool, when the user says so after it was added; `filmed` takes that
+    back. Only what is said here or at import is known: nothing measures it.
 
     Args:
         asset_id: The file.
-        notes: The notes, replacing what was there; empty clears them.
+        notes: The notes, replacing what was there; empty clears them. Left
+            out, they stay as they are.
+        generated: The tool and model that made the file.
+        filmed: The file was filmed or recorded after all, not generated.
         note: Why, in the user's words, kept in the library's history.
 
     Returns:
-        The file's `id`, `name` and `notes`.
+        The file's `id`, `name`, `notes` and `generated`.
 
     Raises:
-        ValueError: If the file is not in the library.
+        ValueError: If the file is not in the library, nothing is to change,
+            or it is said to be both generated and filmed.
     """
-    asset = shared.get_asset(asset_id).model_copy(update={"notes": notes.strip()})
+    if generated is not None and filmed:
+        raise ValueError("a file is either generated or filmed: give `generated` or `filmed`, not both")
+    if notes is None and generated is None and not filmed:
+        raise ValueError("nothing to change: give `notes`, `generated` or `filmed`")
+    update: Dict[str, object] = {}
+    if notes is not None:
+        update["notes"] = notes.strip()
+    if generated is not None or filmed:
+        update["generated"] = generated
+    asset = shared.get_asset(asset_id).model_copy(update=update)
     runtime.repo.save_asset(asset)
-    return {"id": asset.id, "name": os.path.basename(asset.path), "notes": asset.notes}
+    return {"id": asset.id, "name": os.path.basename(asset.path), "notes": asset.notes,
+            "generated": asset.generated.model_dump() if asset.generated else None}
 
 class CreateFolder(BaseModel):
     """Make a folder in the library, and put files in it."""
@@ -581,7 +620,7 @@ def move_files(moves: List[FileMove], confirm_plan: Optional[str] = None, note: 
     return {"moved": moved, "not_moved": not_moved}
 
 @mcp.tool()
-def import_folder(folderpath: str, recursive: bool = False) -> dict:
+def import_folder(folderpath: str, recursive: bool = False, generated: Optional[Generated] = None) -> dict:
     """Register every media file in a folder as an asset, in one call.
 
     Use this when the user points at a folder of footage instead of naming
@@ -595,6 +634,10 @@ def import_folder(folderpath: str, recursive: bool = False) -> dict:
         folderpath: Path to the folder, absolute or relative to the server's
             working directory.
         recursive: Whether to include media in sub-folders.
+        generated: The tool and model that made every file in the folder,
+            for a folder of a generative tool's downloads; see `import_asset`.
+            A folder mixing them is imported without it, and the generated
+            files are marked one by one with `edit_asset`.
 
     Returns:
         A dictionary with `assets` (each in the format `import_asset` returns),
@@ -623,7 +666,7 @@ def import_folder(folderpath: str, recursive: bool = False) -> dict:
     skipped: List[dict] = []
     for path in paths:
         try:
-            assets.append(register_asset(path))
+            assets.append(register_asset(path, generated=generated))
         except (OSError, RuntimeError, ValueError) as error:
             skipped.append({"path": path, "reason": str(error)})
 

@@ -60,6 +60,14 @@ saying what to make of it. It is referenced from SKILL.md.
    sections that are about the same thing the same `topic` — topics are
    labels, so they gather sections across different files, and they are what
    answers 「這批素材有什麼」.
+   When the user asks for 廣告、業配 or 產品介紹, call `propose_sections` with
+   `structure="ad"` and the product's name as it is said in the footage.
+   Without it nothing offers the hook, problem, product, proof and call to
+   action, so a hook you pick yourself is a different sentence every run and
+   a `cta` ends up wherever it was said. Assign them with
+   `set_sections(slots=...)` in that order, passing the same `product`. A
+   slot listed under `missing` is footage to ask the user for, not one to
+   fill from another slot's candidates; `set_sections` refuses that.
 5. Look before you cut. Call `view_frames` with about 12 frames over the whole
    asset for an overview, then use a narrow range to check a specific moment.
    It takes a list of assets, so a range is only accepted for one of them; for
@@ -168,6 +176,16 @@ yours to leave out, 「後面片段請剪除」 ends it where the notes say. Use
 also write these into file names (`0901(請消音).mp4`); follow those the same
 way, and ask whether to keep them as notes with `edit_asset`, where the
 editor shows them too.
+
+### Files a generative tool made
+
+clip-mcp never calls a generation service. A shot, product picture or
+stand-in made with another tool is downloaded to this computer first, then
+added with `import_asset` or `import_folder` with `generated` set to the tool
+and model. Left out, `export_notices` cannot list where it is in the cut,
+since nothing here tells a generated picture from a filmed one; if the user
+says so afterwards, set it with `edit_asset`. Its frames leave this machine
+as tool results like any other footage's.
 
 ### Footage and music
 

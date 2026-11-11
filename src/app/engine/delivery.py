@@ -63,6 +63,12 @@ SENTENCE_PARTICLES = "吧呢嗎嘛囉啦呀啊喔哦"
 NOT_CLOSING = ("酒吧", "網吧", "貼吧")
 # How much of a sentence to quote back, enough to find it in the transcript.
 SENTENCE_TAIL_CHARACTERS = 8
+# Words that lead into more and cannot close a thought, so a line that stops on one stops halfway
+# however long the pause after it: 「它的機構這樣抽下來大概」 (#238). Conjunctions that join a clause
+# to the next, and adverbs that qualify what comes after. Not 的, 了, 可以 or 可能, which end
+# sentences as often. Provisional: picked by ear, not counted in any transcripts.
+LEANING_ENDINGS = ("大概", "然後", "因為", "所以", "但是", "可是", "而且", "如果", "或者", "就是", "應該", "還有",
+                   "雖然")
 # How much of the same stretch of a file has to come back before it is the same shot shown
 # twice rather than two neighbouring moments. Provisional.
 REPEAT_SECONDS = 1.0
@@ -806,6 +812,108 @@ def run_on_cuts(clips: Sequence[Clip], analyses: Mapping[str, MediaAnalysis]) ->
         )
     return found
 
+def _ends_thought(words: Sequence, index: int) -> bool:
+    """Say whether a transcribed word closes what is being said.
+
+    Args:
+        words: The words of one transcribed sentence, in order.
+        index: The word, by its place in `words`.
+
+    Returns:
+        True when it ends a sentence by what it says (`_ends_sentence`), or is
+        the last of the sentence — the transcriber ended it there, at a pause —
+        and is not a word that leads into more (`LEANING_ENDINGS`).
+    """
+    if _ends_sentence(words, index):
+        return True
+    said = bare_words("".join(word.text for word in words[:index + 1]))
+    return index == len(words) - 1 and not said.endswith(LEANING_ENDINGS)
+
+def half_sentences(
+    clips: Sequence[Clip], analyses: Mapping[str, MediaAnalysis], placed: Optional[Sequence[PlacedCue]] = None,
+) -> List[str]:
+    """Find the clips whose sound stops before what is being said is finished.
+
+    A cut can sit in a pause, so nothing is cut off, and still leave a sentence
+    half said (#238). Two ways the transcript tells: the sentence it
+    transcribed goes on after the cut, and nothing marks an end where it
+    stops; or the transcriber ended it, but on a word that leads into more,
+    such as 大概 or 因為. Where the transcriber ended a sentence on anything
+    else there is nothing to go on, and nothing is said: most transcribed
+    Chinese has no punctuation, and asking for it would call most cuts half a
+    sentence. Not refused: only the user can tell whether the line stands.
+
+    Args:
+        clips: The sequence's clips.
+        analyses: Analyses by asset ID.
+        placed: The captions as they fall in the cut, to say which one is read
+            last; None or empty quotes the words instead.
+
+    Returns:
+        One line per clip that stops halfway, saying where, on which words or
+        caption, what is left out, and where the nearest earlier sentence end
+        in the clip is, in seconds of the file.
+    """
+    ordered = sorted(clips, key=lambda item: item.timeline_in)
+    found: List[str] = []
+    tolerance = EDGE_TOLERANCE_SECONDS
+    for place, clip in enumerate(ordered):
+        analysis = analyses.get(clip.asset_id)
+        if clip.volume == 0 or analysis is None or analysis.transcript is None:
+            continue
+        start, at, landed = float(clip.audio_source_start), float(clip.audio_source_end), float(clip.audio_timeline_out)
+        if 0 < at < analysis.duration and _inside_speech(analysis, at, False) and not _heard_whole(analysis, at, False):
+            # Cut into talking: `mid_speech` says so, with where to move it.
+            continue
+        sentences = [segment.words for segment in _said(analysis)]
+        kept = [(words, index) for words in sentences for index, word in enumerate(words)
+                if word.start >= start - tolerance and word.end <= at + tolerance]
+        if not kept:
+            continue
+        words, index = kept[-1]
+        if _ends_thought(words, index):
+            continue
+        last = words[index]
+        later = [word for sentence in sentences for word in sentence if word.start >= last.end - tolerance
+                 and word is not last]
+        following = ordered[place + 1] if place + 1 < len(ordered) else None
+        if (following is not None and following.asset_id == clip.asset_id and following.volume != 0
+                and float(following.audio_source_start) >= last.end - tolerance
+                and (not later or float(following.audio_source_start) <= later[0].start + tolerance)):
+            # The same talking picks up where this leaves it: nothing said is skipped.
+            continue
+        so_far = bare_words("".join(word.text for word in words[:index + 1]
+                                    if word.start >= start - tolerance))[-SENTENCE_TAIL_CHARACTERS:]
+        if index + 1 < len(words):
+            rest = bare_words("".join(word.text for word in words[index + 1:]))[:SENTENCE_TAIL_CHARACTERS]
+            why = f"the transcribed sentence goes on with 「{rest}」, left out, and nothing marks an end before it"
+            closes = next(((sentence, spot) for sentence in sentences for spot in range(len(sentence))
+                           if sentence[spot].start > last.start and _ends_thought(sentence, spot)), None)
+            if closes is not None:
+                why += f"; it runs on to {closes[0][closes[1]].end:.2f}s of the file"
+        else:
+            # Read from the whole sentence, as `_ends_thought` did: the clip may keep only part of the word.
+            said = bare_words("".join(word.text for word in words))
+            leaning = next((ending for ending in LEANING_ENDINGS if said.endswith(ending)), said[-2:])
+            why = f"it stops on 「{leaning}」, which leads into more than it says"
+        shown = [cue for cue in placed or () if float(cue.start) < landed
+                 and float(cue.end) <= landed + tolerance and float(cue.end) > float(clip.timeline_in)]
+        read = (f"caption 「{max(shown, key=lambda cue: cue.start).text.strip()}」 is the last line read"
+                if shown else f"the words heard last, 「{so_far}」")
+        ended = [(sentence, spot) for sentence in sentences for spot in range(len(sentence))
+                 if sentence[spot].start >= start - tolerance and sentence[spot].end < last.start
+                 and _ends_thought(sentence, spot)]
+        if ended:
+            sentence, spot = ended[-1]
+            before = bare_words("".join(word.text for word in sentence[:spot + 1]))[-SENTENCE_TAIL_CHARACTERS:]
+            instead = (f"The nearest earlier sentence end in this clip is after 「{before}」 at "
+                       f"{sentence[spot].end:.2f}s of the file: end there, or shorten the caption")
+        else:
+            instead = "No sentence ends earlier in this clip: let it finish, or shorten the caption"
+        found.append(f"clip {clip.id} ends at {clock(landed)} ({at:.2f}s of the file), where {read}; {why}. "
+                     f"{instead}, or leave it")
+    return found
+
 def _out_of_time(project: Project, recorded: Mapping[str, datetime]) -> List[Finding]:
     """Find a shot put on by hand between two from another moment.
 
@@ -1178,7 +1286,8 @@ class RightsFact:
     Attributes:
         kind: `music` for a song laid under the cut, `recording` for any
             other sound laid on a sound track — a song filed with the footage,
-            a voice-over, a sound effect — `other_voice` for
+            a voice-over, a sound effect — `generated` for a file a
+            generative AI tool made, wherever it is seen or heard, `other_voice` for
             somebody heard who is not the main speaker, `unchecked_voices` for
             talking nobody told the voices apart in, and `faces` for more than
             one face on screen at once.
@@ -1201,8 +1310,9 @@ def rights_facts(
 ) -> List[RightsFact]:
     """List what in a cut its publisher may need permission for, or has to disclose.
 
-    Only facts: which songs play under it and what is known of them, who else
-    is heard, where more than one face is on screen. Whether any of it is a
+    Only facts: which songs play under it and what is known of them, which
+    files a generative AI tool made, who else is heard, where more than one
+    face is on screen. Whether any of it is a
     problem depends on where the video is going and what the user agreed with
     whom, and is theirs to judge — this is what they need in front of them to
     judge it.
@@ -1241,6 +1351,22 @@ def rights_facts(
         # Every recording laid on the sound tracks: a song filed with the footage is still a song.
         kind = "music" if library_of(asset) == MUSIC else "recording"
         facts.append(RightsFact(kind, os.path.basename(asset.path), spans, tuple(known)))
+
+    # Every place a generated file is seen or heard, a title card's background and an inset
+    # included: what platforms ask to have disclosed is that the viewer met it, not how big.
+    made: dict = {}
+    for track in project.tracks:
+        for clip in track.clips:
+            asset = assets.get(clip.asset_id)
+            if asset is None or asset.generated is None:
+                continue
+            if track.track_type == TrackType.AUDIO and clip.volume == 0:
+                continue
+            made.setdefault(clip.asset_id, []).append((float(clip.timeline_in), float(clip.timeline_out)))
+    for asset_id, stretches in made.items():
+        generated = assets[asset_id].generated
+        facts.append(RightsFact("generated", os.path.basename(assets[asset_id].path), _joined_spans(stretches), (
+            f"made with: {generated.tool}" + (f", {generated.model}" if generated.model else ""),)))
 
     tracks = ([project.base_video_track] if project.base_video_track else []) + audio
     heard = [clip for track in tracks for clip in track.clips

@@ -90,3 +90,32 @@ def test_the_editor_writes_the_same_notes(shelf: dict) -> None:
     assert runtime.repo.get_assets([shelf["outside"]])[shelf["outside"]].notes == "可不放"
     shown = next(item for item in client.get("/api/assets?all=1").json()["assets"] if item["id"] == shelf["outside"])
     assert shown["notes"] == "可不放"
+
+
+def test_what_made_a_file_is_said_rather_than_guessed(shelf: dict) -> None:
+    from app.models.media import Generated
+
+    # Nothing measures it: a file nobody said was generated carries no mark.
+    assert "generated" not in catalog.list_assets(text=shelf["name"])["assets"][0]
+    written = catalog.edit_asset(shelf["outside"], generated=Generated(tool="Higgsfield", model="Soul"))
+    assert written["generated"] == {"tool": "Higgsfield", "model": "Soul"}
+    # Saying what made it leaves the notes as they were.
+    assert written["notes"] == runtime.repo.get_assets([shelf["outside"]])[shelf["outside"]].notes
+    assert catalog.list_assets(text=shelf["name"])["assets"][0]["generated"]["tool"] == "Higgsfield"
+    with pytest.raises(ValueError, match="either generated or filmed"):
+        catalog.edit_asset(shelf["outside"], generated=Generated(tool="Higgsfield"), filmed=True)
+    with pytest.raises(ValueError, match="nothing to change"):
+        catalog.edit_asset(shelf["outside"])
+    from app.ui import app as editor
+    marked = runtime.repo.get_assets([shelf["outside"]])[shelf["outside"]]
+    assert editor._asset_summary(marked)["generated"] == {"tool": "Higgsfield", "model": "Soul"}
+    assert catalog.edit_asset(shelf["outside"], filmed=True)["generated"] is None
+
+def test_a_folder_of_generated_files_is_marked_as_one(tmp_path: Path, media: Path) -> None:
+    import shutil
+    from app.models.media import Generated
+
+    shutil.copy(media / "wide.mp4", tmp_path / "shot1.mp4")
+    shutil.copy(media / "tall.mp4", tmp_path / "shot2.mp4")
+    found = catalog.import_folder(str(tmp_path), generated=Generated(tool="Higgsfield"))
+    assert [asset["generated"] for asset in found["assets"]] == [{"tool": "Higgsfield", "model": ""}] * 2

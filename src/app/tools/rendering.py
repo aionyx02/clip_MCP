@@ -28,7 +28,8 @@ from app.engine.reframe import Framing, centred_note, frame_project, framed_size
 from app.engine.builder import DEFAULT_LOUDNESS_TARGET, Talking, voice_keys
 from app.engine.levels import song_level, talking_in
 from app.engine.delivery import (
-    CHECKS, chapter_metadata, chapters, check_delivery, light_steps, look_candidates, run_on_cuts, shaky_clips,
+    CHECKS, chapter_metadata, chapters, check_delivery, half_sentences, light_steps, look_candidates, run_on_cuts,
+    shaky_clips,
 )
 from app.engine.frames import format_timestamp, still, storyboard_sheet
 from app.engine.subtitles import build_ass, place_cues
@@ -1104,6 +1105,14 @@ def check_render(
         either. And `shaky`, the clips the camera shook in that are left as
         shot, with how to steady them; a shake may be wanted, so it never
         stops a render — ask before steadying, since it enlarges the picture.
+        And `half_sentence`, the clips whose sound stops in a pause,
+        so nothing is cut off, before what is being said is finished: the
+        transcribed sentence goes on after the cut with nothing marking an end,
+        or stops on a word that leads into more, such as 大概 or 因為. Each
+        names the caption read last and the nearest earlier sentence end in the
+        clip, in seconds of the file. A sentence the transcriber ended on
+        anything else is not one, punctuated or not. It never stops a render:
+        only the user can tell whether the line stands.
         And `contrast`, the title cards and words over the footage
         whose white letters stand out too little from the picture behind
         them, measured on that picture as the render shows it, with what to
@@ -1131,9 +1140,13 @@ def check_render(
     if shaky:
         checked["shaky"] = shaky
     base = project.base_video_track
-    run_on = run_on_cuts(base.clips, analyses_of(project, listened=True))
+    listened = analyses_of(project, listened=True)
+    run_on = run_on_cuts(base.clips, listened)
     if run_on:
         checked["run_on"] = run_on
+    half = half_sentences(base.clips, listened, place_cues(project, project.subtitles) if project.subtitles else None)
+    if half:
+        checked["half_sentence"] = half
     contrast = contrast_notes(reshaped(project, frame))
     if contrast:
         checked["contrast"] = contrast
