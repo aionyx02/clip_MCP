@@ -95,6 +95,7 @@ def _asset_summary(asset) -> dict:
         "notes": asset.notes,
         "library": library_of(asset),
         "source": asset.source.model_dump() if asset.source is not None else None,
+        "generated": asset.generated.model_dump() if asset.generated is not None else None,
     }
 
 async def projects(request: Request) -> Response:

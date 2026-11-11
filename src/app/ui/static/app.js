@@ -522,9 +522,10 @@ async function mediaPage(page, folderId) {
         : `<span class="dot-sep">${esc(asset.has_video ? T.media.noSound : T.media.audioOnly)}</span>`;
       const gone = asset.missing ? `<span class="badge warn" title="${esc(T.media.goneHint)}">${icon("alert", 13)}${esc(T.media.gone)}</span>` : "";
       const fast = asset.fast_transcript ? `<span class="badge" title="${esc(T.media.fastTranscriptHint)}">${esc(T.media.fastTranscript)}</span>` : "";
+      const made = asset.generated ? `<span class="badge" title="${esc(T.media.generatedHint(asset.generated.tool, asset.generated.model))}">${esc(T.media.generated)}</span>` : "";
       return `<div class="card${asset.missing ? " gone" : ""}" title="${esc(asset.path)}" data-drag="item" data-id="${esc(asset.id)}">${extras}<div class="thumb">${picture}
         <span class="badge">${asset.still ? esc(T.media.photo) : clock(asset.duration)}</span></div>
-        <div class="card-body"><div class="card-title">${esc(asset.name)}</div><div class="card-meta"><span>${asset.width ? `${asset.width}×${asset.height}` : ""}</span>${kind}${fast}${gone}</div>
+        <div class="card-body"><div class="card-title">${esc(asset.name)}</div><div class="card-meta"><span>${asset.width ? `${asset.width}×${asset.height}` : ""}</span>${kind}${fast}${made}${gone}</div>
         ${asset.notes ? `<div class="card-notes" title="${esc(asset.notes)}">${esc(asset.notes)}</div>` : ""}</div></div>`;
     },
     remove: removeAssets,

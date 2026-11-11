@@ -17,6 +17,12 @@ class Source(BaseModel):
     credit: Optional[str] = Field(default=None, description="The credit line it asks for; null when it asks for none")
     personal_only: bool = Field(default=False, description="Taken for a video only the user watches")
 
+class Generated(BaseModel):
+    """What made a file that was generated rather than filmed or recorded, as the caller said."""
+
+    tool: str = Field(..., min_length=1, description="The generative tool, such as 'Higgsfield'")
+    model: str = Field(default="", description="The model within it, such as 'Soul'; empty when nobody said")
+
 class Asset(BaseModel):
     """A registered source media file and the probe facts editing relies on."""
 
@@ -53,6 +59,11 @@ class Asset(BaseModel):
     still: bool = Field(
         default=False,
         description="A photo rather than a video: one picture, shown for as long as a clip of it runs",
+    )
+    generated: Optional[Generated] = Field(
+        default=None,
+        description="Made by a generative AI tool rather than filmed or recorded, and which, as whoever added the "
+                    "file said. Null for a file nobody said was generated: the server never guesses",
     )
 
 class Span(BaseModel):

@@ -1286,7 +1286,8 @@ class RightsFact:
     Attributes:
         kind: `music` for a song laid under the cut, `recording` for any
             other sound laid on a sound track — a song filed with the footage,
-            a voice-over, a sound effect — `other_voice` for
+            a voice-over, a sound effect — `generated` for a file a
+            generative AI tool made, wherever it is seen or heard, `other_voice` for
             somebody heard who is not the main speaker, `unchecked_voices` for
             talking nobody told the voices apart in, and `faces` for more than
             one face on screen at once.
@@ -1309,8 +1310,9 @@ def rights_facts(
 ) -> List[RightsFact]:
     """List what in a cut its publisher may need permission for, or has to disclose.
 
-    Only facts: which songs play under it and what is known of them, who else
-    is heard, where more than one face is on screen. Whether any of it is a
+    Only facts: which songs play under it and what is known of them, which
+    files a generative AI tool made, who else is heard, where more than one
+    face is on screen. Whether any of it is a
     problem depends on where the video is going and what the user agreed with
     whom, and is theirs to judge — this is what they need in front of them to
     judge it.
@@ -1349,6 +1351,22 @@ def rights_facts(
         # Every recording laid on the sound tracks: a song filed with the footage is still a song.
         kind = "music" if library_of(asset) == MUSIC else "recording"
         facts.append(RightsFact(kind, os.path.basename(asset.path), spans, tuple(known)))
+
+    # Every place a generated file is seen or heard, a title card's background and an inset
+    # included: what platforms ask to have disclosed is that the viewer met it, not how big.
+    made: dict = {}
+    for track in project.tracks:
+        for clip in track.clips:
+            asset = assets.get(clip.asset_id)
+            if asset is None or asset.generated is None:
+                continue
+            if track.track_type == TrackType.AUDIO and clip.volume == 0:
+                continue
+            made.setdefault(clip.asset_id, []).append((float(clip.timeline_in), float(clip.timeline_out)))
+    for asset_id, stretches in made.items():
+        generated = assets[asset_id].generated
+        facts.append(RightsFact("generated", os.path.basename(assets[asset_id].path), _joined_spans(stretches), (
+            f"made with: {generated.tool}" + (f", {generated.model}" if generated.model else ""),)))
 
     tracks = ([project.base_video_track] if project.base_video_track else []) + audio
     heard = [clip for track in tracks for clip in track.clips
