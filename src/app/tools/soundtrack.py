@@ -14,7 +14,7 @@ from app.models.timeline.parts import Clip, Project, TimeRange, Track, TrackType
 from app.models.offer import OfferedSong, SongOffer
 from app.engine import clap, fetch
 from app.engine.probe import probe_file, rights_tags
-from app.engine.library import MUSIC, SFX, library_of
+from app.engine.library import MUSIC, SFX, SFX_LONGEST_SECONDS, library_of
 from app.engine.delivery import clock, marked_parts, rights_facts
 from app.engine.plan.effects import SFX_UNDER_TALK_DB, effect_moments, moments_hash
 from app.storage import housekeeping
@@ -153,7 +153,8 @@ def add_music_from_url(url: str, page: str, title: str, artist: str = "", licenc
 
     Raises:
         ValueError: If the site is not allowed, the licence does not allow
-            the use, the plan is not the one shown, or the file is not a song.
+            the use, the plan is not the one shown, or the file is not a song,
+            or, for a sound effect, runs `SFX_LONGEST_SECONDS` or longer.
     """
     if sound_kinds is not None and not sound_effect:
         raise ValueError("sound_kinds says what kind of sound effect a file is; give it only with sound_effect")
@@ -165,15 +166,21 @@ def add_music_from_url(url: str, page: str, title: str, artist: str = "", licenc
         raise ValueError("this is not the plan the user was shown: show them the new one and ask again")
     path = fetch.download(url, planned["saved_in"], title)
     try:
-        streams = probe_file(path).get("streams", [])
+        probed = probe_file(path)
     except RuntimeError:
-        streams = []
+        probed = {}
+    streams = probed.get("streams", [])
     pictures = any(stream.get("codec_type") == "video" and not stream.get("disposition", {}).get("attached_pic")
                    for stream in streams)
     if pictures or not any(stream.get("codec_type") == "audio" for stream in streams):
         # Ours, just downloaded, and not what was agreed to: it does not stay.
         os.remove(path)
         raise ValueError("what was downloaded is not a song: it has no sound, or it has a picture")
+    length = float(probed.get("format", {}).get("duration") or 0)
+    if sound_effect and length >= SFX_LONGEST_SECONDS:
+        os.remove(path)
+        raise ValueError(f"what was downloaded runs {length:.1f} s, and a sound effect is shorter than "
+                         f"{SFX_LONGEST_SECONDS:g} s: it is a song or a bed, so take it without sound_effect")
     shared.say_in_history(f"從 {planned['site']} 加入{'音效' if sound_effect else ''}「{title}」")
     asset = catalog.register_asset(path, SFX if sound_effect else MUSIC,
                                    sound_kinds=sound_kinds if sound_effect else None).model_copy(update={"source": Source(

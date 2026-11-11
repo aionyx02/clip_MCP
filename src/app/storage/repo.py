@@ -1679,7 +1679,8 @@ class Repository:
                           "DELETE FROM reviewed_captions WHERE asset_id = ?",
                           "DELETE FROM semantic_clips WHERE asset_id = ?", "DELETE FROM looks WHERE asset_id = ?"):
             conn.execute(statement, (asset_id,))
-        conn.execute("DELETE FROM folder_items WHERE kind = 'assets' AND item_id = ?", (asset_id,))
+        # Whichever library it was filed in: footage, music and sound effects each keep folders of their own.
+        conn.execute("DELETE FROM folder_items WHERE kind IN ('assets', 'music', 'sfx') AND item_id = ?", (asset_id,))
         planned = {row[0] for row in conn.execute("SELECT timeline_id FROM plans")}
         for timeline_id, data in conn.execute("SELECT id, data FROM semantic_timelines").fetchall():
             timeline = SemanticTimeline.model_validate_json(data)

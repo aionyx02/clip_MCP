@@ -59,8 +59,10 @@ SITES = {
         "free for videos online, social media and ads included, with no credit; not for TV or radio broadcast, "
         "CDs, DVDs or games",
         "Mixkit Sound Effects Free License",
-        "free in videos, commercial ones included, with no credit; the file may not be redistributed or sold on its "
-        "own. Read the licence on Mixkit's page once before relying on it for a broadcast",
+        # Checked against mixkit.co/license/modal/sfxFree on 2026-11-11.
+        "free in any video, commercial ones, TV and radio broadcasts, CDs, DVDs and games included, with no credit; "
+        "the file may not be redistributed on its own or as stock, claimed as one's own, or registered with a "
+        "rights management service such as Content ID",
     ),
     "incompetech": Site(
         "Incompetech (Kevin MacLeod)", ("incompetech.com",), "CC BY 4.0", True,

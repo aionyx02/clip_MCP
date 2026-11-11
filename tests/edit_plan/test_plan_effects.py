@@ -253,3 +253,33 @@ def test_the_effect_is_shown_played_listed_and_accounted_for(planned: dict, effe
     facts = soundtrack.export_notices(project)["facts"]
     assert any(fact.startswith("sound_effect | pop.wav") and "licence: nobody has said" in fact for fact in facts)
     assert soundtrack.music_credits(project)["unknown"] == ["pop.wav"]
+
+
+def test_a_long_download_is_refused_as_an_effect(effects: Path, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    long_one = tmp_path / "bed.wav"
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-f", "lavfi", "-i", f"sine=f=440:d={SFX_LONGEST_SECONDS + 2:g}",
+                    str(long_one)], check=True)
+
+    def fake_download(url, folder, title):
+        Path(folder).mkdir(parents=True, exist_ok=True)
+        return shutil.copy(long_one, Path(folder) / f"{title}.wav")
+
+    for module in (catalog, delivery, rendering, soundtrack, upkeep):
+        monkeypatch.setattr(module, "output_dir", lambda: tmp_path)
+    monkeypatch.setattr(fetch, "download", fake_download)
+    url, page = "https://assets.mixkit.co/sfx/bed.wav", "https://mixkit.co/free-sound-effects/bed/"
+    shown = soundtrack.add_music_from_url(url, page, "Bed", sound_effect=True)
+    with pytest.raises(ValueError, match="take it without sound_effect"):
+        soundtrack.add_music_from_url(url, page, "Bed", sound_effect=True, confirm_plan=shown["plan"])
+    # Ours, downloaded and refused: it does not stay behind.
+    assert not (tmp_path / "音效" / "Bed.wav").exists()
+
+
+def test_a_deleted_effect_leaves_no_folder_entry(effects: Path, tmp_path: Path) -> None:
+    # A copy of its own, so no cut made by another test is using it.
+    pop = import_asset(shutil.copy(effects / "pop.wav", tmp_path / "lone.wav"))["id"]
+    runtime.repo.create_folder("f1", "sfx", "短音效")
+    runtime.repo.file_items("sfx", [pop], "f1")
+    assert runtime.repo.folder_of("sfx") == {pop: "f1"}
+    assert runtime.repo.delete_unused_assets([pop]) == {}
+    assert runtime.repo.folder_of("sfx") == {}

@@ -1435,12 +1435,11 @@
   }
 
   // The piece of the file this clip plays, by itself, so a sound effect can be told apart under the mix.
-  const solo = { audio: null, timer: null };
+  const solo = { audio: null };
   function hearAlone(button, clip) {
     solo.audio ??= new Audio();
     const playing = !solo.audio.paused;
     solo.audio.pause();
-    clearTimeout(solo.timer);
     const reset = () => { button.innerHTML = `${icon("play", 16)}${esc(T.editor.hearAlone)}`; };
     if (playing) { reset(); return; }
     clock().pause();
@@ -1450,8 +1449,9 @@
     solo.audio.volume = Math.min(1, Math.max(0, clip.volume ?? 1));
     solo.audio.play().catch((error) => toast(error.message, "error"));
     button.innerHTML = `${icon("stop", 16)}${esc(T.editor.hearAloneStop)}`;
-    solo.timer = setTimeout(() => { solo.audio.pause(); reset(); }, Math.max(0.1, end - start) * 1000 + 50);
-    solo.audio.onended = () => { clearTimeout(solo.timer); reset(); };
+    // Stopped by where the sound has got to, not a timer: the file may take a while to load.
+    solo.audio.ontimeupdate = () => { if (solo.audio.currentTime >= end) { solo.audio.pause(); reset(); } };
+    solo.audio.onended = reset;
   }
 
   // ------------------------------------------------------------------ comments
