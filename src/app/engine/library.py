@@ -1,6 +1,9 @@
-"""Which library a file belongs in: footage, or music.
+"""Which library a file belongs in: footage, music, or sound effects.
 
-A file with a picture is footage. A file without one is music unless it is
+A file with a picture is footage. A file without one that is shorter than a
+few seconds is a sound effect: a whoosh, a pop, a hit. What kind of effect it
+is is never guessed from the sound; whoever adds it says. A longer file
+without a picture is music unless it is
 mostly somebody talking — a voice memo, a narration, an interview recorded on
 a phone — which is footage too, to be transcribed rather than beat-tracked.
 Speech is found with the Silero VAD that ships inside faster-whisper, run over
@@ -18,9 +21,14 @@ from app.models.media import Asset
 
 FOOTAGE = "footage"
 MUSIC = "music"
-LIBRARIES = (FOOTAGE, MUSIC)
+SFX = "sfx"
+LIBRARIES = (FOOTAGE, MUSIC, SFX)
 # The kind of folder each library's files are filed in.
-FOLDER_KINDS = {FOOTAGE: "assets", MUSIC: "music"}
+FOLDER_KINDS = {FOOTAGE: "assets", MUSIC: "music", SFX: "sfx"}
+# A file with no picture shorter than this is a sound effect. Whooshes, pops and hits run
+# under two seconds and a riser rarely past eight; the shortest songs and jingles run
+# longer. Provisional: a guess at that divide, not measured on any library.
+SFX_LONGEST_SECONDS = 10.0
 
 # A file with no picture is a recording of somebody talking when at least this share of
 # what is listened to is speech. Singing is heard as speech now and then, so it is well
@@ -39,7 +47,7 @@ def library_of(asset: Asset) -> str:
         asset: The file.
 
     Returns:
-        `footage` or `music`. A file with no picture that was never classified
+        `footage`, `music` or `sfx`. A file with no picture that was never classified
         counts as music, which is how it has been treated so far.
     """
     if asset.library in LIBRARIES:
@@ -92,9 +100,12 @@ def classify(asset: Asset, ffmpeg_bin: str = "ffmpeg") -> str:
         ffmpeg_bin: FFmpeg executable.
 
     Returns:
-        `footage` or `music`.
+        `footage`, `music` or `sfx`: a short file with no picture is a sound
+        effect without being listened to.
     """
     if asset.has_video or not asset.has_audio:
         return FOOTAGE
+    if asset.duration is not None and float(asset.duration) < SFX_LONGEST_SECONDS:
+        return SFX
     share = speech_share(asset.path, float(asset.duration or 0), ffmpeg_bin)
     return FOOTAGE if share is not None and share >= SPEECH_SHARE else MUSIC

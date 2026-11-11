@@ -275,6 +275,18 @@ plan is refused with that reason.
 Whether the music actually gets out of the way of the talking cannot be seen
 on a storyboard, and you cannot hear it: `preview_sound` shows it.
 
+## Sound effects in a plan
+
+The moments come from the compiled cut, so compile first, then
+`propose_sound_effects`. Its `candidate_hash` changes when a shot, a card,
+words or B-roll comes or goes, and `compile_plan` then refuses the old
+picks: after any such amendment, propose again and pick again before you
+compile. Pick from the effects' `sound_kinds`, which only you or the user
+gave; a short file imported without them shows none, so pass them to
+`import_asset` from the file's name. A `riser` builds into its moment: give
+it a `lead` of its own length, or it starts at the cut and swells after it.
+Write the picks with `amend_plan` `set_sound_effects`.
+
 ## Cleaning up the sound
 
 **A narration over footage is handled for you.** When a voice recorded apart

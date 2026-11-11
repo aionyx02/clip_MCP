@@ -1401,7 +1401,10 @@
     const asset = E.project.assets[clip.asset_id];
     const isMusic = Boolean(track.duck_under_speech);
     const shifts = [-5, -1, 1, 5].map((delta) => `<button data-shift="${delta}">${delta > 0 ? "+" : ""}${delta}</button>`).join("");
+    const kinds = asset?.sound_kinds?.length
+      ? `<div class="label">${esc(T.editor.effectKinds)}<b>${asset.sound_kinds.map(esc).join("、")}</b></div>` : "";
     panel.innerHTML = `<h2>${esc(asset ? asset.name : T.editor.missingFile)}</h2>
+      ${asset ? `<div class="group">${kinds}<button class="btn" data-hear-alone title="${esc(T.editor.hearAloneHint)}">${icon("play", 16)}${esc(T.editor.hearAlone)}</button></div>` : ""}
       ${volumeGroup(clip.volume, isMusic ? T.editor.trackVolume : T.editor.volume)}
       <div class="group edit-action">
         <div class="label">${esc(T.editor.songStart)}<b>${fmt(num(clip.source_range.start))}</b></div><div class="nudges">${shifts}</div>
@@ -1412,6 +1415,8 @@
       </div>`;
     // Music is one bed however many pieces it was looped into, so it is turned up or down as one.
     const clips = isMusic ? track.clips : [clip];
+    const alone = $("[data-hear-alone]", panel);
+    if (alone) alone.onclick = () => hearAlone(alone, clip);
     wireVolume(panel, (volume) => clips.map((each) => ({ action: "set_clip_audio", track_id: track.id, clip_id: each.id, volume })));
     panel.querySelectorAll("[data-shift]").forEach((button) => {
       button.onclick = () => {
@@ -1427,6 +1432,26 @@
       const done = await edit(clips.map((each) => ({ action: "delete_clip", track_id: track.id, clip_id: each.id, ripple: false })));
       if (done && isMusic) toast(T.editor.musicRemoved);
     };
+  }
+
+  // The piece of the file this clip plays, by itself, so a sound effect can be told apart under the mix.
+  const solo = { audio: null };
+  function hearAlone(button, clip) {
+    solo.audio ??= new Audio();
+    const playing = !solo.audio.paused;
+    solo.audio.pause();
+    const reset = () => { button.innerHTML = `${icon("play", 16)}${esc(T.editor.hearAlone)}`; };
+    if (playing) { reset(); return; }
+    clock().pause();
+    const start = num(clip.source_range.start), end = num(clip.source_range.end);
+    solo.audio.src = `/media/${encodeURIComponent(clip.asset_id)}`;
+    solo.audio.currentTime = start;
+    solo.audio.volume = Math.min(1, Math.max(0, clip.volume ?? 1));
+    solo.audio.play().catch((error) => toast(error.message, "error"));
+    button.innerHTML = `${icon("stop", 16)}${esc(T.editor.hearAloneStop)}`;
+    // Stopped by where the sound has got to, not a timer: the file may take a while to load.
+    solo.audio.ontimeupdate = () => { if (solo.audio.currentTime >= end) { solo.audio.pause(); reset(); } };
+    solo.audio.onended = reset;
   }
 
   // ------------------------------------------------------------------ comments

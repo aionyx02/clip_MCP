@@ -24,6 +24,8 @@ window.T = {
     speech: "像是講話？",
     speechHint: "聽起來比較像有人在講話，不像音樂。如果是講話的錄音，按「移到素材」，它會被聽打成字幕。",
     noCredit: "這首不需要標註出處",
+    effect: "音效",
+    effectHint: "10 秒以內的短音效，AI 會把它下在剪點、標題或結尾，不當配樂用",
   },
 
   jobs: {
@@ -487,6 +489,10 @@ window.T = {
     songStart: "從歌曲的",
     songStartHint: "讓音樂從歌曲更前面或更後面開始",
     removeMusic: "移除音樂",
+    hearAlone: "單獨試聽",
+    hearAloneStop: "停止試聽",
+    hearAloneHint: "只播這段音效，不混其他聲音",
+    effectKinds: "音效類型",
     musicRemoved: "已移除音樂",
   },
 

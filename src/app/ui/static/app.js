@@ -596,10 +596,12 @@ async function musicPage(page, folderId) {
       const bars = asset.energy?.length
         ? `<div class="energy">${asset.energy.map((value) => `<i style="height:${Math.round(8 + value * 92)}%"></i>`).join("")}</div>`
         : icon("music", 30);
-      const tags = [...(asset.moods || []).slice(0, 2), ...(asset.styles || []).slice(0, 2)];
+      const effect = asset.library === "sfx"
+        ? `<span class="badge" title="${esc(T.musicPage.effectHint)}">${esc(T.musicPage.effect)}</span>` : "";
+      const tags = effect ? (asset.sound_kinds || []) : [...(asset.moods || []).slice(0, 2), ...(asset.styles || []).slice(0, 2)];
       return `<div class="card${asset.missing ? " gone" : ""}" title="${esc(asset.path)}" data-drag="item" data-id="${esc(asset.id)}">${extras}<div class="thumb">${bars}
         <span class="badge">${clock(asset.duration)}</span></div>
-        <div class="card-body"><div class="card-title">${esc(asset.name)}</div><div class="card-meta">${state}${gone}</div>
+        <div class="card-body"><div class="card-title">${esc(asset.name)}</div><div class="card-meta">${effect}${state}${gone}</div>
         ${tags.length ? `<div class="tags" title="${esc(T.musicPage.tagsHint)}">${tags.map((tag) => `<span>${esc(tag)}</span>`).join("")}</div>` : ""}
         ${asset.source ? `<div class="card-notes" title="${esc(asset.source.credit || T.musicPage.noCredit)}">${esc(T.musicPage.from(asset.source.site, asset.source.licence))}</div>` : ""}
         ${asset.notes ? `<div class="card-notes" title="${esc(asset.notes)}">${esc(asset.notes)}</div>` : ""}</div></div>`;

@@ -27,6 +27,8 @@ from app.engine.probe import probe_file, speech_loudness
 from app.engine.reframe import Framing, centred_note, frame_project, framed_size, placement_at
 from app.engine.builder import DEFAULT_LOUDNESS_TARGET, Talking, voice_keys
 from app.engine.levels import song_level, talking_in
+from app.engine.library import SFX, library_of
+from app.engine.plan.effects import SFX_TRACKS, effects_on_words
 from app.engine.delivery import (
     CHECKS, chapter_metadata, chapters, check_delivery, half_sentences, light_steps, look_candidates, run_on_cuts,
     shaky_clips,
@@ -326,6 +328,20 @@ def preview_project(
 
     for track in project.tracks:
         if track.track_type != TrackType.AUDIO or not track.clips:
+            continue
+        effects = [clip for clip in track.clips if clip.asset_id in assets
+                   and library_of(assets[clip.asset_id]) == SFX] if track.id in SFX_TRACKS else []
+        if effects:
+            # Each effect is a moment of its own, so each is said: where it lands is the point of it.
+            for clip in sorted(effects, key=lambda item: item.timeline_in):
+                kinds = assets[clip.asset_id].sound_kinds
+                listing.append(
+                    f"-- sound effect on track {track.id}: clip {clip.id} "
+                    f"{os.path.basename(assets[clip.asset_id].path)}"
+                    + (f" ({', '.join(kinds)})" if kinds else "")
+                    + f" at {format_timestamp(float(clip.timeline_in))} for {float(clip.timeline_duration):.2f}s, "
+                    f"volume {clip.volume:g}"
+                )
             continue
         covered_from = min(clip.timeline_in for clip in track.clips)
         covered_to = max(clip.timeline_out for clip in track.clips)
@@ -1118,6 +1134,10 @@ def check_render(
         whose white letters stand out too little from the picture behind
         them, measured on that picture as the render shows it, with what to
         change. It never stops a render: the words still have their shadow.
+        And `sound_effects_on_words`, the sound effects that play over
+        somebody's words, with the words: one may be meant, so it never stops
+        a render; say which to the user, and move or drop the ones that bury
+        a word.
         And `brand_opening`, for a cut whose plan names a brand kit or is a
         commercial: a line when its first 3 seconds show neither a clip of the
         product slot, the corner logo, nor words — a card, words over the
@@ -1156,6 +1176,9 @@ def check_render(
     contrast = contrast_notes(reshaped(project, frame))
     if contrast:
         checked["contrast"] = contrast
+    on_words = effects_on_words(project, listened, shared.referenced_assets(project))
+    if on_words:
+        checked["sound_effects_on_words"] = on_words
     plan_id = next((clip.from_plan_id for clip in base.clips if clip.from_plan_id), None)
     plan = runtime.repo.get_plan(plan_id) if plan_id else None
     if plan is not None:
