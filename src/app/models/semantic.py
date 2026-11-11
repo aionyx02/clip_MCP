@@ -166,6 +166,9 @@ class SemanticTimeline(BaseModel):
         description="The commercial structure chosen from the slot candidates, in the order it plays",
     )
     ad_product: Optional[str] = Field(default=None, description="The product name the slot candidates were found with")
+    ad_aliases: List[str] = Field(
+        default_factory=list, description="The other names the product goes by in the footage, found with it",
+    )
     slots_by: Optional[str] = Field(default=None, description="What assigned the slots, as the caller reported it")
     slot_hash: Optional[str] = Field(default=None, description="Covers the slot candidates the slots were chosen from")
     built_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))

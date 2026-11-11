@@ -64,10 +64,18 @@ saying what to make of it. It is referenced from SKILL.md.
    `structure="ad"` and the product's name as it is said in the footage.
    Without it nothing offers the hook, problem, product, proof and call to
    action, so a hook you pick yourself is a different sentence every run and
-   a `cta` ends up wherever it was said. Assign them with
-   `set_sections(slots=...)` in that order, passing the same `product`. A
-   slot listed under `missing` is footage to ask the user for, not one to
-   fill from another slot's candidates; `set_sections` refuses that.
+   a `cta` ends up wherever it was said. Speakers often never say the name
+   and call it 「杯子」 or 「機構」: read the utterances and pass those words as
+   `aliases`, or `product` comes back under `missing` although the footage
+   shows it. Assign them with `set_sections(slots=...)` in that order,
+   passing the same `product` and `aliases`. A slot listed under `missing`
+   is footage to ask the user for, not one to fill from another slot's
+   candidates; `set_sections` refuses that. Then write the plan with
+   `structure: "ad"`, one beat per slot with that slot as its `role` and
+   its stored clips as the selections. In another structure nothing holds
+   the plan to the slots, and the hook and cta drift back to wherever they
+   were said. To change a slot, call `set_sections(slots=...)` again first;
+   `validate_plan` refuses a plan that plays other clips in a slot's beats.
 5. Look before you cut. Call `view_frames` with about 12 frames over the whole
    asset for an overview, then use a narrow range to check a specific moment.
    It takes a list of assets, so a range is only accepted for one of them; for

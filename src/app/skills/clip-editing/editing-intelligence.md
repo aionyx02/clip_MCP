@@ -87,7 +87,7 @@ changes, not a place or a day — and which structure carries it. **The
 structure is the user's to choose.** Unless they have already said, offer the
 two or three that suit the footage, each in one line with what it would open
 on and end on, and let them pick by letter, in the same message as the other
-open questions. Do not pick one silently and do not offer all eight. Put the
+open questions. Do not pick one silently and do not offer them all. Put the
 choice in the plan's `structure`; it decides which `role` each beat may have.
 
 | `structure` | 中文 | Roles, in the order they play | Suits |
@@ -100,11 +100,12 @@ choice in the plan's `structure`; it decides which `role` each beat may have.
 | `before_after` | 前後對比 | `hook` `before` `process` `after` | Makeovers, tidying, repairs |
 | `review` | 開箱評測 | `hook` `first_look` `detail`… `verdict` | Unboxing, trying out, comparing |
 | `montage` | 蒙太奇／氛圍 | `hook` `build` `peak` `outro` | Travel, events, scenery cut to music, with no plot |
+| `ad` | 廣告／產品介紹 | `hook` `problem` `product` `proof` `cta` | Ads, sponsored segments, product introductions |
 
 What each role is for:
 
 - `hook` — the first seconds: the strongest moment, or the question the rest
-  answers. Optional in a very short cut except in 倒敘, and always first when
+  answers. Optional in a very short cut except in 倒敘 and 廣告, and always first when
   there is one. In 倒敘 it is lifted from the turn or the payoff, and the
   setup then goes back to where it began; in 教學步驟 and 前後對比 it is a
   glimpse of the finished thing.
@@ -127,11 +128,15 @@ What each role is for:
 - 蒙太奇: `build` beats rise towards a `peak`, there can be more than one of
   each, and `outro` lets it settle. The music carries it, so choose the song
   first and consider `cut_on_beat`.
+- 廣告: each role is a slot from `propose_sections(structure="ad")`, and its
+  beats play exactly the clips `set_sections(slots=...)` stored for it, in
+  that order; the reading-footage file says how. `hook` and `product` are
+  required, and it ends on the product, the proof or the cta.
 
 `validate_plan` refuses a plan with more than one beat or more than one file
 that has a beat with no role, a role its structure has no place for, none of
 a role the structure needs (a turn, a step, a peak), or a last beat the
-structure cannot end on. 清單式, 教學步驟, 前後對比 and 開箱評測 also have to play
+structure cannot end on. 清單式, 教學步驟, 前後對比, 開箱評測 and 廣告 also have to play
 their roles in the order above. A single part cut from one recording is a
 trim and needs none. When the user changes structure after a plan is
 written, rewrite the beats' roles with it — the old ones are refused, not

@@ -6,6 +6,7 @@ from dataclasses import replace
 from datetime import timedelta
 from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 
+from app.engine.ad_slots import plan_slot_problems
 from app.engine.continuity import Shot, backward_steps, strays
 from app.engine.plan.beats import beginnings, compile_pieces, on_the_beat, picture_needed, plan_pieces, song_entry
 from app.engine.plan.broll import Cover, broll_covers
@@ -19,7 +20,7 @@ from app.engine.semantic import CLEAN_SILENCE_SECONDS, EDGE_TOLERANCE_SECONDS, C
 from app.models.brand import BrandKit
 from app.models.media import Asset
 from app.models.plan import STRUCTURES, Beat, BeatRole, EditPlan, Structure, TrimKind
-from app.models.semantic import ClipKind, SemanticClip, SemanticTimeline
+from app.models.semantic import ClipKind, ClipLevel, SemanticClip, SemanticTimeline
 from app.models.timeline.parts import MAX_SPEED, MIN_SPEED, Clip, Project, TitleCard, card_background
 
 
@@ -562,6 +563,13 @@ MISSING_ROLE = {
     BeatRole.DETAIL: "a review needs the closer look its verdict rests on",
     BeatRole.VERDICT: "say whether it is worth it, and end on it",
     BeatRole.PEAK: "a montage builds to something; find the moment it all comes to and give it a beat",
+    BeatRole.PRODUCT: "a commercial has to show what it sells; play the clips set for the product slot",
+}
+# The same, where one structure needs a role for its own reason.
+MISSING_ROLE_IN = {
+    Structure.AD: {
+        BeatRole.HOOK: "a commercial is decided in its first seconds; open on the clips set for the hook slot",
+    },
 }
 
 def _a(role: BeatRole) -> str:
@@ -611,7 +619,8 @@ def _story_problems(beats: Sequence[Beat], structure: Structure = Structure.STOR
     for role, needed in rules.at_least.items():
         count = roles.count(role)
         if count == 0:
-            problems.append(f"story: no beat is {_a(role)} — {MISSING_ROLE[role]}")
+            why = MISSING_ROLE_IN.get(structure, {}).get(role) or MISSING_ROLE[role]
+            problems.append(f"story: no beat is {_a(role)} — {why}")
         elif count < needed:
             problems.append(f"story: only {count} beat is {_a(role)}; {rules.label} needs at least {needed}")
     if roles[-1] not in rules.ends_on:
@@ -789,6 +798,9 @@ def check_plan(
     files = {clips[selection.clip_id].asset_id for selection in plan.selections if selection.clip_id in clips}
     if len(plan.beats) > 1 or len(files) > 1:
         problems.extend(_story_problems(plan.beats, plan.structure))
+    utterances = sorted((clip for clip in clips.values() if clip.level == ClipLevel.UTTERANCE),
+                        key=lambda clip: (clip.asset_id, clip.source_range.start))
+    problems.extend(plan_slot_problems(plan, timeline, utterances))
 
     for position, selection in enumerate(plan.selections, start=1):
         where = f"selection {position} ({selection.clip_id})"

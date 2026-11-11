@@ -141,6 +141,7 @@ class Structure(str, Enum):
     BEFORE_AFTER = "before_after"
     REVIEW = "review"
     MONTAGE = "montage"
+    AD = "ad"
 
 class BeatRole(str, Enum):
     """What a part does in the video's structure.
@@ -171,6 +172,9 @@ class BeatRole(str, Enum):
     BUILD = "build"
     PEAK = "peak"
     OUTRO = "outro"
+    PRODUCT = "product"
+    PROOF = "proof"
+    CTA = "cta"
 
 class StructureRules(BaseModel):
     """What a plan in one structure has to have, and in what order."""
@@ -246,6 +250,20 @@ STRUCTURES = {
         at_least={BeatRole.PEAK: 1},
         ends_on=[BeatRole.PEAK, BeatRole.OUTRO],
     ),
+    # Its roles are the slots `propose_sections(structure="ad")` offers, and a plan in it has
+    # to play the clips `set_sections(slots=...)` stored for each. Provisional, the rules:
+    # a commercial cannot do without its opening or the thing it sells, and leaves the viewer
+    # on the product, the proof or the ask, never on the problem. A call to action is not
+    # required, because a brand kit's closing card can make the ask when nobody said it.
+    # None of this is measured on this project's footage.
+    Structure.AD: StructureRules(
+        label="廣告／產品介紹",
+        suits="廣告、業配、產品介紹：鉤子→痛點→產品→證明→行動呼籲",
+        roles=[BeatRole.HOOK, BeatRole.PROBLEM, BeatRole.PRODUCT, BeatRole.PROOF, BeatRole.CTA],
+        at_least={BeatRole.HOOK: 1, BeatRole.PRODUCT: 1},
+        ends_on=[BeatRole.PRODUCT, BeatRole.PROOF, BeatRole.CTA],
+        in_order=True,
+    ),
 }
 
 class PlanTitleCard(BaseModel):
@@ -295,7 +313,8 @@ class Beat(BaseModel):
                     "`turn`, `payoff`. 倒敘: the same, with the hook a moment from later. 問題→解法: `problem`, "
                     "`agitate`, `solution`, `result`. 清單式: `item` per point, `recap`. 教學步驟: `prep`, `step` "
                     "per step, `result`. 前後對比: `before`, `process`, `after`. 開箱評測: `first_look`, `detail`, "
-                    "`verdict`. 蒙太奇: `build`, `peak`, `outro`. Every part says one",
+                    "`verdict`. 蒙太奇: `build`, `peak`, `outro`. 廣告: `problem`, `product`, `proof`, `cta`, each playing "
+                    "the clips stored for that slot. Every part says one",
     )
     intent: str = Field(default="", description="What it has to achieve for the video to work")
     target_seconds: Optional[float] = Field(default=None, gt=0, description="Roughly how long it should run")
@@ -607,8 +626,8 @@ class EditPlan(BaseModel):
         default=Structure.STORY,
         description="The shape the video takes, as the user chose it: `story` (起承轉合), `flashback` (倒敘), "
                     "`problem_solution` (問題→解法), `listicle` (清單式), `tutorial` (教學步驟), `before_after` "
-                    "(前後對比), `review` (開箱評測), `montage` (蒙太奇／氛圍). It decides which beat roles the "
-                    "plan may use and which it needs",
+                    "(前後對比), `review` (開箱評測), `montage` (蒙太奇／氛圍), `ad` (廣告／產品介紹: only after "
+                    "`set_sections(slots=...)`). It decides which beat roles the plan may use and which it needs",
     )
     target: PlanTarget = Field(default_factory=PlanTarget)
     beats: List[Beat] = Field(default_factory=list, description="The parts of the video, in order")
