@@ -1599,8 +1599,9 @@ class Repository:
         """Take files out of the library, unless anything still uses one of them.
 
         A file is in use while a project has a clip of it or shows it as a logo, the AI's current
-        plan for a cut uses it (a selection, a cutaway or music), or an
-        analysis of it is running. Looking and deleting happen in one write
+        plan for a cut uses it (a selection, a cutaway or music), a saved brand
+        kit takes it as its logo (a plan naming the kit would fail to compile
+        long after), or an analysis of it is running. Looking and deleting happen in one write
         transaction, so nothing can start using a file between the two.
 
         What goes with a file: its analysis, its corrected captions, its clips
@@ -1613,7 +1614,7 @@ class Repository:
 
         Returns:
             What uses each file that is in use, as `{"projects": [names],
-            "plans": [goals], "busy": ["analysis"]}` by asset ID. When this is
+            "plans": [goals], "brand_kits": [names], "busy": ["analysis"]}` by asset ID. When this is
             not empty nothing was deleted.
         """
         wanted = set(asset_ids)
@@ -1621,7 +1622,7 @@ class Repository:
             using: Dict[str, Dict[str, List[str]]] = {}
 
             def note(asset_id: str, kind: str, what: str) -> None:
-                found = using.setdefault(asset_id, {"projects": [], "plans": [], "busy": []})[kind]
+                found = using.setdefault(asset_id, {"projects": [], "plans": [], "brand_kits": [], "busy": []})[kind]
                 if what not in found:
                     found.append(what)
 
@@ -1639,6 +1640,10 @@ class Repository:
                         f"SELECT asset_id FROM semantic_clips WHERE id IN ({','.join('?' * len(chunk))})", chunk))
                 for asset_id in wanted & assets:
                     note(asset_id, "plans", plan.get("goal") or plan.get("id", ""))
+            for (data,) in conn.execute("SELECT data FROM brand_kits").fetchall():
+                kit = BrandKit.model_validate_json(data)
+                if kit.logo_asset_id in wanted:
+                    note(kit.logo_asset_id, "brand_kits", kit.name)
             for (data,) in conn.execute("SELECT data FROM jobs").fetchall():
                 job = Job.model_validate_json(data)
                 if job.asset_id in wanted and job.status.is_active:

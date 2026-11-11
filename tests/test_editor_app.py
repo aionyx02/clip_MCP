@@ -364,7 +364,7 @@ def test_a_file_a_project_uses_cannot_be_taken_out_and_the_project_is_named(clie
     _project_using(client, asset, "用著它的專案")
     answer = client.post("/api/assets/delete", json={"ids": [asset], "recycle": True})
     assert answer.status_code == 409
-    assert answer.json()["in_use"] == [{"name": "還在用.mp4", "projects": ["用著它的專案"], "plans": []}]
+    assert answer.json()["in_use"] == [{"name": "還在用.mp4", "projects": ["用著它的專案"], "plans": [], "brand_kits": []}]
     assert runtime.repo.get_assets([asset]) and (tmp_path / "還在用.mp4").exists()
 
 def test_taking_a_file_out_keeps_the_original_unless_asked(client: TestClient, media: Path, tmp_path: Path, monkeypatch) -> None:
@@ -423,8 +423,8 @@ def test_a_file_the_ais_plan_uses_cannot_be_taken_out(tmp_path: Path) -> None:
             {"id": "p", "goal": "台南旅行 60 秒", "beats": [{"selections": [{"clip_id": "t:u0000"}]}],
              "music": {"cues": [{"asset_id": "song"}]}})))
     using = store.delete_unused_assets(["picture", "song", "spare"])
-    assert using == {"picture": {"projects": [], "plans": ["台南旅行 60 秒"], "busy": []},
-                     "song": {"projects": [], "plans": ["台南旅行 60 秒"], "busy": []}}
+    assert using == {"picture": {"projects": [], "plans": ["台南旅行 60 秒"], "brand_kits": [], "busy": []},
+                     "song": {"projects": [], "plans": ["台南旅行 60 秒"], "brand_kits": [], "busy": []}}
     # Refused as a whole: the one nothing uses is still there too.
     assert set(store.get_assets(["picture", "song", "spare"])) == {"picture", "song", "spare"}
 
@@ -599,3 +599,17 @@ def test_an_offer_over_seconds_another_part_was_offered_for_replaces_it(client: 
     across = soundtrack.offer_songs(made["id"], [OfferedSong(asset_id=song)], start=2, end=4)
     assert sorted(across["replaced"]) == sorted([early["part"], late["part"]])
     assert [part["part"] for part in across["waiting"]] == [across["part"]]
+
+def test_a_brand_kits_logo_cannot_be_taken_out(tmp_path: Path) -> None:
+    from app.models.brand import BrandKit
+    from app.models.media import Asset
+    from app.storage.repo import Repository
+
+    store = Repository(str(tmp_path / "kit.db"))
+    store.save_asset(Asset(id="logo", path=str(tmp_path / "logo.png"), has_video=True, has_audio=False))
+    store.save_brand_kit(BrandKit(name="咖啡店", logo_asset_id="logo"))
+    assert store.delete_unused_assets(["logo"]) == {
+        "logo": {"projects": [], "plans": [], "brand_kits": ["咖啡店"], "busy": []}}
+    assert set(store.get_assets(["logo"])) == {"logo"}
+    store.delete_brand_kit("咖啡店")
+    assert store.delete_unused_assets(["logo"]) == {}
