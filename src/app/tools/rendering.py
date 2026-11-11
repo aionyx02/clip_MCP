@@ -32,6 +32,7 @@ from app.engine.delivery import (
     CHECKS, chapter_metadata, chapters, check_delivery, half_sentences, light_steps, look_candidates, run_on_cuts,
     shaky_clips,
 )
+from app.engine.brand_opening import brand_opening
 from app.engine.frames import format_timestamp, still, storyboard_sheet
 from app.engine.subtitles import CAPTION_LINE_HEIGHT, build_ass, drawn_captions, place_cues
 from app.storage import housekeeping
@@ -1195,6 +1196,11 @@ def check_render(
         way, a sample of them across the cut, in one line naming the first
         few. It never stops a render: tell the user, since plain captions are
         their default and an outline is theirs to add.
+        And `brand_opening`, for a cut whose plan names a brand kit or is a
+        commercial: a line when its first 3 seconds show neither a clip of the
+        product slot, the corner logo, nor words — a card, words over the
+        footage or a caption — naming the product or the brand. It never stops
+        a render: holding the product back can be the point, so ask.
 
     Raises:
         ValueError: If the project does not exist.
@@ -1228,6 +1234,13 @@ def check_render(
     contrast = contrast_notes(reshaped(project, frame), burn_subtitles)
     if contrast:
         checked["contrast"] = contrast
+    plan_id = next((clip.from_plan_id for clip in base.clips if clip.from_plan_id), None)
+    plan = runtime.repo.get_plan(plan_id) if plan_id else None
+    if plan is not None:
+        opening = brand_opening(project, plan, runtime.repo.get_semantic_timeline(plan.timeline_id),
+                                place_cues(project, project.subtitles) if project.subtitles else ())
+        if opening:
+            checked["brand_opening"] = opening
     return checked
 
 # Whether edits start making what the browser needs to play them. Off where nobody will
