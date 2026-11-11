@@ -8,7 +8,7 @@ than filled, and that an assignment outside the candidates is refused with
 the reason.
 """
 
-from typing import Dict, List, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple
 
 import pytest
 
@@ -21,9 +21,11 @@ from app.engine.ad_slots import (
 )
 from app.engine.semantic import build_timeline
 from app.models.media import MediaAnalysis, Span, Transcript, TranscriptSegment, TranscriptWord
+from app.models.plan import Beat, BeatRole, EditPlan, Selection, Structure
 from app.models.semantic import AdSlot, ClipDescription, ClipKind, ClipLevel, SemanticClip, SlotChoice, SectionChoice
 from app.runtime import repo as runtime_repo
 from app.tools.catalog import import_asset
+from app.tools.planning import save_plan
 from app.tools.timelines import build_semantic_timeline, propose_sections, query_clips, set_clip_tags, set_sections
 from test_semantic_timeline import ASSET_ID, asset
 
@@ -328,5 +330,174 @@ def test_a_product_without_slots_is_refused(ad_timeline: dict) -> None:
     proposed = propose_sections(timeline_id=ad_timeline["timeline_id"])
     utterances = [clip["clip_id"] for clip in proposed["utterances"]]
     whole = [SectionChoice(first_clip_id=utterances[0], last_clip_id=utterances[-1], name="整支廣告")]
-    with pytest.raises(ValueError, match="send it with slots"):
+    with pytest.raises(ValueError, match="send them with slots"):
         set_sections(whole, timeline_id=ad_timeline["timeline_id"], product="杯架")
+
+# --- a speaker who never says the product's name, and plans built on the slots --------------
+
+# A cup rack as it was really talked about: the speaker never says 「抽杯架」, only 「杯子」
+# and 「機構」, calls the old one's flaw 「缺點」, and gives the result as a share.
+CUP_RACK = [
+    (0.0, 1.8, "你看這個杯子"),
+    (2.2, 4.0, "以前的缺點就是會卡住"),
+    (4.4, 6.2, "這個機構往下一壓就出來"),
+    (6.6, 8.0, "算成功80%"),
+    (8.4, 9.8, "連結放在下面"),
+]
+RACK_ALIASES = ["杯子", "機構"]
+
+def test_a_product_never_named_is_found_by_the_names_the_speaker_uses() -> None:
+    clips = clips_of(CUP_RACK, duration=10.0)
+    assert said(slot_candidates(clips, "抽杯架"), AdSlot.PRODUCT) == []
+    candidates = slot_candidates(clips, "抽杯架", RACK_ALIASES)
+    assert said(candidates, AdSlot.PRODUCT) == ["你看這個杯子", "這個機構往下一壓就出來"]
+    assert candidates[AdSlot.PRODUCT][1].why == ("says 「機構」",)
+
+def test_a_flaw_and_a_jam_are_problems() -> None:
+    candidates = slot_candidates(clips_of(CUP_RACK, duration=10.0))
+    assert said(candidates, AdSlot.PROBLEM) == ["以前的缺點就是會卡住"]
+    assert candidates[AdSlot.PROBLEM][0].why == ("says 「缺點」", "says 「卡住」")
+    assert said(candidates, AdSlot.PROOF) == ["算成功80%"]
+
+def test_the_fingerprint_covers_the_aliases_but_not_their_order() -> None:
+    clips = clips_of(CUP_RACK, duration=10.0)
+    named = slot_hash(slot_candidates(clips, "抽杯架", RACK_ALIASES), "抽杯架", RACK_ALIASES)
+    assert named == slot_hash(slot_candidates(clips, "抽杯架", ["機構", "杯子"]), "抽杯架", ["機構", "杯子"])
+    assert named != slot_hash(slot_candidates(clips, "抽杯架"), "抽杯架")
+
+@pytest.fixture
+def rack_timeline(media) -> dict:
+    """Build a timeline of the cup rack talk through the tools.
+
+    Returns:
+        A dictionary with the `timeline_id` and the `ids` of its clips by what they say.
+    """
+    asset_id = import_asset(str(media / "wide.mp4"))["id"]
+    runtime_repo.save_analysis(chinese_analysis(CUP_RACK, duration=10.0, asset_id=asset_id))
+    built = build_semantic_timeline([asset_id], rebuild=True)
+    clips = runtime_repo.query_semantic_clips(built["timeline_id"], level=ClipLevel.UTTERANCE)
+    return {"timeline_id": built["timeline_id"], "ids": {clip.text: clip.id for clip in clips if clip.text}}
+
+def set_rack_slots(rack: dict, slots: Optional[List[SlotChoice]] = None) -> dict:
+    """Assign the cup rack's slots the way a model reading it would, or as given.
+
+    Args:
+        rack: The timeline, as `rack_timeline` builds it.
+        slots: The assignment; omitted, every slot gets the sentence written for it.
+
+    Returns:
+        What `set_sections` returns.
+    """
+    ids = rack["ids"]
+    if slots is None:
+        slots = [SlotChoice(slot=AdSlot(role), clip_ids=[ids[text]]) for role, text in RACK_BEATS]
+    return set_sections(slots=slots, timeline_id=rack["timeline_id"], product="抽杯架", aliases=RACK_ALIASES)
+
+# `(role, what its one selection says)` per beat, in the order a commercial plays them.
+RACK_BEATS = [
+    ("hook", "你看這個杯子"),
+    ("problem", "以前的缺點就是會卡住"),
+    ("product", "這個機構往下一壓就出來"),
+    ("proof", "算成功80%"),
+    ("cta", "連結放在下面"),
+]
+
+def ad_plan(rack: dict, beats=RACK_BEATS, structure: Structure = Structure.AD) -> List[str]:
+    """Save an ad plan of the cup rack and read back what stops it, by structure and slots.
+
+    Args:
+        rack: The timeline, as `rack_timeline` builds it.
+        beats: `(role, what its one selection says)` per beat, in the order they play.
+        structure: The plan's structure.
+
+    Returns:
+        The `story:` and `slots:` problems; the others are about cutting, not structure.
+    """
+    saved = save_plan(EditPlan(
+        timeline_id=rack["timeline_id"], structure=structure, goal="抽杯架的短廣告",
+        beats=[Beat(id=f"b{index}", name=role, role=BeatRole(role)) for index, (role, _) in enumerate(beats)],
+        selections=[Selection(clip_id=rack["ids"][text], beat_id=f"b{index}")
+                    for index, (_, text) in enumerate(beats)],
+    ))
+    return [problem for problem in saved["problems"] if problem.startswith(("story:", "slots:"))]
+
+def test_slots_are_found_and_stored_with_the_aliases(rack_timeline: dict) -> None:
+    proposed = propose_sections(timeline_id=rack_timeline["timeline_id"], structure="ad", product="抽杯架",
+                                aliases=RACK_ALIASES)
+    assert proposed["missing"] == []
+    stored = set_rack_slots(rack_timeline)
+    assert stored["slots"]["left_out"] == []
+    timeline = runtime_repo.get_semantic_timeline(rack_timeline["timeline_id"])
+    assert (timeline.ad_product, timeline.ad_aliases) == ("抽杯架", RACK_ALIASES)
+    assert timeline.slot_hash == proposed["slot_hash"]
+    chosen = propose_sections(timeline_id=rack_timeline["timeline_id"], structure="ad")["chosen"]
+    assert chosen["aliases"] == RACK_ALIASES
+    assert chosen["current"] is True
+
+def test_slots_checked_without_the_aliases_they_were_chosen_with_are_refused(rack_timeline: dict) -> None:
+    ids = rack_timeline["ids"]
+    # Without them nothing names the product, so its slot has no candidates to be one of.
+    with pytest.raises(ValueError, match="product: nothing in this footage was offered"):
+        set_sections(slots=[SlotChoice(slot=AdSlot.PRODUCT, clip_ids=[ids["這個機構往下一壓就出來"]])],
+                     timeline_id=rack_timeline["timeline_id"], product="抽杯架")
+    with pytest.raises(ValueError, match='structure="ad"'):
+        propose_sections(timeline_id=rack_timeline["timeline_id"], aliases=RACK_ALIASES)
+
+def test_an_ad_plan_with_no_slots_stored_is_sent_to_assign_them_first(rack_timeline: dict) -> None:
+    (problem,) = ad_plan(rack_timeline)
+    assert problem.startswith("slots: an `ad` plan plays the clips chosen for each slot")
+    assert 'propose_sections(structure="ad")' in problem
+    assert "set_sections(slots=...)" in problem
+
+def test_an_ad_plan_that_plays_the_stored_slots_holds_together(rack_timeline: dict) -> None:
+    set_rack_slots(rack_timeline)
+    assert ad_plan(rack_timeline) == []
+
+def test_a_hook_other_than_the_stored_one_is_refused_not_swapped(rack_timeline: dict) -> None:
+    set_rack_slots(rack_timeline)
+    ids = rack_timeline["ids"]
+    # 「以前的缺點就是會卡住」 is a hook candidate too, but the stored hook is 「你看這個杯子」.
+    beats = [("hook", "以前的缺點就是會卡住"), *RACK_BEATS[2:]]
+    assert ad_plan(rack_timeline, beats) == [
+        f"slots: the hook beats play {ids['以前的缺點就是會卡住']}, but hook was assigned "
+        f"{ids['你看這個杯子']}, in that order. Play those, or change the assignment with set_sections(slots=...)",
+        f"slots: problem was assigned {ids['以前的缺點就是會卡住']}, but no beat plays it; add a `problem` beat "
+        "with them, or set the slots again without it",
+    ]
+    # Swapping the hook is an assignment made again, and then the plan follows it.
+    set_rack_slots(rack_timeline, [SlotChoice(slot=AdSlot.HOOK, clip_ids=[ids["以前的缺點就是會卡住"]])]
+                   + [SlotChoice(slot=AdSlot(role), clip_ids=[ids[text]]) for role, text in RACK_BEATS[2:]])
+    assert ad_plan(rack_timeline, beats) == []
+
+def test_a_beat_whose_slot_was_never_assigned_is_refused(rack_timeline: dict) -> None:
+    ids = rack_timeline["ids"]
+    set_rack_slots(rack_timeline, [SlotChoice(slot=AdSlot(role), clip_ids=[ids[text]])
+                                   for role, text in RACK_BEATS if role in ("hook", "product", "cta")])
+    assert [problem.split(",")[0] for problem in ad_plan(rack_timeline)] == [
+        "slots: the plan has problem beats", "slots: the plan has proof beats",
+    ]
+
+def test_slots_gone_out_of_date_stop_the_plan(rack_timeline: dict) -> None:
+    set_rack_slots(rack_timeline)
+    # Somebody looked and wrote that the proof shot shows the product: the candidates changed.
+    set_clip_tags([ClipDescription(clip_id=rack_timeline["ids"]["算成功80%"], description="手拿抽杯架")],
+                  written_by="test", reviewed=True, timeline_id=rack_timeline["timeline_id"])
+    (problem,) = ad_plan(rack_timeline)
+    assert problem.startswith("slots: the candidates have changed since the slots were set")
+
+def test_an_ad_plan_needs_the_product_and_cannot_end_on_the_problem(rack_timeline: dict) -> None:
+    ids = rack_timeline["ids"]
+    set_rack_slots(rack_timeline, [SlotChoice(slot=AdSlot(role), clip_ids=[ids[text]]) for role, text in RACK_BEATS[:2]])
+    assert ad_plan(rack_timeline, RACK_BEATS[:2]) == [
+        "story: no beat is a product — a commercial has to show what it sells; play the clips set for the "
+        "product slot",
+        "story: the video ends on b1, a problem; end on the product or the proof or the cta",
+    ]
+
+def test_an_ad_plan_plays_its_slots_in_a_commercial_s_order(rack_timeline: dict) -> None:
+    set_rack_slots(rack_timeline)
+    swapped = [RACK_BEATS[0], RACK_BEATS[2], RACK_BEATS[1], *RACK_BEATS[3:]]
+    assert ad_plan(rack_timeline, swapped) == [
+        "story: b2, a problem, comes after a product; 廣告／產品介紹 plays hook, problem, product, proof, cta in "
+        "that order",
+    ]

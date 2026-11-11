@@ -27,10 +27,12 @@ import unicodedata
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Sequence, Tuple
 
-from app.models.semantic import AdSlot, ClipKind, SemanticClip, SlotChoice
+from app.models.plan import EditPlan, Structure
+from app.models.semantic import AdSlot, ClipKind, SemanticClip, SemanticTimeline, SlotChoice
 
 # Bumped whenever the rules below change in a way the constants do not show.
-SLOT_VERSION = 1
+# 2: the product goes by several names.
+SLOT_VERSION = 2
 # Provisional: how long a sentence may run and still open a commercial on its own. Short
 # video platforms are commonly said to decide in the first three seconds; this is that
 # figure, not one measured on this project's footage.
@@ -46,6 +48,8 @@ NEIGHBOUR_CHARACTERS = 6
 PROBLEM_MARKERS = (
     "困擾", "麻煩", "問題", "煩", "受不了", "不方便", "不好用", "難", "痛", "怕", "擔心",
     "浪費", "每次", "總是", "老是", "常常", "是不是", "有沒有", "你是否",
+    "缺點", "缺陷", "痛點", "卡住", "卡卡", "太慢", "很慢", "不順", "費力", "吃力", "費時",
+    "弄髒", "打翻", "翻倒", "壞掉", "抱怨",
     "tired of", "problem", "struggle", "annoying", "hate",
 )
 PRODUCT_MARKERS = (
@@ -197,9 +201,28 @@ def _said(clip: Optional[SemanticClip]) -> str:
     """Read what is said in a clip, normalized, or nothing if it is not speech."""
     return normalized(clip.text) if clip is not None and clip.kind == ClipKind.SPEECH else ""
 
+def product_names(product: Optional[str], aliases: Sequence[str] = ()) -> List[str]:
+    """Gather the names a product goes by, normalized, each once.
+
+    Args:
+        product: What it is called.
+        aliases: What else the speaker calls it, such as 「杯子」 for a cup
+            holder whose name is never said.
+
+    Returns:
+        The names in the order given, blanks and repeats left out.
+    """
+    names: List[str] = []
+    for name in (product, *aliases):
+        name = normalized(name) if name else ""
+        if name and name not in names:
+            names.append(name)
+    return names
+
 def slot_candidates(
     clips: Sequence[SemanticClip],
     product: Optional[str] = None,
+    aliases: Sequence[str] = (),
 ) -> Dict[AdSlot, List[SlotCandidate]]:
     """Find every clip that could fill each place in a commercial.
 
@@ -208,19 +231,21 @@ def slot_candidates(
         product: What the product is called, to find the sentences that name
             it and the shots described as showing it. Without it, only the
             phrases that usually introduce a product are found.
+        aliases: Other names the speaker uses for it, found the same way.
+            Only names somebody gave; none is guessed here.
 
     Returns:
         Every slot, in the order a commercial plays them, with its candidates
         in the order of the footage. A slot with nothing is an empty list.
     """
-    name = normalized(product) if product else ""
+    names = product_names(product, aliases)
     marker_patterns = {
         AdSlot.PROBLEM: [_pattern(marker) for marker in PROBLEM_MARKERS],
-        AdSlot.PRODUCT: [_pattern(marker) for marker in (name, *PRODUCT_MARKERS) if marker],
+        AdSlot.PRODUCT: [_pattern(marker) for marker in (*names, *PRODUCT_MARKERS)],
         AdSlot.PROOF: [_pattern(marker) for marker in PROOF_MARKERS] + list(PROOF_PATTERNS),
         AdSlot.CTA: [_pattern(marker) for marker in CTA_MARKERS] + list(CTA_PATTERNS),
     }
-    shown_words = [word for word in (name, *PRODUCT_ON_SCREEN_WORDS) if word]
+    shown_words = [*names, *PRODUCT_ON_SCREEN_WORDS]
     found: Dict[AdSlot, List[SlotCandidate]] = {slot: [] for slot in AdSlot}
 
     for index, clip in enumerate(clips):
@@ -267,19 +292,24 @@ def missing_slots(candidates: Dict[AdSlot, List[SlotCandidate]]) -> List[dict]:
     """
     return [{"slot": slot.value, "needs": MISSING_FOOTAGE[slot]} for slot in AdSlot if not candidates[slot]]
 
-def slot_hash(candidates: Dict[AdSlot, List[SlotCandidate]], product: Optional[str]) -> str:
+def slot_hash(
+    candidates: Dict[AdSlot, List[SlotCandidate]],
+    product: Optional[str],
+    aliases: Sequence[str] = (),
+) -> str:
     """Fingerprint the candidates an assignment was chosen from, and the rules that found them.
 
     Args:
         candidates: The candidates offered.
         product: The product name they were found with.
+        aliases: The other names they were found with.
 
     Returns:
         The fingerprint as a hex digest.
     """
     payload = {
         "slot_version": SLOT_VERSION,
-        "product": normalized(product) if product else None,
+        "product": sorted(product_names(product, aliases)),
         "hook": [HOOK_SECONDS, HOOK_MIN_UNITS],
         "neighbour": NEIGHBOUR_CHARACTERS,
         "markers": [PROBLEM_MARKERS, PRODUCT_MARKERS, PROOF_MARKERS, CTA_MARKERS, PRODUCT_ON_SCREEN_WORDS],
@@ -329,4 +359,81 @@ def check_slots(chosen: Sequence[SlotChoice], candidates: Dict[AdSlot, List[Slot
                 problems.append(f"{slot.value}: {clip_id} is not one of its candidates")
             else:
                 used[clip_id] = slot
+    return problems
+
+def stored_slots_current(timeline: SemanticTimeline, utterances: Sequence[SemanticClip]) -> bool:
+    """Say whether the slots stored on a timeline were chosen from the candidates offered now.
+
+    Args:
+        timeline: The timeline, with its stored slots.
+        utterances: Its `utterance` clips, ordered by file and then time.
+
+    Returns:
+        False when the rules or the footage have changed what is offered since.
+    """
+    offered = slot_candidates(utterances, timeline.ad_product, timeline.ad_aliases)
+    return slot_hash(offered, timeline.ad_product, timeline.ad_aliases) == timeline.slot_hash
+
+def plan_slot_problems(plan: EditPlan, timeline: SemanticTimeline, utterances: Sequence[SemanticClip]) -> List[str]:
+    """Check that a commercial's plan plays the slots stored for its timeline, and nothing else in them.
+
+    Every role of the ad structure is a slot, so every beat is checked: the
+    selections of all the beats of one role, in the order they play, have to
+    be that slot's stored clips in their stored order. A plan that strays is
+    refused with what was stored, never brought into line: moving a clip from
+    one slot to another is done with `set_sections(slots=...)`, where it is
+    checked against the candidates and pinned again.
+
+    Args:
+        plan: The plan; nothing is checked unless its structure is `ad`.
+        timeline: The timeline it is written against, with its stored slots.
+        utterances: That timeline's `utterance` clips, ordered by file and
+            then time, to tell whether the stored slots are still current.
+
+    Returns:
+        One message per problem, empty when the plan follows the slots.
+    """
+    if plan.structure != Structure.AD:
+        return []
+    if not timeline.ad_slots:
+        return [
+            "slots: an `ad` plan plays the clips chosen for each slot, and none are stored for this timeline. "
+            'Call propose_sections(structure="ad") and assign them with set_sections(slots=...) first'
+        ]
+    problems: List[str] = []
+    if not stored_slots_current(timeline, utterances):
+        problems.append(
+            "slots: the candidates have changed since the slots were set; the footage, the product's names or "
+            'the rules are not what they were chosen from. Call propose_sections(structure="ad") again and set '
+            "the slots again before planning on them"
+        )
+    stored = {choice.slot.value: list(choice.clip_ids) for choice in timeline.ad_slots}
+    roles = {beat.id: beat.role for beat in plan.beats}
+    order = {beat.id: index for index, beat in enumerate(plan.beats)}
+    played: Dict[str, List[str]] = {}
+    for selection in sorted(plan.selections, key=lambda item: order.get(item.beat_id, len(order))):
+        role = roles.get(selection.beat_id)
+        if role is not None:
+            played.setdefault(role.value, []).append(selection.clip_id)
+    for slot in AdSlot:
+        want = stored.get(slot.value)
+        got = played.get(slot.value)
+        if want is None and got is None:
+            continue
+        if want is None:
+            problems.append(
+                f"slots: the plan has {slot.value} beats, but no {slot.value} was assigned; set it with "
+                "set_sections(slots=...) from its candidates, or give those beats another role"
+            )
+        elif got is None:
+            problems.append(
+                f"slots: {slot.value} was assigned {', '.join(want)}, but no beat plays it; add a "
+                f"`{slot.value}` beat with them, or set the slots again without it"
+            )
+        elif got != want:
+            problems.append(
+                f"slots: the {slot.value} beats play {', '.join(got)}, but {slot.value} was assigned "
+                f"{', '.join(want)}, in that order. Play those, or change the assignment with "
+                "set_sections(slots=...)"
+            )
     return problems

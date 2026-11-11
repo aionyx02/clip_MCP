@@ -16,7 +16,7 @@ from app.models.semantic import (
     TagSource,
 )
 from app.engine import meaning
-from app.engine.ad_slots import check_slots, missing_slots, slot_candidates, slot_hash
+from app.engine.ad_slots import check_slots, missing_slots, slot_candidates, slot_hash, stored_slots_current
 from app.engine.analysis import unsure_words
 from app.engine.sections import build_sections, candidate_hash, check_sections, propose_candidates
 from app.engine.semantic import build_timeline, content_scores, maybe_one_person, timeline_input_hash, voice_seconds
@@ -673,6 +673,7 @@ def propose_sections(
     asset_id: Optional[str] = None,
     structure: Optional[Literal["ad"]] = None,
     product: Optional[str] = None,
+    aliases: Optional[List[str]] = None,
 ) -> dict:
     """List the places a section could begin, for you to choose between.
 
@@ -703,7 +704,7 @@ def propose_sections(
     found by rule and deliberately too many; none is ranked. Assign them with
     `set_sections(slots=...)`. A place with no candidates is in `missing`,
     with what footage would fill it: tell the user, do not fill it with
-    something else.
+    something else. A plan with `structure="ad"` then plays the slots.
 
     Args:
         timeline_id: Timeline to propose for; omit for the newest build.
@@ -715,6 +716,11 @@ def propose_sections(
         product: What the product is called, as it is said in the footage,
             so that the sentences naming it and the clips described as
             showing it are offered for `product`. Only with `structure`.
+        aliases: What the speaker calls the product when its name is never
+            said, such as 「杯子」, as written in the utterances; without
+            them `product` offers nothing. Only words read in the footage
+            or given by the user; 「這個」 would offer every sentence. Only
+            with `structure`.
 
     Returns:
         A dictionary with the `timeline_id`, the `candidates` — each with the
@@ -730,10 +736,10 @@ def propose_sections(
 
     Raises:
         ValueError: If the timeline does not exist or its analyses are gone,
-            or a `product` is given without `structure`.
+            or a `product` or `aliases` is given without `structure`.
     """
-    if product is not None and structure is None:
-        raise ValueError('product only finds candidates for a commercial; pass structure="ad" with it')
+    if (product is not None or aliases) and structure is None:
+        raise ValueError('product and aliases only find candidates for a commercial; pass structure="ad" with them')
     timeline = _require_timeline(timeline_id)
     clips = _timeline_utterances(timeline)
     candidates = propose_candidates(clips, _timeline_analyses(timeline))
@@ -765,7 +771,7 @@ def propose_sections(
         ],
     }
     if structure == "ad":
-        offered = slot_candidates(clips, product)
+        offered = slot_candidates(clips, product, aliases or [])
         result["slots"] = [
             {
                 "slot": slot.value,
@@ -775,13 +781,13 @@ def propose_sections(
             for slot, found in offered.items()
         ]
         result["missing"] = missing_slots(offered)
-        result["slot_hash"] = slot_hash(offered, product)
+        result["slot_hash"] = slot_hash(offered, product, aliases or [])
         if timeline.ad_slots:
-            stored = slot_candidates(clips, timeline.ad_product)
             result["chosen"] = {
                 "slots": [choice.model_dump(mode="json") for choice in timeline.ad_slots],
                 "product": timeline.ad_product,
-                "current": slot_hash(stored, timeline.ad_product) == timeline.slot_hash,
+                "aliases": timeline.ad_aliases,
+                "current": stored_slots_current(timeline, clips),
             }
     return result
 
@@ -792,6 +798,7 @@ def set_sections(
     chosen_by: Optional[str] = None,
     slots: Optional[List[SlotChoice]] = None,
     product: Optional[str] = None,
+    aliases: Optional[List[str]] = None,
 ) -> dict:
     """Store the sections you chose from `propose_sections`, a commercial's slots, or both.
 
@@ -811,7 +818,9 @@ def set_sections(
     with no candidates cannot be given; it is footage to ask for. A slot you
     leave out is reported back, so leaving one out is a choice you can see.
     The assignment is pinned to the candidates it was chosen from, and
-    `propose_sections` says when they have changed since.
+    `propose_sections` says when they have changed since. A plan with
+    `structure="ad"` is checked against it, so changing which clip opens a
+    commercial is done here first, then in the plan's hook beat.
 
     Args:
         sections: The sections, in order, each with the utterance it opens on
@@ -824,6 +833,7 @@ def set_sections(
             `clip_ids` that fill it.
         product: The product name given to `propose_sections`, so the same
             candidates are checked against. Only with `slots`.
+        aliases: The aliases given to `propose_sections`, likewise.
 
     Returns:
         A dictionary with the `timeline_id`, how many `sections` were stored,
@@ -841,8 +851,8 @@ def set_sections(
         raise ValueError(
             "give at least one section or slot; to clear the sections, build the timeline again with rebuild"
         )
-    if product is not None and not slots:
-        raise ValueError("product only checks a commercial's slots; send it with slots")
+    if (product is not None or aliases) and not slots:
+        raise ValueError("product and aliases only check a commercial's slots; send them with slots")
     timeline = _require_timeline(timeline_id)
     clips = _timeline_utterances(timeline)
 
@@ -856,7 +866,7 @@ def set_sections(
     if slots:
         slots = [SlotChoice.model_validate(with_whole_clip_ids(choice.model_dump(mode="json"), timeline.id))
                  for choice in slots]
-        offered = slot_candidates(clips, product)
+        offered = slot_candidates(clips, product, aliases or [])
         problems += [f"slot {problem}" for problem in check_slots(slots, offered)]
     if problems:
         raise ValueError("nothing was stored:\n- " + "\n- ".join(problems))
@@ -866,8 +876,9 @@ def set_sections(
         timeline = timeline.model_copy(update={
             "ad_slots": slots,
             "ad_product": product,
+            "ad_aliases": list(aliases or []),
             "slots_by": chosen_by,
-            "slot_hash": slot_hash(offered, product),
+            "slot_hash": slot_hash(offered, product, aliases or []),
         })
         assigned = {choice.slot for choice in slots}
         result["slots"] = {
