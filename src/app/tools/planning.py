@@ -753,6 +753,27 @@ def _effect_operations(plan: EditPlan, project: Project, built: List[dict],
     """
     if plan.sound_effects is None or not plan.sound_effects.picks:
         return [], {}
+    scratch = scratch_cut(project, built, provenance)
+    kept ={tuple(clip.from_clip_ids): clip for track_id, clip in compiled_clips(project)
+            if track_id in SFX_TRACKS and clip.pinned}
+    picked = runtime.repo.get_assets({pick.asset_id for pick in plan.sound_effects.picks})
+    laid, made, problems = effect_operations(plan.sound_effects, effect_moments(scratch), picked,
+                                             {track.id for track in scratch.tracks}, plan.id, kept)
+    if problems:
+        raise ValueError("this plan's sound effects do not hold up:\n- " + "\n- ".join(problems))
+    return laid, made
+
+def scratch_cut(project: Project, built: List[dict], provenance: dict) -> Project:
+    """Build a compile's cut on a copy of the project, to read what it will be; nothing is saved.
+
+    Args:
+        project: The project as it is now.
+        built: The operations a compile makes.
+        provenance: Where each clip they make came from.
+
+    Returns:
+        The copy, with the cut built and each compiled clip saying what it was made of.
+    """
     scratch = project.model_copy(deep=True)
     operations = OPERATIONS.validate_python(built)
     named = {op.asset_id for op in operations if getattr(op, "asset_id", None)}
@@ -764,14 +785,7 @@ def _effect_operations(plan: EditPlan, project: Project, built: List[dict],
             origin = provenance.get(clip.id)
             if origin is not None and track.id in COMPILED_TRACKS:
                 clip.from_clip_ids = origin["from_clip_ids"]
-    kept = {tuple(clip.from_clip_ids): clip for track_id, clip in compiled_clips(project)
-            if track_id in SFX_TRACKS and clip.pinned}
-    picked = runtime.repo.get_assets({pick.asset_id for pick in plan.sound_effects.picks})
-    laid, made, problems = effect_operations(plan.sound_effects, effect_moments(scratch), picked,
-                                             {track.id for track in scratch.tracks}, plan.id, kept)
-    if problems:
-        raise ValueError("this plan's sound effects do not hold up:\n- " + "\n- ".join(problems))
-    return laid, made
+    return scratch
 
 def _songs_in(plan: EditPlan) -> List[dict]:
     """The songs a plan plays, each with how it sounds, to say when the plan is read back."""

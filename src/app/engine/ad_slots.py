@@ -408,6 +408,10 @@ def plan_slot_problems(plan: EditPlan, timeline: SemanticTimeline, utterances: S
             "the slots again before planning on them"
         )
     stored = {choice.slot.value: list(choice.clip_ids) for choice in timeline.ad_slots}
+    if plan.variant is not None:
+        offered = slot_candidates(utterances, timeline.ad_product, timeline.ad_aliases)
+        problems.extend(variant_slot_problems(plan.variant.slots, timeline.ad_slots, offered))
+        stored = {choice.slot.value: list(choice.clip_ids) for choice in plan.variant.slots}
     roles = {beat.id: beat.role for beat in plan.beats}
     order = {beat.id: index for index, beat in enumerate(plan.beats)}
     played: Dict[str, List[str]] = {}
@@ -435,5 +439,48 @@ def plan_slot_problems(plan: EditPlan, timeline: SemanticTimeline, utterances: S
                 f"slots: the {slot.value} beats play {', '.join(got)}, but {slot.value} was assigned "
                 f"{', '.join(want)}, in that order. Play those, or change the assignment with "
                 "set_sections(slots=...)"
+            )
+    return problems
+
+def _in_order(part: Sequence[str], whole: Sequence[str]) -> bool:
+    """Say whether every item of `part` is in `whole`, in the same order."""
+    rest = iter(whole)
+    return all(item in rest for item in part)
+
+def variant_slot_problems(
+    played: Sequence[SlotChoice],
+    stored: Sequence[SlotChoice],
+    offered: Dict[AdSlot, List[SlotCandidate]],
+) -> List[str]:
+    """Check that a variant's slots are a part of what was assigned, with any of the hooks offered.
+
+    A cut-down plays fewer of each slot's clips and never others, in the
+    order they were assigned; a hook test opens on another of the hook slot's
+    candidates. Anything else would be a new assignment, which is made with
+    `set_sections(slots=...)` and pinned there, not slipped in by a variant.
+
+    Args:
+        played: The slots the variant says it plays.
+        stored: The slots assigned on the timeline.
+        offered: The candidates offered now.
+
+    Returns:
+        One message per problem, empty when the variant keeps to the assignment.
+    """
+    assigned = {choice.slot: list(choice.clip_ids) for choice in stored}
+    hooks = {candidate.clip_id for candidate in offered[AdSlot.HOOK]}
+    problems: List[str] = []
+    for choice in played:
+        if choice.slot == AdSlot.HOOK:
+            stray = [clip_id for clip_id in choice.clip_ids
+                     if clip_id not in assigned.get(AdSlot.HOOK, []) and clip_id not in hooks]
+            if stray:
+                problems.append(f"slots: the variant opens on {', '.join(stray)}, which is not one of the hook "
+                                "slot's candidates; make the variants again from propose_ad_variants")
+        elif not _in_order(choice.clip_ids, assigned.get(choice.slot, [])):
+            problems.append(
+                f"slots: the variant plays {', '.join(choice.clip_ids)} as {choice.slot.value}, but "
+                f"{choice.slot.value} was assigned {', '.join(assigned.get(choice.slot, [])) or 'nothing'}; a "
+                "variant leaves clips out, it does not add or reorder them"
             )
     return problems

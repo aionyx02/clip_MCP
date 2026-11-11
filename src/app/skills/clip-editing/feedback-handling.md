@@ -69,6 +69,13 @@ one gets its own copy, and `plan_copied` says so — tell the user.
 version to start at, with a name in the user's words. It is a project of its
 own beside the first, which is left alone.
 
+A commercial's 「做 6／15／30 秒版」 or 「換幾個開頭來測」 is not: a branch cut down
+with `drop_selection` stops compiling, since an `ad` plan has to play every
+clip its slots were assigned. `propose_ad_variants` lists what can be had,
+and the lengths that cannot with why; read those back, then
+`make_ad_variants` with the ones picked, and `compare_variants` to show them
+side by side.
+
 A version can carry marks: `starred` and `published`, which the user sets in
 the editor's version panel or asks for (「把這版標起來」「這版發到 IG 了」 is
 `mark_version`), and `exported`, which a version rendered out wears by itself.
