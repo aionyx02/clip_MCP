@@ -2,7 +2,7 @@
 
 import os
 from datetime import datetime, timezone
-from typing import Annotated, Dict, Iterable, List, Optional, Tuple
+from typing import Annotated, Dict, Iterable, List, Literal, Optional, Tuple
 
 import numpy as np
 from fastmcp.tools import ToolResult
@@ -12,9 +12,11 @@ from pydantic import Field
 from app.models.media import Asset
 from app.models.plan import whole_clip_id, with_whole_clip_ids
 from app.models.semantic import (
-    ClipDescription, ClipKind, ClipLevel, SectionChoice, SemanticClip, SemanticTimeline, Tag, TagSource,
+    AdSlot, ClipDescription, ClipKind, ClipLevel, SectionChoice, SemanticClip, SemanticTimeline, SlotChoice, Tag,
+    TagSource,
 )
 from app.engine import meaning
+from app.engine.ad_slots import check_slots, missing_slots, slot_candidates, slot_hash
 from app.engine.analysis import unsure_words
 from app.engine.sections import build_sections, candidate_hash, check_sections, propose_candidates
 from app.engine.semantic import build_timeline, content_scores, maybe_one_person, timeline_input_hash, voice_seconds
@@ -647,8 +649,31 @@ def _timeline_analyses(timeline: SemanticTimeline) -> dict:
         raise ValueError(f"the analysis of {', '.join(missing)} is gone; analyze those assets and build the timeline again")
     return analyses
 
+def _slot_entry(candidate) -> dict:
+    """Describe one slot candidate for the model to choose by.
+
+    Args:
+        candidate: A `SlotCandidate`.
+
+    Returns:
+        Its `clip_id`, `asset_id`, times, text and what the rules found.
+    """
+    return {
+        "clip_id": candidate.clip_id,
+        "asset_id": candidate.asset_id,
+        "start": candidate.start,
+        "end": candidate.end,
+        "text": candidate.text,
+        "why": list(candidate.why),
+    }
+
 @mcp.tool()
-def propose_sections(timeline_id: Optional[str] = None, asset_id: Optional[str] = None) -> dict:
+def propose_sections(
+    timeline_id: Optional[str] = None,
+    asset_id: Optional[str] = None,
+    structure: Optional[Literal["ad"]] = None,
+    product: Optional[str] = None,
+) -> dict:
     """List the places a section could begin, for you to choose between.
 
     Sentences are too fine to plan from: an hour of talk is hundreds of them.
@@ -669,27 +694,52 @@ def propose_sections(timeline_id: Optional[str] = None, asset_id: Optional[str] 
     same subject. Topics are labels, not spans, so the same one can be used in
     different files and it is what answers "what is in this footage".
 
+    For a commercial — an ad, a sponsored segment, a product introduction —
+    pass `structure="ad"` as well. The result then also lists, for each place
+    in hook → problem → product → proof → cta, the utterances that could fill
+    it: a sentence said within three seconds for the hook, one about what
+    bothers the viewer, one naming or showing the product, one with a test or
+    a figure, one with a price or telling the viewer what to do. These are
+    found by rule and deliberately too many; none is ranked. Assign them with
+    `set_sections(slots=...)`. A place with no candidates is in `missing`,
+    with what footage would fill it: tell the user, do not fill it with
+    something else.
+
     Args:
         timeline_id: Timeline to propose for; omit for the newest build.
         asset_id: Show only one file's candidates and utterances. Candidates
             are always worked out over the whole timeline, so this changes
             what you read, not what you may choose.
+        structure: `"ad"` to also list the candidates for each place in a
+            commercial.
+        product: What the product is called, as it is said in the footage,
+            so that the sentences naming it and the clips described as
+            showing it are offered for `product`. Only with `structure`.
 
     Returns:
         A dictionary with the `timeline_id`, the `candidates` — each with the
         `after_clip_id` that would open the next section, its time, its
         `signals` and its `score` — and the `utterances` to read them against,
-        each with its `clip_id`, times, `kind` and text.
+        each with its `clip_id`, times, `kind` and text. With `structure`,
+        also `slots`, one per place in the order they play, each with its
+        `candidates` (`clip_id`, `asset_id`, times, `text`, and `why`, what
+        the rules found); `missing`, the places with none and what they need;
+        `slot_hash`, the fingerprint an assignment is pinned to; and `chosen`
+        when slots were assigned before, with `current` false if the
+        candidates have changed since.
 
     Raises:
-        ValueError: If the timeline does not exist or its analyses are gone.
+        ValueError: If the timeline does not exist or its analyses are gone,
+            or a `product` is given without `structure`.
     """
+    if product is not None and structure is None:
+        raise ValueError('product only finds candidates for a commercial; pass structure="ad" with it')
     timeline = _require_timeline(timeline_id)
     clips = _timeline_utterances(timeline)
     candidates = propose_candidates(clips, _timeline_analyses(timeline))
 
     shown = [clip for clip in clips if asset_id is None or clip.asset_id == asset_id]
-    return {
+    result = {
         "timeline_id": timeline.id,
         "candidates": [
             {
@@ -714,14 +764,36 @@ def propose_sections(timeline_id: Optional[str] = None, asset_id: Optional[str] 
             for clip in shown
         ],
     }
+    if structure == "ad":
+        offered = slot_candidates(clips, product)
+        result["slots"] = [
+            {
+                "slot": slot.value,
+                "candidates": [_slot_entry(candidate) for candidate in found
+                               if asset_id is None or candidate.asset_id == asset_id],
+            }
+            for slot, found in offered.items()
+        ]
+        result["missing"] = missing_slots(offered)
+        result["slot_hash"] = slot_hash(offered, product)
+        if timeline.ad_slots:
+            stored = slot_candidates(clips, timeline.ad_product)
+            result["chosen"] = {
+                "slots": [choice.model_dump(mode="json") for choice in timeline.ad_slots],
+                "product": timeline.ad_product,
+                "current": slot_hash(stored, timeline.ad_product) == timeline.slot_hash,
+            }
+    return result
 
 @mcp.tool()
 def set_sections(
-    sections: List[SectionChoice],
+    sections: Optional[List[SectionChoice]] = None,
     timeline_id: Optional[str] = None,
     chosen_by: Optional[str] = None,
+    slots: Optional[List[SlotChoice]] = None,
+    product: Optional[str] = None,
 ) -> dict:
-    """Store the sections you chose from `propose_sections`.
+    """Store the sections you chose from `propose_sections`, a commercial's slots, or both.
 
     Every utterance belongs to exactly one section, so the sections of a file
     follow one another with nothing left between them, and each one after the
@@ -730,7 +802,16 @@ def set_sections(
     without your say-so is a decision nobody made.
 
     Sections replace whatever was stored for this timeline before, so sending
-    a revised set is how you change your mind.
+    a revised set is how you change your mind. Slots work the same way and
+    are kept apart: sending only slots leaves the sections as they are.
+
+    Slots come from `propose_sections(structure="ad")`. Give them in the
+    order they play — hook, problem, product, proof, cta — each with the
+    clips that fill it, every one of them a candidate of that slot. A slot
+    with no candidates cannot be given; it is footage to ask for. A slot you
+    leave out is reported back, so leaving one out is a choice you can see.
+    The assignment is pinned to the candidates it was chosen from, and
+    `propose_sections` says when they have changed since.
 
     Args:
         sections: The sections, in order, each with the utterance it opens on
@@ -739,28 +820,64 @@ def set_sections(
         timeline_id: Timeline they belong to; omit for the newest build.
         chosen_by: What decided them, such as the model and version doing the
             reading. Stored alongside, so it is clear later what judged this.
+        slots: A commercial's places, in the order they play, each with the
+            `clip_ids` that fill it.
+        product: The product name given to `propose_sections`, so the same
+            candidates are checked against. Only with `slots`.
 
     Returns:
         A dictionary with the `timeline_id`, how many `sections` were stored,
         and `topics`, each with how many sections carry it and how many
-        seconds they cover between them.
+        seconds they cover between them. With `slots`, also `slots`: the
+        places `assigned`, the ones `left_out` although they had candidates,
+        and the `missing` ones with what footage they need.
 
     Raises:
-        ValueError: If the timeline does not exist, no sections were given, or
-            the sections do not cover the footage or start where they may. The
-            message lists every problem at once.
+        ValueError: If the timeline does not exist, neither sections nor
+            slots were given, or what was given does not hold up. The message
+            lists every problem at once, and nothing is stored.
     """
-    if not sections:
-        raise ValueError("give at least one section; to clear them, build the timeline again with rebuild")
+    if not sections and not slots:
+        raise ValueError(
+            "give at least one section or slot; to clear the sections, build the timeline again with rebuild"
+        )
+    if product is not None and not slots:
+        raise ValueError("product only checks a commercial's slots; send it with slots")
     timeline = _require_timeline(timeline_id)
-    sections = [SectionChoice.model_validate(with_whole_clip_ids(choice.model_dump(), timeline.id))
-                for choice in sections]
     clips = _timeline_utterances(timeline)
-    candidates = propose_candidates(clips, _timeline_analyses(timeline))
 
-    problems = check_sections([(choice.first_clip_id, choice.last_clip_id) for choice in sections], clips, candidates)
+    problems: List[str] = []
+    if sections:
+        sections = [SectionChoice.model_validate(with_whole_clip_ids(choice.model_dump(), timeline.id))
+                    for choice in sections]
+        candidates = propose_candidates(clips, _timeline_analyses(timeline))
+        problems += check_sections([(choice.first_clip_id, choice.last_clip_id) for choice in sections],
+                                   clips, candidates)
+    if slots:
+        slots = [SlotChoice.model_validate(with_whole_clip_ids(choice.model_dump(mode="json"), timeline.id))
+                 for choice in slots]
+        offered = slot_candidates(clips, product)
+        problems += [f"slot {problem}" for problem in check_slots(slots, offered)]
     if problems:
-        raise ValueError("these sections were not stored:\n- " + "\n- ".join(problems))
+        raise ValueError("nothing was stored:\n- " + "\n- ".join(problems))
+
+    result: dict = {"timeline_id": timeline.id, "sections": 0, "topics": {}}
+    if slots:
+        timeline = timeline.model_copy(update={
+            "ad_slots": slots,
+            "ad_product": product,
+            "slots_by": chosen_by,
+            "slot_hash": slot_hash(offered, product),
+        })
+        assigned = {choice.slot for choice in slots}
+        result["slots"] = {
+            "assigned": [choice.slot.value for choice in slots],
+            "left_out": [slot.value for slot in AdSlot if slot not in assigned and offered[slot]],
+            "missing": missing_slots(offered),
+        }
+    if not sections:
+        runtime.repo.update_semantic_timeline(timeline)
+        return result
 
     built, utterances = build_sections(timeline.id, clips, sections)
     timeline = timeline.model_copy(update={
@@ -776,7 +893,8 @@ def set_sections(
             entry = topics.setdefault(section.topic, {"sections": 0, "seconds": 0.0})
             entry["sections"] += 1
             entry["seconds"] = round(entry["seconds"] + section.duration, 3)
-    return {"timeline_id": timeline.id, "sections": len(built), "topics": topics}
+    result.update({"sections": len(built), "topics": topics})
+    return result
 
 @mcp.tool()
 def get_semantic_clip(clip_id: str, include_words: bool = False, timeline_id: Optional[str] = None) -> dict:

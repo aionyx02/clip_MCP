@@ -121,6 +121,21 @@ class SectionChoice(BaseModel):
     )
     summary: str = Field(default="", description="One line on what happens in it")
 
+class AdSlot(str, Enum):
+    """A place in a commercial's structure, in the order they play."""
+
+    HOOK = "hook"
+    PROBLEM = "problem"
+    PRODUCT = "product"
+    PROOF = "proof"
+    CTA = "cta"
+
+class SlotChoice(BaseModel):
+    """The clips chosen for one place in a commercial's structure."""
+
+    slot: AdSlot
+    clip_ids: List[str] = Field(..., min_length=1, description="Candidates of this slot, in the order they play")
+
 class SemanticTimeline(BaseModel):
     """One build of semantic clips over a set of assets.
 
@@ -146,4 +161,11 @@ class SemanticTimeline(BaseModel):
         default=None,
         description="Covers the candidate boundaries the sections were chosen from",
     )
+    ad_slots: List[SlotChoice] = Field(
+        default_factory=list,
+        description="The commercial structure chosen from the slot candidates, in the order it plays",
+    )
+    ad_product: Optional[str] = Field(default=None, description="The product name the slot candidates were found with")
+    slots_by: Optional[str] = Field(default=None, description="What assigned the slots, as the caller reported it")
+    slot_hash: Optional[str] = Field(default=None, description="Covers the slot candidates the slots were chosen from")
     built_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))

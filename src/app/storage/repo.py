@@ -976,6 +976,15 @@ class Repository:
                 (timeline.id, timeline.id),
             )
 
+    def update_semantic_timeline(self, timeline: SemanticTimeline) -> None:
+        """Store what is recorded about a timeline, leaving its clips as they are.
+
+        Args:
+            timeline: Timeline to store; it must have been saved before.
+        """
+        with self._transaction() as conn:
+            conn.execute("UPDATE semantic_timelines SET data = ? WHERE id = ?", (timeline.model_dump_json(), timeline.id))
+
     def clip_vectors(self, clip_ids: Iterable[str]) -> Dict[str, tuple]:
         """Read stored search vectors.
 
