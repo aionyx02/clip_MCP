@@ -7,7 +7,7 @@ import pytest
 from pydantic import TypeAdapter
 
 from app.models.media import MediaAnalysis, Rhythm
-from app.models.plan import BeatRole, Beat, BrollShot, EditPlan, MusicCue, MusicPlan, PlanAmendment, Selection
+from app.models.plan import BeatRole, Beat, EditPlan, MusicCue, MusicPlan, PlanAmendment, Selection
 from app.runtime import repo as runtime_repo
 from app.tools.catalog import import_asset
 from app.tools.editing import apply_edits, create_project, get_project
@@ -144,10 +144,15 @@ def compiled_project(planned: dict) -> str:
     compile_plan(project_id=project, expected_version=1, plan_id=planned["plan_id"])
     return project
 
-def test_covering_picture_compiles_onto_a_track_of_its_own(planned: dict, media: Path) -> None:
+def test_covering_picture_compiles_onto_a_track_of_its_own(planned: dict, media: Path,
+                                                           monkeypatch: pytest.MonkeyPatch) -> None:
     """Above the sequence, silent, and without changing how long the video runs."""
+    from app.engine import meaning
     from app.tools.planning import propose_broll
     from app.tools.timelines import build_semantic_timeline, query_clips
+    from test_meaning_search import _stand_in
+
+    monkeypatch.setattr(meaning, "embed", _stand_in)
 
     quiet = import_asset(str(media / "silent.mp4"))["id"]
     runtime_repo.save_analysis(analysis(duration=4.0, scenes=[(0.0, 4.0)], asset_id=quiet))
@@ -162,11 +167,17 @@ def test_covering_picture_compiles_onto_a_track_of_its_own(planned: dict, media:
         # The same two sentences the fixture chose: `wide.mp4` runs ten seconds and the
         # analysis describes twenty, so the later ones are not in the file at all.
         selections=[Selection(clip_id=speech[place]["clip_id"], beat_id="b1") for place in (0, 2)],
-        broll=[BrollShot(clip_id=cover["clip_id"], over_clip_id=speech[0]["clip_id"], seconds=1.5)],
     ))
     assert saved["problems"] == []
     # Nothing in this cut holds long enough to be worth offering something to cover it.
     assert propose_broll(saved["plan_id"])["slots"] == []
+    # Asked for, the first sentence is a stretch, and the silent file is offered over it.
+    offered = propose_broll(saved["plan_id"], over_clip_ids=[speech[0]["clip_id"]])
+    assert [item["clip_id"] for item in offered["slots"][0]["candidates"]] == [cover["clip_id"]]
+    picked = amend_plan(saved["plan_id"], 1, amendments({"action": "add_broll", "shot": {
+        "clip_id": cover["clip_id"], "over_clip_id": speech[0]["clip_id"], "seconds": 1.5,
+        "candidate_hash": offered["candidate_hash"]}}))
+    assert picked["problems"] == []
 
     project = create_project(name="測試", width=640, height=360)["id"]
     compile_plan(project_id=project, expected_version=1, plan_id=saved["plan_id"])
@@ -639,6 +650,18 @@ def test_a_piece_the_plan_steadies_is_steadied_on_the_timeline_and_kept_through_
     assert [clip["stabilize"] for clip in main_clips(project)] == [False, True]
     amend_plan(planned["plan_id"], 2, amendments({"action": "set_stabilize", "clip_id": second, "stabilize": False}))
     assert get_plan(planned["plan_id"])["plan"]["selections"][1].get("stabilize", False) is False
+
+def test_a_piece_the_plan_pushes_in_on_is_pushed_on_the_timeline_and_its_neighbour_is_not(planned: dict) -> None:
+    second = planned["clips"][2]["clip_id"]
+    result = amend_plan(planned["plan_id"], 1, amendments({"action": "set_motion", "clip_id": second}))
+    assert result["problems"] == []
+    motions = [selection.get("motion") for selection in get_plan(planned["plan_id"])["plan"]["selections"]]
+    assert motions == [None, "push"]
+    project = compiled_project(planned)
+    # Held still unless asked, which a video is: only the pushed piece moves.
+    assert [clip["motion"] for clip in main_clips(project)] == [None, "push"]
+    amend_plan(planned["plan_id"], 2, amendments({"action": "set_motion", "clip_id": second, "motion": None}))
+    assert get_plan(planned["plan_id"])["plan"]["selections"][1].get("motion") is None
 
 def test_songs_offered_for_every_part_at_once_are_each_written_into_their_own_cue(planned: dict, media: Path) -> None:
     from app.models.offer import OfferedSong

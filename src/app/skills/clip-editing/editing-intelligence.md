@@ -175,13 +175,21 @@ only for the mood establishes nothing, and that is fine.
 
 A second pass, after the rough cut is right. `propose_broll` says where the
 picture holds too long — one shot held on, or several in a row from the same
-file. Then find something that belongs over those words with `query_clips`,
-and add a shot with `add_broll`: the `clip_id` it plays from, the
-`over_clip_id` it starts over, and how many `seconds` it runs. The sound
-underneath keeps running, which is the whole point. The picture plays from the
-start of `clip_id`; when the moment to show is partway into a long take — the
-mechanism working, not the hands reaching for it — find it with `view_frames`
-and set `from_seconds` to where it begins.
+file — and offers the shots that could cover each stretch, with why each was
+offered; pass `over_clip_ids` for a line the user wants covered that it did
+not find. Pick from those, looking at the likely ones with `view_frames`, and
+add a shot with `add_broll`: the `clip_id` it plays from, the `over_clip_id`
+it starts over, how many `seconds` it runs, and the `candidate_hash`. A shot
+found any other way, such as with `query_clips`, is refused at compile; when
+nothing offered belongs there, tell the user rather than taking the nearest.
+The sound underneath keeps running, which is the whole point. The picture
+plays from the start of `clip_id`; when the moment to show is partway into a
+long take — the mechanism working, not the hands reaching for it — find it
+with `view_frames` and set `from_seconds` to where it begins.
+
+Shots nobody described are offered on their file name, or on when they were
+recorded, so the right one may not be among the eight. Describing the
+footage with `set_clip_tags` first is what puts it there.
 
 The server enforces the rest and refuses with a reason: a shot runs 1 to 6
 seconds, no more than 40% of a beat may be covered, two shots may not overlap,
@@ -194,9 +202,9 @@ do not say it, it is not known.
 ### One camera, nothing to cover it with
 
 A long stretch of one shot — someone talking to a single camera — comes back
-from `propose_broll`, and `query_clips` may find nothing that belongs over it.
-Do not cover it with another moment of the same take; that is the same picture
-again. Change the picture inside the shot instead, roughly in this order:
+from `propose_broll`, which may offer nothing that belongs over it (it never
+offers another moment of the same take, which is the same picture again).
+Change the picture inside the shot instead, roughly in this order:
 
 1. Shorten it: dead air first (`set_pacing`), then whole sentences
    (`drop_selection`, or a tighter `trim`).
@@ -211,8 +219,14 @@ again. Change the picture inside the shot instead, roughly in this order:
 3. Words over it, where the user asked for them: a headline over the line that
    matters (`set_selection_texts`).
 
-`motion` only moves photos; on a video clip it is refused. Video has no slow
-push-in yet, only the held `zoom` above.
+A slow push is the other way to change the picture inside one shot: `motion:
+"push"` closes in 8% over the clip, keeping the face where it is. In a
+compiled cut set it with `amend_plan` `set_motion`, so a recompile keeps it;
+every clip compiled from the piece pushes over its own length, which with the
+punch-in above gives the usual alternation of a push and a held closer shot.
+It is refused on a clip under 1.5 s, where it reads as a jolt. `check_render`
+lists under `moves` the clips it softens, footage shot at the output size
+enlarged at the end of the push: tell the user rather than dropping it.
 
 ## Music in a plan
 

@@ -11,7 +11,7 @@ from pydantic import Field, TypeAdapter
 
 from app.models.plan import (
     EditPlan, MusicCue, PlanAmendment, SetMusicCueOp, Trim, TrimKind, apply_amendment, describe_amendment,
-    with_whole_clip_ids,
+    whole_clip_id, with_whole_clip_ids,
 )
 from app.models.brand import BrandKit
 from app.models.offer import SongOffer
@@ -21,7 +21,9 @@ from app.models.timeline.parts import Project
 from app.engine import loudness, playback
 from app.engine.plan.beats import plan_pieces
 from app.engine.reframe import FRAME_SHAPES
-from app.engine.plan.broll import broll_covers, broll_slots
+from app.engine.library import FOOTAGE, library_of
+from app.engine.plan import broll_candidates as offering
+from app.engine.plan.broll import BROLL_MIN_SECONDS, broll_covers, broll_slots, stretch_over
 from app.engine.plan.checks import COMPILED_TRACKS, as_left, check_plan, check_recompile, compiled_clips, with_cards
 from app.engine.plan.effects import SFX_TRACKS, effect_moments, effect_operations
 from app.models.timeline.apply import apply_operation
@@ -161,7 +163,7 @@ def save_plan(plan: EditPlan, note: str = "", production_id: Optional[str] = Non
     stored = runtime.repo.save_plan(stamped, note)
     if production_id is not None:
         production.bind_plan(production_id, stored.id)
-    problems, notes = check_plan(stored, *_plan_context(stored), kit=_brand(stored))
+    problems, notes = check_plan(stored, *_plan_context(stored), kit=_brand(stored), broll_offers=_offers(stored))
     newest = runtime.repo.get_semantic_timeline(None)
     if newest is not None and newest.id != timeline.id:
         notes.append(Note(f"a newer timeline ({newest.id}) has been built since; this plan is about {timeline.id}",
@@ -429,7 +431,7 @@ def amend_plan(plan_id: str, expected_version: int, amendments: list[PlanAmendme
     for amendment in amendments:
         if isinstance(amendment, SetMusicCueOp) and amendment.asset_id is not None:
             _drop_picked_offers(stored, amendment)
-    problems, notes = check_plan(stored, *_plan_context(stored), kit=_brand(stored))
+    problems, notes = check_plan(stored, *_plan_context(stored), kit=_brand(stored), broll_offers=_offers(stored))
     return {
         "plan_id": stored.id,
         "version": stored.version,
@@ -549,7 +551,7 @@ def revert_plan(plan_id: str, to_version: int, expected_version: int, note: str 
         earlier.model_copy(update={"version": plan.version}),
         f"back to version {to_version}" + (f" — {note}" if note else ""),
     )
-    problems, notes = check_plan(stored, *_plan_context(stored), kit=_brand(stored))
+    problems, notes = check_plan(stored, *_plan_context(stored), kit=_brand(stored), broll_offers=_offers(stored))
     return {
         "plan_id": stored.id,
         "version": stored.version,
@@ -613,7 +615,7 @@ def validate_plan(plan_id: Optional[str] = None) -> dict:
     plan = _require_plan(plan_id)
     timeline, clips, children, assets, cuts = _plan_context(plan)
     kit = _brand(plan)
-    problems, notes = check_plan(plan, timeline, clips, children, assets, cuts, kit=kit)
+    problems, notes = check_plan(plan, timeline, clips, children, assets, cuts, kit=kit, broll_offers=_offers(plan))
     # Title cards in, as the compile lays them: only the plan's own and its brand kit's closing
     # card, with no project to say what else is on the cut.
     pieces = [] if problems else with_cards(plan, plan_pieces(plan, clips, children, assets, cuts), assets, cuts,
@@ -680,7 +682,7 @@ def compile_plan(project_id: str, expected_version: int, plan_id: Optional[str] 
     plan = _require_plan(plan_id)
     timeline, clips, children, assets, cuts = _plan_context(plan)
     kit = _brand(plan)
-    problems, notes = check_plan(plan, timeline, clips, children, assets, cuts, kit=kit)
+    problems, notes = check_plan(plan, timeline, clips, children, assets, cuts, kit=kit, broll_offers=_offers(plan))
     if problems:
         raise ValueError("this plan cannot be compiled yet:\n- " + "\n- ".join(problems))
 
@@ -1005,44 +1007,158 @@ def preview_plan_diff(
     )
     return ToolResult(content=["\n".join(lines), Image(data=image, format="jpeg")])
 
+def _meaning_of(texts: List[str], questions: List[str]) -> List[dict]:
+    """How close each text is in meaning to each question, as the search by `about` measures it.
+
+    Args:
+        texts: What each shot is known to show; repeats are embedded once.
+        questions: What is said under each stretch.
+
+    Returns:
+        One mapping per question, from text to its cosine.
+
+    Raises:
+        ValueError: If the model is not here and cannot be fetched.
+    """
+    import numpy as np
+
+    from app.engine import meaning
+
+    unique = list(dict.fromkeys(text for text in texts if text))
+    if not unique or not questions:
+        return [{} for _ in questions]
+    needed = meaning.download_size()
+    try:
+        passages = meaning.embed(unique)
+        asked = meaning.embed(questions, query=True)
+    except RuntimeError as error:
+        raise ValueError(
+            f"offering B-roll by what it shows needs the meaning search's model ({needed // meaning.models.MEGABYTE} "
+            f"MB to download once), which could not be fetched: {error}"
+        ) from error
+    scores = np.asarray(asked) @ np.asarray(passages).T
+    return [{text: float(score) for text, score in zip(unique, row)} for row in scores]
+
+def _offers(plan: EditPlan) -> dict:
+    """The B-roll offers a plan's shots name, keyed by hash."""
+    return runtime.repo.broll_offers(shot.candidate_hash for shot in plan.broll)
+
 @mcp.tool()
-def propose_broll(plan_id: Optional[str] = None) -> dict:
-    """List the places in a cut where covering picture would help.
+def propose_broll(plan_id: Optional[str] = None, over_clip_ids: Optional[List[str]] = None) -> dict:
+    """List the places in a cut where covering picture would help, and the shots that could cover each.
 
-    B-roll is a second pass over a rough cut, not something to write at the
-    same time as the selections: you have to be able to see where the picture
-    runs out of things to say before you can cover it. So plan the cut, then
-    come back here.
+    A second pass over a rough cut: plan the cut, then come back here.
 
-    What comes back is where, not what. Each slot is a stretch the picture
-    holds too long — one shot held on, or several in a row from the same file,
-    which is the same problem since the camera never moved. Finding footage
-    that belongs over those words is yours: search for it with `query_clips`
-    by `tag` or `text`, then put each shot in the plan with an `add_broll`
-    amendment, or by saving a plan with `broll` on it.
+    Each slot is a stretch the picture holds too long — one shot held on, or
+    several in a row from the same file, which is the same problem since the
+    camera never moved — or one you asked about with `over_clip_ids`, such as
+    the line where the user wants to see what is being talked about. Its
+    `candidates` are found by rule and on purpose too many: shots that are not
+    the same camera as the picture they would cover and not somebody talking
+    to camera, ordered by how close what each is known to show (description,
+    tags, file name and notes — not what is said in it) is to what is said
+    there: those sharing a word with it first, then by meaning. Each says `why` it was offered, what it shares with the words, how
+    long it `runs`, whether it `fits`, its shake, exposure and motion, and
+    `notes` (handheld, a brightness step, on screen nearby, already used),
+    and `also_near_the_top_over` other stretches. Shots nothing describes
+    are offered too, nearest in recording time to the talk, to be looked at
+    with `view_frames` before they are picked. `library` lists files in the
+    library but not this timeline whose name or notes share a word with what
+    is said; using one means building the timeline again with it.
 
-    What is deliberately not offered is "the sound is good but the picture is
-    weak". Weak means a threshold on the exposure and blur measurements, and
-    picking one against footage nobody has measured properly would be making a
-    number up. Those measurements are on every clip's `scores` if you want to
-    read them and decide yourself.
+    Which shot, if any, is yours and the user's to choose. Put each pick in
+    the plan with an `add_broll` amendment: `clip_id` from a stretch's
+    candidates, its `over_clip_id`, `seconds` up to the slot's, `from_seconds`
+    up to the candidate's `from_seconds_up_to`, and this `candidate_hash`.
+    The compile refuses, with the reason, a shot not among the candidates of
+    its stretch, or one whose stretch or footage has changed since — propose
+    again then. When none fits, say so rather than picking the nearest.
 
     Args:
         plan_id: Plan to read; omit for the one saved most recently.
+        over_clip_ids: Clips of the cut to offer shots over as well as the
+            stretches found, for a place the user or you want covered.
 
     Returns:
-        A dictionary with the `plan_id` and `slots`, worst first, each saying
-        the `over_clip_id` a shot would start over, the `seconds` it may run
-        there, how long the stretch `held_seconds`, and `why` it was offered.
-        Empty `slots` means nothing in the cut holds long enough to be worth
-        covering. A cut made of long static shots will have most of itself
-        offered back, which is the answer rather than a list to work through:
-        take the ones at the top.
+        A dictionary with the `plan_id`, the `candidate_hash`, and `slots`,
+        worst first and then the ones asked for, each with the
+        `over_clip_id` a shot would start over, the `seconds` it may run
+        there, `why` it was offered, what is `said` under it, its
+        `candidates`, `left_out` (how many clips each rule left out),
+        `spread` (the highest, median and lowest meaning, close together
+        when nothing stood out) and `library`. `refused` says why a clip asked
+        for has no slot. Empty `slots` means nothing holds long enough.
 
     Raises:
-        ValueError: If the plan does not exist, or its timeline is gone.
+        ValueError: If the plan does not exist, or its timeline is gone, or
+            the meaning search's model cannot be fetched.
     """
     plan = _require_plan(plan_id)
-    _, clips, children, assets, cuts = _plan_context(plan)
+    timeline, clips, children, assets, cuts = _plan_context(plan)
     pieces = with_cards(plan, plan_pieces(plan, clips, children, assets, cuts), assets, cuts, None, _brand(plan))
-    return {"plan_id": plan.id, "slots": broll_slots(plan, pieces, clips, cuts)}
+    slots = broll_slots(plan, pieces, clips, cuts)
+    refused = {}
+    for clip_id in over_clip_ids or []:
+        whole = whole_clip_id(clip_id, plan.timeline_id)
+        if any(slot["over_clip_id"] == whole for slot in slots):
+            continue
+        found, why = stretch_over(plan, pieces, clips, whole, cuts)
+        if found is None:
+            refused[whole] = why
+            continue
+        slots.append({"over_clip_id": whole, "seconds": found.seconds, "held_seconds": None, "why": "asked for"})
+    if not slots:
+        return {"plan_id": plan.id, "slots": [], **({"refused": refused} if refused else {})}
+
+    footage = shared.dated(runtime.repo.get_assets({clip.asset_id for clip in clips.values()}))
+    pool = offering.eligible(list(clips.values()), footage)
+    signature = offering.pool_signature(pool, footage)
+    stretches = []
+    for slot in list(slots):
+        found, why = stretch_over(plan, pieces, clips, slot["over_clip_id"], cuts)
+        if found is None:
+            refused[slot["over_clip_id"]] = why
+            slots.remove(slot)
+        else:
+            stretches.append(found)
+    if not slots:
+        return {"plan_id": plan.id, "slots": [], "refused": refused}
+    texts = {clip.id: offering.reading(clip, footage[clip.asset_id]) for clip in pool}
+    elsewhere = [asset for asset in runtime.repo.list_assets()
+                 if asset.id not in footage and asset.has_video and library_of(asset) == FOOTAGE
+                 and asset.duration is not None and float(asset.duration) >= BROLL_MIN_SECONDS
+                 and (offering.file_label(asset) or asset.notes)]
+    library_texts = {asset.id: "\n".join(part for part in (offering.file_label(asset), asset.notes) if part)
+                     for asset in elsewhere}
+    asked = [stretch.said for stretch in stretches if stretch.said]
+    closeness = iter(_meaning_of([*texts.values(), *library_texts.values()], asked))
+
+    offered = {}
+    for slot, stretch in zip(slots, stretches):
+        near = next(closeness) if stretch.said else None
+        meaning = {clip_id: near[text] for clip_id, text in texts.items() if text} if near is not None else None
+        talk = footage.get(clips[stretch.over_clip_id].asset_id)
+        candidates, left_out, spread = offering.offer_candidates(
+            stretch, plan, pieces, pool, footage, meaning, talk.recorded_at if talk is not None else None)
+        slot.update({"said": stretch.said, "candidates": candidates, "left_out": left_out})
+        if spread is not None:
+            slot["spread"] = spread
+        if near is not None and elsewhere:
+            # Only files whose name or notes share a word with what is said: a second tier offered
+            # on meaning alone, a few hundredths apart, would be whatever the library holds.
+            ranked = sorted((asset for asset in elsewhere
+                             if offering.matched_words(stretch.said, library_texts[asset.id])),
+                            key=lambda asset: -near[library_texts[asset.id]])
+            slot["library"] = [
+                {"asset_id": asset.id, "file": os.path.basename(asset.path), "runs": round(float(asset.duration), 2),
+                 "meaning": round(near[library_texts[asset.id]], 3),
+                 "matched": offering.matched_words(stretch.said, library_texts[asset.id]),
+                 "to_use": "not in this timeline: build the timeline again with this file added, and plan on that"}
+                for asset in ranked[:offering.LIBRARY_PER_STRETCH]
+            ]
+        offered[stretch.over_clip_id] = offering.stretch_for_offer(stretch, candidates, timeline, signature)
+    offering.mark_variety(slots)
+    hashed = offering.candidate_hash(offered)
+    runtime.repo.save_broll_offer(hashed, plan.id, {"plan_id": plan.id, "timeline_id": timeline.id,
+                                                    "stretches": offered})
+    return {"plan_id": plan.id, "candidate_hash": hashed, "slots": slots, **({"refused": refused} if refused else {})}

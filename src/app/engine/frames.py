@@ -237,14 +237,35 @@ def _crop_to_aspect(frame: Image.Image, aspect: float, placed: Optional[Placemen
         scale = min(background.width / width, background.height / height)
         shown = frame.resize((max(1, round(width * scale)), max(1, round(height * scale))), Image.LANCZOS)
         background.paste(shown, ((background.width - shown.width) // 2, (background.height - shown.height) // 2))
-        return background
+        return _moved(background, placed.window)
     wide = width > height * aspect
     kept_w = max(1, round((height * aspect if wide else width) / placed.zoom))
     kept_h = max(1, round((height if wide else width / aspect) / placed.zoom))
     across, down = (placed.centre, placed.cross) if wide else (placed.cross, placed.centre)
     left = min(max(0, round(across * width - kept_w / 2)), width - kept_w)
     top = min(max(0, round(down * height - kept_h / 2)), height - kept_h)
-    return frame.crop((left, top, left + kept_w, top + kept_h))
+    return _moved(frame.crop((left, top, left + kept_w, top + kept_h)), placed.window)
+
+def _moved(picture: Image.Image, window: Tuple[float, float, float]) -> Image.Image:
+    """Take the part of a placed picture a move has on screen, as `moves.window_at` gives it.
+
+    Cut between pixels where the window falls between them and kept at the
+    picture's size, the way the render's `perspective` stretches the window
+    to the frame.
+
+    Args:
+        picture: The picture, placed in its box.
+        window: `(zoom, left, top)`, the left and top as fractions of it.
+
+    Returns:
+        The picture as the move shows it; the same picture when it holds still.
+    """
+    zoom, left, top = window
+    if zoom == 1:
+        return picture
+    width, height = picture.size
+    box = (left * width, top * height, (left + 1 / zoom) * width, (top + 1 / zoom) * height)
+    return picture.resize(picture.size, Image.LANCZOS, box=box)
 
 def still(
     path: str,

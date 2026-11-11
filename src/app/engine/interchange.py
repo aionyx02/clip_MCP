@@ -25,6 +25,7 @@ from pathlib import Path
 from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 from xml.sax.saxutils import quoteattr
 
+from app.engine import moves
 from app.models.media import Asset
 from app.models.timeline.parts import Clip, PlacedCue, Project, TrackType
 
@@ -125,9 +126,11 @@ def left_behind(project: Project, carried: Sequence[str] = (), assets: Optional[
             if clip.fit is not None:
                 uses.setdefault("how a shot of another shape sits — where it is cropped, how far it is zoomed, "
                                 "or shown whole (it comes across cropped from the middle)", []).append(clip.id)
-            photo = (assets or {}).get(clip.asset_id)
-            if photo is not None and photo.still and clip.card is None and clip.motion != "none":
-                uses.setdefault("photos moving while on screen (they come across still)", []).append(clip.id)
+            source = (assets or {}).get(clip.asset_id)
+            if source is not None and moves.motion_of(clip, source.still) != "none":
+                kind = ("photos moving while on screen (they come across still)" if source.still
+                        else "slow pushes, pulls and pans over video (they come across held still)")
+                uses.setdefault(kind, []).append(clip.id)
     lines = [f"{kind}: {', '.join(clips[:6])}{' …' if len(clips) > 6 else ''}" for kind, clips in uses.items()]
     if project.subtitles:
         lines.append("captions (export them separately as SRT)")

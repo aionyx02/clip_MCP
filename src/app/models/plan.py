@@ -22,7 +22,7 @@ from pydantic import BaseModel, Field, model_validator
 
 from app.models.semantic import SlotChoice
 from app.models.timeline.parts import (
-    COLOUR, TITLE_CARD_LONGEST, TITLE_CARD_SECONDS, TITLE_CARD_SHORTEST, CardBackground, TextStyle,
+    COLOUR, TITLE_CARD_LONGEST, TITLE_CARD_SECONDS, TITLE_CARD_SHORTEST, CardBackground, Motion, TextStyle,
 )
 
 def _utc_now() -> datetime:
@@ -438,6 +438,13 @@ class Selection(BaseModel):
         description="Steady this piece's handheld picture. The picture is enlarged a little to hide the moving "
                     "edges, so leave it off where the shake is wanted or the edges of the frame matter",
     )
+    motion: Optional[Motion] = Field(
+        default=None,
+        description="Move this piece's picture slowly over its length: `push` closes in on the speaker's face, "
+                    "for one camera talking a long time; `pull`, `pan_left` or `pan_right`. Each clip the compile "
+                    "makes of the piece moves over its own length, so a pause cut out of it starts the move "
+                    "again. Null holds video still and slowly pushes a photo",
+    )
     texts: List[PlanText] = Field(
         default_factory=list,
         description="Words over this piece — a name, a place, a headline. Only when the user asked for them",
@@ -515,6 +522,12 @@ class BrollShot(BaseModel):
                     "long take — the thing working, not the hands setting it up. 0 plays it from its start",
     )
     rationale: str = Field(default="", description="What this picture is doing here")
+    candidate_hash: str = Field(
+        default="",
+        description="The `candidate_hash` `propose_broll` gave with the candidates this was picked from. `clip_id` "
+                    "has to be one of those offered over `over_clip_id`; a shot without one, or from an offer whose "
+                    "stretch or footage has changed since, is refused at compile",
+    )
 
 class MusicCue(BaseModel):
     """One piece of music, from where one part of the video begins until the next cue takes over.
@@ -842,6 +855,13 @@ class SetStabilizeOp(BaseModel):
     clip_id: str = Field(..., description="Semantic clip whose selection is steadied")
     stabilize: bool = Field(default=True, description="As on a selection; false leaves it as shot")
 
+class SetMotionOp(BaseModel):
+    """Amendment that moves one selection's picture slowly, or holds it, for 「這段慢慢推近」."""
+
+    action: Literal["set_motion"] = "set_motion"
+    clip_id: str = Field(..., description="Semantic clip whose selection moves")
+    motion: Optional[Motion] = Field(default="push", description="As on a selection; null for as the file decides")
+
 class SetBeatJoinOp(BaseModel):
     """Amendment that changes how the picture and the sound pass into a beat from the one before."""
 
@@ -884,7 +904,8 @@ PlanAmendment = Annotated[
     Union[
         SetTrimOp, SetRationaleOp, AddSelectionOp, DropSelectionOp, AddBrollOp, DropBrollOp,
         SetPacingOp, SetMusicLevelOp, SetMusicCueOp, SetTargetOp, DropBeatOp, SetPlaybackOp, SetBeatJoinOp,
-        SetStabilizeOp, SetBeatTitleOp, SetSelectionTextsOp, SetFactsOp, SetKnowledgeOp, SetSoundEffectsOp,
+        SetStabilizeOp, SetMotionOp, SetBeatTitleOp, SetSelectionTextsOp, SetFactsOp, SetKnowledgeOp,
+        SetSoundEffectsOp,
     ],
     Field(discriminator="action"),
 ]
@@ -924,6 +945,8 @@ def describe_amendment(op: "PlanAmendment") -> str:
         return f"{op.clip_id} plays at x{op.speed or 1:g}, volume {1 if op.volume is None else op.volume:g}"
     if isinstance(op, SetStabilizeOp):
         return f"{op.clip_id} {'steadied' if op.stabilize else 'left as shot'}"
+    if isinstance(op, SetMotionOp):
+        return f"{op.clip_id} moves: {op.motion or 'as its file decides'}"
     if isinstance(op, SetBeatJoinOp):
         joined = op.transition_in.kind if op.transition_in else "a straight cut"
         return (f"{op.beat_id} comes in on {joined}" + (f", sound {op.sound_lead:g}s early" if op.sound_lead else "")
@@ -1008,6 +1031,10 @@ def apply_amendment(plan: EditPlan, op: PlanAmendment) -> None:
 
     if isinstance(op, SetStabilizeOp):
         plan.selections[_selection_index(plan, op.clip_id)].stabilize = op.stabilize
+        return
+
+    if isinstance(op, SetMotionOp):
+        plan.selections[_selection_index(plan, op.clip_id)].motion = op.motion
         return
 
     if isinstance(op, SetBeatTitleOp):

@@ -23,7 +23,7 @@ from app.engine.builder import (
     DUCK_ATTACK_SECONDS, DUCK_DEPTH_DB, DUCK_HOLD_SECONDS, DUCK_RELEASE_SECONDS, Talking, _cleanup_filters,
     corner_logo, overlay_box,
 )
-from app.engine import cards, stills, texts
+from app.engine import cards, moves, stills, texts
 from app.engine.ffmpeg import exact_stretch_args
 from app.engine.reframe import Framing
 from app.engine.subtitles import drawn_captions, place_cues
@@ -275,10 +275,14 @@ def describe(
                 left, top, width, height = overlay_box(clip, project.width, project.height)
                 entry["box"] = [left, top, width, height]
                 entry["source_size"] = [asset.width, asset.height] if asset.width and asset.height else None
-                entry["crop"] = _crop(framing.get(clip.id), clip, fps)
-                if asset.still and clip.card is None:
-                    entry["motion"] = stills.motion_of(clip.motion)
+                framed = framing.get(clip.id)
+                entry["crop"] = _crop(framed, clip, fps)
+                motion = moves.motion_of(clip, asset.still)
+                if motion != "none" or (asset.still and clip.card is None):
+                    # Moved over its placed picture, the way the render's `perspective` moves it.
+                    entry["motion"] = motion
                     entry["motion_amount"] = stills.MOTION_AMOUNT
+                    entry["anchor"] = list(framed.anchor if framed is not None else moves.MIDDLE)
                 if clip.card is not None:
                     entry["card"] = {"background": clip.card.background, "colour": clip.card.colour,
                                      "at": _seconds(clip.card.at)}

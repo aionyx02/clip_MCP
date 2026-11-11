@@ -757,6 +757,7 @@ def check_plan(
     assets: Mapping[str, Asset],
     cuts: Optional[Mapping[str, CleanCuts]] = None,
     kit: Optional[BrandKit] = None,
+    broll_offers: Optional[Mapping[str, Mapping]] = None,
 ) -> Tuple[List[str], List[str]]:
     """Check a plan against the footage it claims to be made of.
 
@@ -770,6 +771,9 @@ def check_plan(
             asset ID.
         kit: The brand kit the plan names, as kept; None when it names none
             or one that is not kept, which is a problem.
+        broll_offers: The B-roll offers the plan's shots name, keyed by
+            `candidate_hash`, for refusing a shot that was not offered. None
+            leaves that unchecked, for laying a plan out rather than compiling it.
 
     Returns:
         `(problems, notes)`. A problem stops the plan compiling; a note is
@@ -985,6 +989,10 @@ def check_plan(
         _, covering, said = broll_covers(plan, played, clips, assets, cuts)
         problems.extend(covering)
         notes.extend(said)
+        if broll_offers is not None:
+            from app.engine.plan.broll_candidates import broll_pick_problems
+
+            problems.extend(broll_pick_problems(plan, played, clips, assets, timeline, broll_offers, cuts))
         cut_to = plan.variant.target_seconds if plan.variant is not None else None
         if cut_to:
             low, high = window(cut_to)
