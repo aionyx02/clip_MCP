@@ -218,12 +218,15 @@ class CaptionStyle(BaseModel):
         default=0.08, ge=0, lt=0.5, description="Margin at each side, as a fraction of the width",
     )
     outline_fraction: float = Field(
-        default=1 / 16, ge=0, le=0.5, description="Outline thickness as a fraction of the text size",
+        default=0, ge=0, le=0.5,
+        description="Outline thickness as a fraction of the text size; 0, the default, is plain white text "
+                    "with no outline and no shadow. Add one when the user asks for it",
     )
     karaoke: bool = Field(
         default=False,
-        description="Light each word as it is said, rather than showing the whole caption at once. Needs the "
-                    "word timings `generate_subtitles` puts on a caption; one without them lights up whole",
+        description="Light each word as it is said, rather than showing the whole caption at once. Off in "
+                    "every preset; only when the user asks for it. Needs the word timings `generate_subtitles` "
+                    "puts on a caption; one without them lights up whole",
     )
     speaker_mark: SpeakerMark = Field(
         default=SpeakerMark.OFF,
@@ -258,31 +261,26 @@ class CaptionStyle(BaseModel):
 # Provisional (roadmap §13): `CaptionStyle.min_seconds` above — how long a caption has to stay
 # on screen to be read.
 
-# Where each platform's own furniture sits over the picture, how large text has to be to
-# read on a phone held at arm's length, and how heavy an outline it takes to stay legible
-# there. A phone is watched over whatever the footage is doing, so the vertical presets
-# carry more outline than the one meant for a screen. Conventions, not measurements: they
-# move when the apps move, which is why they are in one place.
+# Where each platform's own furniture sits over the picture, and how large text has to be to
+# read on a phone held at arm's length. Every preset draws plain white words, with no outline
+# and no word-by-word lighting: that is what the user wants by default, and either is asked
+# for on top of a preset. Conventions, not measurements: they move when the apps move, which
+# is why they are in one place.
 CAPTION_PRESETS: Dict[str, CaptionStyle] = {
     # What the server did before there were presets: clear of a phone's controls on a
     # vertical video, lower on a landscape one.
     "plain": CaptionStyle(),
     # Landscape, watched on a screen rather than held: smaller text, and only the player's
     # own control bar to stay above.
-    "youtube": CaptionStyle(size_fraction=1 / 20, bottom_fraction=0.10, side_fraction=0.10,
-                            outline_fraction=1 / 18),
+    "youtube": CaptionStyle(size_fraction=1 / 20, bottom_fraction=0.10, side_fraction=0.10),
     # The caption, the handle and the audio credit take the bottom of a Reel. Captions sit
     # just above them rather than clear of the whole stack: one line placed low is what
     # captioned short video looks like, and a block halfway up the frame covers the subject.
-    "reels": CaptionStyle(size_fraction=1 / 16, bottom_fraction=0.16, side_fraction=0.08,
-                          outline_fraction=1 / 10, karaoke=True),
+    "reels": CaptionStyle(size_fraction=1 / 16, bottom_fraction=0.16, side_fraction=0.08),
     # Same again, and the buttons up the right-hand side push the safe area in further.
-    "tiktok": CaptionStyle(size_fraction=1 / 15, bottom_fraction=0.18, side_fraction=0.10,
-                           outline_fraction=1 / 9, karaoke=True),
-    # A vertical video minutes long — a podcast episode, a vlog. The Reels safe area, without
-    # words lighting up: over a few minutes that reads as a gimmick, not as emphasis.
-    "vertical": CaptionStyle(size_fraction=1 / 16, bottom_fraction=0.16, side_fraction=0.08,
-                             outline_fraction=1 / 10),
+    "tiktok": CaptionStyle(size_fraction=1 / 15, bottom_fraction=0.18, side_fraction=0.10),
+    # A vertical video minutes long — a podcast episode, a vlog: the Reels safe area.
+    "vertical": CaptionStyle(size_fraction=1 / 16, bottom_fraction=0.16, side_fraction=0.08),
 }
 
 class ClipFit(BaseModel):
