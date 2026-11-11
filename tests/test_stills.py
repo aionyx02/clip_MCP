@@ -24,12 +24,16 @@ def photo(tmp_path: Path) -> Path:
 
 
 def test_a_photo_moves_the_way_it_was_told() -> None:
-    assert stills.motion_at(None, 0) == (1.0, 0.5)
-    assert stills.motion_at("push", 1)[0] == pytest.approx(1 + stills.MOTION_AMOUNT)
-    assert stills.motion_at("pull", 1)[0] == pytest.approx(1.0)
-    assert stills.motion_at("pan_left", 0.25) == (pytest.approx(1 + stills.MOTION_AMOUNT), 0.25)
-    assert stills.motion_at("none", 0.7) == (1.0, 0.5)
-    assert "d=120:s=1920x1080:fps=30" in stills.zoompan("push", 120, 1920, 1080, "30")
+    from app.engine import moves
+
+    assert moves.window_at(stills.motion_of(None), 0) == (1.0, 0.0, 0.0)
+    assert moves.window_at("push", 1)[0] == pytest.approx(1 + stills.MOTION_AMOUNT)
+    assert moves.window_at("pull", 1)[0] == pytest.approx(1.0)
+    room = 1 - 1 / (1 + stills.MOTION_AMOUNT)
+    assert moves.window_at("pan_left", 0.25) == (pytest.approx(1 + stills.MOTION_AMOUNT), pytest.approx(0.25 * room),
+                                                 pytest.approx(0.5 * room))
+    assert moves.window_at("none", 0.7) == (1.0, 0.0, 0.0)
+    assert stills.held(120, 1920, 1080, "30").endswith("d=120:s=1920x1080:fps=30")
 
 
 def test_a_photo_is_added_as_a_photo(photo: Path) -> None:
@@ -95,10 +99,9 @@ def test_the_editor_plays_a_photo_from_the_file_itself(photo: Path) -> None:
     assert shown["waiting"] == [] and playback.missing(stored, assets, []) == []
 
 
-def test_motion_on_a_video_clip_is_refused_with_what_to_use_instead(media: Path) -> None:
-    # Taken and ignored, a push-in asked of video would never show up in the render.
+def test_a_video_clip_told_to_push_keeps_it(media: Path) -> None:
+    # Once refused, since nothing drew it; a push on video is now drawn the way a photo's is.
     asset = catalog.import_asset(str(media / "wide.mp4"))["id"]
     project = build_project([video_track(), insert("a", asset, 0, 2)], width=320, height=180, name="影片推近")
-    with pytest.raises(ValueError, match="motion only moves a photo.*zoom"):
-        edit(project, [{"action": "set_clip_look", "track_id": "main", "clip_id": "a", "motion": "push"}])
-    assert clips_of(project, "main")[0]["motion"] is None
+    edit(project, [{"action": "set_clip_look", "track_id": "main", "clip_id": "a", "motion": "push"}])
+    assert clips_of(project, "main")[0]["motion"] == "push"

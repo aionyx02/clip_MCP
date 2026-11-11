@@ -11,7 +11,7 @@ from decimal import Decimal
 from fractions import Fraction
 from statistics import median
 from typing import Callable, Dict, FrozenSet, List, Mapping, Optional, Sequence, Tuple
-from app.engine import cards, loudness, resources, stills
+from app.engine import cards, loudness, moves, resources, stills
 from app.engine.ffmpeg import escape_filter_path, hidden_window_flags
 from app.engine.reframe import Framing, crop_filter
 from app.models.media import Asset, MediaAnalysis
@@ -780,6 +780,7 @@ def _picture_chain(
     framing: Optional[Framing],
     still: bool = False,
     transforms: Optional[str] = None,
+    source: Optional[Tuple[int, int]] = None,
 ) -> str:
     """Build everything that turns a clip's decoded source into its picture.
 
@@ -795,14 +796,17 @@ def _picture_chain(
         width: Width of the box it fills.
         height: Height of the box it fills.
         fps: Output frame rate.
-        framing: Where its crop sits, or None for the middle.
-        still: The source is a photo: one picture, placed at twice the box
-            so the move over it stays sharp, then moved for as many frames
-            as the clip has. Its speed means nothing.
+        framing: Where its crop sits, or None for the middle; also which
+            point a moving video clip closes in on.
+        still: The source is a photo: one picture, held for as many frames
+            as the clip has and moved over the way video is. Its speed means
+            nothing.
         transforms: The transforms that steady it, measured on the frames
             `_source_frames` makes; None leaves it as shot. Applied before it
             is placed, so steadying crops the whole frame and the framing
             then crops from that.
+        source: The picture's `(width, height)`, which says how much detail
+            a move can close in on; None places a moving clip at its box.
 
     Returns:
         The filters, without input or output labels.
@@ -813,23 +817,75 @@ def _picture_chain(
         return (
             f"trim=end_frame=1,{_placed(clip, 2 * width, 2 * height, framing)},"
             f"{cards.backdrop_filter(clip.card, 2 * width, 2 * height)},"
-            f"{stills.zoompan('none', frames, width, height, rate)},setsar=1,format=yuv420p,"
+            f"{stills.held(frames, width, height, rate)},setsar=1,format=yuv420p,"
             f"trim=end_frame={frames},setpts=PTS-STARTPTS"
             f"{_clip_video_filter(clip, frames, fps)}"
         )
-    if still:
+    motion = moves.motion_of(clip, still)
+    if motion == "none":
+        if still:
+            # Placed at twice the box and brought down to it, for as many frames as the clip has.
+            return (
+                f"{_placed(clip, 2 * width, 2 * height, framing)},"
+                f"{stills.held(frames, width, height, rate)},setsar=1,format=yuv420p,"
+                f"trim=end_frame={frames},setpts=PTS-STARTPTS"
+                f"{_clip_video_filter(clip, frames, fps)}"
+            )
         return (
-            f"{_placed(clip, 2 * width, 2 * height, framing)},"
-            f"{stills.zoompan(clip.motion, frames, width, height, rate)},setsar=1,format=yuv420p,"
-            f"trim=end_frame={frames},setpts=PTS-STARTPTS"
+            f"{_source_frames(clip, fps)}{_steadied(transforms)},"
+            f"{_placed(clip, width, height, framing)},setsar=1,format=yuv420p,"
+            f"tpad=stop_mode=clone:stop_duration=1,trim=end_frame={frames},setpts=PTS-STARTPTS"
             f"{_clip_video_filter(clip, frames, fps)}"
         )
+    # Moved once it is placed and cut to its frames, so the move closes in on the box the framing
+    # chose, steadying has already cropped, and the move spans exactly the frames on screen. It is
+    # placed as much larger than the box as the move closes in, where the source has the pixels,
+    # so the closest frame of the move is the source's own detail rather than an enlargement.
+    room = move_room(clip, width, height, framing, source)
+    placed_width, placed_height = 2 * math.ceil(width * room / 2), 2 * math.ceil(height * room / 2)
+    move = moves.perspective(motion, frames, framing.anchor if framing is not None else moves.MIDDLE)
+    brought = f",scale={width}:{height},setsar=1" if (placed_width, placed_height) != (width, height) else ""
+    if still:
+        # One picture, held for as many frames as the clip has, then moved over.
+        held = (f"loop=loop={max(0, frames - 1)}:size=1,setpts=N/({rate})/TB,fps={rate},"
+                f"trim=end_frame={frames},setpts=PTS-STARTPTS")
+    else:
+        held = (f"tpad=stop_mode=clone:stop_duration=1,trim=end_frame={frames},setpts=PTS-STARTPTS")
+    head = "" if still else f"{_source_frames(clip, fps)}{_steadied(transforms)},"
     return (
-        f"{_source_frames(clip, fps)}{_steadied(transforms)},"
-        f"{_placed(clip, width, height, framing)},setsar=1,format=yuv420p,"
-        f"tpad=stop_mode=clone:stop_duration=1,trim=end_frame={frames},setpts=PTS-STARTPTS"
-        f"{_clip_video_filter(clip, frames, fps)}"
+        f"{head}{_placed(clip, placed_width, placed_height, framing)},setsar=1,format=yuv420p,{held},"
+        f"{move}{brought}{_clip_video_filter(clip, frames, fps)}"
     )
+
+def move_room(
+    clip: Clip,
+    width: int,
+    height: int,
+    framing: Optional[Framing],
+    source: Optional[Tuple[int, int]],
+) -> float:
+    """Say how much larger than its box a moving clip's picture is placed before it is moved.
+
+    As much larger as the move closes in, `1 + MOTION_AMOUNT`, when the
+    source has that many pixels to spare at its framing, and less, down to
+    the box itself, when it has fewer: placing footage shot at the output
+    size any larger would only enlarge it twice.
+
+    Args:
+        clip: The clip.
+        width: Width of its box.
+        height: Height of its box.
+        framing: How it is placed, or None for a crop from the middle.
+        source: The picture's `(width, height)`, or None when not known.
+
+    Returns:
+        The factor, from 1 to `1 + MOTION_AMOUNT`.
+    """
+    if not source or not source[0] or not source[1]:
+        return 1.0
+    fitted = min if framing is not None and framing.whole else max
+    scale = fitted(width / source[0], height / source[1]) * (framing.zoom if framing is not None else 1.0)
+    return min(1 + stills.MOTION_AMOUNT, max(1.0, 1 / scale))
 
 def _clip_video_filter(clip: Clip, frames: int, fps: Fraction) -> str:
     """Build the look part of a clip's video chain: its colour and its fades.
@@ -1039,7 +1095,8 @@ class FFmpegRenderer:
         args = _input_args(clip, asset, frames, fps)
         steady = clip.stabilize and not asset.still and clip.card is None
         transforms = self._transforms(pieces, clip, asset, args, fps, frames, transforms_dir) if steady else None
-        chain = _picture_chain(clip, frames, box[0], box[1], fps, framing, still=asset.still, transforms=transforms)
+        chain = _picture_chain(clip, frames, box[0], box[1], fps, framing, still=asset.still, transforms=transforms,
+                               source=(asset.width, asset.height) if asset.width and asset.height else None)
         index = len(inputs)
         if cache_dir is None:
             inputs.append(args)

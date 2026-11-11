@@ -307,9 +307,14 @@ class ClipFit(BaseModel):
     )
     zoom: float = Field(default=1.0, ge=1, le=4, description="For `fill`: how much closer than filling the frame")
 
-# How a photo moves while it is on screen. A photo held perfectly still reads as the video
-# having stopped; a slow push in reads as somebody looking at it.
+# How a clip's picture moves while it is on screen. A photo held perfectly still reads as the
+# video having stopped; a slow push in reads as somebody looking at it, and on a talking shot
+# as a camera move there was never a second camera for.
 Motion = Literal["push", "pull", "pan_left", "pan_right", "none"]
+# Provisional: the shortest clip a move reads as a move on rather than as a jolt. The whole
+# move crossed in less than this is over 5% of the frame a second, which on a cut-in reads as
+# the picture lurching; reasoned from the amount, not measured against anybody watching.
+MIN_MOVE_SECONDS = 1.5
 
 class ClipLayout(BaseModel):
     """Where a clip is drawn in the frame, as fractions of the output size.
@@ -662,8 +667,9 @@ class Clip(BaseModel):
     )
     motion: Optional[Motion] = Field(
         default=None,
-        description="For a photo: `push` closer, `pull` back, `pan_left`, `pan_right`, or `none` to hold it "
-                    "still; null is a slow push. Ignored for video",
+        description="How the picture moves over the clip: `push` slowly closer, `pull` back, `pan_left`, "
+                    "`pan_right`, or `none` to hold it. Null is a slow push for a photo and held for video. A "
+                    "video push closes in on the face when one was seen",
     )
     stabilize: bool = Field(
         default=False,

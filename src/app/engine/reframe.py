@@ -20,10 +20,12 @@ narrow frame, down for a tall shot in a wide one. A shot whose shape already
 matches its frame has nothing to decide.
 """
 
-from dataclasses import dataclass
+import statistics
+from dataclasses import dataclass, replace
 from fractions import Fraction
 from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 
+from app.engine import moves
 from app.models.media import Asset, FaceMeasurement
 from app.models.timeline.parts import Clip, Project
 
@@ -91,6 +93,11 @@ class Framing:
         centred: Told to fill, with no face seen to follow: cropped from the
             middle, which is a guess worth saying out loud rather than a
             framing anybody chose.
+        motion: How the placed picture moves over the clip, as
+            `moves.motion_of` says; `none` holds it.
+        anchor: The point of the placed picture, as fractions of its width
+            and height, that a push closes in on and keeps still on the
+            screen: where the face sits in the box, or the middle.
     """
 
     axis: str
@@ -99,6 +106,8 @@ class Framing:
     zoom: float = 1.0
     cross: float = 0.5
     centred: bool = False
+    motion: str = "none"
+    anchor: Tuple[float, float] = moves.MIDDLE
 
 def _span(source: Tuple[int, int], box: Tuple[int, int]) -> Tuple[str, float]:
     """Work out which axis a crop moves along, and how much of it the crop covers.
@@ -218,12 +227,15 @@ class Placement:
         whole: Shown whole over a blurred copy instead of cropped.
         zoom: How much closer than covering the box.
         cross: Where the crop is centred along the other axis, when zoomed.
+        window: The part of the placed picture a move has on screen at
+            that moment, as `moves.window_at` gives it: `(zoom, left, top)`.
     """
 
     centre: float = 0.5
     whole: bool = False
     zoom: float = 1.0
     cross: float = 0.5
+    window: Tuple[float, float, float] = (1.0, 0.0, 0.0)
 
 def placement_at(framing: Optional[Framing], clip: Clip, seconds: float, fps: Fraction) -> Optional[Placement]:
     """Say how a clip sits in its box at one moment of its source.
@@ -239,9 +251,11 @@ def placement_at(framing: Optional[Framing], clip: Clip, seconds: float, fps: Fr
     """
     if framing is None:
         return None
+    window = moves.window_at_source(framing.motion, clip, seconds, fps, framing.anchor)
     if framing.whole:
-        return Placement(whole=True)
-    return Placement(centre=centre_at(framing, clip, seconds, fps), zoom=framing.zoom, cross=framing.cross)
+        return Placement(whole=True, window=window)
+    return Placement(centre=centre_at(framing, clip, seconds, fps), zoom=framing.zoom, cross=framing.cross,
+                     window=window)
 
 def box_of(clip: Clip, width: int, height: int) -> Tuple[int, int]:
     """Say what size a clip is drawn at.
@@ -316,6 +330,92 @@ def place_clip(
         return Framing(axis=axis, positions=((0, 0.5),), whole=True)
     return None
 
+def _in_box(
+    across: float,
+    down: float,
+    clip: Clip,
+    seconds: float,
+    source: Tuple[int, int],
+    box: Tuple[int, int],
+    framing: Optional[Framing],
+    fps: Fraction,
+) -> Tuple[float, float]:
+    """Say where a point of a shot lands in its box, once the shot is placed the way the render places it.
+
+    Args:
+        across: The point across the shot, 0 the left edge and 1 the right.
+        down: The point down it, 0 the top and 1 the bottom.
+        clip: The clip.
+        seconds: The moment of its file the point is at, for a crop that moves.
+        source: The shot's `(width, height)`.
+        box: The `(width, height)` it is drawn at.
+        framing: How it is placed, or None for a crop from the middle.
+        fps: The output frame rate.
+
+    Returns:
+        The point as fractions of the box's width and height, which are
+        outside 0 to 1 when the crop leaves it out.
+    """
+    (width, height), (box_width, box_height) = source, box
+    if framing is not None and framing.whole:
+        # Fitted inside the box, in its middle.
+        scale = min(box_width / width, box_height / height)
+        return (0.5 + (across - 0.5) * width * scale / box_width,
+                0.5 + (down - 0.5) * height * scale / box_height)
+    scale = max(box_width / width, box_height / height) * (framing.zoom if framing is not None else 1.0)
+    shown_x, shown_y = box_width / (width * scale), box_height / (height * scale)
+    centre_x = centre_y = 0.5
+    if framing is not None:
+        along = centre_at(framing, clip, seconds, fps)
+        centre_x, centre_y = (along, framing.cross) if framing.axis == "x" else (framing.cross, along)
+        if framing.zoom <= 1:
+            # Not zoomed, the other axis is cropped from the middle whatever `cross` says.
+            centre_x, centre_y = (along, 0.5) if framing.axis == "x" else (0.5, along)
+    left = min(max(centre_x - shown_x / 2, 0.0), 1 - shown_x)
+    top = min(max(centre_y - shown_y / 2, 0.0), 1 - shown_y)
+    return (across - left) / shown_x, (down - top) / shown_y
+
+def anchor_of(
+    clip: Clip,
+    source: Tuple[int, int],
+    box: Tuple[int, int],
+    faces: Sequence[FaceMeasurement],
+    framing: Optional[Framing],
+    fps: Fraction,
+) -> Tuple[float, float]:
+    """Find the point of a clip's box that a push closes in on: where the face sits in it.
+
+    Each second the face was seen in the clip is put where the placed shot
+    puts it, under the crop of that second, so a crop that cuts to follow
+    the face is accounted for; the median of those is the anchor. A median
+    rather than a mean, so a second the detector caught somebody passing at
+    the edge does not pull the push off the speaker.
+
+    Args:
+        clip: The clip.
+        source: Its picture's `(width, height)`.
+        box: The `(width, height)` it is drawn at.
+        faces: The per-second face measurements of its file.
+        framing: How it is placed, or None for a crop from the middle.
+        fps: The output frame rate.
+
+    Returns:
+        The anchor as fractions of the box, held inside it; the middle when
+        no face was seen in the clip.
+    """
+    opened = float(clip.video_source_start)
+    closed = float(clip.source_range.end)
+    seen: List[Tuple[float, float]] = []
+    for second in faces:
+        if (second.end <= opened or second.start >= closed or not second.faces
+                or second.face_x is None or second.face_y is None):
+            continue
+        seen.append(_in_box(second.face_x, second.face_y, clip, max(second.start, opened), source, box, framing, fps))
+    if not seen:
+        return moves.MIDDLE
+    held = lambda value: round(min(max(value, 0.0), 1.0), 3)
+    return held(statistics.median(x for x, _ in seen)), held(statistics.median(y for _, y in seen))
+
 def frame_project(
     project: Project,
     assets: Mapping[str, Asset],
@@ -332,7 +432,9 @@ def frame_project(
 
     Returns:
         A framing for each clip that has one, keyed by clip ID. Clips left out
-        are cropped from the middle.
+        are cropped from the middle and hold still. A clip that moves always
+        has one, which says how it moves and, for video, which point it
+        closes in on: the face, when faces may be followed and one was seen.
     """
     fps = Fraction(project.fps_num, project.fps_den)
     framed: Dict[str, Framing] = {}
@@ -341,10 +443,17 @@ def frame_project(
             asset = assets.get(clip.asset_id)
             if asset is None or not asset.width or not asset.height:
                 continue
-            framing = place_clip(
-                clip, (asset.width, asset.height), box_of(clip, project.width, project.height),
-                faces.get(clip.asset_id, ()), fps, follow_faces,
-            )
+            source, box = (asset.width, asset.height), box_of(clip, project.width, project.height)
+            seen = faces.get(clip.asset_id, ())
+            framing = place_clip(clip, source, box, seen, fps, follow_faces)
+            motion = moves.motion_of(clip, asset.still)
+            if motion != "none":
+                # A crop from the middle, said out loud, so the move has somewhere to be written down.
+                framing = framing or Framing(axis=_span(source, box)[0], positions=((0, 0.5),))
+                # A photo's move is centred, as it always was; nothing measures where its subject is.
+                anchor = (anchor_of(clip, source, box, seen, framing, fps)
+                          if follow_faces and not asset.still else moves.MIDDLE)
+                framing = replace(framing, motion=motion, anchor=anchor)
             if framing is not None:
                 framed[clip.id] = framing
     return framed
@@ -397,3 +506,57 @@ def centred_note(framed: Mapping[str, Framing]) -> Optional[str]:
         return None
     return (f"clip {', '.join(named)}: told to fill the frame, but no face was seen to follow, so the crop sits "
             f"in the middle; set fit center_x / center_y to move it onto what matters")
+
+
+def move_notes(project: Project, assets: Mapping[str, Asset], framed: Mapping[str, Framing]) -> List[str]:
+    """Say what a slow move over video costs, clip by clip: a jolt on a short clip, softness past the source.
+
+    A move closes in on the picture by `MOTION_AMOUNT`, so at its closest the
+    frame shows that much less of the source. Footage shot at the output size
+    then has fewer pixels than the frame and is enlarged to fill it, which
+    softens it a little; footage shot larger has the pixels to spare. Said
+    for every clip it happens to, because whether a little softness is worth
+    the move is the user's call, and nothing here can see it. A move on a
+    clip shorter than `MIN_MOVE_SECONDS`, which a split or a trim can leave
+    behind, crosses the whole amount too fast to read as a move.
+
+    Args:
+        project: The cut, at the size it is rendered at.
+        assets: Its files, sized.
+        framed: Its framings, keyed by clip ID.
+
+    Returns:
+        One sentence per clip it applies to; empty when no video moves.
+    """
+    notes: List[str] = []
+    # Clips softened alike are said in one sentence: a talking cut pushes on many clips of one file.
+    softened: Dict[Tuple[int, int, int, int, int, int], List[str]] = {}
+    for track in project.video_tracks:
+        for clip in sorted(track.clips, key=lambda item: item.timeline_in):
+            asset = assets.get(clip.asset_id)
+            if asset is None or asset.still or moves.motion_of(clip, False) == "none":
+                continue
+            seconds = float(clip.timeline_duration)
+            if seconds < moves.MIN_MOVE_SECONDS:
+                notes.append(f"clip {clip.id}: a {clip.motion} over only {seconds:.2f}s reads as a jolt rather than "
+                             f"a move; set motion none on it, or lengthen it past {moves.MIN_MOVE_SECONDS:g}s")
+            if not asset.width or not asset.height:
+                continue
+            framing = framed.get(clip.id)
+            width, height = box_of(clip, project.width, project.height)
+            fitted = min if framing is not None and framing.whole else max
+            scale = fitted(width / asset.width, height / asset.height) * (framing.zoom if framing is not None else 1.0)
+            closest = scale * (1 + moves.MOTION_AMOUNT)
+            if closest > 1.005:
+                key = (round(closest * 100), round(scale * 100), asset.width, asset.height, width, height)
+                softened.setdefault(key, []).append(clip.id)
+    for (closest, framed_at, source_width, source_height, width, height), clip_ids in softened.items():
+        named = ", ".join(clip_ids[:8]) + (" …" if len(clip_ids) > 8 else "")
+        notes.append(
+            f"clip{'s' if len(clip_ids) > 1 else ''} {named}: at the closest point of the move the frame shows "
+            f"{width * 100 / closest:.0f}x{height * 100 / closest:.0f} pixels of the {source_width}x{source_height} "
+            f"source, enlarged {closest - 100}% to fill {width}x{height}, so it is slightly softer there"
+            + (f" ({framed_at - 100}% of that is the framing's own zoom)" if framed_at > 100 else "")
+            + "; footage shot larger than the frame would not be"
+        )
+    return notes

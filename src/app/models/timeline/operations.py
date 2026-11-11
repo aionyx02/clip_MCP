@@ -7,9 +7,9 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from pydantic.json_schema import SkipJsonSchema
 
 from app.models.timeline.parts import (
-    CAPTION_PRESETS, COLOUR, KEEP_LEVEL, MAX_SPEED, MIN_SPEED, TITLE_CARD_LONGEST, TITLE_CARD_SECONDS,
-    TITLE_CARD_SHORTEST, CaptionStyle, CardBackground, ClipFit, ClipLayout, ColorAdjust, LogoLayer, Marker, Motion,
-    SubtitleCue,
+    CAPTION_PRESETS, COLOUR, KEEP_LEVEL, MAX_SPEED, MIN_MOVE_SECONDS, MIN_SPEED, TITLE_CARD_LONGEST,
+    TITLE_CARD_SECONDS, TITLE_CARD_SHORTEST, CaptionStyle, CardBackground, ClipFit, ClipLayout, ColorAdjust,
+    LogoLayer, Marker, Motion, SubtitleCue,
     TextStyle, TimeRange, TitleCard, TrackType, Transition, VoiceCleanup,
 )
 
@@ -495,8 +495,11 @@ class SetClipLookOp(BaseModel):
     clear_fit: bool = Field(default=False, description="Let the shot decide again: crop around a face, else show it whole")
     motion: Optional[Motion] = Field(
         default=None,
-        description="For a photo: how it moves while on screen — `push`, `pull`, `pan_left`, `pan_right` or `none`. "
-                    "Refused on a video clip; for a closer view of video use `fit` with `zoom`",
+        description="How the picture moves while on screen, by 8% over the clip — `push`, `pull`, `pan_left`, "
+                    "`pan_right` or `none`. A photo pushes unless told otherwise; video holds unless told. A video "
+                    "push closes in on the face, keeping it where it is. Refused on a title card, and on video "
+                    f"shorter than {MIN_MOVE_SECONDS:g} s, where it reads as a jolt; for a cut to a held closer view "
+                    "use `fit` with `zoom`",
     )
     stabilize: Optional[bool] = Field(
         default=None,
