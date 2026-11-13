@@ -4,7 +4,8 @@
 know what was asked, or how far it had got. A production keeps only what cannot be
 worked out again from what is already stored: the mode, the request as it was
 said, the footage and the shapes it is for, the project and plan it is bound to,
-and what the user said along the way. How far it has got, and whether it is
+what the user said along the way, and the model's rulings on the story's
+nominations, each tied to the sequence it was ruled on. How far it has got, and whether it is
 finished, are worked out each time from the footage, the plan, the project and its
 renders (`engine/production.py`), so an edit made by hand in the editor never
 leaves the two disagreeing.
@@ -33,6 +34,21 @@ class Said(BaseModel):
     at: datetime = Field(default_factory=_utc_now)
 
 
+class Ruling(BaseModel):
+    """The model's ruling on one of `story_doubts`' nominations, tied to the sequence it was made on.
+
+    Only a `keep` with a reason, for the same nomination and the same sequence,
+    lets a final render past the story check. A `change` only says the cut is
+    to be changed: the nomination has to go, or be ruled `keep` later.
+    """
+
+    doubt_id: str = Field(..., min_length=1, description="The nomination's `id`, as `story_doubts` gave it")
+    verdict: Literal["keep", "change"]
+    reason: str = Field(default="", description="Why it stays, for `keep`; what is to change, for `change`")
+    sequence: str = Field(..., description="The sequence hash it was ruled on: the clip order and what each plays")
+    at: datetime = Field(default_factory=_utc_now)
+
+
 class Production(BaseModel):
     """One request to make a video, from what was asked to the finished files."""
 
@@ -52,6 +68,10 @@ class Production(BaseModel):
     )
     said: List[Said] = Field(
         default_factory=list, description="What the user said along the way in the conversation, in their words",
+    )
+    rulings: List[Ruling] = Field(
+        default_factory=list,
+        description="The model's rulings on the story's nominations, the newest for each nomination kept",
     )
     created_at: datetime = Field(default_factory=_utc_now)
     closed: Optional[Said] = Field(default=None, description="The user's words when they called it off")

@@ -42,7 +42,7 @@ from app.storage import housekeeping
 from app.workspace import output_dir
 from app import runtime
 from app.runtime import mcp
-from app.tools import production, shared
+from app.tools import narrative, production, shared
 
 # Characters a Windows or POSIX filesystem will not take in a name, plus the control
 # range. A project is named by whoever is editing, so a render cannot assume anything
@@ -539,6 +539,10 @@ def render_project(
     in `allow`. Previews are never refused — they are how you look — but
     say what they found.
 
+    While an `auto` production is finishing the project, a final render is
+    also refused until every `story_doubts` nomination is ruled `keep` with
+    a reason, with `rule_doubts`, on the cut as it is now.
+
     Returns immediately. Poll `get_job` with the returned `job_id` until the
     job reaches a terminal status, or stop it with `cancel_job`. Rendering
     runs in a separate worker process and continues even if this server
@@ -598,12 +602,17 @@ def render_project(
         ValueError: If the project does not exist, contains no clips, uses an
             unsupported feature, has no finished preview of its picture as it
             is now in this shape for a final render, or its sound as it is now
-            has been neither previewed nor heard, or the check found something
-            not allowed.
+            has been neither previewed nor heard, the check found something
+            not allowed, or an unfinished `auto` production's story
+            nominations are not all ruled `keep` on the cut as it is now.
     """
     unseen = None if is_preview else _unseen(project_id, frame)
     if unseen:
         raise ValueError(unseen)
+    # Its own check, apart from the preview's: only a final render, only while an `auto` production is unfinished.
+    story = None if is_preview else narrative.undecided(project_id)
+    if story:
+        raise ValueError(story)
     # Named only here: the editor's renders are the user's own, and belong to no production.
     owner = production.of_project(project_id)
     return start_render(
