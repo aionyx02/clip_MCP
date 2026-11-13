@@ -43,7 +43,7 @@ editor (ui/) ──HTTP───────────────────
 | 計畫 | 宣告式 plan、觀眾須知事實（哪段交代、後段依賴前段，順序不對即退回）、單項修改、整體修改（節奏、配樂音量、整段移除）、版本比較與視覺化差異、回退 |
 | 聲音 | 多軌配樂、人聲 ducking、隨段落換曲、剪點對拍、歌不夠長時在拍點上的循環點掉頭、語音修復、逐講者響度、輸出統一 -14 LUFS |
 | 字幕與文字 | 字幕綁定素材時間而非成片時間，隨剪輯移動；依詞斷行、平台安全區樣式、逐字亮、雙語、講者標色；ASS 燒錄 / SRT。標題卡（模糊下一顆鏡頭／照片／純色為底）；畫面上的文字（人名條、地點、大字、自由位置）釘在素材上、避開字幕與平台介面。品牌套件跨專案保存：主色、強調色、字色、字型、淺色／深色兩版 logo（卡片依底色選對比高的那版）、片尾 CTA。CTA 預設疊在最後一個鏡頭結尾、不增加片長，也可改成整張片尾卡（算進片長）；角落 logo 選用，預設關閉；直式影片的字幕避開右側按鈕區 |
-| 輸出 | 先預覽才出正式版；render 前檢查（黑畫面、爆音、字幕出界、長度）；逐一檢視接點（前後影格、跨剪點的字、音量）；橫／直／方形三比例，跟臉裁切；章節、封面；FCPXML / OTIO / EDL 匯出並列出無法攜帶的屬性 |
+| 輸出 | 先預覽才出正式版；render 前檢查（黑畫面、爆音、字幕出界、長度）；逐一檢視接點（前後影格、跨剪點的字、音量）；橫／直／方形三比例，跟臉裁切；章節、封面；FCPXML / OTIO / EDL 匯出並列出無法攜帶的屬性；「直接做完」的正式版要先裁決敘事提名（說完收尾語還繼續、拍攝時間往回跳、主題繞回、第一句話太晚出現），由規則過量提名、模型逐則帶理由裁決，鏡頭順序一變裁決就失效 |
 | 版本 | 專案、計畫、字幕的每次變更都是 git commit，可讀、可回退、可分支、可標記 |
 | 執行 | render 與分析在獨立 worker 執行，依工作數與可用記憶體排隊，可查進度、可取消、跨重啟持續 |
 
@@ -57,8 +57,10 @@ editor (ui/) ──HTTP───────────────────
 | 逐字稿、量測、向量索引、模型權重 | 查詢命中的片段文字與量測值 |
 | 專案、計畫、版本歷史 | 模型要求時的縮圖拼貼、音量圖與頻譜圖 |
 | 製作紀錄（需求原文、故事卡、使用者在對話裡的原話） | `get_production` 回傳的需求原文、故事卡、原話、進度與待問清單 |
+| 敘事裁決（模型對每則提名的 keep／change 與理由） | `story_doubts` 回傳的提名：收尾語或第一個詞、拍攝時間與主題標籤 |
 
 - 製作紀錄存的是使用者在對話裡說的話（需求、改口、取消、確認故事卡的原話），以及模型寫的故事卡（主題、結構、開場、轉折、結尾、捨棄的內容、預估長度），都本來就來自客戶端；`get_production` 會把它們連同進度與待問清單再交回客戶端，新對話靠這個接續。伺服器只驗證故事卡必填、雜湊與是否確認，不評判故事好壞。
+- 敘事提名在本機由規則從專案的實際鏡頭順序算出；`story_doubts` 只交出提名用到的字（收尾語、第一個詞）、拍攝時間與主題標籤，客戶端對照 `read_cut` 裁決，裁決與理由存回本機的製作紀錄。
 - 沒有工具回傳影音本體。模型仍可主動讀取完整逐字稿（`get_analysis`、`query_clips` 的 `brief`、`get_subtitles`）。
 - 回傳內容的去向由客戶端決定；搭配本機模型（如 LM Studio）則完全離線。
 - 對外連線僅限：模型權重下載（固定版本、驗證 SHA-256）、安裝程式下載 FFmpeg、安裝版的更新檢查。
@@ -96,7 +98,7 @@ LM Studio、Cherry Studio（一鍵安裝連結）。修改前備份為 `<檔名>
 | 素材庫 | `inspect_media` `import_asset` `import_folder` `list_assets` `edit_asset` `organize_library` `move_files` |
 | 分析 | `analyze_asset` `listen_again` `get_analysis` `view_frames` `inspect_sound` |
 | 語意時間軸 | `build_semantic_timeline` `query_clips` `get_semantic_clip` `propose_sections` `set_sections` `frames_for_clips` `set_clip_tags` `list_timelines` `delete_timelines` |
-| 製作 | `start_production` `get_production` `set_production_mode` `close_production` `set_story` `confirm_story` |
+| 製作 | `start_production` `get_production` `set_production_mode` `close_production` `set_story` `confirm_story` `story_doubts` `rule_doubts` |
 | 計畫 | `save_plan` `amend_plan` `copy_plan` `get_plan` `validate_plan` `compile_plan` `diff_plan` `preview_plan_diff` `list_plan_versions` `revert_plan` `propose_broll` |
 | 專案 | `create_project` `list_projects` `get_project` `apply_edits` `preview_project` `preview_sound` `offer_songs` `ask_user` `remember_preference` `forget_preference` |
 | 字幕 | `generate_subtitles` `get_subtitles` |

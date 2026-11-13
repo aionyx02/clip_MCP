@@ -360,3 +360,14 @@ clip and `audio_fade_in` on the incoming one when the user asks for it.
 
 Transcripts can misrecognize names and jargon. When a quote matters, check the
 surrounding segments, and ask the user if the meaning is unclear.
+
+## Ruling on the story's nominations
+
+`story_doubts` nominates by rule and never judges; each nomination is a question for you, read against `read_cut`.
+Rule `keep` with the reason when the structure is meant: a hook that shows the ending first, a flashback, a callback,
+an epilogue placed last, on-screen words that say what the video is about before anyone speaks. Change the cut when it
+reads as a mistake: a goodbye with more story after it, a jump back that makes the story go round in circles, half a
+minute before anyone says what this is. `change` only notes that you will; the render stays refused until the
+nomination is gone, so fix the cut and call `story_doubts` again. Moving or trimming a shot, in the editor too, undoes
+the rulings; captions and music do not. One you cannot judge from the footage — whether the user meant that order —
+goes to the user with `ask_user`. `not_checked` is not a clean bill: say what it names when you report.

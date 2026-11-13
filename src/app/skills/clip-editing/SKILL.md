@@ -169,15 +169,15 @@ Do this once per request, not once per operation, and skip it when the user has 
 approved this exact plan. State your assumptions in it, and the user corrects what is wrong
 before a render is wasted.
 
-**When the user says to finish on your own** — 「直接做完再給我看」 — call `start_production`
-with `mode: "auto"` first (with `project_id` for 「把這支直接做完」) and pass its `production_id`
-to `save_plan` and `create_project`: left out, nothing holds the work to the request and a
-later conversation cannot pick it up. Skip the read-back, not the checks: render a preview,
-look at it with `view_render` (`at: "captions"`) and at its joins with `inspect_join`, hear
-any join in doubt with `listen_again` and the preview's `job_id`, fix what you find, then
-render the final cut. `allow` is still never yours to fill in: when `check_render` finds
-something you cannot fix, stop and ask. Write the story card with `set_story` and go on. Report
-every decision — the card first, what went in or out and why, the music — and `confirm_story` only in their words.
+**When the user says to finish on your own** — 「直接做完再給我看」 — call `start_production` with `mode: "auto"` first
+(with `project_id` for 「把這支直接做完」) and pass its `production_id` to `save_plan` and `create_project`: left out, nothing
+holds the work to the request and a later conversation cannot pick it up. Write the story card with `set_story` and go on. Section the footage with `propose_sections` and
+`set_sections`, topics included, before the plan: without topics `story_doubts` cannot see the cut leave a subject and come back.
+Skip the read-back, not the checks: render a preview, look at it with `view_render` (`at: "captions"`) and at its joins with
+`inspect_join`, hear any join in doubt with `listen_again` and the preview's `job_id`, and fix what you find. Then call `story_doubts`
+and rule on every nomination with `rule_doubts`, against `read_cut` — how to judge one is in the editing-intelligence file; the final
+render is refused until each is a `keep` with a reason on the cut as it is now; then render the final cut. `allow` is still never yours to fill in: when `check_render` finds
+something you cannot fix, stop and ask. Then report every decision — the card first, what went in or out and why, the music — and `confirm_story` only in their words.
 
 ## Workflow
 

@@ -12,7 +12,7 @@ from app import runtime
 from app.runtime import mcp
 # Importing a tool module is what registers its tools, so every one is imported here.
 from app.tools import (  # noqa: F401
-    catalog, delivery, editing, examining, feedback, job_queue, looking, planning, production, rendering, shared,
+    catalog, delivery, editing, examining, feedback, job_queue, looking, narrative, planning, production, rendering, shared,
     soundtrack, subtitles, timelines, upkeep, variants, versioning,
 )
 
