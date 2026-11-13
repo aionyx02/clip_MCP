@@ -57,7 +57,6 @@ RestartApplications=no
 RedirectionGuard=no
 ; Whether the GPU pack is wanted is decided again from this computer on a first install; on an
 ; update, the choice made last time stands (see InitializeWizard).
-UsePreviousComponents=yes
 
 [Languages]
 Name: "zh_tw"; MessagesFile: "build\ChineseTraditional.isl"
