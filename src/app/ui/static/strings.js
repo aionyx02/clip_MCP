@@ -607,6 +607,33 @@ window.T = {
     busy: "正在輸出或更新成品畫面，完成後再更新",
     downloading: (percent) => percent == null ? "下載中…" : `下載中 ${percent}%`,
     installing: "正在安裝更新，完成後會自動重新開啟…",
+    section: "更新",
+    current: (version) => `目前版本 ${version}`,
+    upToDate: "已經是最新版",
+    check: "檢查更新",
+    refused: (version, reason) => `有新版 ${version}，但無法自動更新：${reason}。可以到 GitHub 下載安裝程式。`,
+    planLine: (found) => found.plan === "program"
+      ? `只需換掉程式本身，下載 ${(found.size / 2 ** 20).toFixed(1)} MB（完整安裝程式是 ${(found.installer_size / 2 ** 20).toFixed(0)} MB）`
+      : `需要完整安裝程式，下載 ${(found.size / 2 ** 20).toFixed(0)} MB：${found.changed.map((part) => T.update.parts[part] || part).join("、")}`,
+    parts: {
+      unknown: "這份安裝沒有記錄內建元件的版本",
+      runtime: "Python 或套件有變",
+      launchers: "啟動程式有變",
+      ffmpeg: "FFmpeg 有變",
+      no_program_asset: "這一版沒有單獨的程式檔",
+    },
+    auto: "自動更新",
+    autoHint: "有新版時自動下載，等沒有輸出工作時套用，編輯器會自己重新開啟。關閉時只會提示，由你決定何時更新。",
+    autoState: {
+      checking: () => "正在檢查新版…",
+      downloading: (version) => `正在下載 ${version}…`,
+      waiting: (version) => `${version} 已下載，等輸出工作結束後套用`,
+      applying: (version) => `正在套用 ${version}…`,
+      failed: () => "自動更新沒有完成",
+    },
+    lastLine: (last) => last.ok
+      ? `已從 ${last.previous || "舊版"} 更新到 ${last.version}（${last.kind === "program" ? "只換程式" : "完整安裝"}）`
+      : `更新到 ${last.version} 沒有完成${last.kind === "program" ? `，已還原成 ${last.previous || "原本的版本"}` : ""}${last.reason ? `：${last.reason}` : ""}`,
   },
 
   common: {

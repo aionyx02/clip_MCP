@@ -1,7 +1,10 @@
 # Builds the Windows installer, and publishes it when a version tag is pushed.
 #
 #   git tag v0.1.0 && git push origin v0.1.0   -> tests, installer, GitHub Release with notes
-#   Actions -> release -> Run workflow          -> tests and installer only, kept as a build artifact
+#   Actions -> release -> Run workflow          -> tests and assets only, kept as a build artifact
+#
+# A release carries three assets: the installer, a zip of program\ alone, and clip-mcp-update.json,
+# which an installed copy reads to choose between the two (src/app/ui/updates.py).
 #
 # The tag must match the version in pyproject.toml. Release notes come from installer/notes/<tag>.md.
 name: release
@@ -115,15 +118,27 @@ jobs:
             installer\clip-mcp.iss
           if ($LASTEXITCODE -ne 0) { throw "ISCC failed" }
           "Installer: $([math]::Round((Get-Item dist\clip-mcp-setup-*.exe).Length / 1MB, 1)) MB" | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+      - name: Program-only zip and update manifest
+        shell: pwsh
+        run: |
+          # What an installed copy updates from when only clip-mcp itself changed (#293).
+          uv run --no-project python installer\payload_tools.py publish installer\build\payload (Get-Item dist\clip-mcp-setup-*.exe).FullName dist
+          if ($LASTEXITCODE -ne 0) { throw "publish failed" }
+          "Program-only zip: $([math]::Round((Get-Item dist\clip-mcp-program-*.zip).Length / 1MB, 1)) MB" | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
       - uses: actions/upload-artifact@v4
         with:
           name: clip-mcp-setup-${{ steps.version.outputs.version }}
-          path: dist/clip-mcp-setup-*.exe
+          path: |
+            dist/clip-mcp-setup-*.exe
+            dist/clip-mcp-program-*.zip
+            dist/clip-mcp-update.json
       - name: Release
         if: github.ref_type == 'tag'
         shell: pwsh
         run: |
+          # The installer, the program-only zip, and the manifest an installed copy chooses between them by.
           gh release create $env:GITHUB_REF_NAME (Get-ChildItem dist\clip-mcp-setup-*.exe).FullName `
+            (Get-ChildItem dist\clip-mcp-program-*.zip).FullName dist\clip-mcp-update.json `
             --title "clip-mcp $env:GITHUB_REF_NAME" --notes-file "installer\notes\$env:GITHUB_REF_NAME.md"
         env:
           GH_TOKEN: ${{ github.token }}

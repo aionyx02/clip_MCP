@@ -354,6 +354,8 @@ def main(argv: Optional[List[str]] = None) -> None:
         prog="clip-mcp",
         description="Video editing for AI clients over MCP. With no command, runs the server on stdio.",
     )
+    # What an update checks the new program with before keeping it (app.ui.apply_update).
+    parser.add_argument("--version", action="version", version=f"clip-mcp {_version()}")
     commands = parser.add_subparsers(dest="command")
     commands.add_parser("serve", help="run the MCP server on stdio (the default)")
     commands.add_parser("check", help="show the workspace in use, the command clients run, and what is missing")

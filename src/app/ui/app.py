@@ -1051,16 +1051,20 @@ async def open_client(request: Request) -> Response:
     os.startfile(result.detail)
     return JSONResponse({"opened": True})
 
-async def update(request: Request) -> Response:
-    """Whether a newer version is out (GET), or install it now (POST).
+def busy() -> bool:
+    """Whether a render or any other job is running, in this process or another, so an update must wait."""
+    runtime.job_manager.forget_abandoned()
+    return bool(runtime.repo.active_job_ids())
 
-    Never while a render is running: the installer closes clip-mcp, and a
-    render half done would be lost.
+async def update(request: Request) -> Response:
+    """Whether a newer version is out, the automatic-update setting and the last outcome (GET), or update now (POST).
+
+    Never while a render is running: an update closes clip-mcp, and a render
+    half done would be lost.
     """
     if request.method == "GET":
-        return JSONResponse(await run_in_threadpool(updates.latest))
-    runtime.job_manager.forget_abandoned()
-    if runtime.repo.active_job_ids():
+        return JSONResponse(await run_in_threadpool(updates.overview, request.query_params.get("again") == "1"))
+    if busy():
         return _error("busy", 409)
     try:
         installing = await run_in_threadpool(updates.start_update, lambda: os._exit(0))
@@ -1100,6 +1104,17 @@ async def gpu_pack(request: Request) -> Response:
             threading.Thread(target=_install_gpu_pack, daemon=True).start()
     said = await run_in_threadpool(gpu.status)
     return JSONResponse({**said, "install": dict(_gpu_install)})
+
+async def update_settings(request: Request) -> Response:
+    """Turn automatic updates on or off; refused for a copy not from the installer."""
+    body = await request.json()
+    if not isinstance(body.get("auto"), bool):
+        return _error("auto must be true or false")
+    try:
+        await run_in_threadpool(updates.set_auto, body["auto"])
+    except RuntimeError as error:
+        return _error(str(error))
+    return JSONResponse({"auto": body["auto"]})
 
 async def update_progress(request: Request) -> Response:
     """How much of the newer installer has been downloaded, while the user waits for it."""
@@ -1234,6 +1249,7 @@ def create_app() -> Starlette:
         Route("/api/ping", ping),
         Route("/api/update", update, methods=["GET", "POST"]),
         Route("/api/update/progress", update_progress),
+        Route("/api/update/settings", update_settings, methods=["POST"]),
         Route("/api/gpu", gpu_pack, methods=["GET", "POST"]),
         Route("/api/jobs/{job_id}", job),
         Route("/media/{asset_id}", media),
