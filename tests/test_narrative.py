@@ -93,15 +93,6 @@ def test_first_words_late_are_nominated_and_early_ones_are_not() -> None:
     assert "late_subject" not in kinds(early)
 
 
-def test_the_first_fact_landing_late_is_nominated_and_an_early_one_is_not() -> None:
-    late = nominate([Shot("c1", 0, 30, words=said(1, "嗨"), planned=True, sourced=True),
-                     Shot("c2", 30, 100, facts=((84.0, "subject"),), planned=True, sourced=True)])
-    assert [doubt.id for doubt in late.doubts] == ["late_subject:fact:c2"]
-    early = nominate([Shot("c1", 0, 100, words=said(1, "嗨"), facts=((5.0, "subject"),), planned=True,
-                           sourced=True)])
-    assert early.doubts == [] and "late_subject.facts" not in early.unchecked
-
-
 def test_a_flashback_is_nominated_all_the_same() -> None:
     # The ending shown first, then the story from the start: legitimate, and still put to the model.
     shots = [Shot("hook", 0, 5, moment=T0 + timedelta(days=10), words=said(0, "成功了")),
@@ -116,7 +107,7 @@ def test_no_topics_or_recording_times_say_not_checked_rather_than_nothing() -> N
     assert found.doubts == []
     assert "set_sections" in found.unchecked["topic_returns"]
     assert "recording time" in found.unchecked["back_in_time"]
-    assert "establish" in found.unchecked["late_subject.facts"]
+    assert "late_subject.facts" not in found.unchecked
 
 
 def test_a_file_never_transcribed_is_not_read_as_silence() -> None:
@@ -175,8 +166,8 @@ def test_clips_put_in_by_hand_are_nominated_from_their_words_and_times(by_hand: 
     found = story_doubts(by_hand)
     assert sorted(doubt["id"] for doubt in found["doubts"]) == [
         "back_in_time:talk>before", "closing_too_early:talk", "late_subject:words:talk"]
-    # Only what needs a clip's origin is not checked.
-    assert set(found["not_checked"]) == {"topic_returns", "late_subject.facts"}
+    # Only what needs a clip's origin is not checked: the late first words come from the file's seconds.
+    assert set(found["not_checked"]) == {"topic_returns"}
     assert "by hand" in found["not_checked"]["topic_returns"]
 
 
@@ -263,7 +254,7 @@ def test_the_sequence_hash_follows_order_and_ranges_only() -> None:
     assert one != narrative.sequence_hash([("a", 0.0, 4.5, None), ("b", 0.0, 3.0, None)])
 
 
-def test_a_compiled_cut_reads_topics_and_facts_through_the_sections_its_pieces_belong_to(media: Path) -> None:
+def test_a_compiled_cut_reads_topics_through_the_sections_its_pieces_belong_to(media: Path) -> None:
     from app.models.plan import Beat, EditPlan, Established, Fact, Selection
     from app.models.semantic import ClipLevel, SectionChoice
     from app.tools.planning import compile_plan, save_plan
@@ -302,7 +293,7 @@ def test_a_compiled_cut_reads_topics_and_facts_through_the_sections_its_pieces_b
     compile_plan(project_id=project, expected_version=1, plan_id=plan["plan_id"])
 
     found = story_doubts(project)
-    assert {doubt["kind"] for doubt in found["doubts"]} >= {"topic_returns", "late_subject"}
-    assert any(doubt["id"].startswith("late_subject:fact:") for doubt in found["doubts"])
+    assert "topic_returns" in {doubt["kind"] for doubt in found["doubts"]}
+    assert not any(":fact:" in doubt["id"] for doubt in found["doubts"])
     assert "topic_returns" not in found["not_checked"] and "late_subject.facts" not in found["not_checked"]
 

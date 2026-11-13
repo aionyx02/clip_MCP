@@ -9,14 +9,13 @@ it, as they go round every check of a production: the user is there.
 """
 
 from datetime import timedelta
-from typing import Dict, List, Literal, Mapping, Optional, Sequence, Tuple
+from typing import List, Literal, Mapping, Optional, Tuple
 
 from pydantic import BaseModel, Field
 
 from app.engine import narrative
 from app.engine.semantic import was_made_up
 from app.models.media import Asset
-from app.models.plan import EditPlan
 from app.models.production import Production, Ruling
 from app.models.timeline.parts import Clip, Project
 from app import runtime
@@ -66,27 +65,6 @@ def _words(clip: Clip, asset: Optional[Asset]) -> Tuple[Tuple[Tuple[float, str],
     return tuple(sorted(found)), True
 
 
-def _facts(clip: Clip, plan: Optional[EditPlan], ids: Sequence[str]) -> Tuple[Tuple[float, str], ...]:
-    """When each fact the plan says this clip's footage establishes lands in the cut.
-
-    A selection of a section names the section; the clip names the sentences
-    in it, so the sentences' section counts as theirs.
-    """
-    if plan is None:
-        return ()
-    start, end = float(clip.source_range.start), float(clip.source_range.end)
-    placed, speed = float(clip.timeline_in), float(clip.speed)
-    found = []
-    for selection in plan.selections:
-        if selection.clip_id not in ids:
-            continue
-        for item in selection.establishes:
-            low, high = item.evidence
-            if low < end and high > start:
-                found.append((placed + (max(low, start) - start) / speed, item.fact))
-    return tuple(found)
-
-
 def read_sequence(project: Project) -> Tuple[List[narrative.Shot], str]:
     """Read a project's sequence as the story check reads it.
 
@@ -99,7 +77,6 @@ def read_sequence(project: Project) -> Tuple[List[narrative.Shot], str]:
     base = project.base_video_track
     clips = sorted(base.clips, key=lambda clip: clip.timeline_in) if base is not None else []
     assets = shared.referenced_assets(project)
-    plans: Dict[str, Optional[EditPlan]] = {}
     shots, order = [], []
     for clip in clips:
         start, end = float(clip.timeline_in), float(clip.timeline_out)
@@ -119,15 +96,11 @@ def read_sequence(project: Project) -> Tuple[List[narrative.Shot], str]:
             topic = semantic.topic or (parent.topic if parent is not None else None)
             if topic and (not topics or topics[-1] != topic):
                 topics.append(topic)
-        ids = {semantic.id for semantic in found} | {semantic.parent_id for semantic in found if semantic.parent_id}
-        if clip.from_plan_id and clip.from_plan_id not in plans:
-            plans[clip.from_plan_id] = runtime.repo.get_plan(clip.from_plan_id)
-        plan = plans.get(clip.from_plan_id) if clip.from_plan_id else None
         moment = (asset.recorded_at + timedelta(seconds=float(clip.source_range.start))
                   if asset is not None and asset.recorded_at is not None else None)
         shots.append(narrative.Shot(
             clip_id=clip.id, start=start, end=end, words=words, heard=heard, moment=moment, topics=tuple(topics),
-            sourced=bool(found), facts=_facts(clip, plan, sorted(ids)), planned=plan is not None and bool(found),
+            sourced=bool(found),
         ))
     return shots, narrative.sequence_hash(order)
 
@@ -227,8 +200,8 @@ def story_doubts(project_id: str) -> dict:
 
     Nominated by rule, generously, and never judged: a goodbye with more of
     the cut after it, a step back in recording time between neighbouring
-    shots, a topic the cut leaves and comes back to, and the first words or
-    the first fact established landing late. A hook or a flashback is
+    shots, a topic the cut leaves and comes back to, and the first words
+    landing late. A hook or a flashback is
     nominated too; that is yours to rule `keep`, with a reason, in
     `rule_doubts`. Read each against `read_cut`.
 

@@ -10,8 +10,7 @@ that nothing gets past unruled.
 
 What it reads is the project's sequence as it plays, not the plan, so a clip put
 in by hand is read as much as a compiled one, and `read_cut` reads the same
-thing. The plan only adds what a sequence does not carry: which facts a piece
-establishes. Where what a kind needs is missing — no topics because the
+thing. Where what a kind needs is missing — no topics because the
 timeline was never sectioned, no recording times, clips with no origin — the
 kind says it was not checked and why, rather than coming back empty, which
 would read as nothing wrong.
@@ -44,10 +43,10 @@ CLOSING_WORDS = (
 # (`checks.BACKWARD`), which refuses: this only asks, so an afternoon told out of order is
 # asked about too.
 NOMINATE_BACK = timedelta(minutes=20)
-# Provisional: the first words, or the first fact the plan says a piece establishes, landing
-# later than this many seconds, or this share of the cut, whichever is sooner, leaves the
-# viewer not knowing what the video is about. The cup-rack cut said nothing for 27 s and
-# named its subject at 84 s.
+# Provisional: the first words landing later than this many seconds, or this share of the
+# cut, whichever is sooner, leave the viewer waiting to hear what the video is about; the
+# cup-rack cut said nothing for 27 s. Only words: a plan's first established fact was tried
+# and measured the wrong thing (0 of 9 on real cuts), since it is a story fact, not the subject.
 LATE_SECONDS = 15.0
 LATE_SHARE = 0.15
 
@@ -74,12 +73,8 @@ class Shot:
             sections. Empty when it has none, or the clip has no origin to
             look them up by.
         sourced: Whether the clip came from footage the semantic timeline
-            knows, so its topic and facts can be looked up.
+            knows, so its topics can be looked up.
         card: Whether it is a title card.
-        facts: When each fact the plan says it establishes is shown or said,
-            as `(second of the cut, fact ID)`.
-        planned: Whether the plan it came from was found, so its facts could
-            be looked for.
     """
 
     clip_id: str
@@ -91,8 +86,6 @@ class Shot:
     topics: Tuple[str, ...] = ()
     sourced: bool = False
     card: bool = False
-    facts: Tuple[Tuple[float, str], ...] = ()
-    planned: bool = False
 
 
 @dataclass(frozen=True)
@@ -278,7 +271,7 @@ def late_after(length: float) -> float:
 
 
 def _late(shots: Sequence[Shot], length: float) -> Tuple[List[Doubt], Dict[str, str]]:
-    """Nominate the first words, and the first fact established, landing after `late_after`."""
+    """Nominate the first words landing after `late_after`."""
     found: List[Doubt] = []
     why: Dict[str, str] = {}
     late = late_after(length)
@@ -304,27 +297,6 @@ def _late(shots: Sequence[Shot], length: float) -> Tuple[List[Doubt], Dict[str, 
                      f"than {late:.1f} s ({LATE_SECONDS:g} s or {LATE_SHARE:.0%} of {length:.0f} s, whichever "
                      "is sooner)",
             ))
-    footage = [shot for shot in shots if not shot.card]
-    if not any(shot.planned for shot in footage):
-        why["late_subject.facts"] = ("no clip came from a plan that can be read (put in by hand, or the plan is "
-                                     "gone), so when the first fact is established is not known")
-        return found, why
-    facts = sorted((at, fact, shot.clip_id) for shot in shots for at, fact in shot.facts)
-    if not facts:
-        why["late_subject.facts"] = ("the plan says no piece in the cut establishes anything (no `establishes`), "
-                                     "so when the subject is first stated is not known")
-        return found, why
-    unplanned = [shot.clip_id for shot in footage if not shot.planned]
-    if unplanned:
-        why["late_subject.facts"] = (f"partly: {', '.join(unplanned[:8])} came from no plan, so whatever they "
-                                     "establish is not known")
-    at, fact, clip_id = facts[0]
-    if at > late:
-        found.append(Doubt(
-            id=f"late_subject:fact:{clip_id}", kind="late_subject", clip_ids=(clip_id,), at=at,
-            says=f"the first fact established, 「{fact}」, lands at {_clock(at)} in clip {clip_id}; later than "
-                 f"{late:.1f} s",
-        ))
     return found, why
 
 
