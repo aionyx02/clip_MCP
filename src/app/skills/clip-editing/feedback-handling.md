@@ -2,7 +2,8 @@
 
 Read this when the user has watched a version and says what is wrong with
 it — 「太長」「開頭無聊」「音樂太大聲」「剛剛那樣比較好」 — or asks what changed
-since the last one. It is referenced from SKILL.md.
+since the last one; and when a production you are finishing on your own
+reaches its preview, for how to hand it over. It is referenced from SKILL.md.
 
 ## Change the plan, not the timeline
 
@@ -98,7 +99,9 @@ video says `open_comments` when some are waiting — read them with
 footage it was written on; `gone` means that footage was cut out), do what
 each asks like any other feedback, then `resolve_comment` with what you did
 in a sentence the user reads. Ask with `resolve_comment` and `resolved:
-false` when one can be read two ways. Comments are the user's to delete.
+false` when one can be read two ways. Comments are the user's to delete. On
+an `auto` production every one of theirs still open is in `pending`, and holds
+the final render, until you have done it and closed it.
 
 Pass the user's words for every change as `note` — on `apply_edits`,
 `compile_plan`, `generate_subtitles`, `amend_plan` — since that is what the
@@ -123,13 +126,40 @@ blind — and keep the change only if it says to; otherwise `restore_version`.
 
 A final `render_project` over an opening you thought might be too slow is
 that doubt settled without the user. After a preview, `ask_user` the two or
-three things you weighed and could not settle, and wait for the replies in
-`get_comments`. An answer about their videos in general — 「開場都要短」 — goes
+three things you weighed and could not settle. The user answers on the
+question in the editor, where `get_comments` shows it as their reply, or in
+the chat: then `record_answer` with its `comment_id` and exactly what they
+said — not your summary, and never an answer of your own. Something said in
+the chat about the whole video, 「再短一點」, is `record_answer` without a
+`comment_id`. While an `auto` production goes on, `resolve_comment` will not
+close one of your questions that has no answer, unless the footage it is
+about has left the cut. An answer about their videos in general — 「開場都要短」 — goes
 into `remember_preference`, or the next project asks it again;
 `forget_preference` when it no longer holds. Their logo, brand colour, font
 or closing words go into `save_brand_kit` instead, since a preference is
 only words and nothing puts it on a cut; a plan wears the kit by naming it in
 `brand_kit`, and `forget_brand_kit` drops it.
+
+## Handing over a production finished on your own
+
+The user walked away, so the first thing you cannot settle is no reason to
+stop. `ask_user` it, keep going to a preview, and only then hand over, once,
+in the chat — the user may never open the editor:
+
+1. The preview's path, and whether it is the cut as it is now:
+   `get_production`'s `latest_preview` says `shows_the_cut_now`. When it is
+   not, say so and why — a trial of a fix was turned down and the cut put
+   back, so the file is the version that was turned down.
+2. What you decided yourself: what went in or out and why, the music and
+   any credit it needs.
+3. Every item of `get_production`'s `pending`, in its order: the story card
+   first, read in full with its parts; then each question with its `text`;
+   then what you did, or could not do, about each comment of theirs.
+
+Write down each answer as it comes — `confirm_story` with the card's
+`story_hash`, `record_answer` for the rest — in their words. Then do what
+they asked, close their comments, and render the final cut: `render_project`
+refuses it while `pending` has anything, whatever `allow` holds.
 
 ## What the complaint means
 

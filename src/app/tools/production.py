@@ -11,12 +11,13 @@ from typing import List, Optional
 from pydantic import ValidationError
 
 from app.engine import production as progress
+from app.models.comment import USER
 from app.models.production import Mode, Production, Said, Shape, Story, StoryConfirmed
 from app.storage import housekeeping
 from app.workspace import output_dir
 from app import runtime
 from app.runtime import mcp
-from app.tools import rendering
+from app.tools import feedback, rendering
 
 # ------------------------------------------------------------------ finding them
 
@@ -145,7 +146,8 @@ def _footing(production: Production) -> progress.Footing:
     plan = runtime.repo.get_plan(production.plan_id) if production.plan_id else None
     if plan is None and project is not None:
         plan = rendering.compiled_plan(project)
-    comments = runtime.repo.comments(project.id) if project is not None else []
+    comments = [comment for comment in (runtime.repo.comments(project.id) if project is not None else [])
+                if comment.status == "open"]
     return progress.Footing(
         analysed=frozenset(asset_id for asset_id in production.asset_ids
                            if runtime.repo.get_analysis(asset_id) is not None),
@@ -155,9 +157,14 @@ def _footing(production: Production) -> progress.Footing:
         cut=bool(base and base.clips),
         picture=rendering.picture_key(project) if project is not None else None,
         renders=tuple(runtime.repo.renders_of(project.id)) if project is not None else (),
-        questions=tuple(comment.id for comment in comments
-                        if comment.status == "open" and comment.question and not comment.answered),
+        questions=tuple(comment.id for comment in comments if comment.question and not comment.answered),
+        opened=tuple(comment.id for comment in comments if comment.by == USER),
+        texts={comment.id: comment.text for comment in comments},
     )
+
+def owed(production: Production) -> List[dict]:
+    """What is still owed between the AI and the user on a production, as `engine.production.pending` says."""
+    return progress.pending(production, _footing(production))
 
 def _gone(project_id: str) -> str:
     """Say where a production's project went: the trash, or out of it for good."""
@@ -285,9 +292,12 @@ def get_production(production_id: Optional[str] = None) -> dict:
         `story` (the card, its `story_hash`, whether it is `confirmed` as it
         is now, and `last_confirmed_at`), `steps` (each and whether it is
         done), `stage` (the next not done), `next` (what to do about it),
-        `pending` (what is still to be put to the user, in order: in an
-        `auto` one an unconfirmed or missing story card first, then the
-        unanswered questions), `missing` (shapes not delivered yet),
+        `pending` (what is still owed between you and the user, in order: in
+        an `auto` one an unconfirmed or missing story card first, then the
+        unanswered questions, then comments the user wrote that are still
+        open — each with its `comment_id` and `text`; while an `auto` one
+        has any, its final render is refused), `missing` (shapes not
+        delivered yet),
         `latest_preview`, `ended`, and `unbound` while it has no project.
         With no ID, `productions`: each unfinished one the same way.
 
@@ -441,3 +451,46 @@ def confirm_story(production_id: str, story_hash: str, said: str) -> dict:
     })
     runtime.repo.save_production(confirmed)
     return said_of(confirmed)
+
+@mcp.tool()
+def record_answer(production_id: str, said: str, comment_id: Optional[str] = None) -> dict:
+    """Write down what the user said in the chat in answer, in their own words.
+
+    For when the user answers in the conversation instead of in the editor.
+    With `comment_id` — one of `pending`'s questions, or a comment of theirs
+    they added to — it goes on that comment as theirs, so the question is
+    answered just as a reply in the editor would make it. Without, it is kept
+    with the production: 「再短一點」, said about the whole video. Pass
+    exactly what they said: never answer on their behalf, never sum it up or
+    rewrite it, and never pass what you decided yourself. Whatever is
+    written here is taken as the user's words, as `allow` is.
+
+    Args:
+        production_id: The production.
+        said: The user's words, as they said them.
+        comment_id: The comment it answers, from `pending` or `get_comments`;
+            omit when it answers none.
+
+    Returns:
+        The production as `get_production` gives it, with `comment`, the
+        comment as `get_comments` shows it, when one was answered.
+
+    Raises:
+        ValueError: If the production does not exist or has ended, the
+            user's words are missing, or the comment is not on its project.
+    """
+    production = going(production_id)
+    if not said.strip():
+        raise ValueError("an answer is written down only in the user's words: pass what they said")
+    if comment_id is None:
+        kept = production.model_copy(update={"said": [*production.said, Said(said=said.strip())]})
+        runtime.repo.save_production(kept)
+        return said_of(kept)
+    if production.project_id is None:
+        raise ValueError(f"production {production_id} has no project yet, so comment {comment_id} is not on it; "
+                         "omit comment_id to keep the answer with the production")
+    if not any(comment.id == comment_id for comment in runtime.repo.comments(production.project_id)):
+        raise ValueError(f"project {production.project_id} has no comment {comment_id}: pass a comment_id from "
+                         "get_production's pending or get_comments, or omit it")
+    answered = feedback.change_comment(production.project_id, comment_id, USER, said, via="chat")
+    return {**said_of(production), "comment": answered}

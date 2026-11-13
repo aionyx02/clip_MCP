@@ -21,7 +21,7 @@ from app.engine.frames import storyboard_sheet
 from app.engine.listen import cut_sound
 from app import runtime
 from app.runtime import mcp
-from app.tools import editing, rendering, shared
+from app.tools import editing, production, rendering, shared
 
 # Provisional (roadmap §13): a comment dragged over less than this is a moment, not a stretch.
 SHORTEST_STRETCH_SECONDS = 0.05
@@ -48,7 +48,8 @@ def _comment_said(project: Project, comment: Comment) -> dict:
         "file_seconds": comment.start_anchor.source if comment.start_anchor else None,
         "written": comment.created_at.isoformat(timespec="seconds"),
         "replies": [{"by": reply.by, "text": reply.text, "at": reply.at.isoformat(timespec="seconds"),
-                     "commit": reply.commit[:10] if reply.commit else None}
+                     "commit": reply.commit[:10] if reply.commit else None,
+                     **({"via": reply.via} if reply.via else {})}
                     for reply in comment.replies],
         # The version it was dealt with in, to watch what was done about it.
         "resolved_in": comment.resolved_commit[:10] if comment.resolved_commit else None,
@@ -305,9 +306,13 @@ def ask_user(project_id: str, questions: Annotated[List[Question], Field(min_len
     whether four seconds of opening hook anybody, whether a 57-second test
     loses them. Do not settle those by yourself: after a preview, ask about
     the few you weighed and could not decide, with why. Each shows in the
-    editor as a question on its moment of the cut, and the answer comes back
-    as a reply to it in `get_comments`. When an answer says how the user
-    likes their videos in general, not only this one, `remember_preference`.
+    editor as a question on its moment of the cut. The user may answer there,
+    as a reply in `get_comments`, or in the chat: write their words onto it
+    with `record_answer` and its `comment_id`. Finishing on your own
+    (`auto`), do not stop to wait: ask, carry on to a preview, and put every
+    open question to them at once; the final render is refused until each is
+    answered. When an answer says how the user likes their videos in
+    general, not only this one, `remember_preference`.
 
     Args:
         project_id: The video.
@@ -473,7 +478,8 @@ def add_comment(project_id: str, text: str, start: float, end: Optional[float] =
     return _comment_said(project, comment)
 
 def change_comment(project_id: str, comment_id: str, by: str, reply: str = "",
-                   status: Optional[Literal["open", "resolved"]] = None) -> dict:
+                   status: Optional[Literal["open", "resolved"]] = None,
+                   via: Optional[Literal["chat"]] = None) -> dict:
     """Say something back on a comment, close it, or open it again.
 
     Args:
@@ -482,6 +488,8 @@ def change_comment(project_id: str, comment_id: str, by: str, reply: str = "",
         by: Who is speaking: the AI program, or 你.
         reply: What is said; empty to only change its status.
         status: `resolved` to close it, `open` to open it again; None leaves it.
+        via: `chat` when the user said the reply in the conversation and the
+            AI is writing down their words.
 
     Returns:
         The comment as `get_comments` shows it.
@@ -495,7 +503,7 @@ def change_comment(project_id: str, comment_id: str, by: str, reply: str = "",
         raise ValueError(f"project {project_id} has no comment {comment_id}")
     commit = _current_commit(project_id)
     if reply.strip():
-        comment.replies.append(Reply(by=by, text=reply.strip(), commit=commit))
+        comment.replies.append(Reply(by=by, text=reply.strip(), commit=commit, via=via))
     if status == "resolved":
         comment.status, comment.resolved_commit = "resolved", commit
     elif status == "open":
@@ -540,6 +548,25 @@ def get_comments(project_id: str, include_resolved: bool = False) -> dict:
         "open": sum(comment.status == "open" for comment in every),
     }
 
+def _unanswered_in_auto(project_id: str, comment_id: str) -> Optional[str]:
+    """Say why a question may not be closed yet: the AI's own, unanswered, in an `auto` production.
+
+    Returns:
+        The reason, or None when it may be closed — or when the project or
+        comment does not exist, which closing says in its own words.
+    """
+    owner = production.of_project(project_id)
+    project = runtime.repo.get_project(project_id)
+    comment = next((item for item in runtime.repo.comments(project_id) if item.id == comment_id), None)
+    if owner is None or owner.mode != "auto" or project is None or comment is None:
+        return None
+    if not comment.question or comment.answered or comment.status != "open" or where_now(project, comment)["gone"]:
+        return None
+    return (f"comment {comment_id} is a question you asked and the user has not answered, and production "
+            f"{owner.id} is finishing on its own: it stays open until they answer. Put it to them in the chat "
+            "with the rest of get_production's pending and record_answer their words with this comment_id; to "
+            "only say something on it, resolve_comment with resolved: false")
+
 @mcp.tool()
 def resolve_comment(project_id: str, comment_id: str, reply: str, resolved: bool = True) -> dict:
     """Close a comment the user wrote, saying what was done about it.
@@ -549,6 +576,12 @@ def resolve_comment(project_id: str, comment_id: str, reply: str, resolved: bool
     and the user can open it again. With `resolved` false the reply is only
     said — to ask which of two things they meant, or why it was not done.
     Comments are the user's: there is no way to delete one from here.
+
+    While the project's production is finishing on its own (`auto`), a
+    question you asked with `ask_user` is not closed until the user has
+    answered it — in the editor, or in the chat through `record_answer` —
+    or the footage it is about is no longer in the cut: closing it yourself
+    would settle the doubt without them.
 
     Args:
         project_id: The video.
@@ -560,10 +593,14 @@ def resolve_comment(project_id: str, comment_id: str, reply: str, resolved: bool
         The comment as `get_comments` shows it.
 
     Raises:
-        ValueError: If the project or comment does not exist, or the reply
-            is empty.
+        ValueError: If the project or comment does not exist, the reply is
+            empty, or it would close an unanswered question in an `auto`
+            production.
     """
     if not reply.strip():
         raise ValueError("say what was done, or what you need to know")
+    refusal = _unanswered_in_auto(project_id, comment_id) if resolved else None
+    if refusal:
+        raise ValueError(refusal)
     return change_comment(project_id, comment_id, f"AI（{runtime.calling_client.get()}）", reply,
                           "resolved" if resolved else None)

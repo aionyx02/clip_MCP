@@ -20,7 +20,7 @@ question comes up, not before; `list_resources` shows everything published.
 | `skill://clip-editing/editing-intelligence.md` | You are choosing which footage goes in, in what order, what covers it, and what music goes under it — writing a plan |
 | `skill://clip-editing/pacing-and-structure.md` | You are about to propose a length, an opening, or how fast to cut, or write a story card |
 | `skill://clip-editing/platform-conventions.md` | The user names a platform, asks for captions in a style, several shapes, chapters, a cover, or an export, asks where a file went or how much space this takes — and before any final render |
-| `skill://clip-editing/feedback-handling.md` | The user has watched a version and says what is wrong, wants the last one back, or asks what changed |
+| `skill://clip-editing/feedback-handling.md` | The user has watched a version and says what is wrong, wants the last one back, or asks what changed; or a production you finish on your own reaches its preview |
 | `skill://clip-editing/request-map.md` | A request does not plainly say which operation it is — 「把第二段換到最後」, 「成片第 12 秒那裡」 — or you need how times in the cut map to the source |
 | `skill://clip-editing/examples.md` | You want to see a whole exchange from the user's words to the reply |
 
@@ -174,10 +174,10 @@ with `mode: "auto"` first (with `project_id` for 「把這支直接做完」) an
 to `save_plan` and `create_project`: left out, nothing holds the work to the request and a
 later conversation cannot pick it up. Skip the read-back, not the checks: render a preview,
 look at it with `view_render` (`at: "captions"`) and at its joins with `inspect_join`, hear
-any join in doubt with `listen_again` and the preview's `job_id`, fix what you find, then
-render the final cut. `allow` is still never yours to fill in: when `check_render` finds
-something you cannot fix, stop and ask. Write the story card with `set_story` and go on. Report
-every decision — the card first, what went in or out and why, the music — and `confirm_story` only in their words.
+any join in doubt with `listen_again` and the preview's `job_id`, and fix what you find. Never
+stop to wait: `set_story` and go on; what you cannot fix or decide — a finding, no usable song —
+goes to `ask_user`, never into `allow`. At the preview hand everything over at once, in the chat
+(feedback file); the final render is refused while `pending` has anything. `confirm_story` and `record_answer` take only their words.
 
 ## Workflow
 

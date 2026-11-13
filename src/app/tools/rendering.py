@@ -22,6 +22,7 @@ from app.models.media import Asset, MediaAnalysis
 from app.models.plan import EditPlan
 from app.models.timeline.parts import Clip, Project, TrackType
 from app.models.job import Job, JobKind, JobStatus
+from app.models.production import Production
 from app.engine import cards, legibility, looks, playback, resources, sync, texts
 from app.engine.analysis import second_listen, with_words_heard_again
 from app.engine.probe import probe_file, speech_loudness
@@ -537,7 +538,10 @@ def render_project(
     tall for the frame, or a length far from what the plan asked for. Fix
     the cut, or name the kinds of finding the user has decided to live with
     in `allow`. Previews are never refused — they are how you look — but
-    say what they found.
+    say what they found. While the project's production is finishing on its
+    own (`auto`), a final render is also refused until `get_production`'s
+    `pending` is empty — the story card confirmed, every question answered,
+    every comment of the user's closed — and `allow` does not change that.
 
     Returns immediately. Poll `get_job` with the returned `job_id` until the
     job reaches a terminal status, or stop it with `cancel_job`. Rendering
@@ -598,18 +602,52 @@ def render_project(
         ValueError: If the project does not exist, contains no clips, uses an
             unsupported feature, has no finished preview of its picture as it
             is now in this shape for a final render, or its sound as it is now
-            has been neither previewed nor heard, or the check found something
-            not allowed.
+            has been neither previewed nor heard, the check found something
+            not allowed, or its `auto` production still has something pending.
     """
     unseen = None if is_preview else _unseen(project_id, frame)
     if unseen:
         raise ValueError(unseen)
     # Named only here: the editor's renders are the user's own, and belong to no production.
     owner = production.of_project(project_id)
+    owed = None if is_preview else _owed_the_user(owner)
+    if owed:
+        raise ValueError(owed)
     return start_render(
         project_id, is_preview, loudness_target, burn_subtitles, frame, follow_faces, allow, PREVIEW_SHORT_SIDE,
         production_id=owner.id if owner is not None else None,
     )
+
+def _owed_the_user(owner: Optional[Production]) -> Optional[str]:
+    """Say what the user still has to answer, or the AI still has to do for them, before a final render.
+
+    Only for an unfinished `auto` production: the user walked away, so the
+    final cut waits until everything put off for them is settled — the story
+    card, the questions asked, and the comments they wrote. `allow` does not
+    reach this: it is about what the check found, not about what the user
+    was never asked. A project with no production, an `interactive` one,
+    and the editor's own exports are not held here.
+
+    Args:
+        owner: The unfinished production of the project, if any.
+
+    Returns:
+        Why the final render is refused, listing everything still owed; None
+        when there is nothing, or no `auto` production.
+    """
+    if owner is None or owner.mode != "auto":
+        return None
+    items = production.owed(owner)
+    if not items:
+        return None
+    lines = [f"[{item['kind']}]" + (f" {item['comment_id']}「{(item.get('text') or '')[:60]}」"
+                                    if item.get("comment_id") else "") + f": {item['message']}"
+             for item in items]
+    return (f"production {owner.id} is finishing on its own and the user still owes answers, or is owed what "
+            "they asked for; the final cut waits until all of it is settled, and allow does not change that:\n- "
+            + "\n- ".join(lines)
+            + "\nPut everything to the user at once in the chat, with the preview's path and what you decided "
+              "yourself; record_answer their words, handle and resolve_comment their comments, then render again")
 
 def _unseen(project_id: str, frame: Optional[str]) -> Optional[str]:
     """Say what of a project as it is now nobody has looked at or heard, before a final render.
