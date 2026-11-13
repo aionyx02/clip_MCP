@@ -53,7 +53,10 @@ def test_the_ai_is_told_a_mac_transcribes_on_the_processor_only() -> None:
     told = machine.describe(computer(mac=True, apple_silicon=True, memory_bytes=16 * GIB, logical_cores=8), HOUR)
     assert "mid" in told and "processor only" in told and "Apple" in told
 
-def test_the_ai_is_told_other_graphics_do_not_help() -> None:
+def test_the_ai_is_told_other_graphics_do_not_help(monkeypatch: pytest.MonkeyPatch) -> None:
+    from app import gpu
+
+    monkeypatch.setattr(gpu, "card_count", lambda: 0)
     told = machine.describe(computer(memory_bytes=8 * GIB), HOUR)
     assert "low" in told and "AMD" in told and "rough" in told
 

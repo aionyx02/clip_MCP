@@ -787,7 +787,7 @@ async function aiPage(page) {
 const SWATCHES = ["#5b8def", "#7d8aa6", "#6f9f86", "#a3906a", "#8c7ca6", "#6a98a4", "#a07c7c", "#8a8a8f", "#97a06d"];
 
 async function storagePage(page) {
-  page.innerHTML = head(T.storage.title, T.storage.subtitle) + `<div data-usage><div class="row skeleton" style="height:120px"></div></div><div data-trash></div>`;
+  page.innerHTML = head(T.storage.title, T.storage.subtitle) + `<div data-usage><div class="row skeleton" style="height:120px"></div></div><div data-gpu></div><div data-trash></div>`;
   const { items } = await api("/api/storage");
   const inWorkspace = items.filter((item) => item.key !== "outputs" && item.key !== "trash");
   const total = inWorkspace.reduce((sum, item) => sum + item.megabytes, 0);
@@ -818,7 +818,34 @@ async function storagePage(page) {
       } catch (error) { toast(error.message, "error"); }
     };
   });
+  await drawGpu($("[data-gpu]", page));
   await drawTrash($("[data-trash]", page), () => storagePage(page));
+}
+
+// Where speech recognition runs, and why; with an NVIDIA card and no cuBLAS, the GPU pack
+// can be downloaded here, so a card put in after the install needs no reinstall.
+async function drawGpu(box) {
+  let said;
+  try { said = await api("/api/gpu"); } catch { return; }
+  const mb = (count) => bytes(count / 2 ** 20);
+  const where = said.device === "cuda" ? T.gpu.onCard : T.gpu.onProcessor;
+  const action = said.install.running
+    ? `<span class="spinner"></span>${esc(T.gpu.downloading(said.install.total ? Math.floor(said.install.done / said.install.total * 100) : 0))}`
+    : said.can_install && !said.pack_installed
+      ? `<button class="btn small primary" data-gpu-install>${icon("download", 16)}${esc(T.gpu.install(mb(said.pack_size)))}</button>` : "";
+  box.innerHTML = `<h2 class="section-title">${esc(T.gpu.title)}</h2>
+    <div class="list"><div class="row">${icon("sparkle")}
+      <div class="grow"><strong>${esc(where)}</strong><div class="sub">${esc(T.gpu.why[said.why] ? T.gpu.why[said.why](said.folder) : said.reason)}</div>
+        ${said.install.error ? `<div class="sub" style="color:var(--danger)">${esc(T.gpu.failed(said.install.error))}</div>` : ""}
+        ${said.last_failure ? `<div class="sub">${esc(T.gpu.fellBack(said.last_failure))}</div>` : ""}
+        ${said.can_install && !said.pack_installed && !said.install.running ? `<div class="sub">${esc(T.gpu.hint(mb(said.pack_installed_size)))}</div>` : ""}</div>
+      ${action}</div></div>`;
+  const button = $("[data-gpu-install]", box);
+  if (button) button.onclick = async () => {
+    try { await api("/api/gpu", {}); } catch (error) { toast(error.message, "error"); return; }
+    drawGpu(box);
+  };
+  if (said.install.running) setTimeout(() => { if (box.isConnected) drawGpu(box); }, 1000);
 }
 
 // The trash: what the user deleted, waiting to be put back until its days run out.
