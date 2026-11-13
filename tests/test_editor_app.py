@@ -635,3 +635,49 @@ def test_a_brand_kits_logo_cannot_be_taken_out(tmp_path: Path) -> None:
     assert set(store.get_assets(["logo", "dark"])) == {"logo", "dark"}
     store.delete_brand_kit("咖啡店")
     assert store.delete_unused_assets(["logo"]) == {}
+
+
+def test_a_thumbnail_looked_at_again_is_kept_by_the_weekly_clear(client: TestClient, media: Path) -> None:
+    import time
+    from app.storage import housekeeping
+
+    asset = catalog.import_asset(str(media / "wide.mp4"))["id"]
+    assert client.get(f"/thumb/{asset}?t=0.5&h=90").status_code == 200
+    made = max((editor.CACHE_DIR / "thumbs").glob("*.jpg"), key=os.path.getmtime)
+    week_ago = time.time() - 8 * 86400
+    os.utime(made, (week_ago, week_ago))
+    assert client.get(f"/thumb/{asset}?t=0.5&h=90").status_code == 200
+    housekeeping.purge_ui_cache(runtime.WORKSPACE_DIR)
+    assert made.exists()
+
+
+def test_the_editor_clears_its_old_thumbnails_when_it_starts() -> None:
+    import time
+
+    stale = editor.CACHE_DIR / "thumbs" / "stale-test.jpg"
+    stale.parent.mkdir(parents=True, exist_ok=True)
+    stale.write_bytes(b"x")
+    week_ago = time.time() - 8 * 86400
+    os.utime(stale, (week_ago, week_ago))
+    with TestClient(editor.create_app()) as started:
+        assert started.get("/api/ping").status_code == 200
+    assert not stale.exists()
+
+
+def test_the_music_page_reads_each_song_once_and_says_the_same(client: TestClient, media: Path, monkeypatch) -> None:
+    from app.engine import music
+    from app.models.media import MusicSense
+
+    song = catalog.import_asset(str(media / "song.mp3"))["id"]
+    catalog.set_asset_library([song], "music")
+    energy = music.energy_curve([-40.0] * 30 + [-12.0] * 30 + [-40.0] * 10)
+    runtime.repo.save_analysis(MediaAnalysis(asset_id=song, duration=70.0,
+                                             music=MusicSense(moods={"calm": 0.6}, styles={"piano": 0.5}, energy=energy)))
+    assert examining.song_tags({song: runtime.repo.get_analysis(song)})[song] == examining.song_tags()[song]
+    read = []
+    original = runtime.repo.get_analysis
+    monkeypatch.setattr(runtime.repo, "get_analysis", lambda asset_id: read.append(asset_id) or original(asset_id))
+    shown = next(item for item in client.get("/api/assets?library=music").json()["assets"] if item["id"] == song)
+    assert read.count(song) == 1
+    summary = music.summary(energy)
+    assert (shown["ends"], shown["fullest"]) == (summary["ends"], summary["fullest"])

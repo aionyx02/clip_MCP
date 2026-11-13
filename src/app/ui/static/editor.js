@@ -35,9 +35,14 @@
   // ------------------------------------------------------------------ server
 
   async function loadProject() {
-    E.project = await api(`/api/projects/${encodeURIComponent(E.id)}`);
-    E.captions = (await api(`/api/projects/${encodeURIComponent(E.id)}/captions`)).captions;
-    await loadComments();
+    // Asked for together: one after another, opening a project waited on each in turn.
+    const [project, captions] = await Promise.all([
+      api(`/api/projects/${encodeURIComponent(E.id)}`),
+      api(`/api/projects/${encodeURIComponent(E.id)}/captions`),
+      loadComments(),
+    ]);
+    E.project = project;
+    E.captions = captions.captions;
     E.ownVersion = E.project.version;
     if (E.selectedCaption && !E.captions.some((cue) => cue.cue_id === E.selectedCaption)) E.selectedCaption = null;
     if (E.selected && !findClip(E.selected.track, E.selected.clip)) E.selected = null;
@@ -45,11 +50,15 @@
 
   // What the user said about moments of the cut, open and closed, where each is on the cut now.
   async function loadComments() {
+    const songs = api(`/api/projects/${encodeURIComponent(E.id)}/songs`);
+    const comments = api(`/api/projects/${encodeURIComponent(E.id)}/comments`);
+    // Its failure is handled below; this keeps it from being reported while the songs are awaited.
+    comments.catch(() => {});
     try {
-      E.songs = (await api(`/api/projects/${encodeURIComponent(E.id)}/songs`)).offers;
+      E.songs = (await songs).offers;
     } catch { /* kept as it was until the next look */ }
     try {
-      const listed = await api(`/api/projects/${encodeURIComponent(E.id)}/comments`);
+      const listed = await comments;
       const seen = JSON.stringify(listed.comments);
       const changed = seen !== E.commentsSeen;
       E.comments = listed.comments;

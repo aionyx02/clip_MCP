@@ -43,7 +43,9 @@ a { color: inherit; text-decoration: none; }
 svg { flex: none; }
 :focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
 
-.shell { display: grid; grid-template-columns: 196px 1fr; height: 100vh; }
+/* The sidebar's width, also where the selection bar's left edge goes. */
+:root { --sidebar: 196px; }
+.shell { display: grid; grid-template-columns: var(--sidebar) 1fr; height: 100vh; }
 
 /* sidebar: a panel, not a menu of pills */
 .sidebar {
@@ -266,11 +268,16 @@ a.card:hover, button.card:hover { border-color: var(--line-2); background: var(-
 .card.chosen { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
 .card.chosen .select-box { opacity: 1; background: var(--accent); border-color: var(--accent); color: var(--accent-ink); }
 .card.gone .thumb { opacity: .45; }
+/* Pinned to the bottom of the window over the content area, wherever the page is scrolled;
+   the page gets room below its last row so the bar never covers a card. The right edge
+   leaves the page's padding and its scrollbar clear. */
 .selection-bar {
-  position: sticky; bottom: 0; display: flex; align-items: center; gap: 8px; margin-top: 14px; padding: 8px 12px;
+  position: fixed; left: calc(var(--sidebar) + 28px); right: 38px; bottom: 14px; z-index: 30;
+  display: flex; flex-wrap: wrap; align-items: center; gap: 8px; padding: 8px 12px;
   background: var(--panel-2); border: 1px solid var(--line-2); border-radius: var(--radius); box-shadow: var(--shadow);
 }
-.selection-bar .grow { flex: 1; }
+.page:has(> .selection-bar) { padding-bottom: 96px; }
+.selection-bar .grow { flex: 1; white-space: nowrap; }
 .folder-list { max-height: 300px; overflow: auto; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--well); }
 .folder-list button {
   display: flex; align-items: center; gap: 8px; width: 100%; padding: 7px 10px; border: 0; background: transparent;
