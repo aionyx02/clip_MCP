@@ -72,6 +72,7 @@
       this.free = []; // elements not playing anything, kept to be used again
       this.audio = null; // made on the first play: browsers only allow sound after a click
       this.dirty = true;
+      this.played = false; // until the first play, a cut that fades up is shown faded up
       this.frame = requestAnimationFrame(() => this.tick());
     }
 
@@ -82,11 +83,22 @@
       this.described = described;
       const k = Math.min(1, CANVAS_SHORT_SIDE / Math.min(described.width, described.height));
       this.scale = k;
-      this.canvas.width = Math.round(described.width * k);
-      this.canvas.height = Math.round(described.height * k);
+      const width = Math.round(described.width * k), height = Math.round(described.height * k);
+      // Sizing a canvas wipes it, even to the size it already is. The description is read again
+      // every few seconds while copies are being made, and the page can be busy for a while after
+      // each, so it is only sized when its size changes, and drawn again straight away when it is.
+      const resized = width !== this.canvas.width || height !== this.canvas.height;
+      if (resized) {
+        this.canvas.width = width;
+        this.canvas.height = height;
+      }
       this.time = clamp(this.time, 0, described.duration);
       this.held = null;
       this.dirty = true;
+      if (resized && this.ready && !this.canvas.hidden) {
+        this.gather();
+        this.draw(this.opening());
+      }
     }
 
     play() {
@@ -94,6 +106,7 @@
       this.mixer();
       if (this.audio.state === "suspended") this.audio.resume();
       if (this.time >= this.duration - 0.01) this.time = 0;
+      this.played = true;
       this.paused = false;
       this.from = { time: this.time, at: performance.now() };
       this.onState();
@@ -111,6 +124,24 @@
       this.time = clamp(time, 0, this.duration);
       if (!this.paused) this.from = { time: this.time, at: performance.now() };
       this.dirty = true;
+    }
+
+    // Where a cut that opens by fading up from black is first fully seen. Until it is first played,
+    // a player resting at the start shows that frame rather than the black one at 0, so opening a
+    // project does not look like a preview that failed. Played, it starts from 0, fade and all.
+    opening() {
+      if (this.played || !this.paused || this.time !== 0) return this.time;
+      let at = 0;
+      for (const track of this.described.tracks) {
+        if (track.type !== "video") continue;
+        for (const clip of track.clips) {
+          if (pictureStart(clip) <= 0.001 && clip.video_fade_in > 0) at = Math.max(at, pictureStart(clip) + clip.video_fade_in);
+        }
+      }
+      // A title card's words fade in too: on a plain colour, nothing else is there at 0.
+      const card = this.described.cards?.events.find((event) => event.start <= 0.001);
+      if (card) at = Math.max(at, card.start + card.fade);
+      return Math.min(at, this.duration);
     }
 
     show(visible) { this.canvas.hidden = !visible; if (!visible) this.pause(); }
@@ -325,7 +356,7 @@
         }
       }
       this.gather();
-      const time = this.time;
+      const time = this.opening();
       if (this.audio) this.master.gain.setTargetAtTime(dbToGain(this.described.gain_db), this.audio.currentTime, 0.05);
       for (const slot of this.slots.values()) {
         const { clip, track, picture, sound } = slot;

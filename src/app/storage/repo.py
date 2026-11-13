@@ -416,6 +416,24 @@ class Repository:
         rows = self._query("SELECT data FROM analyses WHERE asset_id = ?", (asset_id,))
         return MediaAnalysis.model_validate_json(rows[0][0]) if rows else None
 
+    def black_frames_of(self, asset_ids: Iterable[str]) -> Dict[str, List[Tuple[float, float]]]:
+        """The stretches analysis found black in each file, read without loading the rest of the analysis.
+
+        Args:
+            asset_ids: The files.
+
+        Returns:
+            `(start, end)` stretches by asset ID; a file not analyzed is left out.
+        """
+        wanted = sorted(set(asset_ids))
+        if not wanted:
+            return {}
+        rows = self._query(
+            f"SELECT asset_id, json_extract(data, '$.black_frames') FROM analyses "
+            f"WHERE asset_id IN ({','.join('?' * len(wanted))})", wanted)
+        return {asset_id: [(float(span["start"]), float(span["end"])) for span in json.loads(spans)]
+                for asset_id, spans in rows if spans}
+
     def transcript_model(self, asset_id: str) -> Optional[str]:
         """The speech model an asset's transcript was made with, read without loading the transcript.
 

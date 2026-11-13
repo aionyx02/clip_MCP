@@ -19,7 +19,7 @@ import threading
 import time
 import uuid
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Mapping, Optional, Tuple
 
 import numpy as np
 from starlette.applications import Starlette
@@ -128,18 +128,21 @@ def _project_cards() -> List[dict]:
     for project in everything:
         if project.branched_from is not None:
             branched[project.branched_from.project_id] = branched.get(project.branched_from.project_id, 0) + 1
+    firsts = {project.id: min(project.base_video_track.clips, key=lambda clip: clip.timeline_in, default=None)
+              if project.base_video_track else None for project in everything}
+    # One read for every first shot's black stretches, not one analysis loaded per card.
+    black = runtime.repo.black_frames_of(first.asset_id for first in firsts.values() if first is not None)
     for project in everything:
         base = project.base_video_track
         clips = base.clips if base else []
         used = {clip.asset_id for track in project.tracks for clip in track.clips}
         found = runtime.repo.get_assets(used)
         missing = sorted(os.path.basename(asset.path) for asset in found.values() if not os.path.exists(asset.path))
-        first = min(clips, key=lambda clip: clip.timeline_in, default=None)
         listed.append({
             "id": project.id, "name": project.name, "version": project.version,
             "duration": float(project.duration), "width": project.width, "height": project.height,
             "clips": len(clips),
-            "thumb": _opening_frame(first),
+            "thumb": _opening_frame(firsts[project.id], black),
             "missing": missing,
             "folder_id": filed.get(project.id),
             "versions": counts.get(project.id, 0),
@@ -408,13 +411,12 @@ async def cancel_job(request: Request) -> Response:
         return _error(str(error), 404)
     return JSONResponse(found)
 
-def _opening_frame(first: Optional[Clip]) -> Optional[dict]:
-    """Which frame stands for a project: a second into its first shot, so one that opens on black still
-    shows what it is, or its middle if it is shorter than that, so the frame is one the cut has."""
+def _opening_frame(first: Optional[Clip], black: Mapping[str, List[Tuple[float, float]]]) -> Optional[dict]:
+    """Which frame stands for a project: one in its first shot, past any black the analysis found there."""
     if first is None:
         return None
-    start, end = float(first.source_range.start), float(first.source_range.end)
-    return {"asset_id": first.asset_id, "t": round(min(start + 1.0, (start + end) / 2), 2)}
+    return versioning.opening_frame(first.asset_id, float(first.source_range.start),
+                                    float(first.source_range.end), black.get(first.asset_id, ()))
 
 async def assets(request: Request) -> Response:
     """Every imported file the page can put on the timeline, and the folder each is filed in.
