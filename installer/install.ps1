@@ -35,15 +35,14 @@ $clip = Join-Path $App "bin\clip-mcp.exe"
 "This folder was installed by the clip-mcp installer; the editor may update it." |
     Out-File -FilePath (Join-Path $App "installed-by-setup.txt") -Encoding utf8
 
-# The GPU pack: fetched when chosen, kept when it is already the pinned one, and taken out when
-# the user unchecked it.
+# The GPU pack: fetched when chosen, kept when it is already the pinned one. Left alone when not
+# chosen: the setup cannot tell an unticked box from a pack the user fetched later from the editor,
+# so it is taken out only from the editor, `clip-mcp gpu remove`, or by uninstalling.
 $gpuFailed = $false
 if ($Gpu) {
     Say "STEP gpu"
     $code = Run $clip @("gpu", "install")
     if ($code -ne 0) { Say "GPU pack not installed: $code"; $gpuFailed = $true }
-} else {
-    Run $clip @("gpu", "remove") | Out-Null
 }
 
 # Point clip-mcp at its workspace and at the FFmpeg it came with. It connects no AI client:

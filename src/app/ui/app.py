@@ -1081,10 +1081,12 @@ async def gpu_pack(request: Request) -> Response:
 
     if request.method == "POST":
         if not _gpu_install["running"]:
+            # Claimed before the await, so a second quick press cannot start a second download.
+            _gpu_install.update(running=True, done=0, total=gpu.PACK.size, error=None)
             said = await run_in_threadpool(gpu.status)
             if not said["can_install"]:
+                _gpu_install.update(running=False)
                 return _error(said["reason"])
-            _gpu_install.update(running=True, done=0, total=gpu.PACK.size, error=None)
             threading.Thread(target=_install_gpu_pack, daemon=True).start()
     said = await run_in_threadpool(gpu.status)
     return JSONResponse({**said, "install": dict(_gpu_install)})

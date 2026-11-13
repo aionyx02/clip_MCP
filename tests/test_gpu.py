@@ -161,3 +161,12 @@ def test_the_editor_says_where_speech_recognition_runs_and_refuses_a_pack_it_can
     assert said["device"] == "cpu" and said["why"] == "no_card" and not said["install"]["running"]
     refused = client.post("/api/gpu", json={})
     assert refused.status_code == 400 and "no NVIDIA card" in refused.json()["error"]
+
+def test_a_pack_downloaded_while_running_is_used_without_a_restart(installed: Path) -> None:
+    assert gpu.use().source == "none"
+    libraries(installed / "gpu")
+    assert gpu.use().source == "bundled"
+
+def test_an_update_never_takes_out_a_pack_the_user_fetched_later() -> None:
+    script = (Path(__file__).parent.parent / "installer" / "install.ps1").read_text(encoding="utf-8")
+    assert '"gpu", "remove"' not in script

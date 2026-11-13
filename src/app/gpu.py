@@ -18,7 +18,6 @@ The pack is one pinned wheel from PyPI, checked against its SHA-256 before
 anything is taken out of it; only the two libraries are kept.
 """
 
-import functools
 import hashlib
 import json
 import os
@@ -128,9 +127,14 @@ def find() -> Libraries:
             continue
     return Libraries("none", None)
 
-@functools.lru_cache(maxsize=1)
+_used: Optional[Libraries] = None
+
+
 def use() -> Libraries:
-    """Find cuBLAS and load it from where it was found, once per process.
+    """Find cuBLAS and load it from where it was found, once per process once it loads.
+
+    Only a library that loaded is kept: not finding one is looked into again
+    next time, so a server already running picks up a pack downloaded since.
 
     Loaded by full path, so that when CTranslate2 asks for it by name it gets
     this copy and not whichever comes first on PATH: the bundled pack wins
@@ -139,6 +143,9 @@ def use() -> Libraries:
     Returns:
         Where it was loaded from, or `none` when it was not found or would not load.
     """
+    global _used
+    if _used is not None:
+        return _used
     found = find()
     if found.folder is None:
         return found
@@ -146,7 +153,17 @@ def use() -> Libraries:
         _load(found.folder)
     except OSError:
         return Libraries("none", found.folder)
+    _used = found
     return found
+
+
+def _forget() -> None:
+    """Forget what was loaded, so the next `use` looks again."""
+    global _used
+    _used = None
+
+
+use.cache_clear = _forget  # type: ignore[attr-defined]
 
 def _load(folder: Path) -> None:
     """Load both libraries from `folder`, and let anything loaded after them look there too."""
