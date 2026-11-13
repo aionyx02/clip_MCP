@@ -57,7 +57,7 @@ feedback are mapped in their own files.
 | 「字移到右上」「名字晚一點出來」「字拿掉」 / change words | `set_text` with `x`, `y` (it keeps its style; a new `style` alone puts it back where that style goes); or `timeline_start`; `remove_text` |
 | 「照片不要動」「照片慢慢拉遠／往左移」 / how a photo moves | `set_clip_look` with `motion`: `none`, `pull`, `pan_left`, `pan_right`, or `push` (the default) |
 | 「這段慢慢推近」「鏡頭慢慢拉近他」 / a slow push on video | In a compiled cut, `amend_plan` with `set_motion` (`push`, or `pull`, `pan_left`, `pan_right`); otherwise `set_clip_look` with `motion`. Video holds unless told; the push closes in on the face. Not for 「拉近一點」, which is a held closer crop with `fit` `zoom` |
-| 「右上角放一個小視窗」 / an inset in the top right | `add_track` a second video track, then `add_clip` with `timeline_in` and a `layout` box |
+| 「右上角放一個小視窗」 / an inset in the top right | `add_track` a second video track, then `add_clip` with `timeline_in` and `layout` `{place: "top_right", size: "small"}` (corners take a `size`; `left`/`right`/`top`/`bottom` halves take none) |
 | 「小視窗拿掉」 / drop the inset | `delete_clip` it, or `set_clip_look` with `clear_layout: true` to cover the frame |
 | 「中間插一段別的畫面蓋掉原本的」 / cut away over the same sound | `add_clip` on the upper video track with no `layout` and `volume: 0` (in a plan: `add_broll`) |
 | 「角落放一個小畫面」「子母畫面」「左右分割」 / picture in picture, split screen | in a plan: `add_broll` with `layout` (a corner and `size`, or a half); `sound: true` only when asked to hear it |

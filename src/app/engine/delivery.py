@@ -580,6 +580,7 @@ def _inset_findings(
         placed = framing.get(clip.id)
         zoom = placed.zoom if placed is not None else 1.0
         kept = cropped_share(size, (box[2], box[3])) / (zoom * zoom)
+        # Provisional: half a percent of slack, so a half that keeps exactly half after rounding to whole pixels is not named.
         if kept < SPLIT_KEPT_SHARE - 0.005:
             span = (float(clip.timeline_in), float(clip.timeline_out))
             place = insets.place_in(clip.layout, width, height)
