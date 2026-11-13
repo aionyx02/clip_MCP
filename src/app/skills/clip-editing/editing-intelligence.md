@@ -234,8 +234,10 @@ Every video gets music unless the user declines, so a `save_plan` with no
 `music` needs their no. Say it in the read-back (「我會配兩段音樂：前段輕快，
 成功之後換溫暖的」) and drop it if they decline. When they said to finish on
 your own, add it without asking and report the songs, and any credit they need,
-with the finished video. Only a library with nothing usable stops this: ask for
-a file the way the main skill says. `find_music` cannot find a song that is
+when you hand the preview over. A library with nothing usable is the one gap:
+with the user there, ask for a file the way the main skill says; finishing on
+your own, `ask_user` it on the part that needs a song and carry on to the
+preview without one, since the final render waits for the answer. `find_music` cannot find a song that is
 still `analyzing`, so analyze the songs and look again before saying none fits.
 
 Change the song where the feeling turns, such as a failure becoming a success

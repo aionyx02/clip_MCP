@@ -37,6 +37,11 @@ class Reply(BaseModel):
     text: str
     at: datetime = Field(default_factory=_utc_now)
     commit: Optional[str] = Field(default=None, description="The version it was said at")
+    via: Optional[Literal["chat"]] = Field(
+        default=None,
+        description="`chat` when the user said it in the conversation and the AI wrote down their words; "
+                    "None when it was written where it is kept",
+    )
 
 
 class Comment(BaseModel):
@@ -59,7 +64,7 @@ class Comment(BaseModel):
 
     @property
     def answered(self) -> bool:
-        """Whether the user has said something back on it: for a question the AI asked, its answer."""
+        """Whether the user has said something back on it, here or in the chat: for a question, its answer."""
         return any(reply.by == USER for reply in self.replies)
 
     @property

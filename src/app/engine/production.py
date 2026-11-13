@@ -12,13 +12,14 @@ counts as much as one the AI started. Or its project is gone. Shapes are compare
 by the size they come out at, never by name: a landscape project rendered as it
 is delivers `landscape`.
 
-What is still to be put to the user is worked out the same way, never kept as a
-list: in an `auto` production the story card comes first, until the user has
-said yes to the card as it is now; then the questions asked on the project that
-are still open and unanswered.
+What is still owed between the AI and the user is worked out the same way, never
+kept as a list: in an `auto` production the story card comes first, until the
+user has said yes to the card as it is now; then the questions asked on the
+project that are still open and unanswered; then what the user wrote on the
+project that is still open, until the AI has done it and closed it.
 """
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Dict, FrozenSet, List, Mapping, Optional, Sequence, Set, Tuple
 
 from app.engine.reframe import framed_size
@@ -48,6 +49,9 @@ class Footing:
         renders: The project's finished renders, previews included.
         questions: The questions the AI asked the user on the project that
             are still open and unanswered, by comment ID.
+        opened: What the user wrote on the project that is still open —
+            「這裡太拖」 in the editor, a song picked — by comment ID.
+        texts: What each of those comments says, by comment ID.
     """
 
     analysed: FrozenSet[str]
@@ -58,6 +62,8 @@ class Footing:
     picture: Optional[str]
     renders: Sequence[Job]
     questions: Sequence[str]
+    opened: Sequence[str] = ()
+    texts: Mapping[str, str] = field(default_factory=dict)
 
 
 def _finals(production: Production, renders: Sequence[Job]) -> List[Job]:
@@ -126,21 +132,23 @@ def story_confirmed(production: Production) -> bool:
 
 
 def pending(production: Production, footing: Footing) -> List[dict]:
-    """What is still to be put to the user, in the order it is to be asked.
+    """What is still owed between the AI and the user, in the order it is to be taken up.
 
     In an `auto` production the story card comes first while there is none,
     or the user has not said yes to it as it is now: the AI may write it and
     carry on, but the user was not there to agree to it. An `interactive` one
     has the user there, and its card is put to them before the plan. Then
     each question asked on the project that is still open and unanswered.
+    Then each comment the user wrote that is still open: it is cleared by the
+    AI doing what it asks and closing it, not by the user.
 
     Args:
         production: The production.
         footing: What is stored about it.
 
     Returns:
-        Each item: `kind` (`story` or `question`), `comment_id` for a
-        question, and `message`.
+        Each item: `kind` (`story`, `question` or `comment`), `comment_id`
+        and `text` for a question or a comment, and `message`.
     """
     items = []
     if production.mode == "auto" and not story_confirmed(production):
@@ -149,9 +157,14 @@ def pending(production: Production, footing: Footing) -> List[dict]:
             if production.story is None else
             "the story card has not been confirmed as it is now: put it to the user first, and "
             "confirm_story with their words and its story_hash")})
-    items += [{"kind": "question", "comment_id": comment_id,
-               "message": "a question asked on the project, still unanswered: get_comments has it"}
+    items += [{"kind": "question", "comment_id": comment_id, "text": footing.texts.get(comment_id),
+               "message": "a question asked on the project, still unanswered: put it to the user and "
+                          "record_answer their words with this comment_id"}
               for comment_id in footing.questions]
+    items += [{"kind": "comment", "comment_id": comment_id, "text": footing.texts.get(comment_id),
+               "message": "the user wrote this on the project and it is still open: do what it asks, then "
+                          "resolve_comment saying what was done"}
+              for comment_id in footing.opened]
     return items
 
 
@@ -201,6 +214,7 @@ NEXT: Mapping[str, str] = {
     "project": "make the project with create_project, passing production_id, then compile_plan the plan onto it",
     "cut": "compile_plan the plan onto the project",
     "previewed": "render a preview of the cut as it is now with render_project and look at it",
-    "answered": "the user has not answered every question asked on the project: get_comments lists them",
+    "answered": "the user has not answered every question asked on the project: put the ones in `pending` to "
+                "them in the chat, and record_answer what they say",
     "delivered": "render the final cut in each shape still missing with render_project, is_preview: false",
 }

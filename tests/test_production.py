@@ -22,13 +22,14 @@ from app.models.production import Production
 from app.models.timeline.parts import Project
 from app.engine.delivery import CHECKS
 from app.storage.repo import Repository
-from app.tools import editing, rendering, upkeep, versioning
+from app.tools import editing, feedback, rendering, upkeep, versioning
 from app.tools.editing import apply_edits, create_project, get_project
 from app.tools.planning import OPERATIONS, amend_plan, compile_plan, save_plan
-from app.tools.feedback import ask_user
-from app.models.comment import Question
+from app.tools.feedback import ask_user, get_comments, resolve_comment
+from app.models.comment import USER, Question
 from app.tools.production import (
-    close_production, confirm_story, get_production, set_production_mode, set_story, start_production,
+    close_production, confirm_story, get_production, record_answer, set_production_mode, set_story,
+    start_production,
 )
 from edit_plan.shared import planned  # noqa: F401 — the fixture
 
@@ -420,3 +421,122 @@ def test_an_auto_production_puts_a_missing_or_unconfirmed_card_first(planned: di
 def test_an_interactive_production_s_card_is_not_left_pending(planned: dict) -> None:
     production, _ = compiled(planned, mode="interactive")
     assert kinds(production) == []
+
+
+# ------------------------------------------------------------------ what the user still owes, and the gate it holds
+
+def previewed(project_id: str) -> None:
+    """A finished preview of the cut as it is now, picture and sound, through the tool."""
+    started = rendering.render_project(project_id, is_preview=True)
+    runtime.repo.update_job(started["job_id"], lambda job: setattr(job, "status", JobStatus.COMPLETED))
+
+
+def final(project_id: str) -> dict:
+    """A final render through the tool, with every finding of the check allowed."""
+    return rendering.render_project(project_id, is_preview=False, allow=list(CHECKS))
+
+
+def owing(planned: dict, mode: str = "auto") -> tuple:
+    """A production with a story card not confirmed, a question unanswered and a comment of the user's open.
+
+    Returns:
+        `(production_id, project_id, story_hash, question_id, comment_id)`.
+    """
+    production, project = compiled(planned, mode=mode)
+    story_hash = set_story(production, **CARD)["story_hash"]
+    question = ask_user(project, [Question(start=0.0, question="開場會不會太長？", why="四秒才進正題")])
+    comment = feedback.add_comment(project, "這裡太拖", 1.0)
+    previewed(project)
+    return production, project, story_hash, question["asked"][0]["id"], comment["id"]
+
+
+def test_an_auto_production_s_final_render_waits_for_everything_owed(planned: dict) -> None:
+    production, project, story_hash, question, comment = owing(planned)
+    with pytest.raises(ValueError) as refused:
+        final(project)
+    said = str(refused.value)
+    # Every item is named, in order, and allowing every finding of the check does not get past it.
+    assert "[story]" in said and f"[question] {question}" in said and f"[comment] {comment}「這裡太拖」" in said
+    assert said.index("[story]") < said.index("[question]") < said.index("[comment]")
+    assert not [job for job in runtime.repo.renders_of(project) if not job.preview]
+
+    confirm_story(production, story_hash, said="好，就這樣")
+    record_answer(production, "不會，留著", comment_id=question)
+    with pytest.raises(ValueError, match=rf"\[comment\] {comment}"):
+        final(project)
+    resolve_comment(project, comment, "把那段停頓剪掉了")
+    assert get_production(production)["pending"] == []
+    started = final(project)
+    assert runtime.repo.get_job(started["job_id"]).production_id == production
+
+
+def test_without_an_auto_production_nothing_owed_holds_a_final_render(planned: dict) -> None:
+    # An interactive production: the user is there, and the same open items do not hold the render.
+    production, project, *_ = owing(planned, mode="interactive")
+    assert kinds(production) == ["question", "comment"]
+    assert final(project)["job_id"]
+
+    # No production at all, as before.
+    bare = create_project(name="沒有製作", width=640, height=360)["id"]
+    compile_plan(project_id=bare, expected_version=1, plan_id=planned["plan_id"])
+    ask_user(bare, [Question(start=0.0, question="開場會不會太長？")])
+    previewed(bare)
+    assert final(bare)["job_id"]
+
+
+def test_the_editor_s_export_is_never_held(planned: dict) -> None:
+    production, project, *_ = owing(planned)
+    with pytest.raises(ValueError, match="finishing on its own"):
+        final(project)
+    started = rendering.start_render(project, False, None, False, None, True, list(CHECKS),
+                                     rendering.PREVIEW_SHORT_SIDE)
+    assert runtime.repo.get_job(started["job_id"]).production_id is None
+
+
+def test_an_answer_from_the_chat_answers_the_question_in_the_user_s_words(planned: dict) -> None:
+    production, project, _, question, _ = owing(planned)
+    with pytest.raises(ValueError, match="user's words"):
+        record_answer(production, "  ", comment_id=question)
+    with pytest.raises(ValueError, match="no comment"):
+        record_answer(production, "不會", comment_id="cnothere")
+    said = record_answer(production, "  不會，留著  ", comment_id=question)
+    assert said["comment"]["answered"] and said["comment"]["replies"][-1] == {
+        **said["comment"]["replies"][-1], "by": USER, "text": "不會，留著", "via": "chat"}
+    stored = next(item for item in runtime.repo.comments(project) if item.id == question)
+    assert stored.answered and stored.replies[-1].via == "chat"
+    assert "question" not in [item["kind"] for item in said["pending"]]
+
+
+def test_an_answer_about_the_whole_video_is_kept_with_the_production(planned: dict) -> None:
+    production, project, *_ = owing(planned)
+    said = record_answer(production, "再短一點")
+    assert [entry["said"] for entry in said["said"]] == ["再短一點"]
+    # It answers no question: they are still owed.
+    assert "question" in [item["kind"] for item in said["pending"]]
+    assert all(not reply.via for comment in runtime.repo.comments(project) for reply in comment.replies)
+
+
+def test_an_auto_production_s_own_question_is_not_closed_until_answered(planned: dict) -> None:
+    production, project, _, question, comment = owing(planned)
+    with pytest.raises(ValueError, match="has not answered"):
+        resolve_comment(project, question, "我覺得不會太長")
+    # Saying something on it without closing it, and closing the user's own comment, are still fine.
+    resolve_comment(project, question, "我先保留，等你看", resolved=False)
+    resolve_comment(project, comment, "把那段停頓剪掉了")
+    record_answer(production, "可以", comment_id=question)
+    assert resolve_comment(project, question, "照你說的留著")["status"] == "resolved"
+
+
+def test_a_question_on_footage_that_left_the_cut_can_be_closed(planned: dict) -> None:
+    _, project, _, question, _ = owing(planned)
+    state = get_project(project)
+    apply_edits(project, state["version"], OPERATIONS.validate_python([
+        {"action": "delete_clip", "track_id": "main", "clip_id": state["tracks"][0]["clips"][0]["id"]},
+    ]))
+    assert next(item for item in get_comments(project)["comments"] if item["id"] == question)["gone"]
+    assert resolve_comment(project, question, "那段已經剪掉了")["status"] == "resolved"
+
+
+def test_an_interactive_production_s_question_can_be_closed_by_the_ai(planned: dict) -> None:
+    _, project, _, question, _ = owing(planned, mode="interactive")
+    assert resolve_comment(project, question, "你在旁邊說了不會")["status"] == "resolved"

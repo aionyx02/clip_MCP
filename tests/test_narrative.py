@@ -24,7 +24,7 @@ from app.tools.editing import apply_edits, create_project, get_project
 from app.tools.narrative import DoubtRuling, rule_doubts, story_doubts
 from app.tools.planning import OPERATIONS
 from app.tools.catalog import import_asset
-from app.tools.production import start_production
+from app.tools.production import confirm_story, set_story, start_production
 from test_semantic_timeline import analysis
 
 T0 = datetime(2026, 9, 9, 10, 0, tzinfo=timezone.utc)
@@ -205,10 +205,12 @@ def keep_all(project_id: str) -> None:
 
 
 def test_a_final_render_of_an_auto_production_waits_until_every_nomination_is_kept(by_hand: str) -> None:
-    start_production(mode="auto", brief="直接做完", asset_ids=[], project_id=by_hand)
+    production = start_production(mode="auto", brief="直接做完", asset_ids=[], project_id=by_hand)["production_id"]
     previewed(by_hand)
     with pytest.raises(ValueError) as refused:
         final(by_hand)
+    # One gate: what the user owes and the unruled nominations are listed together.
+    assert "[story]" in str(refused.value)
     assert "closing_too_early:talk (not ruled)" in str(refused.value)
     assert "back_in_time:talk>before" in str(refused.value)
     # Previews are never held up.
@@ -220,6 +222,10 @@ def test_a_final_render_of_an_auto_production_waits_until_every_nomination_is_ke
 
     keep_all(by_hand)
     assert story_doubts(by_hand)["unruled"] == []
+    with pytest.raises(ValueError, match=r"\[story\]"):
+        final(by_hand)
+    card = dict(theme="晚安之後", structure="照時間", opening="開場", turn="轉折", ending="結尾", left_out="無", length="30 秒")
+    confirm_story(production, set_story(production, **card)["story_hash"], said="好，就這樣")
     assert final(by_hand)["job_id"]
 
 
