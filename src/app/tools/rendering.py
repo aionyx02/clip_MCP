@@ -38,7 +38,7 @@ from app.engine.delivery import (
 from app.engine import ad_variants
 from app.engine.brand_opening import brand_opening
 from app.engine.frames import format_timestamp, still, storyboard_sheet
-from app.engine.subtitles import CAPTION_LINE_HEIGHT, build_ass, drawn_captions, place_cues
+from app.engine.subtitles import build_ass, caption_rows, drawn_captions, place_cues
 from app.storage import housekeeping
 from app.workspace import output_dir
 from app import runtime
@@ -312,8 +312,9 @@ def preview_project(
             what = (
                 "covering picture, over the whole frame — the tiles in this stretch show "
                 "the sequence underneath, not this" if box is None
-                else f"inset at {box.x:.0%} across and {box.y:.0%} down, "
-                     f"{box.width:.0%} x {box.height:.0%} of the frame"
+                else f"split screen in the {box.place} half, the sequence in the other — the tiles show the "
+                     "sequence whole" if box.is_half
+                else f"inset in the {box.place.replace('_', '-')} corner, {box.size}"
             )
             listing.append(
                 f"-- track {track.id}: clip {clip.id}, "
@@ -1020,6 +1021,8 @@ def check_findings(project: Project, burn_subtitles: bool) -> list:
         talking_of(project, voices_of(project)), {asset_id: asset.recorded_at for asset_id, asset in dated.items()},
         _looks(look_candidates(project, analyses), assets),
         length_window=ad_variants.window(cut_to) if cut_to else None,
+        # Where each face lands depends on how the sequence is cropped in this frame.
+        framing=framing_of(project, assets), assets=shared.sized(assets),
     )
 
 def _looks(clips: Sequence[Clip], assets: Mapping[str, Asset]) -> Dict[str, Tuple[int, ...]]:
@@ -1062,22 +1065,6 @@ CAPTIONS_NAMED = 5
 # spends about half a second seeking in a phone's file, measured on one laptop; one after
 # another, forty of them held the check up for twenty seconds.
 CAPTION_FRAME_READERS = 8
-
-
-def _caption_rows(event: dict, drawn: dict, height: int) -> List[dict]:
-    """The rows of one drawn caption, placed as the render places them: up from the bottom margin."""
-    size, second_size = drawn["font_size"], drawn["secondary_size"]
-    colour = event["colour"] or drawn["colour"]
-    pitch, second_pitch = size * CAPTION_LINE_HEIGHT, second_size * CAPTION_LINE_HEIGHT
-    lines = ["".join(word[0] for word in line) for line in event["lines"]]
-    lines[0] = event["prefix"] + lines[0]
-    bottom = height - drawn["margin_v"] - len(event["secondary"]) * second_pitch
-    rows = [{"text": line, "size": size, "x": drawn["centre"], "colour": colour,
-             "y": bottom - (len(lines) - index - 0.5) * pitch} for index, line in enumerate(lines)]
-    rows += [{"text": line, "size": second_size, "x": drawn["centre"], "colour": colour,
-              "y": height - drawn["margin_v"] - (len(event["secondary"]) - index - 0.5) * second_pitch}
-             for index, line in enumerate(event["secondary"])]
-    return rows
 
 
 def contrast_notes(project: Project, captions: bool = True) -> List[str]:
@@ -1184,7 +1171,7 @@ def _caption_contrast(project: Project, drawn: dict, frame_at, floor: str) -> Li
     for (event, _clip, _seconds), picture in zip(wanted, pictures):
         if picture is None:
             continue
-        ratio = legibility.words_contrast(picture, _caption_rows(event, drawn, project.height))
+        ratio = legibility.words_contrast(picture, caption_rows(event, drawn, project.height))
         if ratio < legibility.LOW_CONTRAST:
             low.append((event, ratio))
     if not low:
@@ -1206,13 +1193,15 @@ def check_render(
     """Check a cut for what would be noticed in the finished file, without rendering it.
 
     The same check `render_project` runs first and refuses a render over. It
-    looks for eleven things: `bad_picture`, black or frozen source picture that
+    looks for twelve things: `bad_picture`, black or frozen source picture that
     reaches the screen, as far as the analysis measures it: black of half a
     second or more, frozen of two seconds or more, while anything shorter
     shows only in a render's `frames` from `get_job`; `covered_card`,
     full-frame picture on a track above the sequence, such as B-roll, laid
     over a title card so its words are hidden, most likely after a card was
-    added by hand, which moves the sequence but not the tracks above; `clipping`, a recording squared off at the ceiling,
+    added by hand, which moves the sequence but not the tracks above;
+    `inset`, a corner over a face, caption or logo, or heard over talking;
+    `clipping`, a recording squared off at the ceiling,
     which no amount of turning down undoes; `music`, music heard too close
     under somebody talking; `mid_speech`, a cut that lands
     inside a word or between two words of one phrase, or takes the start or

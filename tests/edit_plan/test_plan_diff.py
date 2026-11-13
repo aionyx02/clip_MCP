@@ -45,3 +45,17 @@ def test_a_diff_says_when_covering_picture_now_plays_from_further_into_its_clip(
     assert diff_plans(before, after)["broll"] == [
         f"changed the cover over {first.id}: {second.id} for 2s → {second.id} from 4s for 2s"
     ]
+
+def test_a_diff_says_where_in_the_frame_a_picture_moved_and_that_it_is_heard() -> None:
+    from app.models.timeline.parts import ClipLayout
+
+    by_id, children, assets, clips = footage()
+    first, second = speech_of(clips)[:2]
+    shot = BrollShot(clip_id=second.id, over_clip_id=first.id, seconds=2.0)
+    before = plan_for([Selection(clip_id=first.id, beat_id="b1")], broll=[shot])
+    after = before.model_copy(update={"broll": [shot.model_copy(update={
+        "layout": ClipLayout(place="bottom_left", size="large"), "sound": True})]})
+    assert diff_plans(before, after)["broll"] == [
+        f"changed the cover over {first.id}: {second.id} for 2s → {second.id} for 2s in the bottom_left corner, "
+        "large, with its sound"
+    ]

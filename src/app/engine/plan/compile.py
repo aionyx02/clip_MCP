@@ -329,7 +329,7 @@ def compile_operations(
     # B-roll goes on a track of its own above the sequence, at absolute positions rather
     # than in a row: a cover sits where the words it belongs to are, and the gaps between
     # covers are where the sequence shows through. Silent, because the point is the sound
-    # underneath carrying on.
+    # underneath carrying on — unless a picture in a corner or a half asked to be heard.
     covers, refused, _ = broll_covers(plan, pieces, clips, assets, cuts)
     if refused:
         # `check_plan` reports these, and `compile_plan` stops on them — but the engine
@@ -337,8 +337,13 @@ def compile_operations(
         # the cut would be repairing a plan instead of handing it back.
         raise ValueError("this plan's B-roll does not hold up: " + "; ".join(refused))
     if covers:
+        # A picture whose own sound was turned on drops under the talking; nothing else on the track is heard.
+        ducked = any(cover.sound for cover in covers)
         if BROLL_TRACK_ID not in present:
-            operations.append({"action": "add_track", "track_id": BROLL_TRACK_ID, "track_type": "video"})
+            operations.append({"action": "add_track", "track_id": BROLL_TRACK_ID, "track_type": "video",
+                               "duck_under_speech": ducked})
+        else:
+            operations.append({"action": "set_track_audio", "track_id": BROLL_TRACK_ID, "duck_under_speech": ducked})
         for position, cover in enumerate(covers, start=1):
             clip_id = f"b{position:03d}"
             identity = (cover.clip_id, cover.over_clip_id)
@@ -350,7 +355,8 @@ def compile_operations(
                 "asset_id": cover.asset_id,
                 "source_range": {"start": cover.start, "end": cover.end},
                 "timeline_in": cover.timeline_in,
-                "volume": 0.0,
+                "volume": 1.0 if cover.sound else 0.0,
+                "layout": cover.layout.model_dump() if cover.layout is not None else None,
             }
             if pinned is not None:
                 laid.update(_as_made(pinned))

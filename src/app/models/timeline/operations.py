@@ -22,7 +22,8 @@ class AddTrackOp(BaseModel):
     track_type: TrackType
     duck_under_speech: bool = Field(
         default=False,
-        description="Lower this track automatically while the video's own sound is loud; audio tracks only",
+        description="Lower this track automatically while somebody in the sequence talks: music, or a picture "
+                    "laid over the sequence whose own sound is heard. Not the base video track",
     )
     voice: Optional[bool] = Field(default=None, description="A voice recorded apart from the picture, such as a narration: the footage's own sound "
                     "and any music drop while it speaks. Null decides from the recording, which counts as a "
@@ -562,7 +563,8 @@ class SetTrackAudioOp(BaseModel):
     track_id: str
     duck_under_speech: Optional[bool] = Field(
         default=None,
-        description="Lower this track automatically while the video's own sound is loud; audio tracks only",
+        description="Lower this track automatically while somebody in the sequence talks: music, or a picture "
+                    "laid over the sequence whose own sound is heard. Not the base video track",
     )
     voice: Optional[bool] = Field(
         default=None,

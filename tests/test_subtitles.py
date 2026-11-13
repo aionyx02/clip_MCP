@@ -543,7 +543,7 @@ def test_captions_come_only_from_the_base_track(spoken: str, media: Path) -> Non
         {"action": "add_track", "track_id": "top", "track_type": "video"},
         {"action": "add_clip", "track_id": "top", "clip_id": "pip", "asset_id": inset,
          "source_range": {"start": 0, "end": 2}, "timeline_in": 0,
-         "layout": {"x": 0.6, "y": 0.6, "width": 0.3, "height": 0.3}},
+         "layout": {"place": "bottom_right", "size": "small"}},
     ])
     result = caption(project)
     assert all(cue["text"] != "插入畫面" for cue in result["cues"])

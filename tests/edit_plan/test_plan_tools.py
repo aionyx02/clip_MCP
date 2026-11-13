@@ -311,7 +311,7 @@ def test_tracks_the_plan_does_not_own_are_left_alone(planned: dict) -> None:
         {"action": "add_track", "track_id": "cam", "track_type": "video"},
         {"action": "add_clip", "track_id": "cam", "clip_id": "inset", "asset_id": asset_id,
          "source_range": {"start": 0, "end": 1}, "timeline_in": 0,
-         "layout": {"x": 0.6, "y": 0.1, "width": 0.3, "height": 0.3}},
+         "layout": {"place": "top_right", "size": "small"}},
     ))
     compile_plan(project_id=project, expected_version=get_project(project)["version"], plan_id=planned["plan_id"])
     inset = next(track for track in get_project(project)["tracks"] if track["id"] == "cam")

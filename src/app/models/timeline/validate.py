@@ -38,8 +38,9 @@ def validate_project(project: Project, assets: Mapping[str, Asset]) -> None:
     cut is. A clip with a transition runs its picture over the end of the one
     before it, whether that is a dissolve, a wipe or a dip through a colour.
     Neither moves a clip: the cut stays where it is, and both draw the extra
-    media from outside the clip's own source range. Only audio tracks duck under speech, and only clips on a
-    video track above the base one are drawn in a layout box.
+    media from outside the clip's own source range. Audio tracks and the video tracks above the base one may
+    duck under speech, and only clips on a video track above the base one are drawn in a layout box; two split
+    screens may not be on at once, since the sequence can only be moved into one other half.
 
     Args:
         project: Project to check.
@@ -53,8 +54,11 @@ def validate_project(project: Project, assets: Mapping[str, Asset]) -> None:
     if project.logo is not None:
         logo_picture(project.logo.asset_id, assets)
     for track in project.tracks:
-        if track.duck_under_speech and track.track_type != TrackType.AUDIO:
-            raise ValueError(f"track {track.id}: only audio tracks can duck under speech")
+        if track.duck_under_speech and track is base:
+            raise ValueError(
+                f"track {track.id}: the main video track is the speech everything else ducks under, so it "
+                "cannot duck itself; a picture laid over it, or music, can"
+            )
         if track.voice and track.track_type != TrackType.AUDIO:
             raise ValueError(
                 f"track {track.id}: only an audio track can be a voice recorded apart from the picture; "
@@ -165,3 +169,15 @@ def validate_project(project: Project, assets: Mapping[str, Asset]) -> None:
                     f"which ends at {previous.timeline_out}s on track {track.id}"
                 )
             previous = clip
+    splits = sorted(
+        (clip for track in project.video_tracks[1:] for clip in track.clips
+         if clip.layout is not None and clip.layout.is_half),
+        key=lambda clip: clip.timeline_in,
+    )
+    for earlier, later in zip(splits, splits[1:]):
+        if later.timeline_in < earlier.timeline_out - TOUCHING_SECONDS:
+            raise ValueError(
+                f"clip {later.id} is a split screen from {later.timeline_in}s while clip {earlier.id} still is, "
+                f"until {earlier.timeline_out}s; the sequence can only be moved into one other half at a time, "
+                f"so end one before the other starts"
+            )

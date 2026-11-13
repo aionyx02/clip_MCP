@@ -23,7 +23,7 @@ from app.engine.builder import (
     DUCK_ATTACK_SECONDS, DUCK_DEPTH_DB, DUCK_HOLD_SECONDS, DUCK_RELEASE_SECONDS, Talking, _cleanup_filters,
     corner_logo, overlay_box,
 )
-from app.engine import cards, moves, stills, texts
+from app.engine import cards, insets, moves, stills, texts
 from app.engine.ffmpeg import exact_stretch_args
 from app.engine.reframe import Framing
 from app.engine.subtitles import drawn_captions, place_cues
@@ -239,7 +239,11 @@ def describe(
     base = project.base_video_track
     tracks = []
     waiting = set()
-    for track in project.tracks:
+    # Drawn in the order the render draws them: the sequence, the sequence again in the other half of
+    # any split screen, then the tracks over it; the audio tracks after, which are not drawn.
+    drawn = ([base] if base else []) + insets.drawn_overlays(project)
+    drawn += [track for track in project.tracks if track.track_type != TrackType.VIDEO]
+    for track in drawn:
         clips = []
         for clip in sorted(track.clips, key=lambda item: item.timeline_in):
             asset = assets.get(clip.asset_id)
@@ -272,9 +276,16 @@ def describe(
             if track.track_type == TrackType.VIDEO:
                 entry["transition"] = clip.transition_in.model_dump(mode="json") if clip.transition_in else None
                 entry["color"] = clip.color.model_dump(mode="json") if clip.color else None
-                left, top, width, height = overlay_box(clip, project.width, project.height)
+                source = (asset.width, asset.height) if asset.width and asset.height else None
+                left, top, width, height = overlay_box(clip, project, source)
                 entry["box"] = [left, top, width, height]
-                entry["source_size"] = [asset.width, asset.height] if asset.width and asset.height else None
+                entry["source_size"] = list(source) if source else None
+                if clip.layout is not None and track.id != insets.SPLIT_TRACK_ID:
+                    # The line round a corner picture, or between the halves of a split, as the render draws it.
+                    entry["edges"] = [list(edge) for edge in insets.edges(
+                        clip.layout, (left, top, width, height), project.width, project.height)]
+                    entry["edge_colour"] = insets.INSET_EDGE_COLOUR
+                    entry["edge_opacity"] = insets.INSET_EDGE_OPACITY
                 framed = framing.get(clip.id)
                 entry["crop"] = _crop(framed, clip, fps)
                 motion = moves.motion_of(clip, asset.still)

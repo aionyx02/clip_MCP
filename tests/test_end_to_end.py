@@ -60,7 +60,7 @@ def test_a_whole_job_from_a_folder_to_a_finished_file(footage: Path, tmp_path: P
         {"action": "add_track", "track_id": "cam", "track_type": "video"},
         {"action": "add_clip", "track_id": "cam", "clip_id": "pip", "asset_id": assets["take10"],
          "source_range": {"start": 0, "end": 3}, "timeline_in": 2,
-         "layout": {"x": 0.62, "y": 0.06, "width": 0.32, "height": 0.32}},
+         "layout": {"place": "top_right", "size": "medium"}},
         {"action": "add_track", "track_id": "music", "track_type": "audio", "duck_under_speech": True},
         {"action": "insert_clip", "track_id": "music", "clip_id": "song", "asset_id": assets["bgm"],
          "source_range": {"start": 0, "end": 4}, "volume": 0.5},
@@ -91,7 +91,7 @@ def test_a_whole_job_from_a_folder_to_a_finished_file(footage: Path, tmp_path: P
 
     lines = preview_project(project).content[0].text.splitlines()
     assert "1080x1920" in lines[0] and "00:12.0 long" in lines[0]
-    assert any("track cam" in line and "inset at" in line for line in lines)
+    assert any("track cam" in line and "inset in the top-right corner" in line for line in lines)
     assert any("audio track music" in line for line in lines)
 
     # The workflow's own last steps: render in the background and poll until it lands.

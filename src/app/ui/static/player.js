@@ -401,6 +401,7 @@
         if (track.type !== "video") continue;
         const showing = track.clips.find((clip) => time >= clip.timeline_in && time < clip.timeline_out);
         if (showing) this.drawClip(track, showing, time);
+        if (showing?.edges) this.drawEdges(showing);
         // A transition runs the next clip in over the end of this one, and ends on the cut.
         const incoming = track.clips.find((clip) => clip.transition && showing
           && Math.abs(showing.timeline_out - clip.timeline_in) < 0.002
@@ -411,6 +412,16 @@
       this.drawCards(time);
       this.drawTexts(time);
       this.drawCaptions(time);
+    }
+
+    // The line round a corner picture, or between the halves of a split screen, where the render draws it.
+    drawEdges(clip) {
+      const { ctx } = this;
+      ctx.save();
+      ctx.globalAlpha = clip.edge_opacity;
+      ctx.fillStyle = clip.edge_colour;
+      for (const [x, y, w, h] of clip.edges) ctx.fillRect(x, y, w, h);
+      ctx.restore();
     }
 
     // The logo held in a corner, and a title card's own logo above its words, where the render

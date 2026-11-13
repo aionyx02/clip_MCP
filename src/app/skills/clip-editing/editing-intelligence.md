@@ -187,6 +187,17 @@ plays from the start of `clip_id`; when the moment to show is partway into a
 long take — the mechanism working, not the hands reaching for it — find it
 with `view_frames` and set `from_seconds` to where it begins.
 
+When the speaker should stay on screen — a close-up of the mechanism while
+they explain it, their face over a screen demo, before and after side by side
+— give the shot a `layout`: a corner with a `size`, or a half for a split
+screen. Without one, `add_broll` covers the whole frame and the speaker is
+gone. A corner or a half is not held to the 6 seconds or the 40% of a beat.
+It is silent like any B-roll; set `sound: true` only when what it says or
+sounds like matters, and it then drops while the speaker talks. Pick a corner
+away from the face, with `view_frames`: `check_render` says when it covers the
+face, the captions or the logo in the shape being delivered, and the corner
+stays where you put it.
+
 Shots nobody described are offered on their file name, or on when they were
 recorded, so the right one may not be among the eight. Describing the
 footage with `set_clip_tags` first is what puts it there.
