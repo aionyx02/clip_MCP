@@ -288,7 +288,6 @@
       if (E.mode === "exact") showLive();
       drawVersions();
     }
-    requestAnimationFrame(() => { if (E) fitStage(); });
     drawTime();
   }
 
@@ -366,7 +365,7 @@
     E.compare.players.b.destroy();
     E.compare = null;
     $(".editor", E.root).classList.remove("comparing");
-    if (redraw) { drawVersions(); requestAnimationFrame(() => { if (E) fitStage(); }); }
+    if (redraw) drawVersions();
   }
 
   // Where the right side should be when the left is at a second: the same footage, where it is there.
@@ -2380,6 +2379,7 @@
     clearTimeout(E.exportTimer);
     document.removeEventListener("keydown", onKey);
     window.removeEventListener("resize", E.onResize);
+    E.stageObserver?.disconnect();
     E.video.pause();
     E.video.removeAttribute("src");
     document.body.classList.remove("editing");
@@ -2453,15 +2453,19 @@
       const startHeight = $(".ed-timeline", page).getBoundingClientRect().height;
       const move = (moveEvent) => {
         editor.style.setProperty("--timeline-height", `${Math.max(180, Math.min(window.innerHeight - 260, startHeight - (moveEvent.clientY - startY)))}px`);
-        fitStage();
       };
       const up = () => { window.removeEventListener("pointermove", move); window.removeEventListener("pointerup", up); };
       window.addEventListener("pointermove", move);
       window.addEventListener("pointerup", up);
     });
     document.addEventListener("keydown", onKey);
-    E.onResize = () => { if (E) { fitStage(); drawLanes(); drawRuler(); } };
+    E.onResize = () => { if (E) { drawLanes(); drawRuler(); } };
     window.addEventListener("resize", E.onResize);
+    // The picture's box changes without the window changing: the version page fills the panel under
+    // the player after it opens, the timeline is dragged taller, a comparison ends. Sizing on window
+    // resizes alone left a portrait picture as tall as the box it had before, over the controls (#292).
+    E.stageObserver = new ResizeObserver(() => { if (E) fitStage(); });
+    E.stageObserver.observe($("[data-stage-wrap]", page));
 
     drawAll();
     fitZoom();
