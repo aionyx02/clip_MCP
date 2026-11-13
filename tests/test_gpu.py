@@ -30,7 +30,7 @@ def installed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         monkeypatch.delenv(name)
     monkeypatch.delenv("CLIP_MCP_WHISPER_DEVICE", raising=False)
     # Looked for as on Windows, and never loaded for real.
-    monkeypatch.setattr(gpu.sys, "platform", "win32")
+    monkeypatch.setattr(gpu, "_on_windows", lambda: True)
     monkeypatch.setattr(gpu, "_load", lambda folder: None)
     gpu.use.cache_clear()
     yield root

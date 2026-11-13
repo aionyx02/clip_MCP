@@ -103,6 +103,11 @@ def _system_folders() -> List[Path]:
             folders.append(Path(value) / "bin")
     return folders
 
+def _on_windows() -> bool:
+    """Whether this is Windows, where the libraries are looked for: a seam tests can change without touching `sys`."""
+    return sys.platform == "win32"
+
+
 def find() -> Libraries:
     """Look for cuBLAS 12: the bundled pack first, then the system's.
 
@@ -110,7 +115,7 @@ def find() -> Libraries:
         Where it is, or `none`. Elsewhere than Windows the libraries are the
         system's to provide and are not looked for: `system`, with no folder.
     """
-    if sys.platform != "win32":
+    if not _on_windows():
         return Libraries("system", None)
     bundled = bundled_folder()
     if bundled is not None and _has_all(bundled):
