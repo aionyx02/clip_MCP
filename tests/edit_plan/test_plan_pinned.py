@@ -129,3 +129,19 @@ def test_a_trim_the_plan_changes_on_a_pinned_clip_is_reported(planned: dict) -> 
     with pytest.raises(ValueError, match=rf"clip {first['id']} on track main .*source_range was"):
         compile_plan(project_id=project, expected_version=get_project(project)["version"],
                      plan_id=planned["plan_id"])
+
+
+
+def test_what_the_plan_asked_of_a_clip_is_not_part_of_its_picture(planned: dict) -> None:
+    from app.tools.rendering import picture_key
+
+    project = create_project(name="測試", width=640, height=360)["id"]
+    compile_plan(project_id=project, expected_version=1, plan_id=planned["plan_id"])
+    stored = runtime_repo.get_project(project)
+    assert any(clip.plan_asked for track in stored.video_tracks for clip in track.clips)
+    bare = stored.model_copy(deep=True)
+    for track in bare.video_tracks:
+        for clip in track.clips:
+            clip.plan_asked = None
+    # A recompile that only records what the plan asked does not make the picture render again.
+    assert picture_key(stored) == picture_key(bare)

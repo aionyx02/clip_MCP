@@ -122,7 +122,7 @@ SOUND_ONLY = {"volume", "audio_fade_in", "audio_fade_out", "audio_lead", "audio_
               "preserve_pitch"}
 # What says where a project or a clip came from, or what it is called, and is in no video made of it.
 NOT_RENDERED = {"id", "name", "branched_from", "version", "deleted_subtitles"}
-CLIP_BOOKKEEPING = {"id", "from_plan_id", "from_clip_ids", "pinned"}
+CLIP_BOOKKEEPING = {"id", "from_plan_id", "from_clip_ids", "pinned", "plan_asked"}
 
 def picture_key(project: Project) -> str:
     """Name a cut's picture by everything that decides what is on screen.
