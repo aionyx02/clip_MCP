@@ -11,6 +11,11 @@ by whoever made it: an export from the editor is the user's own decision and
 counts as much as one the AI started. Or its project is gone. Shapes are compared
 by the size they come out at, never by name: a landscape project rendered as it
 is delivers `landscape`.
+
+What is still to be put to the user is worked out the same way, never kept as a
+list: in an `auto` production the story card comes first, until the user has
+said yes to the card as it is now; then the questions asked on the project that
+are still open and unanswered.
 """
 
 from dataclasses import dataclass
@@ -41,8 +46,8 @@ class Footing:
         cut: Whether the project has anything on its sequence.
         picture: The fingerprint of the project's picture as it is now.
         renders: The project's finished renders, previews included.
-        questions: How many questions the AI asked the user on the project
-            are still open and unanswered.
+        questions: The questions the AI asked the user on the project that
+            are still open and unanswered, by comment ID.
     """
 
     analysed: FrozenSet[str]
@@ -52,7 +57,7 @@ class Footing:
     cut: bool
     picture: Optional[str]
     renders: Sequence[Job]
-    questions: int
+    questions: Sequence[str]
 
 
 def _finals(production: Production, renders: Sequence[Job]) -> List[Job]:
@@ -113,6 +118,43 @@ def ended(production: Production, project: Optional[Project], renders: Sequence[
     return None if missing_shapes(production, project, renders) else "delivered"
 
 
+def story_confirmed(production: Production) -> bool:
+    """Whether the user has said yes to the story card as it is now."""
+    confirmed = production.story_confirmed
+    return (production.story is not None and confirmed is not None
+            and confirmed.story_hash == production.story.digest())
+
+
+def pending(production: Production, footing: Footing) -> List[dict]:
+    """What is still to be put to the user, in the order it is to be asked.
+
+    In an `auto` production the story card comes first while there is none,
+    or the user has not said yes to it as it is now: the AI may write it and
+    carry on, but the user was not there to agree to it. An `interactive` one
+    has the user there, and its card is put to them before the plan. Then
+    each question asked on the project that is still open and unanswered.
+
+    Args:
+        production: The production.
+        footing: What is stored about it.
+
+    Returns:
+        Each item: `kind` (`story` or `question`), `comment_id` for a
+        question, and `message`.
+    """
+    items = []
+    if production.mode == "auto" and not story_confirmed(production):
+        items.append({"kind": "story", "message": (
+            "no story card yet: write it with set_story, then put it to the user first"
+            if production.story is None else
+            "the story card has not been confirmed as it is now: put it to the user first, and "
+            "confirm_story with their words and its story_hash")})
+    items += [{"kind": "question", "comment_id": comment_id,
+               "message": "a question asked on the project, still unanswered: get_comments has it"}
+              for comment_id in footing.questions]
+    return items
+
+
 def progress(production: Production, footing: Footing) -> dict:
     """Work out which steps a production has done, and which comes next.
 
@@ -122,8 +164,8 @@ def progress(production: Production, footing: Footing) -> dict:
 
     Returns:
         `steps`, each step and whether it is done; `stage`, the first one not
-        done (None when all are); `missing`, the shapes still to deliver; and
-        `ended`, as `ended` says.
+        done (None when all are); `missing`, the shapes still to deliver;
+        `pending`, as `pending` says; and `ended`, as `ended` says.
     """
     project = footing.project
     wanted = set(production.asset_ids)
@@ -138,7 +180,7 @@ def progress(production: Production, footing: Footing) -> dict:
         "project": project is not None,
         "cut": project is not None and footing.cut,
         "previewed": bool(current),
-        "answered": footing.questions == 0,
+        "answered": not footing.questions,
         "delivered": project is not None and not missing,
     }
     order = STEPS[AFTER_THE_CUT:] if done["cut"] else STEPS
@@ -146,6 +188,7 @@ def progress(production: Production, footing: Footing) -> dict:
         "steps": done,
         "stage": next((step for step in order if not done[step]), None),
         "missing": missing,
+        "pending": pending(production, footing),
         "ended": ended(production, project, footing.renders),
     }
 

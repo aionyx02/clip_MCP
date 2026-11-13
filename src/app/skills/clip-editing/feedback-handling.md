@@ -11,6 +11,11 @@ than nudging clips on the timeline. The plan is where the reasons live; the
 timeline is only what fell out of them. Anything the user adjusted by hand is
 pinned and survives the recompile.
 
+On a production, read its `story` with `get_production` before the `amend_plan`. A change
+that moves the opening, the turn, the ending or what was left out changes the story the
+user said yes to: `set_story` the new card and put it to them again, in either mode. Their
+yes was to the old card, and `confirm_story` refuses its hash; never carry it over.
+
 Change it with `amend_plan`, one amendment per thing that actually changed,
 and pass the user's own words as `note` — they are kept with the version, and
 they are what makes the history readable later. Do not send the whole plan

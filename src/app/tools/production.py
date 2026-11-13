@@ -8,8 +8,10 @@ productions take part; one that is finished is left as it was.
 
 from typing import List, Optional
 
+from pydantic import ValidationError
+
 from app.engine import production as progress
-from app.models.production import Mode, Production, Said, Shape
+from app.models.production import Mode, Production, Said, Shape, Story, StoryConfirmed
 from app.storage import housekeeping
 from app.workspace import output_dir
 from app import runtime
@@ -153,8 +155,8 @@ def _footing(production: Production) -> progress.Footing:
         cut=bool(base and base.clips),
         picture=rendering.picture_key(project) if project is not None else None,
         renders=tuple(runtime.repo.renders_of(project.id)) if project is not None else (),
-        questions=sum(comment.status == "open" and comment.question and not comment.answered
-                      for comment in comments),
+        questions=tuple(comment.id for comment in comments
+                        if comment.status == "open" and comment.question and not comment.answered),
     )
 
 def _gone(project_id: str) -> str:
@@ -164,6 +166,19 @@ def _gone(project_id: str) -> str:
             return (f"the project 「{item.name}」 was moved to the trash; it can be put back from the editor's "
                     "trash, and the production stays ended")
     return "the project no longer exists and is not in the trash; the production stays ended"
+
+def _story_of(production: Production) -> Optional[dict]:
+    """The story card as the AI reads it back, with its fingerprint and whether the user said yes to it."""
+    if production.story is None and production.story_confirmed_at is None:
+        return None
+    confirmed = production.story_confirmed
+    return {
+        **(production.story.model_dump() if production.story is not None else {}),
+        "story_hash": production.story.digest() if production.story is not None else None,
+        "confirmed": progress.story_confirmed(production),
+        "confirmed_in": confirmed.said if confirmed is not None and progress.story_confirmed(production) else None,
+        "last_confirmed_at": production.story_confirmed_at.isoformat() if production.story_confirmed_at else None,
+    }
 
 def said_of(production: Production) -> dict:
     """A production as the AI reads it: what was asked, how far it has got, and what comes next."""
@@ -175,6 +190,7 @@ def said_of(production: Production) -> dict:
         "asset_ids": production.asset_ids, "outputs": production.outputs,
         "project": {"id": project.id, "name": project.name, "version": project.version} if project else None,
         "plan_id": footing.plan_id,
+        "story": _story_of(production),
         "said": [{"said": said.said, "at": said.at.isoformat()} for said in production.said],
         "started_at": production.created_at.isoformat(),
         **worked,
@@ -266,8 +282,12 @@ def get_production(production_id: Optional[str] = None) -> dict:
 
     Returns:
         One production: `brief`, `mode`, `outputs`, `project`, `plan_id`,
-        `steps` (each and whether it is done), `stage` (the next not done),
-        `next` (what to do about it), `missing` (shapes not delivered yet),
+        `story` (the card, its `story_hash`, whether it is `confirmed` as it
+        is now, and `last_confirmed_at`), `steps` (each and whether it is
+        done), `stage` (the next not done), `next` (what to do about it),
+        `pending` (what is still to be put to the user, in order: in an
+        `auto` one an unconfirmed or missing story card first, then the
+        unanswered questions), `missing` (shapes not delivered yet),
         `latest_preview`, `ended`, and `unbound` while it has no project.
         With no ID, `productions`: each unfinished one the same way.
 
@@ -326,3 +346,98 @@ def close_production(production_id: str, said: str) -> dict:
     closed = production.model_copy(update={"closed": Said(said=said.strip())})
     runtime.repo.save_production(closed)
     return said_of(closed)
+
+@mcp.tool()
+def set_story(
+    production_id: str,
+    theme: str,
+    structure: str,
+    opening: str,
+    turn: str,
+    ending: str,
+    left_out: str,
+    length: str,
+) -> dict:
+    """Write the story card: the story the video tells, before the plan is written.
+
+    Write each part so the user could say it is wrong — name the moments in
+    the footage, not the mood: 「開場是第一個印壞的杯架」, not 「輕鬆有趣」. A
+    card that says something different from the one there clears the user's
+    yes to it; the same card again keeps it. Put it to the user and, once
+    they say yes, `confirm_story` with the `story_hash` returned here.
+
+    Args:
+        production_id: The production.
+        theme: The video in one sentence.
+        structure: How it is built — 起承轉合, 清單式, 教學步驟 — and in what order.
+        opening: How it opens: the first moment on screen.
+        turn: Where it turns: the moment things change.
+        ending: How it ends: the last moment on screen.
+        left_out: What is deliberately left out, and why.
+        length: How long it will run, roughly — 「約 60 秒」.
+
+    Returns:
+        The production as `get_production` gives it, with `story_hash`, and
+        `cleared` when this change took away a yes the user had given.
+
+    Raises:
+        ValueError: If the production does not exist or has ended, or a part is empty.
+    """
+    production = going(production_id)
+    try:
+        story = Story(theme=theme, structure=structure, opening=opening, turn=turn, ending=ending,
+                      left_out=left_out, length=length)
+    except ValidationError as error:
+        raise ValueError("; ".join(str(problem["msg"]).removeprefix("Value error, ")
+                                   for problem in error.errors())) from None
+    same = production.story is not None and production.story.digest() == story.digest()
+    cleared = not same and progress.story_confirmed(production)
+    changed = production.model_copy(update={
+        "story": story, "story_confirmed": production.story_confirmed if same else None,
+    })
+    runtime.repo.save_production(changed)
+    result = {**said_of(changed), "story_hash": story.digest()}
+    if cleared:
+        result["cleared"] = ("the card changed, so the user's yes to the old one no longer holds: put this one "
+                             "to them and confirm_story again")
+    return result
+
+@mcp.tool()
+def confirm_story(production_id: str, story_hash: str, said: str) -> dict:
+    """Keep the user's yes to the story card, only once they have said it.
+
+    The `story_hash` is the one `set_story` or `get_production` gave for the
+    card the user was shown. It is refused when the card has changed since:
+    a yes to an earlier card is not a yes to this one, so put the new one to
+    them first. Never confirm on the user's behalf.
+
+    Args:
+        production_id: The production.
+        story_hash: The fingerprint of the card the user said yes to.
+        said: The user's own words saying yes — 「好，就這樣剪」.
+
+    Returns:
+        The production as `get_production` gives it.
+
+    Raises:
+        ValueError: If the production does not exist or has ended, there is
+            no card, the hash is not the card's as it is now, or the user's
+            words are missing.
+    """
+    production = going(production_id)
+    if production.story is None:
+        raise ValueError("there is no story card to confirm: write it with set_story and put it to the user first")
+    if not said.strip():
+        raise ValueError("a story card is confirmed only in the user's words: pass what they said")
+    now = production.story.digest()
+    if story_hash != now:
+        raise ValueError(f"story_hash {story_hash} is not the card as it is now ({now}): the user was shown "
+                         "another card, or it changed after they saw it. Put the card as it is now to them, and confirm with its hash once "
+                         "they say yes")
+    yes = StoryConfirmed(story_hash=now, said=said.strip())
+    last = production.story_confirmed_at
+    confirmed = production.model_copy(update={
+        "story_confirmed": yes, "story_confirmed_at": yes.at if last is None else max(last, yes.at),
+    })
+    runtime.repo.save_production(confirmed)
+    return said_of(confirmed)
