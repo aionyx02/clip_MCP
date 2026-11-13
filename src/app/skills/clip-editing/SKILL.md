@@ -96,11 +96,11 @@ the very start of a video, use `video_fade_in` instead.
   tracks are drawn on top of it; their clips carry their own sound too. Any
   number of `audio` tracks hold music. Anything past the end of the base
   track is cut off.
-- **Layout**: a clip on a video track above the base is drawn in the box its
-  `layout` gives, as fractions of the frame: `{"x": 0.62, "y": 0.06,
-  "width": 0.32, "height": 0.32}` is a small inset in the top right. A clip
-  with no layout covers the whole frame, which is how you cut away to another
-  shot. A `layout` on a base clip is refused rather than ignored.
+- **Layout**: a clip above the base is drawn in a corner, `{"place":
+  "top_right", "size": "small"}` (or medium, large), or a half, `{"place":
+  "left"}`, a split screen with the sequence in the other half; the server
+  works out the box. No layout covers the whole frame, a cutaway. A
+  `layout` on a base clip is refused rather than ignored.
 - **Clip**: the part of an asset between `source_range.start` and
   `source_range.end` (seconds in the source file), placed on a track at
   `timeline_in`. Its length on the timeline is `end - start` at normal speed.
@@ -341,7 +341,7 @@ Use these without asking, and mention the ones you chose in one short line.
 | Music fades | 1 s fade-in on the first music clip, 2 s fade-out ending at the video end |
 | Output loudness | -14 LUFS; only pass `loudness_target: null` if the user asks for the raw levels |
 | Colour | As shot, unless asked, or a clip is clearly too dark next to the others |
-| Inset box | About a third of the frame in a corner, such as `{"x": 0.62, "y": 0.06, "width": 0.32, "height": 0.32}` |
+| Inset box | A corner and a size, such as `{"place": "top_right", "size": "medium"}`, about a third of a landscape frame wide |
 | Captions | Off unless asked; when asked, have the user check the wording before rendering |
 | Render | Preview first |
 | Length | No default: ask, or propose one from the pacing file |
@@ -382,7 +382,7 @@ questions into one short message with options the user can pick from.
 | `has not been analyzed; call analyze_asset first` | Run `analyze_asset`, wait for the job, then retry. |
 | `has no video frames to show` | The asset is audio-only; use `get_analysis` instead. |
 | `has no clips on a video track to preview` | Build the video sequence first. |
-| `runs outside the frame` | The inset's `x + width` or `y + height` is over 1.0; shrink it or move it back. |
+| `needs a size` / `has no size` | A corner layout takes `size` small, medium or large; a half takes none. |
 | `has no transcribed clips to caption` | Run `analyze_asset` with transcription on the sources first. |
 | `has no captions to burn` | Call `generate_subtitles`. |
 | `caption ... not found` | Read the current `cue_id`s with `get_subtitles`. |

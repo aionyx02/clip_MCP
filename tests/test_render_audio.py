@@ -96,7 +96,7 @@ def test_ducking_can_be_turned_on_after_the_track_exists(audio_media: Path, tmp_
 
 def test_a_video_track_cannot_duck_under_itself(audio_media: Path) -> None:
     asset = import_asset(str(audio_media / "quiet.mp4"))["id"]
-    with pytest.raises(ValueError, match="only audio tracks can duck"):
+    with pytest.raises(ValueError, match="cannot duck itself"):
         build_project([
             {"action": "add_track", "track_id": "main", "track_type": "video", "duck_under_speech": True},
             insert("q", asset, 0, 4),

@@ -279,4 +279,4 @@ def test_only_a_moving_clip_gets_a_framing_written_down_for_its_move(media: Path
     stored = runtime.repo.get_project(project)
     framed = frame_project(stored, shared.sized(shared.referenced_assets(stored)), {})
     assert set(framed) == {"a"} and framed["a"].motion == "push"
-    assert box_of(stored.base_video_track.clips[0], 640, 360) == (640, 360)
+    assert box_of(stored.base_video_track.clips[0], stored) == (640, 360)

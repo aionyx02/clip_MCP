@@ -1260,3 +1260,18 @@ def timeline_cues(
     # Numbered here, so a single line can be corrected later without resending the rest,
     # and by the same helper `set_subtitles` uses, so the IDs survive being stored.
     return number_cues(sorted(cues, key=cue_order))
+
+def caption_rows(event: dict, drawn: dict, height: int) -> List[dict]:
+    """The rows of one drawn caption, placed as the render places them: up from the bottom margin."""
+    size, second_size = drawn["font_size"], drawn["secondary_size"]
+    colour = event["colour"] or drawn["colour"]
+    pitch, second_pitch = size * CAPTION_LINE_HEIGHT, second_size * CAPTION_LINE_HEIGHT
+    lines = ["".join(word[0] for word in line) for line in event["lines"]]
+    lines[0] = event["prefix"] + lines[0]
+    bottom = height - drawn["margin_v"] - len(event["secondary"]) * second_pitch
+    rows = [{"text": line, "size": size, "x": drawn["centre"], "colour": colour,
+             "y": bottom - (len(lines) - index - 0.5) * pitch} for index, line in enumerate(lines)]
+    rows += [{"text": line, "size": second_size, "x": drawn["centre"], "colour": colour,
+              "y": height - drawn["margin_v"] - (len(event["secondary"]) - index - 0.5) * second_pitch}
+             for index, line in enumerate(event["secondary"])]
+    return rows

@@ -25,7 +25,7 @@ from dataclasses import dataclass, replace
 from fractions import Fraction
 from typing import Dict, List, Mapping, Optional, Sequence, Tuple
 
-from app.engine import moves
+from app.engine import insets, moves
 from app.models.media import Asset, FaceMeasurement
 from app.models.timeline.parts import Clip, Project
 
@@ -257,7 +257,7 @@ def placement_at(framing: Optional[Framing], clip: Clip, seconds: float, fps: Fr
     return Placement(centre=centre_at(framing, clip, seconds, fps), zoom=framing.zoom, cross=framing.cross,
                      window=window)
 
-def box_of(clip: Clip, width: int, height: int) -> Tuple[int, int]:
+def box_of(clip: Clip, project: Project, source: Optional[Tuple[int, int]] = None) -> Tuple[int, int]:
     """Say what size a clip is drawn at.
 
     The same arithmetic the renderer uses, so the crop is worked out for the
@@ -265,15 +265,16 @@ def box_of(clip: Clip, width: int, height: int) -> Tuple[int, int]:
 
     Args:
         clip: The clip.
-        width: The frame's width.
-        height: The frame's height.
+        project: The cut, at the size it is drawn at.
+        source: The clip's picture size, which a corner picture keeps the
+            shape of.
 
     Returns:
         `(width, height)` of its box: the whole frame without a layout.
     """
     from app.engine.builder import overlay_box
 
-    _, _, box_width, box_height = overlay_box(clip, width, height)
+    _, _, box_width, box_height = overlay_box(clip, project, source)
     return box_width, box_height
 
 def place_clip(
@@ -330,7 +331,7 @@ def place_clip(
         return Framing(axis=axis, positions=((0, 0.5),), whole=True)
     return None
 
-def _in_box(
+def in_box(
     across: float,
     down: float,
     clip: Clip,
@@ -410,7 +411,7 @@ def anchor_of(
         if (second.end <= opened or second.start >= closed or not second.faces
                 or second.face_x is None or second.face_y is None):
             continue
-        seen.append(_in_box(second.face_x, second.face_y, clip, max(second.start, opened), source, box, framing, fps))
+        seen.append(in_box(second.face_x, second.face_y, clip, max(second.start, opened), source, box, framing, fps))
     if not seen:
         return moves.MIDDLE
     held = lambda value: round(min(max(value, 0.0), 1.0), 3)
@@ -438,12 +439,15 @@ def frame_project(
     """
     fps = Fraction(project.fps_num, project.fps_den)
     framed: Dict[str, Framing] = {}
-    for track in project.video_tracks:
+    base = project.base_video_track
+    # The sequence laid into the other half of a split screen is framed in that half, on its own subject.
+    for track in ([base] if base else []) + insets.drawn_overlays(project):
         for clip in track.clips:
             asset = assets.get(clip.asset_id)
             if asset is None or not asset.width or not asset.height:
                 continue
-            source, box = (asset.width, asset.height), box_of(clip, project.width, project.height)
+            source = (asset.width, asset.height)
+            box = box_of(clip, project, source)
             seen = faces.get(clip.asset_id, ())
             framing = place_clip(clip, source, box, seen, fps, follow_faces)
             motion = moves.motion_of(clip, asset.still)
@@ -543,7 +547,7 @@ def move_notes(project: Project, assets: Mapping[str, Asset], framed: Mapping[st
             if not asset.width or not asset.height:
                 continue
             framing = framed.get(clip.id)
-            width, height = box_of(clip, project.width, project.height)
+            width, height = box_of(clip, project, (asset.width, asset.height))
             fitted = min if framing is not None and framing.whole else max
             scale = fitted(width / asset.width, height / asset.height) * (framing.zoom if framing is not None else 1.0)
             closest = scale * (1 + moves.MOTION_AMOUNT)

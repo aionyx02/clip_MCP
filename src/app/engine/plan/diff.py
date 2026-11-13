@@ -142,8 +142,11 @@ def diff_plans(before: EditPlan, after: EditPlan) -> Dict[str, List[str]]:
     laid_after = {shot.over_clip_id: shot for shot in after.broll}
 
     def shown(shot: BrollShot) -> str:
-        """Say what a shot of B-roll plays, and for how long."""
-        return f"{shot.clip_id}{f' from {shot.from_seconds:g}s' if shot.from_seconds else ''} for {shot.seconds:g}s"
+        """Say what a shot of B-roll plays, for how long, and where in the frame."""
+        where = ("" if shot.layout is None else f" in the {shot.layout.place} half" if shot.layout.is_half
+                 else f" in the {shot.layout.place} corner, {shot.layout.size}")
+        return (f"{shot.clip_id}{f' from {shot.from_seconds:g}s' if shot.from_seconds else ''} for {shot.seconds:g}s"
+                f"{where}{', with its sound' if shot.sound else ''}")
 
     broll = [f"covered {over} with {shown(laid_after[over])}" for over in laid_after.keys() - laid_before.keys()]
     broll += [f"uncovered {over}" for over in laid_before.keys() - laid_after.keys()]

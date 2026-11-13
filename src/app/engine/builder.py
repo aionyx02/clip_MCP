@@ -11,7 +11,7 @@ from decimal import Decimal
 from fractions import Fraction
 from statistics import median
 from typing import Callable, Dict, FrozenSet, List, Mapping, Optional, Sequence, Tuple
-from app.engine import cards, loudness, moves, resources, stills
+from app.engine import cards, insets, loudness, moves, resources, stills
 from app.engine.ffmpeg import escape_filter_path, hidden_window_flags
 from app.engine.reframe import Framing, crop_filter
 from app.models.media import Asset, MediaAnalysis
@@ -475,29 +475,27 @@ def _audio_input_args(clip: Clip, asset: Asset, fps: Fraction) -> List[str]:
         return ["-t", _format_seconds(length + start), "-i", asset.path]
     return ["-ss", seek, "-t", _format_seconds(length), "-i", asset.path]
 
-def overlay_box(clip: Clip, width: int, height: int) -> Tuple[int, int, int, int]:
+def overlay_box(clip: Clip, project: Project, source: Optional[Tuple[int, int]] = None) -> Tuple[int, int, int, int]:
     """Work out where a clip is drawn, in whole even pixels.
 
     Args:
         clip: Clip whose layout is read; no layout means the whole frame.
-        width: Output width in pixels.
-        height: Output height in pixels.
+        project: The cut, at the size it is drawn at; its caption style says
+            where the captions reach up to, which a bottom corner keeps above.
+        source: The clip's picture size, which a corner keeps the shape of;
+            None gives a corner the frame's shape.
 
     Returns:
         The box as `(x, y, width, height)`. Sizes are even, because the
         encoder's chroma subsampling needs even dimensions.
     """
-    layout = clip.layout
-    if layout is None:
-        return 0, 0, width, height
-    box_width = max(2, int(round(width * layout.width / 2)) * 2)
-    box_height = max(2, int(round(height * layout.height / 2)) * 2)
-    return (
-        min(int(round(width * layout.x)), width - box_width),
-        min(int(round(height * layout.y)), height - box_height),
-        box_width,
-        box_height,
-    )
+    if clip.layout is None:
+        return 0, 0, project.width, project.height
+    return insets.inset_box(clip.layout, project.width, project.height, project.caption_style, source)
+
+def _source_size(asset: Asset) -> Optional[Tuple[int, int]]:
+    """A file's picture size, or None when it was never measured."""
+    return (asset.width, asset.height) if asset.width and asset.height else None
 
 def corner_logo(project: Project, assets: Mapping[str, Asset]) -> Optional[dict]:
     """Where the logo held over the cut is drawn, in frame pixels, for the render and the editor alike.
@@ -522,6 +520,33 @@ def corner_logo(project: Project, assets: Mapping[str, Asset]) -> Optional[dict]
                                                          if clip.card.logo_asset_id in assets)]
     return {"asset_id": logo.asset_id, "corner": logo.corner, "width": max(2, 2 * round(width * logo.width / 2)),
             "margin": round(min(width, height) * LOGO_MARGIN), "opacity": logo.opacity, "off": off}
+
+def _drawn_edges(
+    clip: Clip, project: Project, box: Tuple[int, int, int, int], frames: Tuple[int, int], filters: List[str],
+    joined: str, name: str,
+) -> str:
+    """Draw the line round a corner picture, or between the halves of a split screen, while it shows.
+
+    Args:
+        clip: The laid-over clip, with a layout.
+        project: The cut, at the size it is drawn at.
+        box: The box the clip is drawn in.
+        frames: The first frame it shows on and the frame it is gone by.
+        filters: The render's filters, added to.
+        joined: The label of the picture so far.
+        name: What makes this clip's labels its own.
+
+    Returns:
+        The label of the picture with the line drawn.
+    """
+    colour = f"{insets.INSET_EDGE_COLOUR}@{insets.INSET_EDGE_OPACITY:g}"
+    drawn = ",".join(
+        f"drawbox=x={x}:y={y}:w={w}:h={h}:color={colour}:t=fill:enable='between(n,{frames[0]},{frames[1] - 1})'"
+        for x, y, w, h in insets.edges(clip.layout, box, project.width, project.height)
+    )
+    label = f"[edge{name}]"
+    filters.append(f"{joined}{drawn}{label}")
+    return label
 
 def _drawn_logos(
     project: Project, assets: Mapping[str, Asset], inputs: List[List[str]], filters: List[str], joined: str,
@@ -1640,9 +1665,13 @@ class FFmpegRenderer:
             filters.append(
                 f"{mixed}apad=whole_len={total_samples},atrim=end_sample={total_samples}[mainaudio]"
             )
-        # Video tracks above the first are drawn on top of it, each clip inside the box its layout gives.
+        # Video tracks above the first are drawn on top of it, each clip inside the box its layout gives,
+        # after the sequence laid into the other half of any split screen.
         overlay_audio: List[str] = []
-        for track_index, track in enumerate(project.video_tracks[1:]):
+        # A track over the sequence that ducks under speech: a picture in picture whose sound was turned
+        # on drops wherever somebody in the sequence talks, the way music does.
+        ducked_overlays: List[str] = []
+        for track_index, track in enumerate(insets.drawn_overlays(project)):
             track_labels: List[str] = []
             for segment_index, segment in enumerate(_layout(track.clips, fps)):
                 if segment.start_frame >= total_frames:
@@ -1661,7 +1690,7 @@ class FFmpegRenderer:
                 if sound_only:
                     input_index, cached = -1, True
                 else:
-                    box_x, box_y, box_width, box_height = overlay_box(clip, project.width, project.height)
+                    box_x, box_y, box_width, box_height = overlay_box(clip, project, _source_size(asset))
                     over = f"[ov{track_index}_{segment_index}]"
                     picture, input_index, cached = self._picture(
                         inputs, pieces, clip, asset, frames, fps, (box_width, box_height), framed.get(clip.id),
@@ -1674,8 +1703,13 @@ class FFmpegRenderer:
                         f"{joined}{over}overlay=x={box_x}:y={box_y}:eof_action=pass:repeatlast=0{composited}"
                     )
                     joined = composited
-                # A title card is silent, whatever the file behind it says.
-                heard = asset.has_audio and clip.card is None
+                    if clip.layout is not None and track.id != insets.SPLIT_TRACK_ID:
+                        joined = _drawn_edges(clip, project, (box_x, box_y, box_width, box_height),
+                                              (segment.start_frame, end_frame), filters, joined,
+                                              f"{track_index}_{segment_index}")
+                # A title card is silent, whatever the file behind it says; a clip turned all the way
+                # down is read for no sound at all.
+                heard = asset.has_audio and clip.card is None and clip.volume != 0
                 if cached and heard:
                     input_index = len(inputs)
                     inputs.append(_input_args(clip, asset, frames, fps))
@@ -1694,7 +1728,7 @@ class FFmpegRenderer:
                     f"{''.join(track_labels)}concat=n={len(track_labels)}:v=0:a=1,"
                     f"apad=whole_len={total_samples},atrim=end_sample={total_samples}{track_label}"
                 )
-                overlay_audio.append(track_label)
+                (ducked_overlays if track.duck_under_speech else overlay_audio).append(track_label)
 
         if not sound_only:
             joined = _drawn_logos(project, assets, inputs, filters, joined)
@@ -1747,6 +1781,11 @@ class FFmpegRenderer:
                 elif track.duck_under_speech:
                     ducking.append(track_label)
                 mix_labels.append(track_label)
+
+        # A picture over the sequence with its sound turned on, set to duck, is placed against the
+        # talking like music is: after everything the footage says, and lowered under it.
+        mix_labels += ducked_overlays
+        ducking += ducked_overlays
 
         # The footage's own sound, and anything laid over the picture, come first in the mix;
         # they are what a narration is spoken over.

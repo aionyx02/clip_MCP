@@ -11,17 +11,19 @@ from app.models.media import MediaAnalysis, Transcript, TranscriptSegment, Trans
 from app.models.plan import (
     AddBrollOp, BrollShot, DropBrollOp, DropSelectionOp, Selection, Trim, TrimKind, apply_amendment,
 )
+from app.models.timeline.parts import ClipLayout
 from test_semantic_timeline import ASSET_ID, analysis, spans
 
 from edit_plan.shared import BROLL_ASSET, covered, plan_for, sourced, speech_of
 
 
-def laid_over(shots: List[dict], holds: List[int] = []) -> tuple:
+def laid_over(shots: List[dict], holds: List[int] = [], silent_cover: bool = False) -> tuple:
     """Compile a cut of the four sentences with some picture laid over it.
 
     Args:
-        shots: Each `{over: <index into the speech clips>, seconds, from: <clip id>}`.
+        shots: Each `{over: <index into the speech clips>, seconds, from: <clip id>, layout, sound}`.
         holds: Which of the four selections are held for what they show.
+        silent_cover: Give the file the covering picture comes from no sound.
 
     Returns:
         `(covers, problems, notes)`.
@@ -38,11 +40,13 @@ def laid_over(shots: List[dict], holds: List[int] = []) -> tuple:
             BrollShot(
                 clip_id=shot.get("from", cover_source.id),
                 over_clip_id=shot["over"] if isinstance(shot["over"], str) else speech[shot["over"]].id,
-                seconds=shot["seconds"],
+                seconds=shot["seconds"], layout=shot.get("layout"), sound=shot.get("sound", False),
             )
             for shot in shots
         ],
     )
+    if silent_cover:
+        assets = {**assets, BROLL_ASSET: assets[BROLL_ASSET].model_copy(update={"has_audio": False})}
     pieces = plan_pieces(plan, by_id, children, assets)
     return broll_covers(plan, pieces, by_id, assets)
 
@@ -357,3 +361,69 @@ def test_a_shot_that_would_run_over_a_title_card_is_refused() -> None:
     covers, problems, _ = broll_covers(plan, pieces, by_id, assets)
     assert covers == []
     assert any("title card of beat b2" in problem for problem in problems)
+
+# --- a picture in a corner or a half -----------------------------------------------------------
+
+CORNER = ClipLayout(place="top_right", size="small")
+
+def test_a_picture_in_a_corner_carries_where_it_goes_and_whether_it_is_heard() -> None:
+    covers, problems, _ = laid_over([{"over": 0, "seconds": 2.0, "layout": CORNER, "sound": True}])
+    assert problems == []
+    assert covers[0].layout == CORNER and covers[0].sound is True
+
+def test_a_picture_in_a_corner_may_run_as_long_as_the_speaker_does() -> None:
+    # The speaker stays on screen, so neither the 6 s nor the 40% a beat may be covered holds.
+    covers, problems, _ = laid_over([{"over": 0, "seconds": 7.0, "layout": CORNER}])
+    assert problems == [] and covers[0].duration == 7.0
+    _, problems, _ = laid_over([{"over": 0, "seconds": 7.0}])
+    assert any("may run" in problem for problem in problems)
+
+def test_a_picture_in_a_corner_still_may_not_flicker() -> None:
+    _, problems, _ = laid_over([{"over": 0, "seconds": 0.5, "layout": ClipLayout(place="left")}])
+    assert any("under the 1s a picture in a corner or a half" in problem for problem in problems)
+
+def test_a_picture_over_the_whole_frame_cannot_be_heard() -> None:
+    covers, problems, _ = laid_over([{"over": 0, "seconds": 2.0, "sound": True}])
+    assert covers == [] and any("would replace what is being said" in problem for problem in problems)
+
+def test_a_picture_with_no_sound_cannot_have_it_turned_on() -> None:
+    covers, problems, _ = laid_over([{"over": 0, "seconds": 2.0, "layout": CORNER, "sound": True}], silent_cover=True)
+    assert covers == [] and any("no sound of its own" in problem for problem in problems)
+
+def test_a_picture_in_a_corner_that_runs_out_of_footage_is_refused() -> None:
+    # A box left holding the last frame, or gone black, is the mistake this stops.
+    _, _, _, clips = covered()
+    short = speech_of(clips)[0]
+    _, problems, _ = laid_over([{"over": 2, "seconds": 5.0, "from": short.id, "layout": CORNER}])
+    assert any("which is not the 5s asked for" in problem for problem in problems)
+
+def test_a_split_screen_over_a_title_card_is_refused() -> None:
+    from app.engine.plan.checks import with_cards
+
+    plan, by_id, children, assets, speech, quiet = _carded(["b1", "b1", "b2", "b2"], "b2")
+    plan = plan.model_copy(update={"broll": [BrollShot(clip_id=quiet.id, over_clip_id=speech[1].id, seconds=1.65,
+                                                       layout=ClipLayout(place="right"))]})
+    pieces = with_cards(plan, plan_pieces(plan, by_id, children, assets), assets, None, None)
+    covers, problems, _ = broll_covers(plan, pieces, by_id, assets)
+    assert covers == [] and any("title card of beat b2" in problem for problem in problems)
+
+def test_a_picture_in_a_corner_compiles_to_its_box_silent_unless_asked() -> None:
+    from app.engine.plan.compile import compile_operations
+
+    by_id, children, assets, clips = covered()
+    speech, quiet = speech_of(clips), next(clip for clip in clips if clip.asset_id == BROLL_ASSET)
+
+    def compiled(sound: bool) -> tuple:
+        plan = plan_for([Selection(clip_id=clip.id, beat_id="b1") for clip in speech], broll=[
+            BrollShot(clip_id=quiet.id, over_clip_id=speech[0].id, seconds=2.0, layout=CORNER, sound=sound)])
+        operations, _ = compile_operations(plan, by_id, children, assets)
+        track = next(op for op in operations if op["action"] == "add_track" and op["track_id"] == "broll")
+        laid = next(op for op in operations if op.get("track_id") == "broll" and op["action"] == "add_clip")
+        return track, laid
+
+    track, laid = compiled(False)
+    assert laid["layout"] == {"place": "top_right", "size": "small"} and laid["volume"] == 0.0
+    assert track["duck_under_speech"] is False
+    track, laid = compiled(True)
+    # Heard, and lowered wherever somebody in the cut is talking.
+    assert laid["volume"] == 1.0 and track["duck_under_speech"] is True

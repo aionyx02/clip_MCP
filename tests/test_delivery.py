@@ -137,7 +137,7 @@ def test_black_under_full_frame_covering_picture_is_not_seen() -> None:
     project = project_of(clip("a", "x", 10, 20, 0), over=[clip("b", "y", 0, 3, 4, volume=0.0)])
     assert check_delivery(project, {"x": black_at(15, 16)}) == []
     # An inset does not hide what is under the rest of the frame.
-    inset = clip("b", "y", 0, 3, 4, volume=0.0, layout=ClipLayout(x=0.6, y=0.6, width=0.3, height=0.3))
+    inset = clip("b", "y", 0, 3, 4, volume=0.0, layout=ClipLayout(place="bottom_right", size="small"))
     assert check_delivery(project_of(clip("a", "x", 10, 20, 0), over=[inset]), {"x": black_at(15, 16)})
 
 def test_a_voice_recorded_clipping_is_found() -> None:

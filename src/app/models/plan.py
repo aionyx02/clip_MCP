@@ -22,7 +22,8 @@ from pydantic import BaseModel, Field, model_validator
 
 from app.models.semantic import SlotChoice
 from app.models.timeline.parts import (
-    COLOUR, TITLE_CARD_LONGEST, TITLE_CARD_SECONDS, TITLE_CARD_SHORTEST, CardBackground, Motion, TextStyle,
+    COLOUR, TITLE_CARD_LONGEST, TITLE_CARD_SECONDS, TITLE_CARD_SHORTEST, CardBackground, ClipLayout, Motion,
+    TextStyle,
 )
 
 def _utc_now() -> datetime:
@@ -520,6 +521,20 @@ class BrollShot(BaseModel):
         default=0, ge=0,
         description="How far into `clip_id` the covering picture starts, for showing a moment partway through a "
                     "long take — the thing working, not the hands setting it up. 0 plays it from its start",
+    )
+    layout: Optional[ClipLayout] = Field(
+        default=None,
+        description="Null covers the whole frame. A corner — `{\"place\": \"top_right\", \"size\": \"small\"}`, "
+                    "sizes small, medium or large — lays it small over the speaker, who stays on screen: a "
+                    "close-up of what they are talking about, or their face over a demo. A half — "
+                    "`{\"place\": \"right\"}`, or left, top, bottom — is a split screen, the speaker moved into "
+                    "the other half, each cropped on its own subject: before and after, or two views at once",
+    )
+    sound: bool = Field(
+        default=False,
+        description="Hear this picture's own sound as well as the speaker's, for a picture laid in a corner or "
+                    "a half only. It drops while somebody in the cut is talking. Off, only the cut's sound is "
+                    "heard, which is what B-roll and nearly every picture in picture want",
     )
     rationale: str = Field(default="", description="What this picture is doing here")
     candidate_hash: str = Field(

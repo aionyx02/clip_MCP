@@ -60,6 +60,7 @@ feedback are mapped in their own files.
 | 「右上角放一個小視窗」 / an inset in the top right | `add_track` a second video track, then `add_clip` with `timeline_in` and a `layout` box |
 | 「小視窗拿掉」 / drop the inset | `delete_clip` it, or `set_clip_look` with `clear_layout: true` to cover the frame |
 | 「中間插一段別的畫面蓋掉原本的」 / cut away over the same sound | `add_clip` on the upper video track with no `layout` and `volume: 0` (in a plan: `add_broll`) |
+| 「角落放一個小畫面」「子母畫面」「左右分割」 / picture in picture, split screen | in a plan: `add_broll` with `layout` (a corner and `size`, or a half); `sound: true` only when asked to hear it |
 | 「這段我自己調的不要動」 / keep my version | Already kept: a hand edit pinned it. `set_clip_pinned` `pinned: true` for an untouched clip |
 | 「標一下開場到哪裡」 / mark where a part begins | `set_markers`; `compile_plan` already writes one per beat |
 | 「這支叫 EP1 台北」 / name this project | `rename_project` with the new `name` |

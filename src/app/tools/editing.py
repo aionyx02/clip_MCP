@@ -162,7 +162,8 @@ def apply_edits(project_id: str, expected_version: int, operations: list[EditOpe
     The first video track is the base and defines the output length: gaps
     are rendered as black frames with silence, and audio past its last clip
     is cut. Further video tracks are drawn on top of the base, each clip
-    inside the box its `layout` gives. Background music goes on an audio
+    inside the box its `layout` names: a corner and a size, or a half for a
+    split screen. Background music goes on an audio
     track. Each operation's own description says what it changes: a clip's
     sound running outside its picture (J and L cuts), its transition, colour
     and speed, a track's ducking, the structure markers, the captions and how
@@ -175,7 +176,7 @@ def apply_edits(project_id: str, expected_version: int, operations: list[EditOpe
       inside the file.
     - Audio and video fades fit within their clip.
     - Only clips above the base video track take a `layout`.
-    - Only audio tracks duck under speech.
+    - The base video track cannot duck under speech.
     - Video-track clips use assets with video; audio-track clips use assets
       with audio.
 

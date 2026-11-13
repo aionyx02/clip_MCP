@@ -17,9 +17,11 @@ import os
 import statistics
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from fractions import Fraction
 from typing import Dict, Iterator, List, Mapping, Optional, Sequence, Tuple
 
-from app.engine.builder import DUCK_DEPTH_DB, Talking
+from app.engine import insets
+from app.engine.builder import DUCK_DEPTH_DB, Talking, corner_logo
 from app.engine.continuity import Shot, stray_runs
 from app.engine.looks import alike
 from app.engine.plan.checks import LENGTH_TOLERANCE, NOT_PARTICLES, SENTENCE_END_PUNCTUATION, SHAKY
@@ -28,7 +30,9 @@ from app.engine.semantic import (
     CLEAN_GAP_SECONDS, CLEAN_SILENCE_SECONDS, EDGE_TOLERANCE_SECONDS, bare_words, clean_cuts, combined_over, join_voices,
     share_covered, voice_likeness, was_audible, was_made_up,
 )
-from app.engine.subtitles import caption_overflow, captioned_clips
+from app.engine.legibility import row_box
+from app.engine.reframe import Framing, in_box
+from app.engine.subtitles import caption_overflow, caption_rows, captioned_clips, drawn_captions
 from app.models.media import Asset, MediaAnalysis
 from app.models.timeline.parts import CaptionStyle, Clip, Marker, PlacedCue, Project, TrackType
 
@@ -44,7 +48,7 @@ CLIPPED_PEAK_DB = -0.5
 CLIPPED_FLATNESS = 5.0
 # The kinds of finding a render can be told to go ahead in spite of.
 CHECKS = (
-    "bad_picture", "covered_card", "clipping", "music", "mid_speech", "repeated", "look_alike", "continuity",
+    "bad_picture", "covered_card", "inset", "clipping", "music", "mid_speech", "repeated", "look_alike", "continuity",
     "unplanned", "captions", "length",
 )
 # How far under the talking music has to sit while somebody speaks, in dB. Under that it
@@ -231,6 +235,8 @@ def check_delivery(
     recorded: Optional[Mapping[str, datetime]] = None,
     looks: Optional[Mapping[str, Sequence[int]]] = None,
     length_window: Optional[Tuple[float, float]] = None,
+    framing: Optional[Mapping[str, Framing]] = None,
+    assets: Optional[Mapping[str, Asset]] = None,
 ) -> List[Finding]:
     """Find what would be noticed in the finished file, before it is rendered.
 
@@ -256,6 +262,12 @@ def check_delivery(
             commercial's variant cut down to a platform length, which is a
             ceiling rather than a length to land on either side of. Without
             it, the cut is held to `target_seconds` either way.
+        framing: How each clip sits in the frame it is checked in, keyed by
+            clip ID, for where a face in the sequence lands under a picture in
+            a corner. Without it the sequence is taken as cropped from the middle.
+        assets: The files, keyed by asset ID, for the shape of each picture
+            and of the logo. Without them, nothing a corner picture covers is
+            looked for.
 
     Returns:
         The findings, grouped by check in the order of `CHECKS`.
@@ -299,6 +311,8 @@ def check_delivery(
                     ), ((start, end),)))
 
     findings.extend(_covered_cards(project, fps))
+    if assets is not None:
+        findings.extend(_inset_findings(project, analyses, assets, framing or {}, captions, style, talking))
 
     # Everything heard: the sequence and the audio tracks, less anything turned all the way down.
     for clip in captioned_clips(project):
@@ -383,19 +397,174 @@ def _covered_cards(project: Project, fps: float) -> List[Finding]:
     base = project.base_video_track
     cards = [clip for clip in (base.clips if base else []) if clip.card is not None]
     found: List[Finding] = []
-    # An inset leaves the rest of the frame, and most of the card, to be seen.
-    for over in sorted((clip for track in project.video_tracks[1:] for clip in track.clips if clip.layout is None),
+    # A picture in a corner or a half counts too: a card is words to be read on their own, and a
+    # half takes half of them away while a corner sits beside them where nothing is meant to be.
+    for over in sorted((clip for track in project.video_tracks[1:] for clip in track.clips),
                        key=lambda clip: clip.timeline_in):
         for card in cards:
             start = max(float(over.timeline_in), float(card.timeline_in))
             end = min(float(over.timeline_out), float(card.timeline_out))
             if end - start < 1 / fps:
                 continue
+            does = ("and hides its words" if over.layout is None
+                    else f"in the {over.layout.place} half, cutting it in two" if over.layout.is_half
+                    else f"in the {over.layout.place.replace('_', '-')} corner, beside words meant to be read alone")
             found.append(Finding("covered_card", (
                 f"clip {over.id} is laid over the title card 「{card.card.title}」 from {clock(start)} to "
-                f"{clock(end)} ({end - start:.1f}s) and hides its words; move it to end before "
+                f"{clock(end)} ({end - start:.1f}s) {does}; move it to end before "
                 f"{clock(float(card.timeline_in))} or start after {clock(float(card.timeline_out))}, or take it off"
             ), ((start, end),)))
+    return found
+
+# Provisional: how much of a face has to be under a corner picture before it counts as covered.
+# The edge of a cheek is not the face; a quarter of it is. Reasoned, not measured.
+INSET_FACE_SHARE = 0.25
+
+def _corner_name(clip: Clip) -> str:
+    """Name a corner picture for whoever reads a finding: which corner, how big, which clip."""
+    return f"the {clip.layout.size} picture in the {clip.layout.place.replace('_', '-')} corner (clip {clip.id})"
+
+def _faces_under(
+    project: Project,
+    analyses: Mapping[str, MediaAnalysis],
+    sizes: Mapping[str, Tuple[int, int]],
+    framing: Mapping[str, Framing],
+    box: insets.Box,
+    span: Tuple[float, float],
+) -> List[Tuple[float, float, str]]:
+    """Find where the faces of the sequence are under a box while it is on screen.
+
+    Each second a face was measured in is placed in the frame the way the
+    render places its clip, cropped where the framing says, as a square of the
+    face's measured area.
+
+    Args:
+        project: The cut, at the size it is checked at.
+        analyses: The analyses of its files, keyed by asset ID.
+        sizes: Each file's picture size, by asset ID.
+        framing: How each clip sits in the frame, by clip ID.
+        box: The box laid over the sequence.
+        span: When it is on screen, in timeline seconds.
+
+    Returns:
+        `(start, end, clip_id)` of each second a face is at least
+        `INSET_FACE_SHARE` under the box.
+    """
+    fps = Fraction(project.fps_num, project.fps_den)
+    width, height = project.width, project.height
+    base = project.base_video_track
+    found: List[Tuple[float, float, str]] = []
+    for under in (base.clips if base else []):
+        analysis, source = analyses.get(under.asset_id), sizes.get(under.asset_id)
+        if under.card is not None or analysis is None or source is None:
+            continue
+        framed = framing.get(under.id)
+        fitted = min if framed is not None and framed.whole else max
+        scale = fitted(width / source[0], height / source[1]) * (framed.zoom if framed is not None else 1.0)
+        for second in analysis.faces:
+            if not second.faces or second.face_x is None or second.face_y is None:
+                continue
+            landed = _on_timeline(under, second.start, second.end)
+            if landed is None or landed[1] <= span[0] or landed[0] >= span[1]:
+                continue
+            at = max(second.start, float(under.source_range.start))
+            across, down = in_box(second.face_x, second.face_y, under, at, source, (width, height), framed, fps)
+            side = math.sqrt(max(0.0, second.face_share or 0.0) * source[0] * source[1]) * scale
+            face = (across * width - side / 2, down * height - side / 2, side, side)
+            if insets.covered(face, box) >= INSET_FACE_SHARE:
+                found.append((max(landed[0], span[0]), min(landed[1], span[1]), under.id))
+    return found
+
+def _inset_findings(
+    project: Project,
+    analyses: Mapping[str, MediaAnalysis],
+    assets: Mapping[str, Asset],
+    framing: Mapping[str, Framing],
+    captions: Optional[Sequence[PlacedCue]],
+    style: Optional[CaptionStyle],
+    talking: Optional[Talking],
+) -> List[Finding]:
+    """Find what a picture in a corner or a half gets in the way of, in the frame it is checked in.
+
+    A corner keeps above where two lines of captions reach, but the cut can
+    still put it over the speaker's face, most likely once it is delivered in
+    another shape and the sequence is cropped on the face; over a caption that
+    runs to three lines; or over the logo. A picture whose sound was turned on,
+    on a track that does not duck, plays it at full level over the speaker.
+    Each is said with where, and nothing is moved: which corner is right is for
+    whoever planned it to decide.
+
+    Args:
+        project: The cut, at the size it is checked at.
+        analyses: The analyses of its files, keyed by asset ID.
+        assets: Its files, keyed by asset ID.
+        framing: How each clip sits in the frame, by clip ID.
+        captions: The captions being burned in, placed; None when none are.
+        style: How they are drawn.
+        talking: Where the transcripts say somebody is talking.
+
+    Returns:
+        The findings, in timeline order.
+    """
+    width, height = project.width, project.height
+    sizes = {asset_id: (asset.width, asset.height) for asset_id, asset in assets.items()
+             if asset.width and asset.height}
+    drawn = drawn_captions(captions, width, height, style or project.caption_style) if captions else None
+    logo, logo_box = corner_logo(project, assets), None
+    if logo is not None and logo["asset_id"] in sizes:
+        logo_width, logo_height = sizes[logo["asset_id"]]
+        tall = 2 * round(logo["width"] * logo_height / logo_width / 2)
+        logo_box = (logo["margin"] if logo["corner"].endswith("left") else width - logo["width"] - logo["margin"],
+                    logo["margin"] if logo["corner"].startswith("top") else height - tall - logo["margin"],
+                    logo["width"], tall)
+    found: List[Finding] = []
+    for track in project.video_tracks[1:]:
+        for clip in sorted(track.clips, key=lambda item: item.timeline_in):
+            if clip.layout is None:
+                continue
+            span = (float(clip.timeline_in), float(clip.timeline_out))
+            if clip.volume > 0 and not track.duck_under_speech and talking is not None and any(
+                    start < span[1] and span[0] < end for start, end in talking.spans):
+                what = (f"the picture in the {clip.layout.place} half (clip {clip.id})" if clip.layout.is_half
+                        else _corner_name(clip))
+                found.append(Finding("inset", (
+                    f"{what} plays its own sound at full level over somebody talking, from {clock(span[0])} to "
+                    f"{clock(span[1])}; turn it to 0 to hear only the speaker, or set duck_under_speech on track "
+                    f"{track.id} so it drops while they talk"
+                ), (span,)))
+            if clip.layout.is_half:
+                continue
+            box = insets.inset_box(clip.layout, width, height, project.caption_style, sizes.get(clip.asset_id))
+            faces = insets.spans_of([(start, end) for start, end, _ in
+                                     _faces_under(project, analyses, sizes, framing, box, span)])
+            if faces:
+                found.append(Finding("inset", (
+                    f"{_corner_name(clip)} covers the speaker's face in this {width}x{height} frame for "
+                    f"{sum(end - start for start, end in faces):.1f}s, first from {clock(faces[0][0])} to "
+                    f"{clock(faces[0][1])}. It is left where it is: put it in another corner, make it smaller, or "
+                    "keep it if the user is happy with it"
+                ), tuple(faces)))
+            over = []
+            for event in (drawn["events"] if drawn else []):
+                start, end = max(event["start"], span[0]), min(event["end"], span[1])
+                if end <= start:
+                    continue
+                rows = [row_box(row, width) for row in caption_rows(event, drawn, height)]
+                if any(insets.covered((left, top, right - left, bottom - top), box) > 0
+                       for left, top, right, bottom in rows):
+                    over.append((start, end))
+            if over:
+                over = insets.spans_of(over)
+                found.append(Finding("inset", (
+                    f"captions are drawn over {_corner_name(clip)} for {sum(end - start for start, end in over):.1f}s, "
+                    f"first from {clock(over[0][0])} to {clock(over[0][1])}, where a caption runs past two lines; "
+                    "put the picture in a top corner, or shorten the caption"
+                ), tuple(over)))
+            if logo_box is not None and insets.covered(logo_box, box) > 0:
+                found.append(Finding("inset", (
+                    f"{_corner_name(clip)} is drawn over the logo in the {logo['corner'].replace('_', '-')} corner "
+                    f"from {clock(span[0])} to {clock(span[1])}; put one of them in another corner"
+                ), (span,)))
     return found
 
 def _music_over_talking(project: Project, talking: Optional[Talking]) -> List[Finding]:

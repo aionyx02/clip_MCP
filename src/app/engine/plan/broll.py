@@ -8,6 +8,7 @@ from app.engine.semantic import CleanCuts
 from app.models.media import Asset
 from app.models.plan import EditPlan
 from app.models.semantic import SemanticClip
+from app.models.timeline.parts import ClipLayout
 
 
 # How long one shot of covering picture may run. Under the first it reads as a flicker
@@ -34,6 +35,9 @@ class Cover:
         end: Where it ends, in seconds.
         timeline_in: Where it lands on the timeline, in seconds.
         over_clip_id: The clip in the cut it starts over.
+        layout: Where it is drawn: None over the whole frame, or a corner
+            or a half.
+        sound: Whether its own sound is heard, ducked under the talking.
     """
 
     clip_id: str
@@ -42,6 +46,8 @@ class Cover:
     end: float
     timeline_in: float
     over_clip_id: str
+    layout: Optional[ClipLayout] = None
+    sound: bool = False
 
     @property
     def duration(self) -> float:
@@ -239,14 +245,28 @@ def broll_covers(
         if not asset.has_video:
             problems.append(f"{where}: {asset.id} has no picture, so there is nothing to lay over anything")
             continue
+        inset = shot.layout is not None
+        if shot.sound and not inset:
+            problems.append(
+                f"{where}: covering the whole frame, its sound would replace what is being said; leave `sound` "
+                "off, or lay it in a corner or a half to hear both"
+            )
+            continue
+        if shot.sound and not asset.has_audio:
+            problems.append(f"{where}: {asset.id} has no sound of its own to turn on")
+            continue
         span = _in_cut(over, placed)
         if span is None:
             problems.append(
                 f"{where}: the cut does not use {shot.over_clip_id}, so there is nowhere for this to start"
             )
             continue
-        if not BROLL_MIN_SECONDS <= shot.seconds <= BROLL_MAX_SECONDS:
+        # A picture in a corner or a half leaves the speaker on screen, so the viewer does not lose
+        # them however long it runs: only the shortest a shot may be holds for it.
+        if shot.seconds < BROLL_MIN_SECONDS or (not inset and shot.seconds > BROLL_MAX_SECONDS):
             problems.append(
+                f"{where}: {shot.seconds:g}s is under the {BROLL_MIN_SECONDS:g}s a picture in a corner or a half "
+                "needs not to read as a flicker" if inset else
                 f"{where}: {shot.seconds:g}s is outside the {BROLL_MIN_SECONDS:g}–{BROLL_MAX_SECONDS:g}s a shot "
                 "may run; under that it reads as a flicker, over it the viewer loses what is being said"
             )
@@ -301,8 +321,9 @@ def broll_covers(
             continue
 
         beat = _under(placed, opened)
-        if beat is not None and _splits_a_sentence(beat, opened, cuts) and not _covers_bad_picture(
-                beat, opened, shot.seconds, cuts):
+        # A picture in a corner or a half hides no black or frozen frame: the sequence stays on screen.
+        if beat is not None and _splits_a_sentence(beat, opened, cuts) and (inset or not _covers_bad_picture(
+                beat, opened, shot.seconds, cuts)):
             # Cutting away mid-sentence is the half of the boundary rule that can be
             # fixed for nothing: the shot moves to another clip and the cut keeps its
             # length. The other half — cutting back — cannot, so that one is reported.
@@ -313,9 +334,9 @@ def broll_covers(
             )
             continue
         beat_id = beat[0].beat_id if beat is not None else ""
-        running = covered_in_beat.get(beat_id, 0.0) + shot.seconds
+        running = covered_in_beat.get(beat_id, 0.0) + (0.0 if inset else shot.seconds)
         allowed = in_beat.get(beat_id, 0.0) * BROLL_MAX_SHARE
-        if running > allowed:
+        if not inset and running > allowed:
             problems.append(
                 f"{where}: would put {running:.1f}s of beat {beat_id or '(none)'} under B-roll, more than the "
                 f"{BROLL_MAX_SHARE:.0%} of its {in_beat.get(beat_id, 0.0):.1f}s that may be covered"
@@ -330,6 +351,8 @@ def broll_covers(
             end=round(source.source_range.start + shot.from_seconds + shot.seconds, 3),
             timeline_in=opened,
             over_clip_id=shot.over_clip_id,
+            layout=shot.layout,
+            sound=shot.sound,
         ))
         if not over.text:
             notes.append(Note(

@@ -316,35 +316,60 @@ Motion = Literal["push", "pull", "pan_left", "pan_right", "none"]
 # the picture lurching; reasoned from the amount, not measured against anybody watching.
 MIN_MOVE_SECONDS = 1.5
 
-class ClipLayout(BaseModel):
-    """Where a clip is drawn in the frame, as fractions of the output size.
+# Where a picture laid over the sequence sits: in a corner, small, or taking one half of the frame
+# while the sequence takes the other. Named places rather than coordinates, so the server works
+# the box out for whatever shape the cut is delivered in (see `engine/insets.py`).
+InsetCorner = Literal["top_left", "top_right", "bottom_left", "bottom_right"]
+InsetHalf = Literal["left", "right", "top", "bottom"]
+InsetSize = Literal["small", "medium", "large"]
+INSET_CORNERS = ("top_left", "top_right", "bottom_left", "bottom_right")
+INSET_HALVES = ("left", "right", "top", "bottom")
 
-    Fractions rather than pixels, so the same layout works whatever the
-    project's resolution is. A clip with no layout fills the frame.
+class ClipLayout(BaseModel):
+    """Where a clip on a video track above the base is drawn: a corner, or half the frame.
+
+    A corner is picture in picture: the clip small over the sequence, which
+    plays on around it. A half is a split screen: the clip in one half, and
+    the sequence moved into the other, each cropped on its own subject. A clip
+    with no layout fills the frame.
     """
 
-    x: float = Field(default=0.0, ge=0, le=1, description="Left edge as a fraction of the output width")
-    y: float = Field(default=0.0, ge=0, le=1, description="Top edge as a fraction of the output height")
-    # No upper bound here: a box that is too big is caught below, with a message that says why.
-    width: float = Field(default=1.0, gt=0, description="Width as a fraction of the output width")
-    height: float = Field(default=1.0, gt=0, description="Height as a fraction of the output height")
+    place: Union[InsetCorner, InsetHalf] = Field(
+        ...,
+        description="A corner — `top_left`, `top_right`, `bottom_left`, `bottom_right` — for a small picture "
+                    "over the sequence, or a half — `left`, `right`, `top`, `bottom` — for a split screen with "
+                    "the sequence in the other half. On a portrait frame a left or right half is laid as the top "
+                    "or bottom one, since side by side would leave two slivers",
+    )
+    size: Optional[InsetSize] = Field(
+        default=None,
+        description="How big a corner picture is: `small`, `medium` or `large`, about a quarter, a third or "
+                    "two fifths of a landscape frame's width. A corner needs one; a half has none",
+    )
 
     @model_validator(mode="after")
-    def validate_box(self):
-        """Ensure the box stays inside the frame.
+    def sized_where_it_means_something(self):
+        """Ensure a corner says how big it is and a half does not.
 
         Returns:
             The validated `ClipLayout` instance.
 
         Raises:
-            ValueError: If the box runs past the right or bottom edge.
+            ValueError: If a corner has no size, or a half has one.
         """
-        if self.x + self.width > 1.0001 or self.y + self.height > 1.0001:
+        if self.place in INSET_CORNERS and self.size is None:
+            raise ValueError(f"a picture in the {self.place} corner needs a size: small, medium or large")
+        if self.place in INSET_HALVES and self.size is not None:
             raise ValueError(
-                f"a clip at x {self.x}, y {self.y} sized {self.width} x {self.height} runs outside the frame; "
-                "x + width and y + height must each stay within 1.0"
+                f"the {self.place} half is half the frame, so it has no size; leave `size` out, or put the "
+                f"picture in a corner to choose how big it is"
             )
         return self
+
+    @property
+    def is_half(self) -> bool:
+        """Whether this is one half of a split screen rather than a corner."""
+        return self.place in INSET_HALVES
 
 class ColorAdjust(BaseModel):
     """Picture adjustments applied to a clip, in the language of the controls people expect."""
@@ -842,7 +867,8 @@ class Track(BaseModel):
     clips: List[Clip] = Field(default_factory=list)
     duck_under_speech: bool = Field(
         default=False,
-        description="Lower this audio track automatically while the video's own sound is loud; audio tracks only",
+        description="Lower this track automatically while somebody in the sequence talks: music, or a picture "
+                    "laid over the sequence whose own sound is heard. Not the base video track",
     )
     voice: Optional[bool] = Field(
         default=None,
