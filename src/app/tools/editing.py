@@ -133,7 +133,8 @@ def get_project(project_id: str, include_subtitles: bool = False) -> dict:
     for track in project.tracks:
         summary = track.model_dump(exclude_defaults=True)
         summary.update({"id": track.id, "track_type": track.track_type.value})
-        summary["clips"] = [clip.model_dump(exclude_defaults=True) for clip in track.clips]
+        # What the plan last asked of a clip is the compiler's bookkeeping, not something to read.
+        summary["clips"] = [clip.model_dump(exclude_defaults=True, exclude={"plan_asked"}) for clip in track.clips]
         state["tracks"].append(summary)
     if include_subtitles:
         state["subtitles"] = [cue.model_dump() for cue in project.subtitles]

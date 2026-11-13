@@ -1,7 +1,9 @@
 """Turning a plan into the edit operations that build its cut."""
 
 import hashlib
-from typing import Dict, List, Mapping, Optional, Sequence, Tuple
+from decimal import Decimal
+from enum import Enum
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Tuple
 
 from app.engine.plan.beats import plan_pieces
 from app.engine.plan.broll import broll_covers
@@ -57,6 +59,150 @@ def _as_made(pinned: Clip) -> dict:
         "stabilize": pinned.stabilize,
     }
 
+def _plain(value: Any) -> Any:
+    """Put a value into the one shape a plan's ask and a clip's setting are compared in."""
+    if isinstance(value, Enum):
+        return value.value
+    if isinstance(value, (Decimal, float)):
+        return round(float(value), 3)
+    if isinstance(value, dict):
+        return {key: _plain(item) for key, item in value.items()}
+    return value
+
+def _transition(piece: Piece) -> Optional[dict]:
+    """Write how a window comes in over the one before, as the operation that places it takes it."""
+    if piece.transition is None:
+        return None
+    kind, seconds, through, direction = piece.transition
+    made = {"kind": kind, "seconds": seconds}
+    if kind == "dip":
+        made["through"] = through
+    elif kind == "wipe":
+        made["direction"] = direction
+    return made
+
+def _piece_asks(piece: Piece, raw: Piece) -> dict:
+    """Write down what the plan asks of one shot in the sequence.
+
+    Args:
+        piece: The window as the compile places it.
+        raw: The same window as the plan alone makes it, before a pinned
+            clip's range is laid over it or a cut is moved onto the beat:
+            the range has to come from the plan, or a hand trim would read as
+            the plan changing.
+
+    Returns:
+        The fields a hand adjustment can also hold, in `_plain` shape.
+    """
+    return _plain({
+        "source_range": {"start": raw.start, "end": raw.end},
+        "speed": raw.speed,
+        "volume": piece.gain,
+        "keep_level": piece.keep_level,
+        "stabilize": piece.stabilize,
+        "motion": piece.motion,
+        "transition_in": _transition(piece),
+        "audio_lead": piece.sound_lead or 0.0,
+    })
+
+def _clip_holds(clip: Clip) -> dict:
+    """Read the same fields off a clip as it stands, in `_plain` shape."""
+    held = clip.transition_in
+    return _plain({
+        "source_range": {"start": clip.source_range.start, "end": clip.source_range.end},
+        "speed": clip.speed,
+        "volume": clip.volume,
+        "keep_level": clip.keep_level,
+        "stabilize": clip.stabilize,
+        "motion": clip.motion,
+        "transition_in": None if held is None else held.model_dump(),
+        "audio_lead": clip.audio_lead,
+        "layout": clip.layout.model_dump() if clip.layout else None,
+    })
+
+def _overridden(pinned: Clip, asked: dict) -> List[Tuple[str, Any, Any]]:
+    """Find what the plan changed about a pinned clip that keeping it would throw away.
+
+    A pinned clip is meant to differ from the plan — that is what it is
+    pinned for — so its own settings are not the comparison. What is compared
+    is what the plan asked of this clip last time against what it asks now: a
+    field only the plan changed is a change the person made to the plan and
+    expects to see. It is reported only when the clip does not already have
+    what the plan now asks.
+
+    Args:
+        pinned: The pinned clip, carrying the plan's asks from the compile
+            that made it. One compiled before those were recorded carries
+            none, and nothing can be said about it.
+        asked: What the plan asks of the same clip now.
+
+    Returns:
+        `(field, asked before, asked now)` for each such field.
+    """
+    before = pinned.plan_asked
+    if not before:
+        return []
+    holds = _clip_holds(pinned)
+    return [
+        (field, before[field], now)
+        for field, now in asked.items()
+        if field in before and before[field] != now and holds.get(field) != now
+    ]
+
+def _say(field: str, value: Any) -> str:
+    """Say one asked-for setting in words."""
+    if field == "layout":
+        if not value:
+            return "the whole frame"
+        return " ".join(str(part) for part in (value.get("place"), value.get("size")) if part)
+    if field == "source_range":
+        return f"{value['start']:.2f}s-{value['end']:.2f}s of its file"
+    if field == "transition_in" and not value:
+        return "a straight cut"
+    if field == "motion" and value is None:
+        return "no motion"
+    if isinstance(value, dict):
+        return ", ".join(f"{key} {item}" for key, item in value.items())
+    return str(value)
+
+def pinned_differences(provenance: Mapping[str, dict]) -> List[str]:
+    """Say which pinned clips the plan has changed since they were pinned, and how.
+
+    A recompile keeps a pinned clip exactly as it is, so a change the plan
+    makes to that same clip would be dropped without a word. `compile_plan`
+    stops on these instead of choosing between the hand adjustment and the
+    plan for the person.
+
+    Args:
+        provenance: What `compile_operations` returned.
+
+    Returns:
+        One line per pinned clip that differs, naming every field.
+    """
+    lines = []
+    for origin in provenance.values():
+        changed = origin.get("overridden")
+        if not changed:
+            continue
+        what = "; ".join(
+            f"{field} was {_say(field, was)}, the plan now asks for {_say(field, now)}"
+            for field, was, now in changed
+        )
+        lines.append(
+            f"clip {origin['kept_clip_id']} on track {origin['track_id']} is pinned to keep a hand adjustment, "
+            f"and the plan has changed it since ({what}); compiling would keep the clip as it is and drop that. "
+            "Unpin it with set_clip_pinned to take the plan's version, which gives up the hand adjustment, "
+            "or change the plan back to keep the clip as it is"
+        )
+    return lines
+
+def _kept(provenance: Dict[str, dict], clip_id: str, track_id: str, pinned: Optional[Clip], asked: dict) -> None:
+    """Record a compiled clip's asks, and, for one kept from a pin, what keeping it drops."""
+    origin = provenance[clip_id]
+    origin["asked"] = asked
+    if pinned is not None:
+        origin.update(track_id=track_id, kept_clip_id=pinned.id, overridden=_overridden(pinned, asked))
+
 def _card_operation(clip_id: str, piece: Piece) -> dict:
     """Write the operation that puts one title card on the sequence."""
     placed = {
@@ -65,12 +211,7 @@ def _card_operation(clip_id: str, piece: Piece) -> dict:
         "card": piece.card.model_dump(mode="json"),
     }
     if piece.transition is not None:
-        kind, seconds, through, direction = piece.transition
-        placed["transition_in"] = {"kind": kind, "seconds": seconds}
-        if kind == "dip":
-            placed["transition_in"]["through"] = through
-        elif kind == "wipe":
-            placed["transition_in"]["direction"] = direction
+        placed["transition_in"] = _transition(piece)
     return placed
 
 def _text_operations(
@@ -256,7 +397,13 @@ def compile_operations(
         operations are applied, so it never has to travel through the tool
         surface.
     """
-    pieces, _ = as_left(plan_pieces(plan, clips, children, assets, cuts), project)
+    raw = plan_pieces(plan, clips, children, assets, cuts)
+    # What the plan alone makes of each window, by what it is made of. The first one wins,
+    # as it does when a pinned clip is matched: two windows can share their clip IDs.
+    as_planned: Dict[Tuple[str, ...], Piece] = {}
+    for piece in raw:
+        as_planned.setdefault(piece.from_clip_ids, piece)
+    pieces, _ = as_left(raw, project)
     # Keyed by track as well as by what it was made of. The three kinds of clip the
     # compiler owns mean different things by `from_clip_ids` — merged semantic clips on
     # the sequence, a (cover, covered) pair on the B-roll track, nothing at all for the
@@ -309,12 +456,7 @@ def compile_operations(
         if piece.motion is not None:
             placed["motion"] = piece.motion
         if piece.transition is not None:
-            kind, seconds, through, direction = piece.transition
-            placed["transition_in"] = {"kind": kind, "seconds": seconds}
-            if kind == "dip":
-                placed["transition_in"]["through"] = through
-            elif kind == "wipe":
-                placed["transition_in"]["direction"] = direction
+            placed["transition_in"] = _transition(piece)
         if piece.sound_lead:
             placed["audio_lead"] = piece.sound_lead
         if pinned is not None:
@@ -325,6 +467,8 @@ def compile_operations(
             "from_clip_ids": list(piece.from_clip_ids),
             "pinned": pinned is not None,
         }
+        asked = _piece_asks(piece, as_planned.get(piece.from_clip_ids, piece))
+        _kept(provenance, clip_id, VIDEO_TRACK_ID, pinned, asked)
 
     # B-roll goes on a track of its own above the sequence, at absolute positions rather
     # than in a row: a cover sits where the words it belongs to are, and the gaps between
@@ -366,6 +510,12 @@ def compile_operations(
                 "from_clip_ids": list(identity),
                 "pinned": pinned is not None,
             }
+            asked = _plain({
+                "source_range": {"start": cover.start, "end": cover.end},
+                "volume": laid["volume"],
+                "layout": cover.layout.model_dump() if cover.layout is not None else None,
+            })
+            _kept(provenance, clip_id, BROLL_TRACK_ID, pinned, asked)
 
     operations += _text_operations(plan, operations, provenance, project, children, kit)
     operations += _brand_operations(kit, project)
@@ -415,4 +565,7 @@ def compile_operations(
             provenance[clip_id] = {
                 "from_plan_id": plan.id, "from_clip_ids": list(bed.key), "pinned": pinned is not None,
             }
+            # Only its level: where a stretch starts and ends in the song follows the cut, so a
+            # shot trimmed by hand would read as the plan moving the music.
+            _kept(provenance, clip_id, bed.track_id, pinned, _plain({"volume": bed.volume}))
     return operations, provenance

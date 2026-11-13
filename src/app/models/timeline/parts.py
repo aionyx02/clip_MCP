@@ -639,6 +639,11 @@ class Clip(BaseModel):
         default=False,
         description="Adjusted by hand, so compiling the plan again keeps it as it is rather than rebuilding it",
     )
+    plan_asked: Optional[Dict[str, object]] = Field(
+        default=None,
+        description="What the plan asked of this clip when it last compiled it. A recompile keeps a pinned clip "
+                    "as it is, so it compares the plan's new asks against these and stops on a change it would drop",
+    )
     speed: float = Field(
         default=1.0,
         ge=MIN_SPEED,
