@@ -55,6 +55,11 @@ FORBIDDEN_IN_NAMES = frozenset('<>:"/\\|?*') | {chr(code) for code in range(32)}
 NAME_LOOKALIKES = {"<": "＜", ">": "＞", ":": "：", '"': "＂", "/": "／", "\\": "＼", "|": "｜", "?": "？",
                    "*": "＊"}
 MAX_OUTPUT_NAME = 60
+# Provisional: how many versions of the cut an unfinished `auto` production may preview,
+# the first preview included, before the user is heard from again. It measures how many
+# rounds of fixing on its own the user can be taken to accept while away, each preview
+# costing a minute or so and the frames read off it; no run has measured it yet.
+MAX_ROUNDS = 3
 
 def file_gone(job: Job) -> Optional[str]:
     """Say what became of a finished render's file, when it is no longer there.
@@ -538,15 +543,17 @@ def render_project(
     or frozen picture on screen, a voice recorded clipping, a caption too
     tall for the frame, or a length far from what the plan asked for. Fix
     the cut, or name the kinds of finding the user has decided to live with
-    in `allow`. Previews are never refused — they are how you look — but
-    say what they found. While the project's production is finishing on its
-    own (`auto`), a final render is also refused until `get_production`'s
-    `pending` is empty — the story card confirmed, every question answered,
-    every comment of the user's closed — and `allow` does not change that.
+    in `allow`. Previews are not refused for what the check finds — they are
+    how you look — but say what they found. The one exception: an `auto`
+    production previews three versions of the cut after the user was last
+    heard from, and the fourth is refused (platform-conventions file).
 
-    While an `auto` production is finishing the project, a final render is
-    also refused until every `story_doubts` nomination is ruled `keep` with
-    a reason, with `rule_doubts`, on the cut as it is now.
+    While the project's production is finishing on its own (`auto`), a
+    final render is also refused until `get_production`'s `pending` is
+    empty — the story card confirmed, every question answered, every
+    comment of the user's closed — and every `story_doubts` nomination is
+    ruled `keep` with a reason, with `rule_doubts`, on the cut as it is now;
+    `allow` does not change that.
 
     Returns immediately. Poll `get_job` with the returned `job_id` until the
     job reaches a terminal status, or stop it with `cancel_job`. Rendering
@@ -609,7 +616,9 @@ def render_project(
             is now in this shape for a final render, or its sound as it is now
             has been neither previewed nor heard, the check found something
             not allowed, or its unfinished `auto` production still has something
-            pending or a story nomination not ruled `keep` on the cut as it is now.
+            pending or a story nomination not ruled `keep` on the cut as it is now;
+            or, for a preview, that production has already previewed
+            `MAX_ROUNDS` other versions since the user was last heard from.
     """
     unseen = None if is_preview else _unseen(project_id, frame)
     if unseen:
@@ -619,13 +628,51 @@ def render_project(
     # One gate, so everything holding the final cut is listed at once: what the user still owes,
     # then the story nominations not yet ruled `keep`.
     owner = production.of_project(project_id)
-    held = [] if is_preview else [why for why in (_owed_the_user(owner), narrative.undecided(project_id)) if why]
+    held = ([why for why in (_out_of_rounds(owner, project_id),) if why] if is_preview
+            else [why for why in (_owed_the_user(owner), narrative.undecided(project_id)) if why])
     if held:
         raise ValueError("\n\n".join(held))
     return start_render(
         project_id, is_preview, loudness_target, burn_subtitles, frame, follow_faces, allow, PREVIEW_SHORT_SIDE,
         production_id=owner.id if owner is not None else None,
     )
+
+def _out_of_rounds(owner: Optional[Production], project_id: str) -> Optional[str]:
+    """Say why a preview is refused: an `auto` production has fixed the cut on its own for as long as it may.
+
+    Counted, not kept: the versions of the cut previewed for this production
+    since the user was last heard from (`production.last_heard`), in any
+    shape, finished or still queued or running, so several asked for at
+    once all count; a preview that failed or was cancelled does not. The
+    version asked for now is one of them when it was previewed already, so
+    the same cut again or in another shape always runs. The editor's
+    previews belong to no production, so are neither counted nor held, and a
+    project with no production, or an `interactive` one, is never held.
+
+    Args:
+        owner: The unfinished production of the project, if any.
+        project_id: The project to preview.
+
+    Returns:
+        Why the preview is refused; None when it may run.
+    """
+    if owner is None or owner.mode != "auto":
+        return None
+    project = runtime.repo.get_project(project_id)
+    if project is None:
+        return None
+    heard = production.last_heard(owner)
+    versions = {job.project_version for job in runtime.repo.previews_for(owner.id)
+                if heard is None or job.created_at > heard}
+    if project.version in versions or len(versions) < MAX_ROUNDS:
+        return None
+    since = f"since the user was last heard from ({heard.isoformat(timespec='seconds')})" if heard else         "since it began, and the user has not been heard from"
+    return (f"production {owner.id} is finishing on its own and has previewed {len(versions)} versions of the cut "
+            f"{since}, versions {sorted(versions)}: that is as many rounds as it fixes on its own (MAX_ROUNDS = "
+            f"{MAX_ROUNDS}), so this version is not previewed. Stop changing the cut: put what is still to fix or "
+            "decide to the user with ask_user, so it is in get_production's pending, and hand everything over at "
+            "once in the chat with the last preview's path. Once the user says anything — record_answer their "
+            "words, or they reply or comment in the editor — previews run again")
 
 def _owed_the_user(owner: Optional[Production]) -> Optional[str]:
     """Say what the user still has to answer, or the AI still has to do for them, before a final render.

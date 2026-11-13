@@ -540,3 +540,174 @@ def test_a_question_on_footage_that_left_the_cut_can_be_closed(planned: dict) ->
 def test_an_interactive_production_s_question_can_be_closed_by_the_ai(planned: dict) -> None:
     _, project, _, question, _ = owing(planned, mode="interactive")
     assert resolve_comment(project, question, "你在旁邊說了不會")["status"] == "resolved"
+
+
+# ------------------------------------------------------------------ how many rounds an auto production fixes on its own
+
+def amended(project_id: str) -> None:
+    """A new version of the project, as any edit makes one."""
+    project = runtime.repo.get_project(project_id)
+    runtime.repo.update_project(project.model_copy(update={"version": project.version + 1}), project.version)
+
+
+def rounds(project_id: str, count: int) -> None:
+    """Preview `count` versions of the cut, one after another, each finished, with an edit before each but the first."""
+    for number in range(count):
+        if number:
+            amended(project_id)
+        previewed(project_id)
+
+
+def confirmed(planned: dict, mode: str = "auto") -> tuple:
+    """A production on a compiled project with its story card confirmed, so nothing is owed.
+
+    Returns:
+        `(production_id, project_id)`.
+    """
+    production, project = compiled(planned, mode=mode)
+    confirm_story(production, set_story(production, **CARD)["story_hash"], said="好，就這樣剪")
+    return production, project
+
+
+def test_the_third_version_is_previewed_and_the_fourth_refused(planned: dict) -> None:
+    production, project = confirmed(planned)
+    rounds(project, rendering.MAX_ROUNDS)
+    amended(project)
+    with pytest.raises(ValueError) as refused:
+        rendering.render_project(project, is_preview=True)
+    said = str(refused.value)
+    assert f"previewed {rendering.MAX_ROUNDS} versions" in said and "ask_user" in said and "pending" in said
+    assert len(runtime.repo.previews_for(production)) == rendering.MAX_ROUNDS
+
+
+def test_the_same_version_again_or_in_another_shape_is_not_another_round(planned: dict) -> None:
+    production, project = confirmed(planned)
+    rounds(project, rendering.MAX_ROUNDS)
+    # The last version once more, and in two other shapes: still three versions.
+    previewed(project)
+    rendering.render_project(project, is_preview=True, frame="portrait")
+    rendering.render_project(project, is_preview=True, frame="square")
+    amended(project)
+    with pytest.raises(ValueError, match="previewed 3 versions"):
+        rendering.render_project(project, is_preview=True)
+
+
+def test_a_failed_or_cancelled_preview_is_not_a_round(planned: dict) -> None:
+    production, project = confirmed(planned)
+    rounds(project, rendering.MAX_ROUNDS - 1)
+    for status in (JobStatus.FAILED, JobStatus.CANCELLED):
+        amended(project)
+        started = rendering.render_project(project, is_preview=True)
+        runtime.repo.update_job(started["job_id"], lambda job, status=status: setattr(job, "status", status))
+    amended(project)
+    previewed(project)
+    amended(project)
+    with pytest.raises(ValueError, match="previewed 3 versions"):
+        rendering.render_project(project, is_preview=True)
+
+
+def test_previews_asked_for_at_once_all_count(planned: dict) -> None:
+    production, project = confirmed(planned)
+    # Never finished: queued, as they are while the first is still rendering.
+    for number in range(rendering.MAX_ROUNDS):
+        if number:
+            amended(project)
+        rendering.render_project(project, is_preview=True)
+    runtime.repo.update_job(runtime.repo.previews_for(production)[0].job_id,
+                            lambda job: setattr(job, "status", JobStatus.RUNNING))
+    amended(project)
+    with pytest.raises(ValueError, match="previewed 3 versions"):
+        rendering.render_project(project, is_preview=True)
+
+
+def _editor_answer(production: str, project: str) -> None:
+    question = ask_user(project, [Question(start=0.0, question="開場會不會太長？")])["asked"][0]["id"]
+    feedback.change_comment(project, question, USER, "不會")
+
+
+def _editor_comment(production: str, project: str) -> None:
+    feedback.add_comment(project, "這裡太拖", 1.0)
+
+
+def _chat_answer(production: str, project: str) -> None:
+    question = ask_user(project, [Question(start=0.0, question="開場會不會太長？")])["asked"][0]["id"]
+    record_answer(production, "不會，留著", comment_id=question)
+
+
+def _chat_said(production: str, project: str) -> None:
+    record_answer(production, "再短一點")
+
+
+def _story_yes(production: str, project: str) -> None:
+    story_hash = set_story(production, **{**CARD, "length": "約 45 秒"})["story_hash"]
+    confirm_story(production, story_hash, said="好")
+
+
+def _mode(production: str, project: str) -> None:
+    set_production_mode(production, "auto", said="你繼續做完")
+
+
+@pytest.mark.parametrize("heard", [_editor_answer, _editor_comment, _chat_answer, _chat_said, _story_yes, _mode])
+def test_anything_the_user_says_starts_the_rounds_again(planned: dict, heard) -> None:
+    production, project = confirmed(planned)
+    rounds(project, rendering.MAX_ROUNDS)
+    amended(project)
+    with pytest.raises(ValueError, match="previewed 3 versions"):
+        rendering.render_project(project, is_preview=True)
+    heard(production, project)
+    rounds(project, rendering.MAX_ROUNDS)
+    amended(project)
+    with pytest.raises(ValueError, match="previewed 3 versions"):
+        rendering.render_project(project, is_preview=True)
+
+
+def test_rewriting_the_card_does_not_move_the_reset_back(planned: dict) -> None:
+    production, project = compiled(planned)
+    story_hash = set_story(production, **CARD)["story_hash"]
+    rounds(project, rendering.MAX_ROUNDS)
+    confirm_story(production, story_hash, said="好，就這樣剪")
+    # The card changes after the yes: the yes is cleared, but when it was given is not.
+    assert set_story(production, **{**CARD, "length": "約 90 秒"})["cleared"]
+    amended(project)
+    previewed(project)
+
+
+def test_only_再短一點_lets_the_next_preview_and_the_final_render_run(planned: dict) -> None:
+    production, project = confirmed(planned)
+    rounds(project, rendering.MAX_ROUNDS)
+    state = get_project(project)
+    apply_edits(project, state["version"], OPERATIONS.validate_python([
+        {"action": "delete_clip", "track_id": "main", "clip_id": state["tracks"][0]["clips"][-1]["id"]},
+    ]))
+    # At the limit, neither runs: the new picture has no preview, and it cannot have one.
+    with pytest.raises(ValueError, match="previewed 3 versions"):
+        rendering.render_project(project, is_preview=True)
+    with pytest.raises(ValueError, match="no preview|picture has changed"):
+        final(project)
+    record_answer(production, "再短一點")
+    previewed(project)
+    assert runtime.repo.get_job(final(project)["job_id"]).production_id == production
+
+
+def test_the_editor_s_previews_are_neither_counted_nor_held(planned: dict) -> None:
+    production, project = confirmed(planned)
+    for number in range(rendering.MAX_ROUNDS + 2):
+        if number:
+            amended(project)
+        rendering.start_render(project, True, None, False, None, True, None, rendering.PREVIEW_SHORT_SIDE)
+    assert runtime.repo.previews_for(production) == []
+    rounds(project, rendering.MAX_ROUNDS)
+    amended(project)
+    with pytest.raises(ValueError, match="previewed 3 versions"):
+        rendering.render_project(project, is_preview=True)
+    started = rendering.start_render(project, True, None, False, None, True, None, rendering.PREVIEW_SHORT_SIDE)
+    assert runtime.repo.get_job(started["job_id"]).production_id is None
+
+
+def test_without_an_auto_production_previews_are_never_held(planned: dict) -> None:
+    _, project = confirmed(planned, mode="interactive")
+    rounds(project, rendering.MAX_ROUNDS + 2)
+
+    bare = create_project(name="沒有製作", width=640, height=360)["id"]
+    compile_plan(project_id=bare, expected_version=1, plan_id=planned["plan_id"])
+    rounds(bare, rendering.MAX_ROUNDS + 2)

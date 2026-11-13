@@ -177,7 +177,7 @@ Skip the read-back, not the checks: render a preview, look at it with `view_rend
 `inspect_join`, hear any join in doubt with `listen_again` and the preview's `job_id`, and fix what you find; then rule on every
 `story_doubts` nomination with `rule_doubts` against `read_cut` (editing-intelligence file). Never stop to wait: `set_story` and go on;
 what you cannot fix or decide — a finding, no usable song — goes to `ask_user`, never into `allow`.
-At the preview hand everything over at once, in the chat (feedback file); the final render is refused while `pending` has anything or a nomination is not a `keep` with a reason. `confirm_story` and `record_answer` take only their words.
+At the preview hand everything over at once, in the chat (feedback file); the final render is refused while `pending` has anything or a nomination is not a `keep` with a reason. `confirm_story` and `record_answer` take only their words. Only three versions are previewed until the user is heard from again — the fourth `render_project` preview is refused — so gather fixes into one version before previewing it, and at the limit `ask_user` what is left.
 
 ## Workflow
 
