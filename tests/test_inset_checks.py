@@ -107,3 +107,13 @@ def test_a_corner_over_a_title_card_is_a_covered_card() -> None:
     ])
     found = [finding for finding in check_delivery(project, {}) if finding.check == "covered_card"]
     assert len(found) == 1 and "top-right corner" in found[0].message
+
+def test_a_half_that_crops_away_most_of_its_picture_is_said_and_left_as_it_is() -> None:
+    # A 1920x1080 picture in a 540x1080 half of a square frame keeps 28% of it; the sequence's
+    # copy in the other half is cropped the same, so both are said.
+    found = insets_found(cut(ClipLayout(place="right"), 1080, 1080), {})
+    assert [finding.message.split(" (clip ")[1].split(")")[0] for finding in found] == ["pip", "pip~a"]
+    assert "28%" in found[0].message and "It is left as it is" in found[0].message
+    assert found[0].spans == ((2.0, 6.0),)
+    # Half of a landscape frame keeps exactly half of a landscape picture, which is not said.
+    assert insets_found(cut(ClipLayout(place="right")), {}) == []

@@ -250,6 +250,33 @@ def test_a_right_half_on_a_portrait_frame_is_the_bottom_one(sources: dict, third
     assert green > 150
     assert brightness(tmp_path / "out.mp4", 2.0, (0.0, 0.52, 1.0, 1.0)) < 10
 
+def test_a_half_is_filled_by_cropping_never_shown_whole_over_a_blur(sources: dict, thirds: str, tmp_path: Path) -> None:
+    # A 16:9 shot in a 360x320 half keeps 63% of its width. With no face that used to be
+    # shown whole over its own blur; a half is filled, so its top-left corner is the red band.
+    project = split_over(thirds, sources["base"], "right", 360, 640)
+    render(project, tmp_path / "out.mp4", loudness_target=None)
+    red, green, blue = colour(tmp_path / "out.mp4", 2.0, (0.0, 0.01, 0.08, 0.06))
+    assert red > 150 and green < 80 and blue < 80
+    framed = rendering.framing_of(repo.get_project(project), shared.referenced_assets(repo.get_project(project)))
+    assert not framed["half~a"].whole and framed["half~a"].positions == ((0, 0.5),)
+
+def test_a_half_holds_its_crop_on_the_median_face() -> None:
+    from decimal import Decimal
+    from fractions import Fraction
+    from app.engine.reframe import place_clip
+    from app.models.media import FaceMeasurement
+    from app.models.timeline.parts import Clip, ClipFit, TimeRange
+    clip = Clip(id="c", asset_id="x", source_range=TimeRange(start=Decimal(0), end=Decimal(3)),
+                timeline_in=Decimal(0), layout=ClipLayout(place="left"))
+    seen = [FaceMeasurement(start=float(s), end=float(s + 1), faces=1, face_share=0.02, face_x=x, face_y=0.4)
+            for s, x in enumerate((0.2, 0.25, 0.9))]
+    # A 16:9 picture in a 960x1080 half keeps half its width; the crop sits on 0.25, held still.
+    framing = place_clip(clip, (1920, 1080), (960, 1080), seen, Fraction(30), half=True)
+    assert framing.positions == ((0, 0.25),) and not framing.whole
+    # Told to show it whole, a half still fills.
+    told = clip.model_copy(update={"fit": ClipFit(mode="whole")})
+    assert not place_clip(told, (1920, 1080), (960, 1080), [], Fraction(30), half=True).whole
+
 def test_the_sequence_in_the_other_half_follows_a_trim_and_is_silent(sources: dict, thirds: str) -> None:
     project = split_over(thirds, sources["base"], "right", 640, 360)
     partners = insets.split_partners(repo.get_project(project))

@@ -126,6 +126,18 @@ def _span(source: Tuple[int, int], box: Tuple[int, int]) -> Tuple[str, float]:
         return "x", float(box_aspect / source_aspect)
     return "y", float(source_aspect / box_aspect)
 
+def cropped_share(source: Tuple[int, int], box: Tuple[int, int]) -> float:
+    """Say how much of a picture is left once it is cropped to fill a box of another shape.
+
+    Args:
+        source: The picture's `(width, height)`.
+        box: The `(width, height)` it fills.
+
+    Returns:
+        The share of its area kept, 1.0 when the shapes match.
+    """
+    return min(_span(source, box)[1], 1.0)
+
 def _clamped(centre: float, span: float) -> float:
     """Keep a crop's centre where the crop stays inside the picture.
 
@@ -284,6 +296,7 @@ def place_clip(
     faces: Sequence[FaceMeasurement],
     fps: Fraction,
     follow_faces: bool = True,
+    half: bool = False,
 ) -> Optional[Framing]:
     """Decide how one clip sits in its box: where its crop goes, or whether it is shown whole.
 
@@ -300,6 +313,10 @@ def place_clip(
         faces: The per-second face measurements of its file.
         fps: The output frame rate.
         follow_faces: Whether a face may be followed.
+        half: The box is one half of a split screen. A half is always filled,
+            never shown whole over a blur — two blurred strips side by side
+            read as two windows rather than one frame — and the crop holds on
+            the median of where the face was, or the middle without one.
 
     Returns:
         The framing, or None to crop from the middle.
@@ -309,7 +326,7 @@ def place_clip(
     zoom = fit.zoom if fit is not None and fit.mode == "fill" else 1.0
     if span >= 1 - SLACK and zoom <= 1:
         return None
-    if fit is not None and fit.mode == "whole":
+    if fit is not None and fit.mode == "whole" and not half:
         return Framing(axis=axis, positions=((0, 0.5),), whole=True)
     if fit is not None and (fit.center_x is not None or fit.center_y is not None or zoom > 1):
         # Placed by hand: it stays where it was put. Zooming in narrows both axes.
@@ -317,6 +334,15 @@ def place_clip(
         narrowed = span / zoom
         return Framing(axis=axis, positions=((0, _clamped(0.5 if along is None else along, narrowed)),),
                        zoom=zoom, cross=_clamped(0.5 if other is None else other, 1 / zoom))
+    if half:
+        # Held still: a half is seconds long, and a crop cutting inside it reads as a jump.
+        seen = sorted(
+            (second.face_x if axis == "x" else second.face_y) for second in faces
+            if second.faces and second.face_x is not None and second.face_y is not None
+            and second.end > float(clip.video_source_start) and second.start < float(clip.source_range.end)
+        ) if follow_faces else []
+        centre = statistics.median(seen) if seen else 0.5
+        return Framing(axis=axis, positions=((0, _clamped(centre, span)),))
     followed = frame_clip(clip, source, box, faces, fps) if follow_faces else None
     if followed is not None:
         return followed
@@ -449,7 +475,8 @@ def frame_project(
             source = (asset.width, asset.height)
             box = box_of(clip, project, source)
             seen = faces.get(clip.asset_id, ())
-            framing = place_clip(clip, source, box, seen, fps, follow_faces)
+            half = clip.layout is not None and clip.layout.is_half
+            framing = place_clip(clip, source, box, seen, fps, follow_faces, half)
             motion = moves.motion_of(clip, asset.still)
             if motion != "none":
                 # A crop from the middle, said out loud, so the move has somewhere to be written down.

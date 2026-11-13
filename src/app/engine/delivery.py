@@ -31,7 +31,7 @@ from app.engine.semantic import (
     share_covered, voice_likeness, was_audible, was_made_up,
 )
 from app.engine.legibility import row_box
-from app.engine.reframe import Framing, in_box
+from app.engine.reframe import Framing, cropped_share, in_box
 from app.engine.subtitles import caption_overflow, caption_rows, captioned_clips, drawn_captions
 from app.models.media import Asset, MediaAnalysis
 from app.models.timeline.parts import CaptionStyle, Clip, Marker, PlacedCue, Project, TrackType
@@ -419,6 +419,10 @@ def _covered_cards(project: Project, fps: float) -> List[Finding]:
 # Provisional: how much of a face has to be under a corner picture before it counts as covered.
 # The edge of a cheek is not the face; a quarter of it is. Reasoned, not measured.
 INSET_FACE_SHARE = 0.25
+# Provisional: how little of a picture a half of a split screen may keep before it is said.
+# A half is filled by cropping, and past half of the picture gone the shot can lose what it
+# was chosen for. Reasoned, not measured.
+SPLIT_KEPT_SHARE = 0.5
 
 def _corner_name(clip: Clip) -> str:
     """Name a corner picture for whoever reads a finding: which corner, how big, which clip."""
@@ -491,6 +495,8 @@ def _inset_findings(
     another shape and the sequence is cropped on the face; over a caption that
     runs to three lines; or over the logo. A picture whose sound was turned on,
     on a track that does not duck, plays it at full level over the speaker.
+    A half of a split screen is filled by cropping, and one that keeps less
+    than `SPLIT_KEPT_SHARE` of its picture may have lost what it was for.
     Each is said with where, and nothing is moved: which corner is right is for
     whoever planned it to decide.
 
@@ -565,7 +571,25 @@ def _inset_findings(
                     f"{_corner_name(clip)} is drawn over the logo in the {logo['corner'].replace('_', '-')} corner "
                     f"from {clock(span[0])} to {clock(span[1])}; put one of them in another corner"
                 ), (span,)))
-    return found
+    for clip in [clip for track in project.video_tracks[1:] for clip in track.clips
+                 if clip.layout is not None and clip.layout.is_half] + insets.split_partners(project):
+        size = sizes.get(clip.asset_id)
+        if size is None:
+            continue
+        box = insets.inset_box(clip.layout, width, height, project.caption_style, size)
+        placed = framing.get(clip.id)
+        zoom = placed.zoom if placed is not None else 1.0
+        kept = cropped_share(size, (box[2], box[3])) / (zoom * zoom)
+        if kept < SPLIT_KEPT_SHARE - 0.005:
+            span = (float(clip.timeline_in), float(clip.timeline_out))
+            place = insets.place_in(clip.layout, width, height)
+            found.append(Finding("inset", (
+                f"the {place} half of the split screen (clip {clip.id}) is filled by cropping its "
+                f"{size[0]}x{size[1]} picture to {kept:.0%} of it, from {clock(span[0])} to {clock(span[1])}. "
+                "It is left as it is: look at the frame, and if what the shot was chosen for is cut away, use a "
+                "corner instead or a shot closer to the shape of the half"
+            ), (span,)))
+    return sorted(found, key=lambda finding: finding.spans[0][0] if finding.spans else 0.0)
 
 def _music_over_talking(project: Project, talking: Optional[Talking]) -> List[Finding]:
     """Find music that plays too close to the level of somebody talking over it.
