@@ -43,7 +43,7 @@ from app.storage import housekeeping
 from app.workspace import output_dir
 from app import runtime
 from app.runtime import mcp
-from app.tools import production, shared
+from app.tools import narrative, production, shared
 
 # Characters a Windows or POSIX filesystem will not take in a name, plus the control
 # range. A project is named by whoever is editing, so a render cannot assume anything
@@ -543,6 +543,10 @@ def render_project(
     `pending` is empty — the story card confirmed, every question answered,
     every comment of the user's closed — and `allow` does not change that.
 
+    While an `auto` production is finishing the project, a final render is
+    also refused until every `story_doubts` nomination is ruled `keep` with
+    a reason, with `rule_doubts`, on the cut as it is now.
+
     Returns immediately. Poll `get_job` with the returned `job_id` until the
     job reaches a terminal status, or stop it with `cancel_job`. Rendering
     runs in a separate worker process and continues even if this server
@@ -603,16 +607,20 @@ def render_project(
             unsupported feature, has no finished preview of its picture as it
             is now in this shape for a final render, or its sound as it is now
             has been neither previewed nor heard, the check found something
-            not allowed, or its `auto` production still has something pending.
+            not allowed, or its unfinished `auto` production still has something
+            pending or a story nomination not ruled `keep` on the cut as it is now.
     """
     unseen = None if is_preview else _unseen(project_id, frame)
     if unseen:
         raise ValueError(unseen)
+    # Its own check, apart from the preview's: only a final render, only while an `auto` production is unfinished.
     # Named only here: the editor's renders are the user's own, and belong to no production.
+    # One gate, so everything holding the final cut is listed at once: what the user still owes,
+    # then the story nominations not yet ruled `keep`.
     owner = production.of_project(project_id)
-    owed = None if is_preview else _owed_the_user(owner)
-    if owed:
-        raise ValueError(owed)
+    held = [] if is_preview else [why for why in (_owed_the_user(owner), narrative.undecided(project_id)) if why]
+    if held:
+        raise ValueError("\n\n".join(held))
     return start_render(
         project_id, is_preview, loudness_target, burn_subtitles, frame, follow_faces, allow, PREVIEW_SHORT_SIDE,
         production_id=owner.id if owner is not None else None,

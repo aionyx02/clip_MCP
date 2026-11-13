@@ -169,15 +169,15 @@ Do this once per request, not once per operation, and skip it when the user has 
 approved this exact plan. State your assumptions in it, and the user corrects what is wrong
 before a render is wasted.
 
-**When the user says to finish on your own** — 「直接做完再給我看」 — call `start_production`
-with `mode: "auto"` first (with `project_id` for 「把這支直接做完」) and pass its `production_id`
-to `save_plan` and `create_project`: left out, nothing holds the work to the request and a
-later conversation cannot pick it up. Skip the read-back, not the checks: render a preview,
-look at it with `view_render` (`at: "captions"`) and at its joins with `inspect_join`, hear
-any join in doubt with `listen_again` and the preview's `job_id`, and fix what you find. Never
-stop to wait: `set_story` and go on; what you cannot fix or decide — a finding, no usable song —
-goes to `ask_user`, never into `allow`. At the preview hand everything over at once, in the chat
-(feedback file); the final render is refused while `pending` has anything. `confirm_story` and `record_answer` take only their words.
+**When the user says to finish on your own** — 「直接做完再給我看」 — call `start_production` with `mode: "auto"` first
+(with `project_id` for 「把這支直接做完」) and pass its `production_id` to `save_plan` and `create_project`: left out, nothing
+holds the work to the request and a later conversation cannot pick it up. Section the footage with `propose_sections` and
+`set_sections`, topics included, before the plan: without topics `story_doubts` cannot see the cut leave a subject and come back.
+Skip the read-back, not the checks: render a preview, look at it with `view_render` (`at: "captions"`) and at its joins with
+`inspect_join`, hear any join in doubt with `listen_again` and the preview's `job_id`, and fix what you find; then rule on every
+`story_doubts` nomination with `rule_doubts` against `read_cut` (editing-intelligence file). Never stop to wait: `set_story` and go on;
+what you cannot fix or decide — a finding, no usable song — goes to `ask_user`, never into `allow`.
+At the preview hand everything over at once, in the chat (feedback file); the final render is refused while `pending` has anything or a nomination is not a `keep` with a reason. `confirm_story` and `record_answer` take only their words.
 
 ## Workflow
 

@@ -224,6 +224,16 @@ def test_going_back_leaves_another_video_compiled_from_the_same_plan_alone(kept_
                for track in runtime.repo.get_project(landscape).tracks for clip in track.clips if clip.from_plan_id)
 
 
+def test_a_version_that_opens_on_black_is_shown_past_it(kept_history, media: Path) -> None:
+    from app.models.media import MediaAnalysis, Span
+
+    asset = catalog.import_asset(str(media / "wide.mp4"))["id"]
+    runtime.repo.save_analysis(MediaAnalysis(asset_id=asset, duration=3.0, black_frames=[Span(start=0.0, end=1.5)]))
+    project = build_project([video_track(), insert("a", asset, 0, 3)], name="黑場開頭的版本")
+    # The same frame as the projects page: half a second past the black.
+    assert versioning.version_graph(project)["nodes"][0]["thumb"] == {"asset_id": asset, "t": 2.0}
+
+
 def test_the_version_panel_folds_one_sitting_into_one_dot(kept_history, media: Path) -> None:
     from app.models.job import Job, JobKind, JobStatus
 
