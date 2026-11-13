@@ -804,7 +804,7 @@ async function aiPage(page) {
 const SWATCHES = ["#5b8def", "#7d8aa6", "#6f9f86", "#a3906a", "#8c7ca6", "#6a98a4", "#a07c7c", "#8a8a8f", "#97a06d"];
 
 async function storagePage(page) {
-  page.innerHTML = head(T.storage.title, T.storage.subtitle) + `<div data-usage><div class="row skeleton" style="height:120px"></div></div><div data-gpu></div><div data-trash></div>`;
+  page.innerHTML = head(T.storage.title, T.storage.subtitle) + `<div data-usage><div class="row skeleton" style="height:120px"></div></div><div data-gpu></div><div data-updates></div><div data-trash></div>`;
   const { items } = await api("/api/storage");
   const inWorkspace = items.filter((item) => item.key !== "outputs" && item.key !== "trash");
   const total = inWorkspace.reduce((sum, item) => sum + item.megabytes, 0);
@@ -836,6 +836,7 @@ async function storagePage(page) {
     };
   });
   await drawGpu($("[data-gpu]", page));
+  await drawUpdates($("[data-updates]", page));
   await drawTrash($("[data-trash]", page), () => storagePage(page));
 }
 
@@ -863,6 +864,34 @@ async function drawGpu(box) {
     drawGpu(box);
   };
   if (said.install.running) setTimeout(() => { if (box.isConnected) drawGpu(box); }, 1000);
+}
+
+// Updates for an installed copy: the automatic-update switch (off until the user turns it on),
+// a check now, what the automatic updater is doing, and how the last update went.
+async function drawUpdates(box) {
+  let said;
+  try { said = await api("/api/update"); } catch { return; }
+  if (!said.managed) { box.innerHTML = ""; return; }
+  const state = said.auto_state || {};
+  const doing = said.auto && T.update.autoState[state.state] ? T.update.autoState[state.state](state.version) : "";
+  box.innerHTML = `<h2 class="section-title">${esc(T.update.section)}</h2>
+    <div class="list"><div class="row">${icon("download")}
+      <div class="grow"><strong>${esc(T.update.current(said.current))}</strong>
+        <div class="sub">${esc(said.available ? T.update.badge(said.version) + "：" + T.update.planLine(said) : said.refused ? T.update.refused(said.version, said.refused) : T.update.upToDate)}</div>
+        ${doing ? `<div class="sub">${esc(doing)}</div>` : ""}
+        ${said.auto && state.error ? `<div class="sub" style="color:var(--danger)">${esc(state.error)}</div>` : ""}
+        ${said.last ? `<div class="sub">${esc(T.update.lastLine(said.last))}</div>` : ""}</div>
+      <button class="btn small" data-check>${icon("refresh", 16)}${esc(T.update.check)}</button></div>
+    <div class="row"><label class="check-line"><input type="checkbox" data-auto ${said.auto ? "checked" : ""}>
+      <span>${esc(T.update.auto)}<br><small style="color:var(--muted)">${esc(T.update.autoHint)}</small></span></label></div></div>`;
+  $("[data-auto]", box).onchange = async (event) => {
+    try { await api("/api/update/settings", { auto: event.target.checked }); } catch (error) { toast(error.message, "error"); }
+    drawUpdates(box);
+  };
+  $("[data-check]", box).onclick = async () => {
+    await checkForUpdate(true);
+    drawUpdates(box);
+  };
 }
 
 // The trash: what the user deleted, waiting to be put back until its days run out.
@@ -943,15 +972,17 @@ async function route() {
   }
 }
 
-// A newer version, offered in the sidebar; nothing is downloaded until the user chooses to update.
-async function checkForUpdate() {
+// A newer version, offered in the sidebar; nothing is downloaded until the user chooses to update,
+// unless they turned automatic updates on. The last update's outcome is said once, on the start after it.
+async function checkForUpdate(again = false) {
   let found;
-  try { found = await api("/api/update"); } catch { return; }
-  if (!found.available) return;
+  try { found = await api(again ? "/api/update?again=1" : "/api/update"); } catch { return; }
+  if (found.last?.fresh) toast(T.update.lastLine(found.last), found.last.ok ? "ok" : "error");
+  if (!found.available) { if (again) toast(found.refused ? T.update.refused(found.version, found.refused) : T.update.upToDate); return; }
   const item = $("#update");
   item.innerHTML = `${icon("download")}<span>${esc(T.update.badge(found.version))}</span>`;
   item.hidden = false;
-  item.onclick = () => modal(`<h2>${esc(T.update.title(found.version))}</h2><p>${esc(T.update.body)}</p>
+  item.onclick = () => modal(`<h2>${esc(T.update.title(found.version))}</h2><p>${esc(T.update.body)}</p><p class="hint">${esc(T.update.planLine(found))}</p>
     ${found.notes ? `<div class="field"><label>${esc(T.update.notes)}</label><div class="notes-box">${releaseNotes(found.notes)}</div></div>` : ""}
     <div class="foot"><button class="btn" data-later>${esc(T.update.later)}</button><button class="btn primary" data-now>${esc(T.update.now)}</button></div>`,
   (box, close) => {

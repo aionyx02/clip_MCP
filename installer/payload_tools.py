@@ -4,12 +4,16 @@
     python payload_tools.py slim <payload>
     python payload_tools.py smoke <payload>
     python payload_tools.py sizes <payload> [<json out>]
+    python payload_tools.py stamp <payload> <requirements> <python version> <slimmed: 1 or 0>
+    python payload_tools.py publish <payload> <installer exe> <out folder>
 
-Run with the build machine's Python for `launcher`, `slim` and `sizes`, and with
-the payload's own (`runtime\\python.exe -I -B`) for `smoke`, which is the point of it.
+Run with the build machine's Python for `launcher`, `slim`, `sizes`, `stamp` and
+`publish`, and with the payload's own (`runtime\\python.exe -I -B`) for `smoke`,
+which is the point of it.
 """
 
 import ctypes
+import hashlib
 import json
 import os
 import shutil
@@ -207,6 +211,79 @@ def sizes(payload: Path) -> dict:
         print(f"{part:<10} {size / 2 ** 20:9.1f} MB")
     return found
 
+# --- what a release is made of (#293) --------------------------------------------------------
+# The editor replaces only `program\` when nothing else changed. What else could have changed is
+# written down once, at build time, as one fingerprint per part: `release.json` goes into the
+# payload (and so into the install folder), and `publish` repeats it in the manifest a release
+# carries beside the installer and the program-only zip. A fingerprint is a hash of what decides
+# a part's content, never of the build's folder or time, so two builds of the same inputs agree.
+
+RELEASE = "release.json"
+MANIFEST = "clip-mcp-update.json"
+# The .pth line that puts program\ on the path: part of the runtime, which holds the file.
+PROGRAM_PTH = "../../../program"
+
+def hash_files(root: Path) -> str:
+    """The names and bytes of every file under `root`, in a fixed order."""
+    digest = hashlib.sha256()
+    for path in sorted(item for item in root.rglob("*") if item.is_file()):
+        digest.update(path.relative_to(root).as_posix().encode() + b"\0")
+        digest.update(hashlib.sha256(path.read_bytes()).digest())
+    return digest.hexdigest()
+
+def runtime_fingerprint(requirements: str, python: str, slimmed: bool) -> str:
+    """What decides runtime\\: the Python version, the pinned packages, and what slimming removes.
+
+    The requirements are compared pin by pin without comments, so uv's `# via` notes and its
+    header are not a change.
+    """
+    pins = sorted(line.split("#", 1)[0].strip() for line in requirements.splitlines())
+    decided = {"python": python, "packages": [pin for pin in pins if pin], "pth": PROGRAM_PTH,
+               "slim": [REMOVE, sorted(REMOVE_DIRS), list(PYWIN32_TESTS)] if slimmed else None}
+    return hashlib.sha256(json.dumps(decided, sort_keys=True).encode()).hexdigest()
+
+def program_version(payload: Path) -> str:
+    """clip-mcp's version, from the dist-info `--target` wrote into program\\."""
+    for metadata in (payload / "program").glob("clip_mcp-*.dist-info/METADATA"):
+        for line in metadata.read_text(encoding="utf-8").splitlines():
+            if line.startswith("Version:"):
+                return line.split(":", 1)[1].strip()
+    raise SystemExit(f"no clip-mcp dist-info in {payload / 'program'}")
+
+def stamp(payload: Path, requirements: Path, python: str, slimmed: bool) -> dict:
+    """Write release.json: this build's version, and the fingerprint of every part but program\\."""
+    record = {
+        "version": program_version(payload),
+        "runtime": runtime_fingerprint(requirements.read_text(encoding="utf-8"), python, slimmed),
+        "ffmpeg": hash_files(payload / "ffmpeg"),
+        "launchers": hash_files(payload / "bin"),
+    }
+    (payload / RELEASE).write_text(json.dumps(record, indent=1), encoding="utf-8")
+    print(f"{RELEASE}: {json.dumps(record)}")
+    return record
+
+def _asset(path: Path) -> dict:
+    return {"name": path.name, "size": path.stat().st_size, "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
+
+def publish(payload: Path, installer: Path, out: Path) -> dict:
+    """Zip program\\ alone, and write the manifest that lets an install tell which asset it needs.
+
+    Returns:
+        The manifest: release.json's fields, and each asset's name, size and SHA-256.
+    """
+    import zipfile
+
+    record = json.loads((payload / RELEASE).read_text(encoding="utf-8"))
+    out.mkdir(parents=True, exist_ok=True)
+    program = out / f"clip-mcp-program-{record['version']}.zip"
+    with zipfile.ZipFile(program, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as archive:
+        for path in sorted(item for item in (payload / "program").rglob("*") if item.is_file()):
+            archive.write(path, path.relative_to(payload / "program").as_posix())
+    manifest = {**record, "assets": {"program": _asset(program), "installer": _asset(installer)}}
+    (out / MANIFEST).write_text(json.dumps(manifest, indent=1), encoding="utf-8")
+    print(json.dumps(manifest, indent=1))
+    return manifest
+
 def main() -> None:
     command, *rest = sys.argv[1:]
     if command == "launcher":
@@ -219,6 +296,10 @@ def main() -> None:
         found = sizes(Path(rest[0]))
         if len(rest) > 1:
             Path(rest[1]).write_text(json.dumps(found, indent=1), encoding="utf-8")
+    elif command == "stamp":
+        stamp(Path(rest[0]), Path(rest[1]), rest[2], slimmed=rest[3] == "1")
+    elif command == "publish":
+        publish(Path(rest[0]), Path(rest[1]), Path(rest[2]))
     else:
         raise SystemExit(__doc__)
 

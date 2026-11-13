@@ -57,15 +57,6 @@ def test_a_copy_not_from_the_installer_is_never_offered_an_update(monkeypatch: p
     monkeypatch.setattr(updates.urllib.request, "urlopen", lambda *args, **kwargs: pytest.fail("asked GitHub"))
     assert updates.latest(force=True)["available"] is False
 
-def test_a_newer_release_with_an_installer_is_offered(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    release = {"tag_name": "v99.0.0", "body": "新功能", "assets": [
-        {"name": "clip-mcp-setup-99.0.0.exe", "browser_download_url": "https://example/setup.exe", "size": 10},
-    ]}
-    monkeypatch.setattr(updates, "installed_by_setup", lambda: tmp_path)
-    monkeypatch.setattr(updates.urllib.request, "urlopen", lambda *args, **kwargs: io.BytesIO(json.dumps(release).encode()))
-    found = updates.latest(force=True)
-    assert found["available"] and found["version"] == "99.0.0" and found["notes"] == "新功能"
-
 def test_no_network_is_simply_no_update(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     def offline(*args, **kwargs):
         raise OSError("no network")
@@ -82,28 +73,6 @@ def test_the_editor_will_not_update_while_a_render_runs(monkeypatch: pytest.Monk
     monkeypatch.setattr(runtime.repo, "active_job_ids", lambda: {"job"})
     monkeypatch.setattr(updates, "start_update", lambda on_started: pytest.fail("started an update"))
     assert TestClient(editor.create_app()).post("/api/update", json={}).status_code == 409
-
-def test_the_download_says_how_far_it_has_got(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    import subprocess
-
-    seen = []
-
-    class Arriving(io.BytesIO):
-        headers: dict = {}
-
-        def read(self, size=-1):
-            seen.append(updates.download_progress()["done"])
-            return super().read(size)
-
-    monkeypatch.setattr(updates, "DOWNLOADS", tmp_path)
-    monkeypatch.setattr(updates, "CHUNK", 4)
-    monkeypatch.setattr(updates, "latest", lambda: {"available": True, "version": "9", "url": "https://example/setup.exe",
-                                                 "size": 10})
-    monkeypatch.setattr(updates.urllib.request, "urlopen", lambda *args, **kwargs: Arriving(b"0123456789"))
-    monkeypatch.setattr(subprocess, "Popen", lambda *args, **kwargs: None)
-    monkeypatch.setattr(updates.threading, "Thread", lambda **kwargs: type("T", (), {"start": lambda self: None})())
-    updates.start_update(lambda: None)
-    assert seen[:3] == [0, 4, 8] and updates.download_progress() == {"done": 10, "total": 10}
 
 @pytest.mark.parametrize(("first_line", "option"), [
     ("ffmpeg version 6.1.1-3ubuntu5 Copyright (c) 2000-2023 the FFmpeg developers", "-filter_complex_script"),

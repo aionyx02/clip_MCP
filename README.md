@@ -64,7 +64,7 @@ editor (ui/) ──HTTP───────────────────
 - 敘事提名在本機由規則從專案的實際鏡頭順序算出；`story_doubts` 只交出提名用到的字（收尾語、第一個詞）、拍攝時間與主題標籤，客戶端對照 `read_cut` 裁決，裁決與理由存回本機的製作紀錄。
 - 沒有工具回傳影音本體。模型仍可主動讀取完整逐字稿（`get_analysis`、`query_clips` 的 `brief`、`get_subtitles`）。
 - 回傳內容的去向由客戶端決定；搭配本機模型（如 LM Studio）則完全離線。
-- 對外連線僅限：模型權重下載（固定版本、驗證 SHA-256）、安裝版的更新檢查，以及使用者在安裝程式或編輯器選了「GPU 加速轉錄」時，從 PyPI 下載 NVIDIA cuBLAS（固定版本 `nvidia-cublas-cu12` 12.9.1.4，約 528 MB，驗證 SHA-256）。安裝程式本身已包含 Python、所有套件與 FFmpeg，安裝時不下載其他東西。
+- 對外連線僅限：模型權重下載（固定版本、驗證 SHA-256）、安裝版的更新（見下方「更新」：每次開啟編輯器問 GitHub 一次最新版與它的更新清單；打開「自動更新」後，編輯器開著時每 6 小時再問一次，並自動下載新版的程式檔或安裝程式），以及使用者在安裝程式或編輯器選了「GPU 加速轉錄」時，從 PyPI 下載 NVIDIA cuBLAS（固定版本 `nvidia-cublas-cu12` 12.9.1.4，約 528 MB，驗證 SHA-256）。安裝程式本身已包含 Python、所有套件與 FFmpeg，安裝時不下載其他東西。
 
 ## 安裝
 
@@ -81,6 +81,20 @@ GPU 加速轉錄：在 NVIDIA 顯示卡上轉錄需要 cuBLAS 12。安裝程式�
 
 轉錄時先找自帶的，再找系統的，都沒有就用處理器。`clip-mcp check` 的 `speech:` 一行與編輯器「儲存空間」頁會寫現在用哪一個、為什麼；
 之後換了顯示卡，也能在那一頁下載，不必重跑安裝程式（或 `clip-mcp gpu install`）。
+
+### 更新
+
+只有安裝程式裝的版本會更新；從原始碼執行的用 git 更新。每次開啟編輯器會問 GitHub 一次有沒有新版，
+連不上就不提示。每一版除了安裝程式，還附一個只含 clip-mcp 本身的程式檔（`clip-mcp-program-<版本>.zip`）
+與更新清單（`clip-mcp-update.json`，記錄每個檔案的 SHA-256，以及 Python 與套件、啟動程式、FFmpeg 的指紋）。
+
+- 這三樣都沒變：只下載程式檔，換掉安裝資料夾的 `program\`。換之前先停掉從安裝資料夾執行的 clip-mcp（AI 程式的 MCP server 與編輯器），
+  換好後確認 `clip-mcp --version` 是新版、server 能載入；不能就換回舊的，並在編輯器說明原因。
+- 有任何一樣變了，或這份安裝沒有指紋紀錄（0.7.x 以前裝的）：下載完整安裝程式，照舊安裝。
+- 下載的檔案與清單的 SHA-256 不符就不套用。輸出工作進行中不更新。
+- 「自動更新」在編輯器「儲存空間」頁，預設關閉：關閉時只提示，由你按「立即更新」；打開後有新版會自動下載，
+  等沒有輸出工作時套用，編輯器會自己重新開啟。只有編輯器開著時才會檢查與套用。
+- 更新後，正在使用 clip-mcp 的 AI 程式要重新開啟（或重新連線）才會用到新版。
 
 ### 從原始碼安裝（開發者）
 
@@ -104,7 +118,7 @@ LM Studio、Cherry Studio（一鍵安裝連結）。修改前備份為 `<檔名>
 移除：`clip-mcp uninstall`（只移除自己加入的設定；工作區先詢問，成品不動），再 `uv tool uninstall clip-mcp`。
 安裝程式裝的版本從 Windows 的「應用程式」移除。
 
-建置安裝程式的內容：`installer/build_payload.ps1`（說明在檔案開頭）；完整安裝程式由 `.github/workflows/release.yml` 建置。
+建置安裝程式的內容：`installer/build_payload.ps1`（說明在檔案開頭）；完整安裝程式、程式檔與更新清單由 `.github/workflows/release.yml` 建置。
 
 除錯：`uv run fastmcp dev fastmcp.json` 開啟 MCP Inspector。
 

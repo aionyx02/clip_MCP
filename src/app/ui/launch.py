@@ -99,6 +99,9 @@ def run(open_browser: bool = True) -> None:
     updates.clear_old_downloads()
     # Files added before there were two libraries are sorted, and songs not yet analyzed queued.
     threading.Thread(target=catalog.tend_library, name="tend-library", daemon=True).start()
+    # Automatic updates, when the user turned them on; looks at nothing otherwise.
+    threading.Thread(target=updates.watch, args=(editor.busy, lambda: os._exit(0)), name="updates",
+                     daemon=True).start()
 
     port = _free_port()
     url = f"http://127.0.0.1:{port}/"

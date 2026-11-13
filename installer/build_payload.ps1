@@ -12,6 +12,7 @@
 #   program\   clip-mcp itself, put on the path by runtime\Lib\site-packages\clip-mcp-program.pth
 #   bin\       clip-mcp.exe and clip-mcp-editor.exe, which start ..\runtime\python(w).exe
 #   ffmpeg\    ffmpeg.exe and ffprobe.exe
+#   release.json  the version, and a fingerprint of runtime\, bin\ and ffmpeg\ (payload_tools stamp)
 #
 # Nothing in it names the folder it was built in, so it runs from wherever it is copied.
 param(
@@ -26,6 +27,8 @@ param(
 )
 $ErrorActionPreference = "Stop"
 $tools = Join-Path $PSScriptRoot "payload_tools.py"
+# PowerShell names are case-blind: $python, the payload's python.exe below, replaces $Python.
+$pythonVersion = $Python
 
 function Check([string]$what) {
     if ($LASTEXITCODE -ne 0) { throw "$what failed: $LASTEXITCODE" }
@@ -90,6 +93,10 @@ try {
     $env:PYTHONDONTWRITEBYTECODE = "1"
     try { & (Join-Path $bin "clip-mcp.exe") --help | Out-Null; Check "bin\clip-mcp.exe --help" }
     finally { Pop-Location; Remove-Item Env:PYTHONDONTWRITEBYTECODE }
+
+    # What this build's runtime, FFmpeg and launchers are, so a later release can tell whether
+    # replacing program\ alone is enough (#293). Copied into the install folder by the installer.
+    & $python -I -B $tools stamp $Out $Requirements $pythonVersion $(if ($NoSlim) { "0" } else { "1" }); Check "release.json"
 
     Write-Output "--- payload"
     & $python -I -B $tools sizes $Out (Join-Path (Split-Path $Out) "payload-sizes.json"); Check "sizes"

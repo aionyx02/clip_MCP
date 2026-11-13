@@ -1,6 +1,6 @@
 ; The clip-mcp installer. Built by .github/workflows/release.yml, which passes:
 ;   AppVersion        the version, from pyproject.toml
-;   Payload           the folder build_payload.ps1 made: runtime, program, bin, ffmpeg
+;   Payload           the folder build_payload.ps1 made: runtime, program, bin, ffmpeg, release.json
 ;   GpuSizeMB         the GPU pack's download, in MB, and
 ;   GpuInstalledMB    what it takes once installed, in MB and
 ;   GpuInstalledBytes in bytes, all from app.gpu.PACK
@@ -91,6 +91,10 @@ Name: "desktopicon"; Description: "{cm:DesktopIcon}"
 Type: filesandordirs; Name: "{app}\runtime"
 Type: filesandordirs; Name: "{app}\program"
 Type: filesandordirs; Name: "{app}\bin"
+; What a program-only update (#293) left half done.
+Type: filesandordirs; Name: "{app}\program.new"
+Type: filesandordirs; Name: "{app}\program.old"
+Type: filesandordirs; Name: "{app}\program.failed"
 ; What the installers before 0.8 made at install time with uv.
 Type: filesandordirs; Name: "{app}\uv"
 Type: filesandordirs; Name: "{app}\python"
@@ -105,6 +109,9 @@ Source: "{#Payload}\runtime\*"; DestDir: "{app}\runtime"; Flags: ignoreversion r
 Source: "{#Payload}\program\*"; DestDir: "{app}\program"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#Payload}\bin\*"; DestDir: "{app}\bin"; Flags: ignoreversion
 Source: "{#Payload}\ffmpeg\*"; DestDir: "{app}\ffmpeg"; Flags: ignoreversion
+; This build's version and the fingerprints of runtime, bin and ffmpeg, which tell the editor
+; whether a later release can replace the program alone.
+Source: "{#Payload}\release.json"; DestDir: "{app}"; Flags: ignoreversion
 Source: "build\FFMPEG-NOTICE.txt"; DestDir: "{app}\ffmpeg"; Flags: ignoreversion
 Source: "install.ps1"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\src\app\ui\static\icon.ico"; DestDir: "{app}"; Flags: ignoreversion
