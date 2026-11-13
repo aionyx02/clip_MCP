@@ -9,7 +9,8 @@ import pytest
 from starlette.testclient import TestClient
 
 from app import runtime
-from app.tools import catalog, editing, examining, planning, rendering, soundtrack, subtitles, upkeep
+from app.tools import catalog, editing, examining, planning, rendering, soundtrack, subtitles, upkeep, versioning
+from app.models.media import MediaAnalysis, Span
 from app.models.offer import OfferedSong
 from app.ui import app as editor
 from app.ui import dialogs
@@ -70,6 +71,24 @@ def test_a_first_shot_under_a_second_long_is_shown_from_inside_it(client: TestCl
              "source_range": {"start": 2, "end": 2.6}}]})
     listed = next(item for item in client.get("/api/projects").json()["projects"] if item["id"] == made["id"])
     assert listed["thumb"] == {"asset_id": asset, "t": 2.3}
+
+def test_a_first_shot_that_opens_on_black_is_shown_past_it(client: TestClient, media: Path) -> None:
+    asset = catalog.import_asset(str(media / "wide.mp4"))["id"]
+    runtime.repo.save_analysis(MediaAnalysis(asset_id=asset, duration=8.0, black_frames=[Span(start=0.0, end=3.0)]))
+    made = client.post("/api/projects", json={"name": "黑場開頭"}).json()
+    client.post(f"/api/projects/{made['id']}/edits", json={
+        "expected_version": runtime.repo.get_project(made["id"]).version, "operations": [
+            {"action": "insert_clip", "track_id": "video", "clip_id": "c1", "asset_id": asset,
+             "source_range": {"start": 0, "end": 8}}]})
+    listed = next(item for item in client.get("/api/projects").json()["projects"] if item["id"] == made["id"])
+    assert listed["thumb"] == {"asset_id": asset, "t": 3.5}
+
+def test_a_shot_black_to_its_end_keeps_the_first_frame() -> None:
+    assert versioning.opening_frame("a", 0.0, 2.0, [(0.0, 2.5)]) == {"asset_id": "a", "t": 1.0}
+    # Past the black, but never past the shot's middle onward of what is left.
+    assert versioning.opening_frame("a", 0.0, 4.0, [(0.5, 3.0)]) == {"asset_id": "a", "t": 3.5}
+    assert versioning.opening_frame("a", 0.0, 3.4, [(0.5, 3.0)]) == {"asset_id": "a", "t": 3.2}
+    assert versioning.opening_frame("a", 5.0, 9.0, [(0.0, 3.0)]) == {"asset_id": "a", "t": 6.0}
 
 def test_the_library_is_in_number_order(client: TestClient, media: Path, tmp_path: Path) -> None:
     for number in (10, 2, 1):

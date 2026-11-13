@@ -237,7 +237,9 @@
     });
     const scrolled = panel.scrollTop;
     const total = nodes.reduce((sum, node) => sum + node.versions.length, 0);
+    // The count is of versions, and a run of edits in one sitting is one row: said, so the two agree.
     panel.innerHTML = `<div class="label">${esc(T.versions.treeTitle(total))}</div>
+      ${total > nodes.length ? `<p class="hint" data-folded>${esc(T.versions.folded(total, nodes.length))}</p>` : ""}
       ${parent ? `<p class="hint">${esc(T.versions.branchedFrom(parent.name || "", parent.what || ""))}
         <a href="#/project/${encodeURIComponent(parent.project_id)}" data-keep-view>${esc(T.versions.openParent)}</a></p>` : ""}
       <ol class="vgraph">${list || `<p class="hint">${esc(T.versions.none)}</p>`}</ol>
@@ -964,7 +966,7 @@
     }
     if (isVideo && asset?.has_video && width > 24) element.append(filmstrip(clip, asset, width, lane.height - 10));
     if (asset?.has_audio && width > 24) drawWave(element, clip, asset, width, lane.height - 10, isVideo);
-    element.insertAdjacentHTML("beforeend", `<span class="label">${esc(asset ? asset.name : T.editor.missingFile)} · ${length.toFixed(1)}s</span>
+    element.insertAdjacentHTML("beforeend", `<span class="label">${esc(asset ? asset.name : T.editor.missingFile)} · ${length.toFixed(1)}s${(clip.speed || 1) !== 1 ? ` · ${+clip.speed.toFixed(2)}×` : ""}</span>
       <span class="handle l" data-handle="l"></span><span class="handle r" data-handle="r"></span>`);
     return element;
   }
@@ -1137,17 +1139,21 @@
     const nudges = (side) => [-1, -0.1, 0.1, 1].map((delta) =>
       `<button data-nudge="${side}" data-by="${delta}">${delta > 0 ? "+" : ""}${delta}</button>`).join("");
     const madeBy = clip.from_plan_id ? (clip.pinned ? T.editor.adjusted : T.editor.madeByAi) : "";
+    // The nudges move the cut in the footage's seconds; at another speed the video changes by less
+    // or more, so the speed is shown up top and the arithmetic beside the nudges.
+    const speed = clip.speed || 1;
     panel.innerHTML = `<h2>${esc(asset ? asset.name : T.editor.missingFile)}</h2>
-      <p class="hint">${madeBy ? `<span class="badge ${clip.pinned ? "warn" : ""}">${esc(madeBy)}</span>` : ""}</p>
+      <p class="hint">${madeBy ? `<span class="badge ${clip.pinned ? "warn" : ""}">${esc(madeBy)}</span>` : ""}${speed !== 1
+        ? ` <span class="badge" data-speed>${esc(T.editor.speedBadge(speed))}</span>` : ""}</p>
       <div class="group edit-action">
         <div class="label">${esc(T.editor.start)}<b>${fmt(num(clip.source_range.start))}</b></div><div class="nudges">${nudges("start")}</div>
       </div>
       <div class="group edit-action">
         <div class="label">${esc(T.editor.end)}<b>${fmt(num(clip.source_range.end))}</b></div><div class="nudges">${nudges("end")}</div>
         <p class="hint">${esc(T.editor.nudgeHint)}</p>
+        ${speed !== 1 ? `<p class="hint" data-speed-hint>${esc(T.editor.speedHint(speed))}</p>` : ""}
       </div>
-      <div class="group"><div class="label">${esc(T.editor.length)}<b>${clipLength(clip).toFixed(2)} ${esc(T.editor.seconds)}</b></div>
-        ${(clip.speed || 1) !== 1 ? `<p class="hint">${esc(T.editor.speedHint(clip.speed))}</p>` : ""}</div>
+      <div class="group"><div class="label">${esc(T.editor.length)}<b>${clipLength(clip).toFixed(2)} ${esc(T.editor.seconds)}</b></div></div>
       ${fitGroup(clip, asset)}
       ${motionGroup(clip, asset)}
       ${textsGroup(clip)}

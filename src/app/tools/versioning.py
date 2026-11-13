@@ -84,14 +84,46 @@ def _base_clips(data: Optional[dict]) -> List[dict]:
     base = next((track for track in (data or {}).get("tracks", []) if track.get("track_type") == "video"), None)
     return sorted(base.get("clips", []) if base else [], key=lambda clip: float(clip["timeline_in"]))
 
-def _thumb_of(data: Optional[dict]) -> Optional[dict]:
-    """Which frame stands for a version: its first shot, a second in, as the projects page shows it."""
+# Provisional: how far past a stretch analysis found black the frame standing for a cut is taken,
+# so it is not the last dark frame of a fade up. Not yet tried on footage that fades in slowly.
+PAST_BLACK = 0.5
+
+def opening_frame(asset_id: str, start: float, end: float,
+                  black: Iterable[Tuple[float, float]] = ()) -> dict:
+    """Which frame stands for a cut, on the projects page and in its versions: one in its first shot.
+
+    A second in, so a shot that opens on a black frame or two still shows what
+    it is, or the middle of a shot shorter than two seconds, so the frame is
+    one the cut has. When that lands in a stretch the file's analysis found
+    black, it moves past the stretch, as long as the shot is still running
+    there; a shot black to its end keeps the first choice.
+
+    Args:
+        asset_id: The first shot's file.
+        start: Where the shot starts in its file, in seconds.
+        end: Where it ends.
+        black: The file's black stretches, `(start, end)`, from its analysis.
+
+    Returns:
+        `asset_id` and `t`, the second in the file to show.
+    """
+    at = min(start + 1.0, (start + end) / 2)
+    for black_start, black_end in sorted(black):
+        if black_start <= at < black_end:
+            later = min(black_end + PAST_BLACK, (black_end + end) / 2)
+            if later >= end:
+                break
+            at = later
+    return {"asset_id": asset_id, "t": round(at, 2)}
+
+def _thumb_of(data: Optional[dict], black: Mapping[str, List[Tuple[float, float]]]) -> Optional[dict]:
+    """Which frame stands for a version, as the projects page shows it."""
     clips = _base_clips(data)
     if not clips:
         return None
     first = clips[0]
-    start, end = float(first["source_range"]["start"]), float(first["source_range"]["end"])
-    return {"asset_id": first["asset_id"], "t": round(min(start + 1.0, (start + end) / 2), 2)}
+    return opening_frame(first["asset_id"], float(first["source_range"]["start"]),
+                         float(first["source_range"]["end"]), black.get(first["asset_id"], ()))
 
 def _length_of(data: Optional[dict]) -> float:
     """How long a version runs: where its sequence ends."""
@@ -100,7 +132,8 @@ def _length_of(data: Optional[dict]) -> float:
                       / float(clip.get("speed") or 1) for clip in _base_clips(data)), default=0.0), 2)
 
 def _version_nodes(entries: List[Tuple[Version, Optional[dict], set]], apart: set,
-                   outputs: Mapping[int, List[Job]]) -> List[dict]:
+                   outputs: Mapping[int, List[Job]],
+                   black: Mapping[str, List[Tuple[float, float]]]) -> List[dict]:
     """Group versions into what the version panel shows as one dot each.
 
     A run of changes by one author with nothing rendered out between them is
@@ -114,6 +147,7 @@ def _version_nodes(entries: List[Tuple[Version, Optional[dict], set]], apart: se
         apart: Commits that must not be folded into another's dot.
         outputs: The finished videos still there, by the project version
             they were rendered from.
+        black: The black stretches of each version's first file, by asset ID.
 
     Returns:
         The dots, newest first, each named by its newest version.
@@ -132,7 +166,7 @@ def _version_nodes(entries: List[Tuple[Version, Optional[dict], set]], apart: se
         nodes.append({
             "commit": version.commit, "when": record["when"], "by": version.author, "what": version.subject,
             "body": version.body, "marks": sorted(marked), "gone": data is None, "project_version": number,
-            "thumb": _thumb_of(data), "seconds": _length_of(data),
+            "thumb": _thumb_of(data, black), "seconds": _length_of(data),
             "outputs": [{"job_id": job.job_id, "name": os.path.basename(job.output_path)}
                         for job in outputs.get(number, [])],
             "versions": [record],
@@ -144,7 +178,9 @@ def _nodes_of(project_id: str, limit: int, apart: set) -> List[dict]:
     outputs: Dict[int, List[Job]] = {}
     for job in outputs_of(project_id):
         outputs.setdefault(job.project_version, []).append(job)
-    return _version_nodes(_project_versions(project_id, limit), apart, outputs)
+    entries = _project_versions(project_id, limit)
+    firsts = {clips[0]["asset_id"] for _, data, _ in entries if (clips := _base_clips(data))}
+    return _version_nodes(entries, apart, outputs, runtime.repo.black_frames_of(firsts))
 
 def version_graph(project_id: str, limit: int = 200) -> dict:
     """Everything the editor's version panel draws for one video.

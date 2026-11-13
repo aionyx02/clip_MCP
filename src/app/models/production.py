@@ -11,11 +11,13 @@ renders (`engine/production.py`), so an edit made by hand in the editor never
 leaves the two disagreeing.
 """
 
+import hashlib
+import json
 import uuid
 from datetime import datetime, timezone
 from typing import List, Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 # The shapes a cut is delivered in; None is the project's own.
 Shape = Literal["landscape", "portrait", "square"]
@@ -30,6 +32,44 @@ def _utc_now() -> datetime:
 class Said(BaseModel):
     """Something the user said in the conversation, in their words, and when."""
 
+    said: str = Field(..., min_length=1)
+    at: datetime = Field(default_factory=_utc_now)
+
+
+class Story(BaseModel):
+    """The story the video tells, written down before the cut: a paper edit.
+
+    Every part is required and has to say something, so the card is specific
+    enough for the user to say it is wrong. Whether it is a good story is the
+    user's to say, not the server's.
+    """
+
+    theme: str = Field(..., description="The video in one sentence")
+    structure: str = Field(..., description="How it is built: 起承轉合, 清單式, 教學步驟, and in what order")
+    opening: str = Field(..., description="How it opens: the first moment on screen")
+    turn: str = Field(..., description="Where it turns: the moment things change")
+    ending: str = Field(..., description="How it ends: the last moment on screen")
+    left_out: str = Field(..., description="What is deliberately left out, and why")
+    length: str = Field(..., description="How long it will run, roughly, as the user would say it")
+
+    @field_validator("*")
+    @classmethod
+    def _says_something(cls, value: str, info) -> str:
+        """Refuse a part left empty or blank; keep what was written, trimmed."""
+        if not value.strip():
+            raise ValueError(f"the story's {info.field_name} is empty: every part of the card has to say something")
+        return value.strip()
+
+    def digest(self) -> str:
+        """A fingerprint of what the card says; any change to any part changes it."""
+        blob = json.dumps(self.model_dump(), sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+        return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:12]
+
+
+class StoryConfirmed(BaseModel):
+    """The user's yes to one story card, in their words."""
+
+    story_hash: str = Field(..., description="The card they said yes to, by its fingerprint")
     said: str = Field(..., min_length=1)
     at: datetime = Field(default_factory=_utc_now)
 
@@ -68,6 +108,16 @@ class Production(BaseModel):
     )
     said: List[Said] = Field(
         default_factory=list, description="What the user said along the way in the conversation, in their words",
+    )
+    story: Optional[Story] = Field(default=None, description="The story the video tells, once it is written")
+    story_confirmed: Optional[StoryConfirmed] = Field(
+        default=None,
+        description="The user's yes to the card as it is now; cleared whenever the card changes",
+    )
+    story_confirmed_at: Optional[datetime] = Field(
+        default=None,
+        description="When the user last said yes to a story card. Kept when the card changes, and never moved "
+                    "back: it is a point the user was last heard from",
     )
     rulings: List[Ruling] = Field(
         default_factory=list,

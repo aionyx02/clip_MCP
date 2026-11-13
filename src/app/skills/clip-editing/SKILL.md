@@ -18,7 +18,7 @@ question comes up, not before; `list_resources` shows everything published.
 |---|---|
 | `skill://clip-editing/reading-footage.md` | The request depends on what is said or shown, or the user hands you footage with no plan — and before any `analyze_asset`, since how long it takes, and whether to ask the user first, depends on this computer |
 | `skill://clip-editing/editing-intelligence.md` | You are choosing which footage goes in, in what order, what covers it, and what music goes under it — writing a plan |
-| `skill://clip-editing/pacing-and-structure.md` | You are about to propose a length, an opening, or how fast to cut |
+| `skill://clip-editing/pacing-and-structure.md` | You are about to propose a length, an opening, or how fast to cut, or write a story card |
 | `skill://clip-editing/platform-conventions.md` | The user names a platform, asks for captions in a style, several shapes, chapters, a cover, or an export, asks where a file went or how much space this takes — and before any final render |
 | `skill://clip-editing/feedback-handling.md` | The user has watched a version and says what is wrong, wants the last one back, or asks what changed |
 | `skill://clip-editing/request-map.md` | A request does not plainly say which operation it is — 「把第二段換到最後」, 「成片第 12 秒那裡」 — or you need how times in the cut map to the source |
@@ -171,13 +171,13 @@ before a render is wasted.
 
 **When the user says to finish on your own** — 「直接做完再給我看」 — call `start_production` with `mode: "auto"` first
 (with `project_id` for 「把這支直接做完」) and pass its `production_id` to `save_plan` and `create_project`: left out, nothing
-holds the work to the request and a later conversation cannot pick it up. Section the footage with `propose_sections` and
+holds the work to the request and a later conversation cannot pick it up. Write the story card with `set_story` and go on. Section the footage with `propose_sections` and
 `set_sections`, topics included, before the plan: without topics `story_doubts` cannot see the cut leave a subject and come back.
 Skip the read-back, not the checks: render a preview, look at it with `view_render` (`at: "captions"`) and at its joins with
 `inspect_join`, hear any join in doubt with `listen_again` and the preview's `job_id`, and fix what you find. Then call `story_doubts`
 and rule on every nomination with `rule_doubts`, against `read_cut` — how to judge one is in the editing-intelligence file; the final
 render is refused until each is a `keep` with a reason on the cut as it is now; then render the final cut. `allow` is still never yours to fill in: when `check_render` finds
-something you cannot fix, stop and ask. Then report every decision you made — what went in, what was left out and why, the music — since the user was not there to agree to them.
+something you cannot fix, stop and ask. Then report every decision — the card first, what went in or out and why, the music — and `confirm_story` only in their words.
 
 ## Workflow
 
@@ -195,9 +195,9 @@ something you cannot fix, stop and ask. Then report every decision you made — 
    (`save_plan`, `validate_plan`, `compile_plan`) rather than placing clips
    by hand; the check before a render finds a hand-built sequence. A note
    with `look: true` is worth weighing, and worth telling the user about;
-   its `clip_ids` say which pieces, its `message` what to do. Once the footage is read and
-   before you put the story to the user, `start_production` with `mode: "interactive"` and
-   pass its `production_id` on the same way.
+   its `clip_ids` say which pieces, its `message` what to do. Once the footage is read,
+   `start_production` with `mode: "interactive"`, pass its `production_id` on the same way, and
+   agree the story card before `save_plan`: `set_story`, show it, `confirm_story` (pacing file).
 4. By hand: `create_project` with the output settings and a `name` the user
    would recognise, such as `EP1 台北`; see [Defaults](#defaults). Then
    `apply_edits` with an `add_track` operation,
