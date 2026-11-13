@@ -633,7 +633,7 @@ window.T = {
     },
     lastLine: (last) => last.ok
       ? `已從 ${last.previous || "舊版"} 更新到 ${last.version}（${last.kind === "program" ? "只換程式" : "完整安裝"}）`
-      : `更新到 ${last.version} 沒有完成${last.kind === "program" ? `，已還原成 ${last.previous || "原本的版本"}` : ""}${last.reason ? `：${last.reason}` : ""}`,
+      : `更新到 ${last.version} 沒有完成${last.kind !== "program" ? "" : last.restored === false ? `，也沒能換回 ${last.previous || "原本的版本"}：目前裝的是沒通過檢查的新版，下次更新會先換回舊版，或重新執行安裝檔` : `，已還原成 ${last.previous || "原本的版本"}`}${last.reason ? `：${last.reason}` : ""}`,
   },
 
   common: {

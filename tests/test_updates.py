@@ -137,10 +137,37 @@ def test_a_new_program_that_does_not_start_is_rolled_back(tmp_path: Path, monkey
     root = _installed(tmp_path, monkeypatch)
     _staged(root)
     outcome = apply_update.apply(root, "99.0.0", lambda: "", lambda: (False, "ImportError: boom"))
-    assert outcome["ok"] is False and outcome["reason"] == "ImportError: boom"
+    assert outcome["ok"] is False and outcome["reason"] == "ImportError: boom" and outcome["restored"] is True
     assert (root / "program" / "app" / "__init__.py").read_text(encoding="utf-8") == "old"
     assert not any((root / name).exists() for name in ("program.old", "program.new", "program.failed"))
     assert json.loads((root / updates.RELEASE).read_text(encoding="utf-8"))["version"] == "1.0.0"
+
+def test_a_rollback_that_fails_says_so_and_keeps_the_old_program(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    root = _installed(tmp_path, monkeypatch)
+    _staged(root)
+    real = apply_update.os.rename
+    rollbacks = []
+
+    def stuck(source, target):
+        if Path(target).name == "program.failed":
+            rollbacks.append(source)
+            raise PermissionError("held by the check")
+        return real(source, target)
+    monkeypatch.setattr(apply_update.os, "rename", stuck)
+    monkeypatch.setattr(apply_update, "RENAME_WAIT", 0)
+    outcome = apply_update.apply(root, "99.0.0", lambda: "", lambda: (False, "ImportError: boom"))
+    assert rollbacks and outcome["ok"] is False and outcome["restored"] is False
+    assert (root / "program.old" / "app" / "__init__.py").read_text(encoding="utf-8") == "old"
+    (root / apply_update.RESULT).write_text(json.dumps(outcome), encoding="utf-8")
+
+    # The next update puts the working program back instead of clearing program.old.
+    monkeypatch.setattr(apply_update.os, "rename", real)
+    _staged(root)
+    seen = []
+    apply_update.apply(root, "99.0.1", lambda: "",
+                       lambda: (seen.append((root / "program.old" / "app" / "__init__.py").read_text(encoding="utf-8")), (False, "still broken"))[1])
+    assert seen == ["old"]
+    assert (root / "program" / "app" / "__init__.py").read_text(encoding="utf-8") == "old"
 
 def test_a_program_still_in_use_is_left_as_it_was(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     root = _installed(tmp_path, monkeypatch)

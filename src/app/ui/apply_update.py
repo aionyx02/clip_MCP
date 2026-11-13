@@ -135,6 +135,12 @@ def apply(app: Path, version: str, stop: Callable[[], str], check: Callable[[], 
     if not program.exists() and old.is_dir():
         _rename(old, program)
         _log(app, "put back program.old left by an update that did not finish")
+    # A past update whose rollback failed left the new, failing program in place and the working one in
+    # program.old: put that one back before anything clears program.old.
+    elif old.is_dir() and _read(app / RESULT).get("restored") is False:
+        _rename(program, failed)
+        _rename(old, program)
+        _log(app, "put back program.old left by an update whose rollback failed")
     if not staged.is_dir():
         return {**outcome, "reason": "nothing staged"}
     for leftover in (old, failed):
@@ -148,20 +154,35 @@ def apply(app: Path, version: str, stop: Callable[[], str], check: Callable[[], 
     try:
         _rename(staged, program)
     except OSError as error:
-        _rename(old, program)
         shutil.rmtree(staged, ignore_errors=True)
-        return {**outcome, "reason": f"could not move the new program in: {error}"}
+        return {**outcome, **_roll_back(app, None), "reason": f"could not move the new program in: {error}"}
     started, why = check()
     if not started:
         _log(app, f"smoke check failed: {why}")
-        _rename(program, failed)
-        _rename(old, program)
-        shutil.rmtree(failed, ignore_errors=True)
-        return {**outcome, "reason": why}
+        return {**outcome, **_roll_back(app, failed), "reason": why}
     if release:
         (app / RELEASE).write_text(json.dumps({**release, "version": version}, indent=1), encoding="utf-8")
     shutil.rmtree(old, ignore_errors=True)
     return {**outcome, "ok": True}
+
+def _roll_back(app: Path, failed: Optional[Path]) -> dict:
+    """Put program.old back as program, moving the new one aside to `failed` first when given.
+
+    Returns:
+        `restored`, and `rollback` naming the error when the old program could not be put back. It then
+        stays in program.old, and the next update puts it back before anything else.
+    """
+    program, old = app / "program", app / "program.old"
+    try:
+        if failed is not None:
+            _rename(program, failed)
+        _rename(old, program)
+    except OSError as error:
+        _log(app, f"rollback failed: {error}")
+        return {"restored": False, "rollback": str(error)}
+    if failed is not None:
+        shutil.rmtree(failed, ignore_errors=True)
+    return {"restored": True}
 
 def _read(path: Path) -> dict:
     try:
@@ -178,7 +199,9 @@ def main(argv: Optional[list] = None) -> int:
     try:
         outcome = apply(app, version, lambda: stop_running(app), lambda: smoke(app, version))
     except Exception as error:  # noqa: BLE001 - whatever went wrong is told to the user, not lost
+        # Whether the old program is still set aside is what says if it was put back.
         outcome = {"ok": False, "version": version, "kind": "program", "reason": f"{type(error).__name__}: {error}",
+                   "restored": not (app / "program.old").is_dir(),
                    "at": datetime.datetime.now().isoformat(timespec="seconds")}
     outcome["seconds"] = round(time.monotonic() - started, 1)
     outcome["announced"] = False
