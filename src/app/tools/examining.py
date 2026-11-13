@@ -37,8 +37,12 @@ from app import runtime
 from app.runtime import mcp
 from app.tools import rendering, shared
 
-def song_tags() -> Dict[str, Dict[str, List[str]]]:
+def song_tags(analyses: Optional[Mapping[str, Optional[MediaAnalysis]]] = None) -> Dict[str, Dict[str, List[str]]]:
     """The moods and styles that set each analyzed song apart from the rest of the library.
+
+    Args:
+        analyses: Every song's analysis by ID, when the caller has read them already;
+            reading one is most of the cost of the music page.
 
     Returns:
         `moods` and `styles` by song.
@@ -47,7 +51,7 @@ def song_tags() -> Dict[str, Dict[str, List[str]]]:
     for asset in runtime.repo.list_assets():
         if library_of(asset) != MUSIC:
             continue
-        analysis = runtime.repo.get_analysis(asset.id)
+        analysis = analyses.get(asset.id) if analyses is not None else runtime.repo.get_analysis(asset.id)
         if analysis is not None and analysis.music is not None:
             sensed[asset.id] = analysis.music
     moods = clap.ranked({song: sense.moods for song, sense in sensed.items()})
@@ -56,8 +60,10 @@ def song_tags() -> Dict[str, Dict[str, List[str]]]:
 
 def sounds_like(asset_id: str, analysis: MediaAnalysis, heard: Mapping[str, Mapping[str, List[str]]]) -> dict:
     """A song in a line: its moods and styles, how it ends and where it is fullest."""
-    summary = music_energy.summary(analysis.music.energy)
-    return {**heard.get(asset_id, {}), "ends": summary["ends"], "fullest": summary["fullest"],
+    # Not `summary`: its sections are most of its cost and nobody reading this line uses them.
+    energy = analysis.music.energy
+    found = music_energy.fullest(energy)
+    return {**heard.get(asset_id, {}), "ends": music_energy.ending(energy), "fullest": list(found) if found else None,
             # The speech detector put it with music; the model hears talking. Asked about, not moved.
             **({"sounds_like_speech": True} if analysis.music.sounds_like_speech else {})}
 

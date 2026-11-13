@@ -207,17 +207,26 @@ function chooseFolder(folders, title, current, blocked = new Set()) {
 //   empty      what to show when there are no things and no folders at all
 // The list page on screen, so the job poll can redraw it when something changed elsewhere.
 let shownList = null;
+// What each list page showed last. Coming back to a page draws this at once and asks the
+// server again behind it, so a switch does not wait on the network; what the server says
+// replaces it as soon as it answers, so nothing old stays on screen past that.
+const listMemory = {};
 
 async function folderPage(page, folderId, config) {
   const { kind } = config;
   const chosen = new Set();
   // Items that came from another one in the same view sit folded under it until it is opened.
   const opened = new Set();
-  let folders = [], items = [];
-  const refresh = async () => {
+  let folders = [], items = [], drawnFrom = null;
+  // `quiet`: leave the page as it is when the server says what is already on it.
+  const refresh = async ({ quiet = false } = {}) => {
     const loaded = await Promise.all([api(`/api/folders?kind=${kind}`).then((data) => data.folders), config.load()]);
+    const seen = JSON.stringify(loaded);
+    listMemory[kind] = { loaded, seen };
     // The user may have moved to another page while this was loading.
     if (shownList !== mine) return;
+    if (quiet && seen === drawnFrom) return;
+    drawnFrom = seen;
     [folders, items] = loaded;
     draw();
   };
@@ -398,6 +407,14 @@ async function folderPage(page, folderId, config) {
     });
   }
 
+  const remembered = listMemory[kind];
+  if (remembered) {
+    [folders, items] = remembered.loaded;
+    drawnFrom = remembered.seen;
+    draw();
+    await refresh({ quiet: true });
+    return;
+  }
   page.innerHTML = config.head(folderId) + `<div class="grid">${'<div class="card skeleton" style="height:200px"></div>'.repeat(4)}</div>`;
   await refresh();
 }

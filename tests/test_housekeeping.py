@@ -136,3 +136,26 @@ def test_a_folder_s_size_counts_every_file_inside_once_and_not_its_links(tmp_pat
     assert housekeeping.size_of(str(tmp_path)) == 1110
     assert housekeeping.size_of(str(tmp_path / "top.bin")) == 10
     assert housekeeping.size_of(str(tmp_path / "missing")) == 0
+
+def test_the_editor_cache_keeps_only_what_was_used_this_week(tmp_path: Path) -> None:
+    workspace = tmp_path / "ws"
+    cache = Path(housekeeping.ui_cache_dir(str(workspace)))
+    (cache / "thumbs").mkdir(parents=True)
+    (cache / "waves").mkdir()
+    old, used, fresh = cache / "thumbs" / "old.jpg", cache / "thumbs" / "used.jpg", cache / "waves" / "fresh.json"
+    proxy, original = workspace / "cache" / "proxies" / "p.mp4", tmp_path / "clip.mp4"
+    proxy.parent.mkdir(parents=True)
+    for path in (old, used, fresh, proxy, original):
+        path.write_bytes(b"x" * 10)
+    now = time.time()
+    eight_days = now - 8 * 86400
+    for path in (old, used, proxy, original):
+        os.utime(path, (eight_days, eight_days))
+    housekeeping.mark_used(str(used))
+
+    assert housekeeping.purge_ui_cache(str(workspace), now=now) == 10
+    assert not old.exists()
+    # Looked at this week, or made this week: kept.
+    assert used.exists() and fresh.exists()
+    # Only the editor's own folder: a playback copy and the user's footage are never touched.
+    assert proxy.exists() and original.exists()

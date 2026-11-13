@@ -7,6 +7,8 @@ writes a project directly except undo, which only ever puts back a state this
 page saved a moment before.
 """
 
+import asyncio
+import contextlib
 import hashlib
 import io
 import json
@@ -430,16 +432,20 @@ async def assets(request: Request) -> Response:
     # The editor has no page of its own for sound effects yet: they are shown with the music, as sound.
     wanted = {MUSIC, SFX} if library == MUSIC else {library}
     listed = []
-    heard = examining.song_tags() if library == MUSIC else {}
+    everything_listed = runtime.repo.list_assets()
+    # Each song's analysis read once, for its tags and its card both.
+    analyses = {asset.id: runtime.repo.get_analysis(asset.id) for asset in everything_listed
+                if library_of(asset) == MUSIC} if library not in (FOOTAGE, SFX) else {}
+    heard = examining.song_tags(analyses) if library == MUSIC else {}
     analyzing = examining.analyzing_assets()
-    for asset in runtime.repo.list_assets():
+    for asset in everything_listed:
         if library in LIBRARIES and library_of(asset) not in wanted:
             continue
         present = os.path.exists(asset.path)
         if present or everything:
             entry = {**_asset_summary(asset), "folder_id": filed.get(asset.id), "missing": not present}
             if entry["library"] == MUSIC:
-                analysis = runtime.repo.get_analysis(asset.id)
+                analysis = analyses[asset.id]
                 entry.update(examining.song_details(asset, analysis, heard, analyzing))
                 if analysis is not None and analysis.music is not None:
                     energy = analysis.music.energy
@@ -811,7 +817,9 @@ async def thumb(request: Request) -> Response:
     height = min(THUMB_HEIGHTS, key=lambda size: abs(size - wanted))
     key = hashlib.sha1(f"{asset.path}|{os.path.getmtime(asset.path)}|{seconds}|{height}".encode()).hexdigest()
     cached = CACHE_DIR / "thumbs" / f"{key}.jpg"
-    if not cached.exists():
+    if cached.exists():
+        housekeeping.mark_used(str(cached))
+    else:
         try:
             # Decoding runs off the event loop: a timeline asks for dozens of these at once,
             # and every other request would wait behind them.
@@ -827,7 +835,9 @@ async def wave(request: Request) -> Response:
         return JSONResponse({"rate": WAVE_RATE, "peaks": []})
     key = hashlib.sha1(f"{asset.path}|{os.path.getmtime(asset.path)}|{WAVE_RATE}".encode()).hexdigest()
     cached = CACHE_DIR / "waves" / f"{key}.json"
-    if not cached.exists():
+    if cached.exists():
+        housekeeping.mark_used(str(cached))
+    else:
         await run_in_threadpool(_write_wave, asset.path, cached)
     return FileResponse(cached, media_type="application/json", headers={"Cache-Control": "max-age=86400"})
 
@@ -1121,9 +1131,30 @@ class _FreshStatic(StaticFiles):
         response.headers["Cache-Control"] = "no-cache"
         return response
 
+# How often the editor looks for thumbnails and waveforms unused for a week. Provisional:
+# a day is often enough for a weekly limit and costs one walk of a small folder.
+PURGE_EVERY_SECONDS = 86400
+
+async def _purge_ui_cache_daily() -> None:
+    """Clear old thumbnails and waveforms now, and again every `PURGE_EVERY_SECONDS` while the editor runs."""
+    while True:
+        try:
+            await run_in_threadpool(housekeeping.purge_ui_cache, runtime.WORKSPACE_DIR)
+        except OSError:
+            pass
+        await asyncio.sleep(PURGE_EVERY_SECONDS)
+
+@contextlib.asynccontextmanager
+async def _lifespan(application):
+    task = asyncio.create_task(_purge_ui_cache_daily())
+    try:
+        yield
+    finally:
+        task.cancel()
+
 def create_app() -> Starlette:
     """Build the editor's web application."""
-    return Starlette(middleware=[Middleware(_Stamp)], routes=[
+    return Starlette(lifespan=_lifespan, middleware=[Middleware(_Stamp)], routes=[
         Route("/", index),
         Route("/api/projects", projects, methods=["GET", "POST"]),
         # Before the route that takes a project's ID, or "delete" would be read as one.

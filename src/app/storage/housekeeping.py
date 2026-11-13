@@ -661,6 +661,39 @@ def give_cache_back(workspace: str, busy: Set[str], floor: int = CACHE_FLOOR_BYT
             continue
     return freed
 
+# The editor's thumbnails and waveforms not looked at for this long are removed. Provisional:
+# the user asked for the cache to be cleared once a week; nothing has measured what it should be.
+UI_CACHE_KEEP_DAYS = 7
+
+def purge_ui_cache(workspace: str, now: Optional[float] = None, keep_days: float = UI_CACHE_KEEP_DAYS) -> int:
+    """Remove the editor's thumbnails and waveforms that have not been used for `keep_days`.
+
+    Only `ui_cache_dir`: everything there is made again from the user's files
+    the next time it is asked for. Using a file marks it (`mark_used`), so the
+    ones on screen every day stay.
+
+    Args:
+        workspace: The workspace folder.
+        now: The time to measure from, as `time.time()`; now when omitted.
+        keep_days: How long an unused file is kept.
+
+    Returns:
+        Bytes freed.
+    """
+    folder, cutoff = ui_cache_dir(workspace), (time.time() if now is None else now) - keep_days * 86400
+    freed = 0
+    for root, _, files in os.walk(folder):
+        for name in files:
+            path = os.path.join(root, name)
+            try:
+                stat = os.stat(path)
+                if stat.st_mtime < cutoff:
+                    os.remove(path)
+                    freed += stat.st_size
+            except OSError:
+                continue
+    return freed
+
 def mark_used(path: str, every: float = 3600) -> None:
     """Note that a cached file was used just now, so it is not the first given back.
 
