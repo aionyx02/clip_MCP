@@ -6,6 +6,16 @@ on, or how fast to cut. It is referenced from SKILL.md.
 These are defaults for when the user has no opinion of their own. Drop any of
 them the moment they say otherwise.
 
+**The story card comes before the plan.** On a production, `set_story` writes the
+paper edit: the video in one sentence, its structure, how it opens, where it
+turns, how it ends, what is left out, and its rough length. Write every part so
+the user could say it is wrong — name the moments in this footage, 「開場是印歪的
+第一個杯架，轉在杯子終於卡進去」, not 「輕鬆有趣」. In `interactive` show it in the
+conversation and `confirm_story` with its `story_hash` and the user's own words
+before `save_plan`: a plan saved first is cut to a story nobody agreed to. In
+`auto` write it and go on; `get_production`'s `pending` keeps it first until the
+user says yes. Never `confirm_story` in your own words.
+
 **The parts have a structure.** Which one, and what each role is for, is in
 `skill://clip-editing/editing-intelligence.md`. Pacing serves it. In 起承轉合
 and 倒敘 the setup can breathe, the turn is where the cutting tightens, and

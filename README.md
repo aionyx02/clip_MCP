@@ -56,9 +56,9 @@ editor (ui/) ──HTTP───────────────────
 | 影音原檔、預覽、成品 | 檔名、路徑、規格 |
 | 逐字稿、量測、向量索引、模型權重 | 查詢命中的片段文字與量測值 |
 | 專案、計畫、版本歷史 | 模型要求時的縮圖拼貼、音量圖與頻譜圖 |
-| 製作紀錄（需求原文、使用者在對話裡的原話） | `get_production` 回傳的需求原文、原話與進度 |
+| 製作紀錄（需求原文、故事卡、使用者在對話裡的原話） | `get_production` 回傳的需求原文、故事卡、原話、進度與待問清單 |
 
-- 製作紀錄存的是使用者在對話裡說的話（需求、改口、取消），本來就來自客戶端；`get_production` 會把它們連同進度再交回客戶端，新對話靠這個接續。
+- 製作紀錄存的是使用者在對話裡說的話（需求、改口、取消、確認故事卡的原話），以及模型寫的故事卡（主題、結構、開場、轉折、結尾、捨棄的內容、預估長度），都本來就來自客戶端；`get_production` 會把它們連同進度與待問清單再交回客戶端，新對話靠這個接續。伺服器只驗證故事卡必填、雜湊與是否確認，不評判故事好壞。
 - 沒有工具回傳影音本體。模型仍可主動讀取完整逐字稿（`get_analysis`、`query_clips` 的 `brief`、`get_subtitles`）。
 - 回傳內容的去向由客戶端決定；搭配本機模型（如 LM Studio）則完全離線。
 - 對外連線僅限：模型權重下載（固定版本、驗證 SHA-256）、安裝程式下載 FFmpeg、安裝版的更新檢查。
@@ -96,7 +96,7 @@ LM Studio、Cherry Studio（一鍵安裝連結）。修改前備份為 `<檔名>
 | 素材庫 | `inspect_media` `import_asset` `import_folder` `list_assets` `edit_asset` `organize_library` `move_files` |
 | 分析 | `analyze_asset` `listen_again` `get_analysis` `view_frames` `inspect_sound` |
 | 語意時間軸 | `build_semantic_timeline` `query_clips` `get_semantic_clip` `propose_sections` `set_sections` `frames_for_clips` `set_clip_tags` `list_timelines` `delete_timelines` |
-| 製作 | `start_production` `get_production` `set_production_mode` `close_production` |
+| 製作 | `start_production` `get_production` `set_production_mode` `close_production` `set_story` `confirm_story` |
 | 計畫 | `save_plan` `amend_plan` `copy_plan` `get_plan` `validate_plan` `compile_plan` `diff_plan` `preview_plan_diff` `list_plan_versions` `revert_plan` `propose_broll` |
 | 專案 | `create_project` `list_projects` `get_project` `apply_edits` `preview_project` `preview_sound` `offer_songs` `ask_user` `remember_preference` `forget_preference` |
 | 字幕 | `generate_subtitles` `get_subtitles` |

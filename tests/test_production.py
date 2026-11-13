@@ -25,8 +25,10 @@ from app.storage.repo import Repository
 from app.tools import editing, rendering, upkeep, versioning
 from app.tools.editing import apply_edits, create_project, get_project
 from app.tools.planning import OPERATIONS, amend_plan, compile_plan, save_plan
+from app.tools.feedback import ask_user
+from app.models.comment import Question
 from app.tools.production import (
-    close_production, get_production, set_production_mode, start_production,
+    close_production, confirm_story, get_production, set_production_mode, set_story, start_production,
 )
 from edit_plan.shared import planned  # noqa: F401 — the fixture
 
@@ -84,7 +86,7 @@ def footing(**changes) -> progress.Footing:
     """What is stored, with everything done but what is changed."""
     project = Project(id="p1", name="短片", width=640, height=360)
     base = dict(analysed=frozenset({"a1"}), timelines=(frozenset({"a1"}),), plan_id="plan1", project=project,
-                cut=True, picture="pic", renders=(), questions=0)
+                cut=True, picture="pic", renders=(), questions=())
     return progress.Footing(**{**base, **changes})
 
 
@@ -99,7 +101,7 @@ def test_each_step_is_read_off_what_is_stored() -> None:
     assert progress.progress(made, footing())["stage"] == "previewed"
     preview = Job(kind=JobKind.RENDER, project_id="p1", project_version=1, preview=True, picture="pic",
                   status=JobStatus.COMPLETED, created_at=made.created_at + timedelta(seconds=1))
-    assert progress.progress(made, footing(renders=(preview,), questions=1))["stage"] == "answered"
+    assert progress.progress(made, footing(renders=(preview,), questions=("c1",)))["stage"] == "answered"
     assert progress.progress(made, footing(renders=(preview,)))["stage"] == "delivered"
 
 
@@ -321,3 +323,100 @@ def test_a_project_with_no_production_renders_as_it_did(planned: dict) -> None:
     started = rendering.render_project(project, is_preview=True)
     assert runtime.repo.get_job(started["job_id"]).production_id is None
     assert editing.get_project(project)["id"] == project
+
+
+# ------------------------------------------------------------------ the story card
+
+CARD = dict(theme="第一次自己印杯架，從失敗到成功", structure="起承轉合，照時間順序",
+            opening="開場是印壞、歪掉的第一個杯架", turn="杯子終於卡進去的那一下",
+            ending="一整排杯子掛在架上", left_out="切片設定的畫面：太長，觀眾不需要", length="約 60 秒")
+
+
+def with_story(planned: dict, mode: str = "auto") -> tuple:
+    """A production with the card written.
+
+    Returns:
+        `(production_id, story_hash)`.
+    """
+    production = start_production(mode=mode, brief="把這些剪成一支短片", asset_ids=[asset_of(planned)])
+    written = set_story(production["production_id"], **CARD)
+    return production["production_id"], written["story_hash"]
+
+
+@pytest.mark.parametrize("part", sorted(CARD))
+def test_a_story_card_with_a_part_left_empty_is_refused(planned: dict, part: str) -> None:
+    production = start_production(mode="auto", brief="剪短", asset_ids=[asset_of(planned)])["production_id"]
+    with pytest.raises(ValueError, match=f"story's {part} is empty"):
+        set_story(production, **{**CARD, part: "   "})
+    assert get_production(production)["story"] is None
+
+
+def test_a_yes_is_kept_in_the_user_s_words_and_holds_the_card(planned: dict) -> None:
+    production, story_hash = with_story(planned)
+    said = confirm_story(production, story_hash, said="好，就這樣剪")
+    assert said["story"]["confirmed"] and said["story"]["confirmed_in"] == "好，就這樣剪"
+    assert said["story"]["last_confirmed_at"] is not None
+    with pytest.raises(ValueError, match="user's words"):
+        confirm_story(production, story_hash, said="  ")
+
+
+def test_changing_the_card_clears_the_yes_but_not_when_it_was_given(planned: dict) -> None:
+    production, story_hash = with_story(planned)
+    confirmed_at = confirm_story(production, story_hash, said="好")["story"]["last_confirmed_at"]
+
+    changed = set_story(production, **{**CARD, "ending": "把杯架送給朋友"})
+    assert "cleared" in changed and changed["story_hash"] != story_hash
+    assert not changed["story"]["confirmed"] and changed["story"]["confirmed_in"] is None
+    # When the user last said yes stays: it is when they were last heard from.
+    assert changed["story"]["last_confirmed_at"] == confirmed_at
+    stored = runtime.repo.production(production)
+    assert stored.story_confirmed is None and stored.story_confirmed_at.isoformat() == confirmed_at
+
+
+def test_the_same_card_written_again_keeps_the_yes(planned: dict) -> None:
+    production, story_hash = with_story(planned)
+    confirm_story(production, story_hash, said="好")
+    again = set_story(production, **{**CARD, "turn": "  " + CARD["turn"] + "  "})
+    assert again["story_hash"] == story_hash and "cleared" not in again
+    assert again["story"]["confirmed"]
+
+
+def test_a_yes_to_an_earlier_card_is_refused(planned: dict) -> None:
+    production, old_hash = with_story(planned)
+    set_story(production, **{**CARD, "opening": "開場是一整排杯子"})
+    with pytest.raises(ValueError, match="not the card as it is now"):
+        confirm_story(production, old_hash, said="好")
+    assert not get_production(production)["story"]["confirmed"]
+
+
+def test_there_is_no_yes_without_a_card(planned: dict) -> None:
+    production = start_production(mode="auto", brief="剪短", asset_ids=[asset_of(planned)])["production_id"]
+    with pytest.raises(ValueError, match="no story card"):
+        confirm_story(production, "0" * 12, said="好")
+
+
+def kinds(production_id: str) -> List[str]:
+    """What is still to be put to the user, in order, by kind."""
+    return [item["kind"] for item in get_production(production_id)["pending"]]
+
+
+def test_an_auto_production_puts_a_missing_or_unconfirmed_card_first(planned: dict) -> None:
+    production, project = compiled(planned)
+    ask_user(project, [Question(start=0.0, question="開場會不會太長？")])
+    # No card at all counts as not confirmed: skipping set_story does not get past it.
+    assert kinds(production) == ["story", "question"]
+    assert "set_story" in get_production(production)["pending"][0]["message"]
+
+    story_hash = set_story(production, **CARD)["story_hash"]
+    assert kinds(production) == ["story", "question"]
+    assert "confirm_story" in get_production(production)["pending"][0]["message"]
+
+    confirm_story(production, story_hash, said="可以")
+    assert kinds(production) == ["question"]
+    set_story(production, **{**CARD, "length": "約 90 秒"})
+    assert kinds(production) == ["story", "question"]
+
+
+def test_an_interactive_production_s_card_is_not_left_pending(planned: dict) -> None:
+    production, _ = compiled(planned, mode="interactive")
+    assert kinds(production) == []
