@@ -127,13 +127,19 @@ def test_a_filter_graph_in_a_file_is_handed_over_the_way_that_ffmpeg_reads_it(
 def test_the_installer_holds_every_package_to_the_tested_versions() -> None:
     root = Path(__file__).resolve().parent.parent
     workflow = (root / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8")
+    build = (root / "installer" / "build_payload.ps1").read_text(encoding="utf-8")
+    # The lockfile's versions, exported where the payload build picks them up...
+    assert "uv export --locked" in workflow and r"-Requirements installer\build\requirements.txt" in workflow
+    # ...and installed exactly, with nothing resolved at build time and nothing at install time.
+    assert "--no-deps -r $Requirements" in build
+
+def test_installing_downloads_nothing_but_the_gpu_pack_the_user_chose() -> None:
+    root = Path(__file__).resolve().parent.parent
     script = (root / "installer" / "install.ps1").read_text(encoding="utf-8")
     setup = (root / "installer" / "clip-mcp.iss").read_text(encoding="utf-8")
-    # The lockfile's versions, exported where the installer picks them up...
-    assert "uv export --locked" in workflow and r"installer\build\constraints.txt" in workflow
-    assert r'Source: "build\constraints.txt"' in setup and "-Constraints" in setup
-    # ...and the install held to them, not left to take whatever is newest that day.
-    assert '"--constraints", $Constraints' in script
+    assert "curl" not in script and "uv" not in script.replace("uv-based", "")
+    assert '@("gpu", "install")' in script and "if ($Gpu)" in script
+    assert "WizardIsComponentSelected('gpu')" in setup and "Check: HasNvidiaCard" in setup
 
 def test_pyav_is_held_below_the_release_that_breaks_transcription() -> None:
     import tomllib

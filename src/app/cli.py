@@ -70,6 +70,12 @@ def check() -> int:
         found = _tool_version(tool)
         missing += found.startswith("not found")
         print(f"{tool + ':':<11} {found}")
+    from app import gpu
+
+    speech = gpu.status()
+    print(f"speech:     {'NVIDIA card (cuda)' if speech['device'] == 'cuda' else 'processor (cpu)'} - {speech['reason']}")
+    if speech["last_failure"]:
+        print(f"  the card failed in this process and the processor was used: {speech['last_failure']}")
     failed = card_failure()
     if failed is not None:
         print(f"card:       not used for the scan since it failed on {failed}")
@@ -256,6 +262,38 @@ def uninstall(dry_run: bool, delete_data: bool) -> int:
         print("Last, remove the program itself: uv tool uninstall clip-mcp")
     return 1 if failed else 0
 
+def gpu_pack(action: str) -> int:
+    """Say where speech recognition runs, or install or remove the GPU pack.
+
+    Args:
+        action: `status`, `install` or `remove`.
+
+    Returns:
+        The exit status: 0 unless the pack could not be installed.
+    """
+    from app import gpu
+
+    if action == "install":
+        shown = -1
+
+        def progress(done: int, total: int) -> None:
+            nonlocal shown
+            percent = done * 100 // max(total, 1)
+            if percent >= shown + 5:
+                shown = percent
+                print(f"GPU pack {done // 2 ** 20} / {total // 2 ** 20} MB ({percent}%)", flush=True)
+
+        try:
+            print(f"GPU pack installed in {gpu.install_pack(progress)}")
+        except (OSError, RuntimeError) as error:
+            print(f"GPU pack not installed: {error}")
+            return 1
+    elif action == "remove":
+        print("GPU pack removed" if gpu.remove_pack() else "no GPU pack to remove")
+    said = gpu.status()
+    print(f"speech: {said['device']} - {said['reason']}")
+    return 0
+
 # How far back `clip-mcp profile --days` may reach: a century, well inside what a date can hold.
 MOST_DAYS = 36500
 
@@ -335,6 +373,8 @@ def main(argv: Optional[List[str]] = None) -> None:
     remove.add_argument("--no-prompt", action="store_true", help="never ask; answer no to anything not given")
     editor = commands.add_parser("ui", help="open the editor in the browser, to check and adjust a cut by hand")
     editor.add_argument("--no-browser", action="store_true", help="serve it without opening a window")
+    card = commands.add_parser("gpu", help="say where speech recognition runs; install or remove the GPU pack")
+    card.add_argument("action", nargs="?", default="status", choices=("status", "install", "remove"))
     profiler = commands.add_parser("profile", help="show how long each stage of recent jobs took, and its memory")
     profiler.add_argument("--days", type=_days, default=30, help="how far back to read ended jobs (default 30)")
     arguments = parser.parse_args(argv)
@@ -356,6 +396,8 @@ def main(argv: Optional[List[str]] = None) -> None:
         return
     if arguments.command == "profile":
         sys.exit(profile(arguments.days))
+    if arguments.command == "gpu":
+        sys.exit(gpu_pack(arguments.action))
     from app.server import main as serve
 
     serve()

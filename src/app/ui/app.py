@@ -1068,6 +1068,39 @@ async def update(request: Request) -> Response:
         return _error(str(error))
     return JSONResponse({"installing": installing})
 
+# The GPU pack being downloaded from the editor: one at a time, read back while the user waits.
+_gpu_install = {"running": False, "done": 0, "total": 0, "error": None}
+
+def _install_gpu_pack() -> None:
+    from app import gpu
+
+    try:
+        gpu.install_pack(lambda done, total: _gpu_install.update(done=done, total=total))
+    except (OSError, RuntimeError) as error:
+        _gpu_install["error"] = str(error)
+    finally:
+        _gpu_install["running"] = False
+
+async def gpu_pack(request: Request) -> Response:
+    """Where speech recognition runs and why (GET), or download the GPU pack now (POST).
+
+    Looked at afresh each time, so a card put in since the install is found here
+    without running the installer again.
+    """
+    from app import gpu
+
+    if request.method == "POST":
+        if not _gpu_install["running"]:
+            # Claimed before the await, so a second quick press cannot start a second download.
+            _gpu_install.update(running=True, done=0, total=gpu.PACK.size, error=None)
+            said = await run_in_threadpool(gpu.status)
+            if not said["can_install"]:
+                _gpu_install.update(running=False)
+                return _error(said["reason"])
+            threading.Thread(target=_install_gpu_pack, daemon=True).start()
+    said = await run_in_threadpool(gpu.status)
+    return JSONResponse({**said, "install": dict(_gpu_install)})
+
 async def update_progress(request: Request) -> Response:
     """How much of the newer installer has been downloaded, while the user waits for it."""
     return JSONResponse(updates.download_progress())
@@ -1201,6 +1234,7 @@ def create_app() -> Starlette:
         Route("/api/ping", ping),
         Route("/api/update", update, methods=["GET", "POST"]),
         Route("/api/update/progress", update_progress),
+        Route("/api/gpu", gpu_pack, methods=["GET", "POST"]),
         Route("/api/jobs/{job_id}", job),
         Route("/media/{asset_id}", media),
         Route("/proxy/{name}", proxy),

@@ -95,17 +95,20 @@ def whisper_device() -> str:
     """Choose the device for speech recognition.
 
     The `CLIP_MCP_WHISPER_DEVICE` environment variable selects `cuda` or
-    `cpu`; the default, `auto`, uses CUDA when a GPU is available.
+    `cpu`; the default, `auto`, uses the card when there is one and cuBLAS
+    12 to run on it (`app.gpu`, which also says why when there is not).
 
     Returns:
         `"cuda"` or `"cpu"`.
     """
+    from app import gpu
+
     requested = os.environ.get("CLIP_MCP_WHISPER_DEVICE", "auto").lower()
     if requested != "auto":
+        if requested == "cuda":
+            gpu.use()
         return requested
-    import ctranslate2
-
-    return "cuda" if ctranslate2.get_cuda_device_count() > 0 else "cpu"
+    return "cuda" if gpu.card_count() > 0 and gpu.use().source != "none" else "cpu"
 
 def _nvidia_smi(query: str) -> Optional[str]:
     """Ask the tool the NVIDIA driver ships one question about the first card.
@@ -247,6 +250,10 @@ def describe(found: Machine, hour: dict) -> str:
     elif found.mac:
         runs_on = ("the processor only: speech recognition cannot use a Mac's graphics, Apple chips included"
                    f" ({'Apple silicon' if found.apple_silicon else 'Intel Mac'})")
+    elif _card_without_libraries():
+        from app import gpu
+
+        runs_on = f"the processor only: {gpu.status()['reason']}"
     else:
         runs_on = ("the processor only: no NVIDIA card it can use, and AMD or Intel graphics do not help, since"
                    " speech recognition runs only on NVIDIA cards")
@@ -257,6 +264,12 @@ def describe(found: Machine, hour: dict) -> str:
         f" ({hour['basis']}). Before analyzing, `analyze_asset` with `dry_run` gives both choices' times for"
         " the files at hand."
     ) + _card_off()
+
+def _card_without_libraries() -> bool:
+    """Whether an NVIDIA card is here that speech recognition cannot use for want of cuBLAS."""
+    from app import gpu
+
+    return os.environ.get("CLIP_MCP_WHISPER_DEVICE", "auto").lower() == "auto" and gpu.card_count() > 0
 
 def _card_off() -> str:
     """A sentence saying the scan stopped decoding on the card, or nothing when it did not."""

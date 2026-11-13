@@ -1175,6 +1175,9 @@ def on_whisper_device(run: Callable[[str], T]) -> T:
     except RuntimeError as exc:
         if device != "cuda" or not any(name in str(exc).lower() for name in ("cuda", "cublas", "cudnn")):
             raise
+        from app import gpu
+
+        gpu.note_failure(str(exc))
         return run("cpu")
 
 def heard_with(model: Optional[str]) -> str:

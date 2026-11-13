@@ -16,8 +16,7 @@ permissions:
 
 env:
   UV_VERSION: "0.12.22"
-  # FFmpeg is not shipped in the installer: it is downloaded at install time from this pinned
-  # build, checked against the checksum recorded here at build time.
+  # The FFmpeg build the installer carries, checked against the checksum recorded at build time.
   FFMPEG_VERSION: "9.0.2"
   # Inno Setup 7 changed the script language; this installer is written for 6.
   INNO_VERSION: "6.7.1"
@@ -47,7 +46,7 @@ jobs:
   installer:
     needs: test
     runs-on: windows-latest
-    timeout-minutes: 30
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
@@ -63,24 +62,21 @@ jobs:
             throw "tag $env:GITHUB_REF_NAME does not match version $version in pyproject.toml"
           }
           "version=$version" | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
-      - name: Wheel
+      - name: Wheel, and the versions the tests passed with
         id: wheel
         shell: pwsh
         run: |
           uv build --wheel -o dist
           "name=$((Get-ChildItem dist\*.whl).Name)" | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
-          # The exact versions the tests passed with. Without them the installer takes the newest
-          # release of everything, and one (PyAV 19) broke transcription in installs the tests never saw.
+          # Every package at the lockfile's version: one (PyAV 19) broke transcription in installs
+          # that took whatever was newest.
           New-Item -ItemType Directory -Force installer\build | Out-Null
-          uv export --locked --no-dev --no-emit-project --no-hashes --format requirements-txt -o installer\build\constraints.txt
+          uv export --locked --no-dev --no-emit-project --no-hashes --format requirements-txt -o installer\build\requirements.txt
           if ($LASTEXITCODE -ne 0) { throw "uv export failed" }
-      - name: uv, FFmpeg checksum, language file
+      - name: FFmpeg, its notice, the GPU pack's size, language file
         id: parts
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force installer\build | Out-Null
-          gh release download $env:UV_VERSION --repo astral-sh/uv --pattern "uv-x86_64-pc-windows-msvc.zip" --dir $env:RUNNER_TEMP
-          & "$env:SystemRoot\System32\tar.exe" -xf "$env:RUNNER_TEMP\uv-x86_64-pc-windows-msvc.zip" -C installer\build uv.exe
           $zip = "ffmpeg-$env:FFMPEG_VERSION-essentials_build.zip"
           gh release download $env:FFMPEG_VERSION --repo GyanD/codexffmpeg --pattern $zip --dir $env:RUNNER_TEMP
           $sha = (Get-FileHash "$env:RUNNER_TEMP\$zip" -Algorithm SHA256).Hash.ToLower()
@@ -88,10 +84,23 @@ jobs:
           (Get-Content installer\FFMPEG-NOTICE.txt -Raw).Replace("{VERSION}", $env:FFMPEG_VERSION).Replace("{URL}", $url).Replace("{SHA256}", $sha) |
             Out-File -Encoding utf8 installer\build\FFMPEG-NOTICE.txt
           Invoke-WebRequest "https://raw.githubusercontent.com/jrsoftware/issrc/$env:INNO_TAG/Files/Languages/Unofficial/ChineseTraditional.isl" -OutFile installer\build\ChineseTraditional.isl
-          "sha=$sha" | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
-          "url=$url" | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
+          "zip=$env:RUNNER_TEMP\$zip" | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
+          # What the component page says the GPU pack takes, from the one place it is pinned.
+          $env:PYTHONPATH = "src"
+          uv run --no-project python -c "from app.gpu import PACK; print(f'gpu_mb={round(PACK.size / 2**20)}'); print(f'gpu_installed_mb={round(PACK.installed_size / 2**20)}'); print(f'gpu_installed_bytes={PACK.installed_size}')" |
+            Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
         env:
           GH_TOKEN: ${{ github.token }}
+      - name: Payload (Python, packages, clip-mcp, FFmpeg)
+        shell: pwsh
+        run: |
+          installer\build_payload.ps1 -Out installer\build\payload -Wheel "dist\${{ steps.wheel.outputs.name }}" `
+            -Requirements installer\build\requirements.txt -FfmpegZip "${{ steps.parts.outputs.zip }}" `
+            -FfmpegFolder "ffmpeg-${{ env.FFMPEG_VERSION }}-essentials_build"
+          "### Payload, uncompressed (bytes): before and after slimming" | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+          '```' | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+          Get-Content installer\build\payload-sizes-before.json, installer\build\payload-sizes.json | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+          '```' | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
       - name: Inno Setup
         run: choco install innosetup --version ${{ env.INNO_VERSION }} --no-progress -y
       - name: Installer
@@ -99,12 +108,13 @@ jobs:
         run: |
           & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" `
             "/DAppVersion=${{ steps.version.outputs.version }}" `
-            "/DWheel=${{ steps.wheel.outputs.name }}" `
-            "/DFfmpegUrl=${{ steps.parts.outputs.url }}" `
-            "/DFfmpegSha256=${{ steps.parts.outputs.sha }}" `
-            "/DFfmpegFolder=ffmpeg-${{ env.FFMPEG_VERSION }}-essentials_build" `
+            "/DPayload=build\payload" `
+            "/DGpuSizeMB=${{ steps.parts.outputs.gpu_mb }}" `
+            "/DGpuInstalledMB=${{ steps.parts.outputs.gpu_installed_mb }}" `
+            "/DGpuInstalledBytes=${{ steps.parts.outputs.gpu_installed_bytes }}" `
             installer\clip-mcp.iss
           if ($LASTEXITCODE -ne 0) { throw "ISCC failed" }
+          "Installer: $([math]::Round((Get-Item dist\clip-mcp-setup-*.exe).Length / 1MB, 1)) MB" | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
       - uses: actions/upload-artifact@v4
         with:
           name: clip-mcp-setup-${{ steps.version.outputs.version }}

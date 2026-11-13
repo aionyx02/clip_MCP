@@ -578,6 +578,25 @@ window.T = {
     jumpTo: (time) => `跳到 ${time}`,
   },
 
+  gpu: {
+    title: "語音辨識",
+    onCard: "在 NVIDIA 顯示卡上轉錄",
+    onProcessor: "在處理器上轉錄",
+    why: {
+      forced: () => "由 CLIP_MCP_WHISPER_DEVICE 指定。",
+      no_card: () => "這台電腦沒有可用的 NVIDIA 顯示卡，或驅動程式不支援 CUDA 12。",
+      wont_load: (folder) => `${folder} 裡的 cuBLAS 載入失敗，改用處理器。`,
+      no_libraries: () => "有 NVIDIA 顯示卡，但缺少 GPU 加速元件（cuBLAS 12）。",
+      bundled: (folder) => `使用 clip-mcp 自帶的 GPU 加速元件（${folder}）。`,
+      system: (folder) => `使用這台電腦已安裝的 cuBLAS（${folder}）。`,
+    },
+    install: (size) => `下載 GPU 加速元件（${size}）`,
+    hint: (size) => `下載後解壓約佔 ${size}，放在 clip-mcp 的安裝資料夾裡，解除安裝時一併移除。`,
+    downloading: (percent) => `下載中 ${percent}%`,
+    failed: (reason) => `沒有裝好：${reason}`,
+    fellBack: (reason) => `上次在顯示卡上轉錄失敗，改用處理器：${reason}`,
+  },
+
   update: {
     badge: (version) => `有新版 ${version}`,
     title: (version) => `更新到 ${version}？`,

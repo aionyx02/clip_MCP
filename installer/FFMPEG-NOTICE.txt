@@ -1,8 +1,8 @@
 FFmpeg
 
-clip-mcp uses FFmpeg to read, cut and render video. The installer does not carry FFmpeg: it
-downloads the build below during installation, checks it against its SHA-256, and keeps
-ffmpeg.exe and ffprobe.exe in this folder for clip-mcp alone. Nothing is added to the PATH.
+clip-mcp uses FFmpeg to read, cut and render video. The installer carries ffmpeg.exe and
+ffprobe.exe from the build below, checked against its SHA-256 when the installer was built, and
+keeps them in this folder for clip-mcp alone. Nothing is added to the PATH.
 
   Version:  {VERSION} ("essentials" build by gyan.dev)
   From:     {URL}

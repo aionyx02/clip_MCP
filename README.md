@@ -64,19 +64,34 @@ editor (ui/) ──HTTP───────────────────
 - 敘事提名在本機由規則從專案的實際鏡頭順序算出；`story_doubts` 只交出提名用到的字（收尾語、第一個詞）、拍攝時間與主題標籤，客戶端對照 `read_cut` 裁決，裁決與理由存回本機的製作紀錄。
 - 沒有工具回傳影音本體。模型仍可主動讀取完整逐字稿（`get_analysis`、`query_clips` 的 `brief`、`get_subtitles`）。
 - 回傳內容的去向由客戶端決定；搭配本機模型（如 LM Studio）則完全離線。
-- 對外連線僅限：模型權重下載（固定版本、驗證 SHA-256）、安裝程式下載 FFmpeg、安裝版的更新檢查。
+- 對外連線僅限：模型權重下載（固定版本、驗證 SHA-256）、安裝版的更新檢查，以及使用者在安裝程式或編輯器選了「GPU 加速轉錄」時，從 PyPI 下載 NVIDIA cuBLAS（固定版本 `nvidia-cublas-cu12` 12.9.1.4，約 528 MB，驗證 SHA-256）。安裝程式本身已包含 Python、所有套件與 FFmpeg，安裝時不下載其他東西。
 
 ## 安裝
 
-需求：Python 3.14+、[uv](https://docs.astral.sh/uv/)、FFmpeg / ffprobe 7.0+ 位於 `PATH`。
-Windows 另有安裝程式（`installer/`），自帶 Python 與 FFmpeg。
+Windows：下載 [Releases](https://github.com/aionyx02/clip_MCP/releases) 的 `clip-mcp-setup-<版本>.exe`，執行後一路按下一步。
+不需要先裝 Python、uv、FFmpeg 或 CUDA：安裝程式裡已經有 Python 3.14、所有套件、clip-mcp 與 FFmpeg，
+裝在 `%LOCALAPPDATA%\Programs\clip-mcp`，不需要系統管理員權限，也不改系統的 `PATH`。
+裝好後在編輯器左邊的「連接 AI」選要連接的 AI 程式；安裝程式不會自己修改任何 AI 程式的設定。
+
+GPU 加速轉錄：在 NVIDIA 顯示卡上轉錄需要 cuBLAS 12。安裝程式在選元件那一步偵測這台電腦：
+
+- 有 NVIDIA 顯示卡（驅動 528.33 以上，支援 CUDA 12）且系統沒有 cuBLAS：顯示「GPU 加速轉錄」並預設勾選，勾選才下載（約 528 MB，解壓後 735 MB，放在安裝資料夾的 `gpu\`）。
+- 系統已有 cuBLAS 12（例如裝過 CUDA Toolkit）：預設不勾，直接用系統的；仍可勾選改用自帶的。
+- 沒有 NVIDIA 顯示卡：不顯示這個元件。
+
+轉錄時先找自帶的，再找系統的，都沒有就用處理器。`clip-mcp check` 的 `speech:` 一行與編輯器「儲存空間」頁會寫現在用哪一個、為什麼；
+之後換了顯示卡，也能在那一頁下載，不必重跑安裝程式（或 `clip-mcp gpu install`）。
+
+### 從原始碼安裝（開發者）
+
+需求：Python 3.14+、[uv](https://docs.astral.sh/uv/)、FFmpeg / ffprobe 7.0+ 位於 `PATH`；要在顯示卡上轉錄，另需 CUDA 12 Toolkit 的 cuBLAS。
 
 ```bash
 git clone https://github.com/aionyx02/clip_MCP.git
 cd clip_MCP
 uv tool install --editable .
 clip-mcp setup        # 選擇工作區，逐一確認要註冊的客戶端（--dry-run 預覽、--all、--client <name>）
-clip-mcp check        # 檢查工作區、FFmpeg 與各客戶端註冊狀態
+clip-mcp check        # 檢查工作區、FFmpeg、轉錄裝置與各客戶端註冊狀態
 clip-mcp ui           # 開啟編輯器
 ```
 
@@ -87,6 +102,9 @@ LM Studio、Cherry Studio（一鍵安裝連結）。修改前備份為 `<檔名>
 不要以 `uv run clip-mcp` 註冊：每次啟動會重寫 `.venv` 內的執行檔，多客戶端同時使用時會因檔案鎖定失敗。
 
 移除：`clip-mcp uninstall`（只移除自己加入的設定；工作區先詢問，成品不動），再 `uv tool uninstall clip-mcp`。
+安裝程式裝的版本從 Windows 的「應用程式」移除。
+
+建置安裝程式的內容：`installer/build_payload.ps1`（說明在檔案開頭）；完整安裝程式由 `.github/workflows/release.yml` 建置。
 
 除錯：`uv run fastmcp dev fastmcp.json` 開啟 MCP Inspector。
 
