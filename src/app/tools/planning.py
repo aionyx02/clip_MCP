@@ -27,7 +27,7 @@ from app.engine.plan.broll import BROLL_MIN_SECONDS, broll_covers, broll_slots, 
 from app.engine.plan.checks import COMPILED_TRACKS, as_left, check_plan, check_recompile, compiled_clips, with_cards
 from app.engine.plan.effects import SFX_TRACKS, effect_moments, effect_operations
 from app.models.timeline.apply import apply_operation
-from app.engine.plan.compile import compile_operations
+from app.engine.plan.compile import compile_operations, pinned_differences
 from app.engine.plan.diff import diff_plans, piece_changes
 from app.engine.plan.music import music_beds
 from app.engine.plan.pieces import Note, compiled_duration, note_record
@@ -649,6 +649,11 @@ def compile_plan(project_id: str, expected_version: int, plan_id: Optional[str] 
     gives it. If the new plan no longer uses the footage a pinned clip was
     made from, nothing is compiled and you are told which clips are in the
     way, because losing somebody's work to a recompile is worse than stopping.
+    Likewise if the plan has changed a pinned clip since it was pinned — a
+    new layout, range, speed, motion or level for that same shot — nothing is
+    compiled and you are told which clip and which settings, because keeping
+    the clip would drop the plan's change without a word: unpin it to take the
+    plan's version, or change the plan back.
 
     The sequence, the music bed, the covering picture and the sound effects
     belong to the plan, each on its own track, and all are rebuilt. Other
@@ -676,8 +681,8 @@ def compile_plan(project_id: str, expected_version: int, plan_id: Optional[str] 
 
     Raises:
         ValueError: If the plan does not check out, compiling would destroy
-            work done by hand, the project does not exist, or the version does
-            not match. Nothing is compiled in part.
+            work done by hand or drop a change the plan makes to a pinned
+            clip, the project does not exist, or the version does not match. Nothing is compiled in part.
     """
     plan = _require_plan(plan_id)
     timeline, clips, children, assets, cuts = _plan_context(plan)
@@ -706,6 +711,10 @@ def compile_plan(project_id: str, expected_version: int, plan_id: Optional[str] 
         raise ValueError("compiling would undo work already on this project:\n- " + "\n- ".join(blocked))
 
     built, provenance = compile_operations(plan, clips, children, assets, project, cuts, kit)
+    dropped = pinned_differences(provenance)
+    if dropped:
+        raise ValueError("compiling would drop changes the plan makes to clips pinned by hand:\n- "
+                         + "\n- ".join(dropped))
     laid, made = _effect_operations(plan, project, built, provenance)
     built, provenance = built + laid, {**provenance, **made}
     operations = OPERATIONS.validate_python(built)
@@ -719,6 +728,7 @@ def compile_plan(project_id: str, expected_version: int, plan_id: Optional[str] 
                     clip.from_plan_id = origin["from_plan_id"]
                     clip.from_clip_ids = origin["from_clip_ids"]
                     clip.pinned = origin["pinned"]
+                    clip.plan_asked = origin.get("asked")
 
     saved = editing.apply(project_id, expected_version, operations, stamp=record)
     production.bind_compiled(plan.id, project_id)
