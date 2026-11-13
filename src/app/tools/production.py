@@ -6,6 +6,7 @@ project, and a render that names the production it was made for. Only unfinished
 productions take part; one that is finished is left as it was.
 """
 
+from datetime import datetime
 from typing import List, Optional
 
 from pydantic import ValidationError
@@ -165,6 +166,29 @@ def _footing(production: Production) -> progress.Footing:
 def owed(production: Production) -> List[dict]:
     """What is still owed between the AI and the user on a production, as `engine.production.pending` says."""
     return progress.pending(production, _footing(production))
+
+def last_heard(production: Production) -> Optional[datetime]:
+    """When the user was last heard from on a production, worked out from what is stored.
+
+    The latest of: a reply of theirs on a comment of its project, in the
+    editor or written down from the chat; a comment of theirs on it, a
+    song picked included; anything kept with the production in their words,
+    `set_production_mode`'s included; and their last yes to a story card.
+    Every one of these is stamped by the same UTC clock. Nothing here moves
+    back when the card is rewritten: `story_confirmed_at` is kept through it.
+
+    Returns:
+        The time, or None when nothing of theirs has been heard since it began.
+    """
+    times = [said.at for said in production.said]
+    if production.story_confirmed_at is not None:
+        times.append(production.story_confirmed_at)
+    if production.project_id is not None:
+        for comment in runtime.repo.comments(production.project_id):
+            if comment.by == USER:
+                times.append(comment.created_at)
+            times.extend(reply.at for reply in comment.replies if reply.by == USER)
+    return max(times, default=None)
 
 def _gone(project_id: str) -> str:
     """Say where a production's project went: the trash, or out of it for good."""

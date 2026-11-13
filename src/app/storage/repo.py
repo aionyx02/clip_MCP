@@ -699,6 +699,27 @@ class Repository:
         )
         return sorted((Job.model_validate_json(data) for (data,) in rows), key=lambda job: job.created_at)
 
+    def previews_for(self, production_id: str) -> List[Job]:
+        """Read every preview rendered for a production that has not failed or been cancelled.
+
+        Queued and running ones are included, unlike `renders_of`: a preview
+        counts from the moment it is asked for, so several asked for at once
+        are all seen.
+
+        Args:
+            production_id: The production.
+
+        Returns:
+            The jobs, oldest first.
+        """
+        rows = self._query(
+            "SELECT data FROM jobs WHERE json_extract(data, '$.production_id') = ? "
+            "AND json_extract(data, '$.kind') = 'render' AND json_extract(data, '$.preview') "
+            "AND json_extract(data, '$.status') NOT IN ('failed', 'cancelled')",
+            (production_id,),
+        )
+        return sorted((Job.model_validate_json(data) for (data,) in rows), key=lambda job: job.created_at)
+
     def hear_sound(self, project_id: str, sound: str) -> None:
         """Note that a sound of a project's cut, named by its fingerprint, has been heard."""
         with self._transaction() as conn:

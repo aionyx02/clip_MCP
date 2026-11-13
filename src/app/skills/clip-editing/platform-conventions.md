@@ -90,7 +90,17 @@ from the length the plan asked for). Each is a fact, not a verdict — the black
 may be a deliberate pause, the user may prefer the longer cut — so tell them
 in plain words and let them decide. Fix what they want fixed. Only once they
 have said to go ahead anyway, render again with those kinds in `allow`; never
-fill `allow` in yourself. Previews are never refused.
+fill `allow` in yourself. Previews are not refused for what the check finds.
+The one exception is the limit on rounds: while an `auto` production is
+finishing a project on its own, only three versions of the cut (`MAX_ROUNDS`,
+provisional) are previewed after the user was last heard from — a reply or
+comment of theirs in the editor, `record_answer`, `confirm_story`,
+`set_production_mode`. The same version again, or in another shape, is not
+another round; a preview that failed or was cancelled is none. The fourth
+version's preview is refused: stop fixing, `ask_user` what is left so it is in
+`pending`, and hand the last preview over with everything else. Whatever the
+user says next — even only 「再短一點」 — lets the next preview run, and the
+final render then needs that version previewed as always.
 
 ## One cut, several shapes
 
